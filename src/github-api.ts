@@ -28,6 +28,8 @@ export interface PullConfig {
   maxSearchPages: number;
   maxForkPages: number;
   maxUpstreamPages: number;
+  /** Repositories without an explicit choice are followed when we are involved in them, or always. */
+  followDefault: 'involved' | 'all';
 }
 export function parsePullConfig(value: unknown): PullConfig {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Pulls configuration must be a JSON object.');
@@ -52,7 +54,10 @@ export function parsePullConfig(value: unknown): PullConfig {
   if (!Array.isArray(roots) || roots.length > 100 || roots.some(item => typeof item !== 'string' || !item || !isAbsolute(expandHome(item)))) {
     throw new Error('scanRoots must contain absolute paths or ~/ paths.');
   }
+  const followDefault = input.followDefault ?? 'involved';
+  if (followDefault !== 'involved' && followDefault !== 'all') throw new Error('followDefault must be "involved" or "all".');
   return {
+    followDefault,
     authors: logins('authors'), ownedOwners: logins('ownedOwners'), upstreamOwners: logins('upstreamOwners'),
     excludeRepositories: unique(excluded), scanRoots: [...new Set(roots.map(path => resolve(expandHome(path))))],
     maxScanDepth: integer('maxScanDepth', 6, 0, 20), maxSearchPages: integer('maxSearchPages', 10, 1, 10),
@@ -94,6 +99,7 @@ export class GitHubCommands {
   private readonly children = new Set<ChildProcess>();
   private readonly closed = new Map<ChildProcess, Promise<void>>();
   private gh?: string;
+  private readonly remoteCache = new Map<string, Promise<{ name: string; repository: string }[]>>();
   constructor(private readonly directory: string, private readonly signal: AbortSignal) {}
   private async run(file: string, args: string[], timeout = 30_000): Promise<string> {
     this.signal.throwIfAborted();
@@ -150,7 +156,13 @@ export class GitHubCommands {
     }
     return response;
   }
-  async remotes(directory: string): Promise<{ name: string; repository: string }[]> {
+  /** Remotes are read at most once per directory per refresh; conversation and disk scans share them. */
+  remotes(directory: string): Promise<{ name: string; repository: string }[]> {
+    let pending = this.remoteCache.get(directory);
+    if (!pending) { pending = this.readRemotes(directory); this.remoteCache.set(directory, pending); }
+    return pending;
+  }
+  private async readRemotes(directory: string): Promise<{ name: string; repository: string }[]> {
     const git = process.platform === 'darwin' ? '/usr/bin/git' : 'git';
     let stdout: string;
     try { stdout = await this.run(git, ['-C', directory, 'config', '--local', '--get-regexp', '^remote\\..*\\.url$'], 10_000); }
@@ -195,7 +207,8 @@ export interface PullCollection {
   incompleteInternal: boolean; incompleteUpstream: boolean; observedUrls: string[];
 }
 
-export async function collectPulls(config: PullConfig, commands: GitHubCommands, signal: AbortSignal): Promise<PullCollection> {
+/** `directories` are working directories of local agent conversations; their upstream remotes join outgoing coverage like scanned clones. */
+export async function collectPulls(config: PullConfig, commands: GitHubCommands, signal: AbortSignal, directories: string[] = []): Promise<PullCollection> {
   const warnings = new Set<string>(); const failures: string[] = [];
   const warn = (message: string): void => { warnings.add(safeError(new Error(message))); };
   const limit = limiter(4);
@@ -265,6 +278,20 @@ export async function collectPulls(config: PullConfig, commands: GitHubCommands,
     try { await operation(); }
     catch (error) { signal.throwIfAborted(); const message = `${name}: ${safeError(error)}`; failures.push(message); warn(`${message} Coverage for this source failed; the last good snapshot is retained.`); }
   };
+  const upstreamRemotes = (remotes: { name: string; repository: string }[]): void => {
+    const origin = remotes.find(remote => key(remote.name) === 'origin');
+    for (const remote of remotes.filter(remote => /^upstream(?:[-_].*)?$/i.test(remote.name))) {
+      addUpstream(remote.repository);
+      if (origin && key(origin.repository) !== key(remote.repository)) scope.localForks!.push(origin.repository);
+    }
+  };
+  // Conversation directories may be deleted worktrees or non-repositories; those simply contribute nothing.
+  const conversations = async (): Promise<void> => {
+    for (const directory of [...new Set(directories)]) {
+      signal.throwIfAborted();
+      try { upstreamRemotes(await commands.remotes(directory)); } catch { signal.throwIfAborted(); }
+    }
+  };
   const local = async (): Promise<void> => {
     const queue = config.scanRoots.map(path => ({ path, depth: 0 })); const visited = new Set<string>();
     let position = 0; let repositories = 0;
@@ -279,14 +306,7 @@ export async function collectPulls(config: PullConfig, commands: GitHubCommands,
       } catch (error) { incompleteUpstream = true; warn(`local:${entry.path}: could not scan directory: ${safeError(error)}`); continue; }
       if (children.some(child => child.name === '.git')) {
         repositories++;
-        try {
-          const remotes = await commands.remotes(directory);
-          const origin = remotes.find(remote => key(remote.name) === 'origin');
-          for (const remote of remotes.filter(remote => /^upstream(?:[-_].*)?$/i.test(remote.name))) {
-            addUpstream(remote.repository);
-            if (origin && key(origin.repository) !== key(remote.repository)) scope.localForks!.push(origin.repository);
-          }
-        } catch (error) { signal.throwIfAborted(); incompleteUpstream = true; warn(`local:${directory}: remotes are outside coverage: ${safeError(error)}`); }
+        try { upstreamRemotes(await commands.remotes(directory)); } catch (error) { signal.throwIfAborted(); incompleteUpstream = true; warn(`local:${directory}: remotes are outside coverage: ${safeError(error)}`); }
       }
       for (const child of children) {
         if (IGNORED_DIRECTORIES.has(child.name) || !child.isDirectory() && !child.isSymbolicLink()) continue;
@@ -329,7 +349,7 @@ export async function collectPulls(config: PullConfig, commands: GitHubCommands,
       else { incompleteUpstream = true; warn(`forks:${owner.login}: a fork parent is not visible; its upstream PRs are outside coverage.`); }
     }) || incompleteUpstream;
   }));
-  await Promise.all([local(), ...internal, ...authored, ...forks]);
+  await Promise.all([local(), conversations(), ...internal, ...authored, ...forks]);
   const targets = [...upstreams.values()].sort();
   if (targets.length > MAX_UPSTREAMS) { incompleteUpstream = true; warn(`upstream: only ${MAX_UPSTREAMS} of ${targets.length} discovered repositories were scheduled.`); }
   await Promise.all(targets.slice(0, MAX_UPSTREAMS).map(repository => source(`upstream:${repository}`, async () => {

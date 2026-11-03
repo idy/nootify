@@ -146,7 +146,7 @@ Only one process should receive an application's Feishu WebSocket events: multip
 
 ## Web UI
 
-Open `http://127.0.0.1:9417`. The dark layout has a navigation column grouped by **message bridge** (run logs, routing sessions) and **GitHub** (pull requests to our repositories, pull requests we sent upstream), with module and connection status at its foot. Each page uses one bordered list of two-line rows: the primary text, a dot-separated metadata line, and status on the right. Segmented filters show counts; search and `/` focus the page's search field. On narrow screens the navigation becomes a scrolling top bar.
+Open `http://127.0.0.1:9417`. The dark layout has a navigation column grouped by **message bridge** (run logs, routing sessions) and **GitHub** (pull requests to our repositories, pull requests we sent upstream, followed repositories), with module and connection status at its foot. Each page uses one bordered list of two-line rows: the primary text, a dot-separated metadata line, and status on the right. Segmented filters show counts; search and `/` focus the page's search field. On narrow screens the navigation becomes a scrolling top bar.
 
 Log rows expand in place for full IDs, reasons, and message text; logs can be paused and the filtered set exported as NDJSON. The routing-session page displays only targets encountered by incoming messages or explicit sends, with their last lookup time and result. Refreshing it performs no client lookups. These are historical observations, not a live inventory.
 
@@ -165,7 +165,19 @@ Both default to the **least recently updated first**; the sort toggle reverses i
 
 Refreshes run in the background every five minutes and from the page's refresh button. A request only starts or joins the running refresh and returns immediately; the page keeps showing the previous data and updates when it finishes. A failed refresh keeps the last good snapshot and says so. The snapshot is cached privately in `pulls-cache.json` in the state directory, so a restart shows the last data at once. Coverage limits (search caps, private or SSO visibility, scan depth) are listed under the collapsed "data scope" details. Routine successful refreshes are not written to the run log; only changes in outcome are.
 
-Configuration is re-read on each refresh, first found wins: `NOOTIFY_PULLS_CONFIG`, then `pulls.config.json` in the state directory. Fields are `authors`, `ownedOwners`, `upstreamOwners`, `excludeRepositories`, and `scanRoots`. Organization membership counts as internal unless the organization is listed in `upstreamOwners`. Set an absolute `GH_BIN` if `gh` is not in Homebrew or a standard location; the launchd job does not inherit your shell's `PATH`.
+### Followed repositories
+
+The 关注的仓库 page lists every repository found in local agent conversations or in either queue, with a checkbox. Both PR pages show only followed repositories and say how many PRs are hidden. Each refresh reads conversation metadata only, never message text:
+
+| Agent | Source |
+| --- | --- |
+| Claude | The `cwd` recorded at the top of the newest transcript in each `~/.claude/projects/*` folder (honoring `CLAUDE_CONFIG_DIR`); folders that keep only `memory/` are decoded back to their path |
+| Codex | `cwd` and `git_origin_url` per thread in the latest `state_*.sqlite` under `CODEX_HOME` |
+| OpenCode | `directory` per session in `opencode.db` (or the older JSON session files) under `$XDG_DATA_HOME/opencode` |
+
+The GitHub remotes of those directories name the repositories; an `upstream` remote also adds that repository to the outgoing-PR scan, like the disk scan does. Without an explicit choice, a repository is followed when it appears in a conversation or has an open PR by our accounts. Ticking or unticking stores a choice in the private `repo-preferences.json`; choosing the automatic value again removes the choice. Set `"followDefault": "all"` in the pulls configuration to follow every repository by default instead.
+
+Configuration is re-read on each refresh, first found wins: `NOOTIFY_PULLS_CONFIG`, then `pulls.config.json` in the state directory. Fields are `authors`, `ownedOwners`, `upstreamOwners`, `excludeRepositories`, `scanRoots`, and `followDefault`. Organization membership counts as internal unless the organization is listed in `upstreamOwners`. Set an absolute `GH_BIN` if `gh` is not in Homebrew or a standard location; the launchd job does not inherit your shell's `PATH`.
 
 ## Tailscale access
 
@@ -197,7 +209,9 @@ Read the bearer token from the private state file in your local application; nev
 | `GET /ui/api/snapshot` | Recent sanitized logs, module health, encountered targets, PR counts, Tailscale address |
 | `GET /ui/api/pulls` | Current PR snapshot for the page |
 | `POST /ui/api/pulls/refresh` | Start or join a background PR refresh (`202`); needs the `X-Nootify-UI: 1` header |
+| `POST /ui/api/repos` | Set a follow choice: `{"repository": "owner/name", "follow": true \| false \| null}`; needs the same header |
 | `GET /v1/pulls`, `POST /v1/pulls/refresh` | The same PR snapshot and refresh for token-authenticated clients |
+| `GET /v1/repos`, `PUT /v1/repos/:owner/:name` | Repository list and follow choices for token-authenticated clients |
 | `GET /v1/sessions` | In-memory routing observations; never queries clients |
 | `PUT /v1/backends/:adapter` | Configure an existing local Codex or OpenCode endpoint |
 | `PUT /v1/sessions/:id` | Register/update an inbox from an authorized local client |
@@ -213,7 +227,8 @@ Read the bearer token from the private state file in your local application; nev
 | --- | --- |
 | `src/server.ts` | Loopback and Tailscale HTTP listeners, authentication, lifecycle |
 | `src/tailnet.ts` | Tailscale address discovery and peer identity checks |
-| `src/github.ts`, `src/github-api.ts`, `src/github-model.ts` | Background GitHub queries, classification, sorting, private cache |
+| `src/github.ts`, `src/github-api.ts`, `src/github-model.ts` | Background GitHub queries, classification, sorting, follow choices, private cache |
+| `src/conversations.ts` | Working directories of local Claude, Codex and OpenCode conversations |
 | `src/types.ts` | Public request/response and module contracts |
 | `src/client.ts` | Typed client for other TypeScript tools |
 | `src/state.ts` | Private local session and binding persistence |

@@ -57,23 +57,25 @@ test('a request needs this node\'s address as Host and an allowed peer identity 
   assert.match((await offline.authorize('100.64.0.7:9417', '100.64.0.9'))!, /Tailscale address/);
 });
 
-function call(port: number, path: string, headers: Record<string, string>, method = 'GET'): Promise<{ status: number; body: string }> {
+function call(port: number, path: string, headers: Record<string, string>, method = 'GET', body?: string): Promise<{ status: number; body: string }> {
   return new Promise((resolveCall, reject) => {
     const req = request({ host: '127.0.0.1', port, path, method, headers }, response => {
-      let body = ''; response.setEncoding('utf8');
-      response.on('data', chunk => { body += chunk; });
-      response.on('end', () => resolveCall({ status: response.statusCode ?? 0, body }));
+      let text = ''; response.setEncoding('utf8');
+      response.on('data', chunk => { text += chunk; });
+      response.on('end', () => resolveCall({ status: response.statusCode ?? 0, body: text }));
     });
-    req.once('error', reject); req.end();
+    req.once('error', reject); req.end(body);
   });
 }
 
 test('the tailnet listener serves the owner, starts background PR refreshes and keeps control APIs token-only', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'ws-tailnet-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
-  const snapshot: PullSnapshot = { internal: [], upstream: [], refresh: { running: false }, warnings: ['coverage note'] };
+  const snapshot: PullSnapshot = { internal: [], upstream: [], hidden: { internal: 0, upstream: 0 }, repositories: [], refresh: { running: false }, warnings: ['coverage note'] };
   let refreshes = 0;
-  const pulls = { snapshot: () => snapshot, refresh: () => { refreshes++; } };
+  const choices: [string, boolean | null][] = [];
+  const pulls = { snapshot: () => snapshot, refresh: () => { refreshes++; },
+    setChoice: async (repository: string, follow: boolean | null) => { choices.push([repository, follow]); return { repository, followed: follow !== false, agents: [], sessions: 0, authored: 0, pulls: { internal: 0, upstream: 0 } }; } };
   // The test listener uses loopback, so the fake Tailscale lookup maps that peer address.
   const peers: Record<string, string> = { '127.0.0.1': 'owner@example.com' };
   const tailnet = new TailnetAccess(9417, { probe: probe(peers), ttl: 0 });
@@ -99,6 +101,11 @@ test('the tailnet listener serves the owner, starts background PR refreshes and 
   assert.equal((await call(port, '/ui/api/pulls/refresh', browser, 'POST')).status, 403, 'a plain cross-site form cannot add the header');
   assert.equal((await call(port, '/ui/api/pulls/refresh', { ...browser, origin: 'http://attacker.example', 'x-nootify-ui': '1' }, 'POST')).status, 403);
   assert.equal(refreshes, 1);
+  const choice = JSON.stringify({ repository: 'viewer/tool', follow: false });
+  assert.equal((await call(port, '/ui/api/repos', { ...browser, 'x-nootify-ui': '1', 'content-type': 'application/json' }, 'POST', choice)).status, 200);
+  assert.equal((await call(port, '/ui/api/repos', browser, 'POST', choice)).status, 403, 'follow choices need the UI header too');
+  assert.equal((await call(port, '/ui/api/repos', { ...browser, 'x-nootify-ui': '1' }, 'POST', 'x'.repeat(5000))).status, 413);
+  assert.deepEqual(choices, [['viewer/tool', false]]);
   assert.equal((await call(port, '/v1/services', owner)).status, 401, 'a Tailscale identity is not a control-API credential');
 
   peers['127.0.0.1'] = 'someone@example.com';

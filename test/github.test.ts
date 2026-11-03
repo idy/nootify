@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
@@ -7,6 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { PullRequestsService, type PullSnapshot } from '../src/github.js';
 import { loadPullConfig, parsePullConfig } from '../src/github-api.js';
 import { classifyPull, comparePulls, normalizePull, parseGitHubRemote, type GitHubPull } from '../src/github-model.js';
+import type { ConversationSources } from '../src/conversations.js';
 
 const date = '2026-10-01T00:00:00Z';
 const pull = (number: number, overrides: Partial<GitHubPull> = {}): GitHubPull => ({
@@ -44,12 +46,12 @@ async function settled(service: PullRequestsService): Promise<PullSnapshot> {
   await waitFor(() => !service.snapshot().refresh.running);
   return service.snapshot();
 }
-async function fixture(t: TestContext, data: Data = {}, config: Record<string, unknown> = {}) {
+async function fixture(t: TestContext, data: Data = {}, config: Record<string, unknown> = {}, conversations: ConversationSources = {}) {
   const root = await mkdtemp(join(tmpdir(), 'ws-github-')); const directory = join(root, 'state');
   await mkdir(directory);
   const control = join(root, 'data.json'); const calls = join(root, 'calls.ndjson'); const binary = join(root, 'fake-gh.cjs');
   await writeFile(control, JSON.stringify(data));
-  await writeFile(join(directory, 'pulls.config.json'), JSON.stringify({ scanRoots: [], ...config }));
+  await writeFile(join(directory, 'pulls.config.json'), JSON.stringify({ scanRoots: [], followDefault: 'all', ...config }));
   const script = `#!${process.execPath}\n` + String.raw`
 const fs = require('node:fs');
 const control = ${JSON.stringify(control)};
@@ -107,7 +109,8 @@ else setTimeout(() => {
   const previousGh = process.env.GH_BIN; const previousConfig = process.env.NOOTIFY_PULLS_CONFIG;
   process.env.GH_BIN = binary; delete process.env.NOOTIFY_PULLS_CONFIG;
   const reports: Record<string, unknown>[] = [];
-  const service = new PullRequestsService(directory, record => reports.push(record));
+  // No conversation sources: tests never read the real ~/.claude, ~/.codex or OpenCode data.
+  const service = new PullRequestsService(directory, record => reports.push(record), conversations);
   t.after(async () => {
     await service.stop();
     if (previousGh === undefined) delete process.env.GH_BIN; else process.env.GH_BIN = previousGh;
@@ -283,4 +286,50 @@ test('GH_BIN must identify itself as GitHub CLI before any authenticated query i
   await f.service.start(); const result = await settled(f.service);
   assert.equal(f.service.status(), 'error'); assert.match(result.refresh.error!, /did not identify itself as GitHub CLI/);
   assert.equal((await f.calls()).length, 0);
+});
+
+test('repositories from local conversations are followed by default; explicit choices persist and filter both queues', async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'nootify-follow-'))); t.after(() => rm(root, { recursive: true, force: true }));
+  const checkout = join(root, 'tool');
+  await mkdir(checkout);
+  const git = (...args: string[]) => execFileSync('/usr/bin/git', ['-C', checkout, ...args], { stdio: 'ignore' });
+  git('init', '-q'); git('remote', 'add', 'origin', 'https://github.com/viewer/tool.git'); git('remote', 'add', 'upstream', 'git@github.com:External/Upstream.git');
+  const projects = join(root, 'claude', 'projects', checkout.replace(/[^a-zA-Z0-9]/g, '-'));
+  await mkdir(projects, { recursive: true });
+  await writeFile(join(projects, 'one.jsonl'), JSON.stringify({ cwd: checkout }) + '\n');
+  const upstreamPull = pull(21, { repository: { nameWithOwner: 'External/Upstream' }, url: 'https://github.com/External/Upstream/pull/21',
+    author: { login: 'colleague' }, headRepository: { nameWithOwner: 'viewer/tool' } });
+  const f = await fixture(t, {
+    internal: { viewer: [internalPull(1, 'viewer/tool'), internalPull(2, 'viewer/other')] },
+    authored: { viewer: [pull(5)] },
+    upstream: { 'External/Upstream': [upstreamPull] },
+  }, { followDefault: 'involved' }, { claudeDir: join(root, 'claude') });
+  await f.service.start();
+  const first = await settled(f.service);
+  assert.equal(first.refresh.error, undefined);
+  assert.deepEqual(first.internal.map(pr => pr.number), [1], 'viewer/other has no conversation and no PR of ours');
+  assert.deepEqual(first.hidden, { internal: 1, upstream: 0 });
+  assert.deepEqual(first.upstream.map(pr => pr.number).sort(), [21, 5], 'an upstream remote in a conversation joins outgoing coverage');
+  assert.ok((await f.calls()).some(call => call.operation === 'PullUpstream' && call.variables.owner === 'External'));
+  const entries = new Map(first.repositories.map(entry => [entry.repository, entry]));
+  assert.deepEqual(entries.get('viewer/tool')?.agents, ['claude']);
+  assert.equal(entries.get('viewer/tool')?.followed, true);
+  assert.equal(entries.get('External/Upstream')?.followed, true);
+  assert.equal(entries.get('external/project')?.authored, 1, 'PRs we authored make a repository involved');
+  assert.equal(entries.get('viewer/other')?.followed, false);
+
+  assert.equal((await f.service.setChoice('viewer/other', true)).followed, true);
+  await f.service.setChoice('VIEWER/TOOL', false);
+  assert.deepEqual(f.service.snapshot().internal.map(pr => pr.number), [2]);
+  assert.equal((await stat(join(f.directory, 'repo-preferences.json'))).mode & 0o777, 0o600);
+  await f.service.stop(); await f.service.start(); await settled(f.service);
+  const reloaded = new Map(f.service.repositories().map(entry => [entry.repository, entry]));
+  assert.equal(reloaded.get('viewer/tool')?.choice, 'mute', 'choices survive a restart and keep the known spelling');
+  assert.equal((await f.service.setChoice('viewer/tool', null)).followed, true, 'clearing a choice restores the default');
+  await f.service.setChoice('viewer/tool', false);
+  assert.equal((await f.service.setChoice('viewer/tool', true)).choice, undefined, 'choosing the default again clears the choice');
+  await assert.rejects(f.service.setChoice('not a repo', true), /owner\/name/);
+  const put = await f.service.handle({ method: 'PUT', path: '/v1/repos/viewer/other', body: { follow: false } });
+  assert.equal((put?.body as { followed: boolean }).followed, false);
+  assert.ok(Array.isArray((await f.service.handle({ method: 'GET', path: '/v1/repos', body: undefined }))?.body));
 });

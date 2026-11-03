@@ -1,13 +1,13 @@
 import type { LogEntry } from './events.js';
-import type { PullRequest, PullSnapshot } from './github.js';
+import type { PullRequest, PullSnapshot, RepositoryEntry } from './github.js';
 import type { ModuleStatus, PublicSession } from './types.js';
 
-interface PullSummary { internal: number; upstream: number; running: boolean; lastSuccessAt?: string; error?: string }
+interface PullSummary { internal: number; upstream: number; followed: number; running: boolean; lastSuccessAt?: string; error?: string }
 interface Snapshot {
   time: string; modules: ModuleStatus[]; sessions: PublicSession[]; logs: LogEntry[];
   pulls?: PullSummary; access?: { tailnet_url?: string };
 }
-type View = 'logs' | 'sessions' | 'pulls-internal' | 'pulls-upstream';
+type View = 'logs' | 'sessions' | 'pulls-internal' | 'pulls-upstream' | 'repos';
 interface Tone { label: string; tone: string }
 
 const views: Record<View, { hash: string; group: string; title: string; section: string }> = {
@@ -15,6 +15,7 @@ const views: Record<View, { hash: string; group: string; title: string; section:
   sessions: { hash: '#/sessions', group: '消息桥接', title: '路由会话', section: 'sessions-view' },
   'pulls-internal': { hash: '#/pulls/internal', group: 'GitHub', title: '我们仓库的 PR', section: 'pulls-view' },
   'pulls-upstream': { hash: '#/pulls/upstream', group: 'GitHub', title: '提交上游的 PR', section: 'pulls-view' },
+  repos: { hash: '#/repos', group: 'GitHub', title: '关注的仓库', section: 'repos-view' },
 };
 const descriptions: Record<string, string> = {
   ready: '服务已启动', lark_ready: '飞书长连接已建立', lark_failed: '飞书连接失败',
@@ -40,6 +41,8 @@ const categories: Record<string, Tone> = {
 };
 const outcomeTabs: [string, string][] = [['all', '全部'], ['forwarded', '待回执'], ['acknowledged', '已确认'], ['replied', '已回复'], ['ignored', '已忽略'], ['error', '异常']];
 const pullTabs: [string, string][] = [['all', '全部'], ['attention', '需跟进'], ['draft', '草稿']];
+const repoTabs: [string, string][] = [['all', '全部'], ['followed', '已关注'], ['muted', '未关注']];
+const agentNames: Record<string, string> = { claude: 'Claude', codex: 'Codex', opencode: 'OpenCode' };
 const adapters: Record<string, string> = { 'claude-desktop': 'Claude Desktop', 'claude-code': 'Claude Code', codex: 'Codex', opencode: 'OpenCode' };
 const availability: Record<string, Tone> = {
   active: { label: '可投递', tone: 'ok' }, archived: { label: '已归档', tone: 'muted' }, offline: { label: '未运行', tone: 'warn' },
@@ -73,13 +76,16 @@ function viewFromHash(): View {
   return 'logs';
 }
 const isPullView = (view: View): view is 'pulls-internal' | 'pulls-upstream' => view.startsWith('pulls-');
+/** Views backed by the GitHub module's snapshot, loaded separately from the two-second page snapshot. */
+const usesPulls = (view: View): boolean => isPullView(view) || view === 'repos';
 
 const state = {
   view: viewFromHash(),
   snapshot: { time: '', modules: [], sessions: [], logs: [] } as Snapshot,
   pulls: undefined as PullSnapshot | undefined,
   pullsError: '',
-  outcome: 'all', pullFilter: 'all', pullSort: 'asc' as 'asc' | 'desc',
+  outcome: 'all', pullFilter: 'all', pullSort: 'asc' as 'asc' | 'desc', repoFilter: 'all',
+  pendingRepos: new Set<string>(), repoError: '',
   paused: false, loading: false, loadingPulls: false, connected: false,
   expanded: new Set<string>(),
   signatures: new Map<string, string>(),
@@ -262,6 +268,9 @@ function renderPulls(): void {
   $('pull-sort').textContent = state.pullSort === 'asc' ? '最久未更新在前' : '最近更新在前';
   $('pull-title').textContent = upstream ? '我们提交给上游的 PR' : '提交到我们仓库的 PR';
   $('pull-sub').textContent = upstream ? '来自我们账号或 fork 的跨仓库 PR，仅 Open 与草稿' : '所有作者提交到我们账号与组织仓库的 PR，仅 Open 与草稿';
+  const hidden = data?.hidden?.[upstream ? 'upstream' : 'internal'] ?? 0;
+  $('pull-hidden').hidden = !hidden;
+  $('pull-hidden').textContent = hidden ? `另有 ${hidden} 个 PR 在未关注的仓库` : '';
   const refresh = data?.refresh;
   const side = $('pull-side'); side.replaceChildren();
   side.append(node('div', refresh?.running ? '正在后台刷新…' : refresh?.lastSuccessAt ? `${ago(refresh.lastSuccessAt)}刷新` : '尚未刷新'),
@@ -280,7 +289,8 @@ function renderPulls(): void {
   if (!pulls.length) {
     const first = !refresh?.lastSuccessAt;
     $('pull-empty-title').textContent = !data ? '正在读取 PR 数据' : first && refresh?.running ? '正在首次从 GitHub 拉取' : first ? '还没有 GitHub 数据' : all.length ? '没有匹配的 PR' : '没有打开的 PR';
-    $('pull-empty-detail').textContent = first ? '数据在后台刷新，完成后自动显示。' : all.length ? '换个筛选条件或搜索词。' : '刷新完成后，新的 Open PR 会出现在这里。';
+    $('pull-empty-detail').textContent = first ? '数据在后台刷新，完成后自动显示。' : all.length ? '换个筛选条件或搜索词。'
+      : hidden ? '已关注的仓库没有打开的 PR；在「关注的仓库」中勾选更多仓库。' : '刷新完成后，新的 Open PR 会出现在这里。';
   }
   const warnings = $<HTMLDetailsElement>('pull-warnings');
   warnings.hidden = !data?.warnings.length;
@@ -301,6 +311,63 @@ function renderPulls(): void {
   }));
 }
 
+// ---- Followed repositories ----
+function repoMeta(entry: RepositoryEntry): string {
+  const parts: string[] = [];
+  if (entry.agents.length) parts.push(entry.agents.map(agent => agentNames[agent] ?? agent).join('、'));
+  if (entry.sessions) parts.push(`${entry.sessions} 个对话`);
+  if (entry.lastActive) parts.push(`最近活跃${ago(entry.lastActive)}`);
+  if (entry.authored) parts.push(`我们提交的 PR ${entry.authored} 个`);
+  if (!parts.length) parts.push('未在本机对话中出现');
+  return parts.join(' · ');
+}
+function repoSide(entry: RepositoryEntry): HTMLElement {
+  const total = entry.pulls.internal + entry.pulls.upstream;
+  const counts = [entry.pulls.internal ? `我们仓库 ${entry.pulls.internal}` : '', entry.pulls.upstream ? `上游 ${entry.pulls.upstream}` : ''].filter(Boolean).join(' · ');
+  const mode = entry.choice === 'follow' ? '手动关注' : entry.choice === 'mute' ? '手动取消' : entry.followed ? '自动关注' : '未关注';
+  return sideBlock(total ? { label: `${total} 个 PR`, tone: entry.followed ? 'info' : 'muted' } : { label: '无打开的 PR', tone: 'muted' }, counts ? `${counts} · ${mode}` : mode);
+}
+async function setFollow(entry: RepositoryEntry, follow: boolean): Promise<void> {
+  // Show the new state at once; the reload below restores the server's view if saving fails.
+  entry.followed = follow; entry.choice = follow ? 'follow' : 'mute';
+  state.pendingRepos.add(entry.repository); state.repoError = ''; renderRepos(); renderChrome();
+  try {
+    const response = await fetch('/ui/api/repos', { method: 'POST', headers: { 'x-nootify-ui': '1', 'content-type': 'application/json' },
+      body: JSON.stringify({ repository: entry.repository, follow }), signal: AbortSignal.timeout(8000) });
+    if (!response.ok) throw new Error(((await response.json().catch(() => ({}))) as { error?: string }).error ?? `HTTP ${response.status}`);
+  } catch (error) { state.repoError = `无法保存 ${entry.repository} 的关注设置：${(error as Error).message}`; }
+  state.pendingRepos.delete(entry.repository);
+  await loadPulls();
+}
+function renderRepos(): void {
+  const entries = state.pulls?.repositories ?? [];
+  const followed = entries.filter(entry => entry.followed).length;
+  renderTabs('repo-tabs', repoTabs.map(([value, label]) => [value, label, value === 'all' ? entries.length : value === 'followed' ? followed : entries.length - followed]), state.repoFilter, value => {
+    state.repoFilter = value; renderRepos();
+  });
+  $('repo-banner').hidden = !state.repoError; $('repo-banner').textContent = state.repoError;
+  if (state.view !== 'repos') return;
+  const query = $<HTMLInputElement>('repo-search').value.trim().toLocaleLowerCase();
+  const visible = entries.filter(entry => (state.repoFilter === 'all' || (state.repoFilter === 'followed') === entry.followed)
+    && (!query || entry.repository.toLocaleLowerCase().includes(query)));
+  $('repo-empty').hidden = visible.length > 0;
+  if (!visible.length) {
+    $('repo-empty-title').textContent = !state.pulls ? '正在读取仓库' : entries.length ? '没有匹配的仓库' : '还没有发现仓库';
+    $('repo-empty-detail').textContent = entries.length ? '换个筛选条件或搜索词。' : '后台刷新会读取本机 Claude、Codex、OpenCode 对话的工作目录和 GitHub PR。';
+  }
+  if (!changed('repo-rows', [visible, [...state.pendingRepos]])) return;
+  replaceRows($('repo-rows'), visible.map(entry => {
+    const item = node('div', undefined, 'entry'); item.setAttribute('role', 'listitem');
+    const row = node('label', undefined, 'row');
+    const box = node('input', undefined, 'check'); box.type = 'checkbox'; box.checked = entry.followed;
+    box.disabled = state.pendingRepos.has(entry.repository); box.dataset.key = entry.repository;
+    box.setAttribute('aria-label', `关注 ${entry.repository}`);
+    box.addEventListener('change', () => { void setFollow(entry, box.checked); });
+    row.append(box, rowMain(entry.repository, repoMeta(entry)), repoSide(entry));
+    item.append(row); return item;
+  }));
+}
+
 // ---- Chrome, loading and events ----
 function renderChrome(): void {
   const meta = views[state.view];
@@ -309,17 +376,19 @@ function renderChrome(): void {
   for (const link of document.querySelectorAll<HTMLAnchorElement>('.nav-item')) {
     if (link.dataset.view === state.view) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current');
   }
-  for (const section of ['logs-view', 'sessions-view', 'pulls-view']) $(section).hidden = section !== meta.section;
+  for (const section of ['logs-view', 'sessions-view', 'pulls-view', 'repos-view']) $(section).hidden = section !== meta.section;
   const pullSummary = state.snapshot.pulls;
   const internal = pullSummary?.internal ?? state.pulls?.internal.length;
   const upstream = pullSummary?.upstream ?? state.pulls?.upstream.length;
   $('internal-count').textContent = internal === undefined ? '' : String(internal);
   $('upstream-count').textContent = upstream === undefined ? '' : String(upstream);
-  const busy = isPullView(state.view) && Boolean(pullSummary?.running || state.pulls?.refresh.running);
+  const followedRepos = pullSummary?.followed ?? state.pulls?.repositories.filter(entry => entry.followed).length;
+  $('repos-count').textContent = followedRepos === undefined ? '' : String(followedRepos);
+  const busy = usesPulls(state.view) && Boolean(pullSummary?.running || state.pulls?.refresh.running);
   $('refresh').classList.toggle('busy', busy);
-  const label = isPullView(state.view) ? '在后台刷新 GitHub 数据' : '立即刷新';
+  const label = usesPulls(state.view) ? '在后台刷新 GitHub 数据' : '立即刷新';
   $('refresh').title = label; $('refresh').setAttribute('aria-label', label);
-  $('updated').textContent = isPullView(state.view)
+  $('updated').textContent = usesPulls(state.view)
     ? (busy ? '后台刷新中' : state.pulls?.refresh.lastSuccessAt ? `${ago(state.pulls.refresh.lastSuccessAt)}刷新` : '')
     : state.snapshot.time ? `更新于 ${clock(state.snapshot.time)}` : '';
   if (changed('modules', state.snapshot.modules)) {
@@ -338,7 +407,7 @@ function renderChrome(): void {
   $('tailnet-url').textContent = tailnet ? tailnet.replace(/^https?:\/\//, '').replace(/\/$/, '') : '';
   $('tailnet-url').title = tailnet ? `tailnet 内其他设备的访问地址：${tailnet}` : '';
 }
-function renderAll(): void { renderChrome(); renderLogs(); renderSessions(); renderPulls(); }
+function renderAll(): void { renderChrome(); renderLogs(); renderSessions(); renderPulls(); renderRepos(); }
 async function loadSnapshot(): Promise<void> {
   if (state.loading) return;
   state.loading = true;
@@ -350,7 +419,7 @@ async function loadSnapshot(): Promise<void> {
     $('error').hidden = true;
     $('connection').textContent = '实时更新'; $('connection-dot').className = 'dot ok';
     renderChrome(); renderLogs(); renderSessions();
-    if (isPullView(state.view) && (state.snapshot.pulls?.running || state.pulls?.refresh.running)) void loadPulls();
+    if (usesPulls(state.view) && (state.snapshot.pulls?.running || state.pulls?.refresh.running)) void loadPulls();
   } catch (error) {
     state.connected = false;
     $('error').textContent = `无法连接本机服务：${(error as Error).message}。正在自动重试。`;
@@ -366,10 +435,10 @@ async function loadPulls(): Promise<void> {
     state.pulls = await response.json() as PullSnapshot;
     state.pullsError = '';
   } catch (error) { state.pullsError = (error as Error).message; }
-  finally { state.loadingPulls = false; renderChrome(); renderPulls(); }
+  finally { state.loadingPulls = false; renderChrome(); renderPulls(); renderRepos(); }
 }
 async function refreshNow(): Promise<void> {
-  if (!isPullView(state.view)) { await loadSnapshot(); return; }
+  if (!usesPulls(state.view)) { await loadSnapshot(); return; }
   $('refresh').classList.add('busy');
   try {
     const response = await fetch('/ui/api/pulls/refresh', { method: 'POST', headers: { 'x-nootify-ui': '1' }, signal: AbortSignal.timeout(8000) });
@@ -381,12 +450,13 @@ async function refreshNow(): Promise<void> {
 window.addEventListener('hashchange', () => {
   state.view = viewFromHash();
   renderAll();
-  if (isPullView(state.view)) void loadPulls();
+  if (usesPulls(state.view)) void loadPulls();
   $(views[state.view].section).scrollTop = 0;
 });
 $('refresh').addEventListener('click', () => { void refreshNow(); });
 $('search').addEventListener('input', () => renderLogs(true));
 $('pull-search').addEventListener('input', () => renderPulls());
+$('repo-search').addEventListener('input', () => renderRepos());
 $('pull-sort').addEventListener('click', () => { state.pullSort = state.pullSort === 'asc' ? 'desc' : 'asc'; renderPulls(); });
 $('pause').addEventListener('click', () => {
   state.paused = !state.paused;
@@ -404,11 +474,12 @@ document.addEventListener('keydown', event => {
   if (event.key !== '/' || ['INPUT', 'TEXTAREA', 'SELECT'].includes((event.target as HTMLElement).tagName)) return;
   event.preventDefault();
   if (isPullView(state.view)) $('pull-search').focus();
+  else if (state.view === 'repos') $('repo-search').focus();
   else { if (state.view !== 'logs') location.hash = views.logs.hash; $('search').focus(); }
 });
 
 renderAll();
 void loadSnapshot();
-if (isPullView(state.view)) void loadPulls();
+if (usesPulls(state.view)) void loadPulls();
 setInterval(() => { void loadSnapshot(); }, 2000);
-setInterval(() => { if (isPullView(state.view)) void loadPulls(); }, 10000);
+setInterval(() => { if (usesPulls(state.view)) void loadPulls(); }, 10000);
