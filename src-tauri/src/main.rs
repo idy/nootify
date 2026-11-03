@@ -5,6 +5,7 @@ compile_error!("Nootify currently supports macOS only");
 
 mod service;
 mod smoke;
+mod update;
 
 use std::{
     sync::{
@@ -16,7 +17,8 @@ use std::{
 };
 
 use service::{
-    check_health, health_client, menu_text, Health, JobAction, LaunchAgent, SERVICE_URL,
+    check_health, health_client, menu_text, BundledService, Health, JobAction, LaunchAgent,
+    SERVICE_URL,
 };
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
@@ -24,19 +26,23 @@ use tauri::{
     webview::{NewWindowResponse, PageLoadEvent},
     AppHandle, Manager, RunEvent, Url, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
+use update::{UpdateMenu, UpdateRequest};
 
 const MAIN_WINDOW: &str = "main";
 const TRAY_ID: &str = "nootify";
 const FALLBACK_URL: &str = "tauri://localhost/index.html";
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
+const INSTALL_LABEL: &str = "安装后台服务";
 
 enum Request {
     Refresh,
     Job(JobAction),
+    Install,
 }
 
 struct NativeState {
     requests: SyncSender<Request>,
+    updates: SyncSender<UpdateRequest>,
     action_pending: AtomicBool,
     view_online: Mutex<bool>,
     loaded_url: Mutex<Option<Url>>,
@@ -49,6 +55,8 @@ struct TrayItems {
     action: MenuItem<tauri::Wry>,
     start: MenuItem<tauri::Wry>,
     restart: MenuItem<tauri::Wry>,
+    install: MenuItem<tauri::Wry>,
+    update: UpdateMenu,
 }
 
 fn main() {
@@ -59,11 +67,15 @@ fn main() {
             restore_window(app);
             request_refresh(app);
         }))
+        // Used from Rust only (update.rs); the capability grants the webview none of its commands.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         // No invoke_handler: neither the daemon page nor fallback controls native APIs.
         .setup(move |app| {
             let (requests, receiver) = mpsc::sync_channel(4);
+            let (updates, update_receiver) = mpsc::sync_channel(2);
             app.manage(NativeState {
                 requests,
+                updates,
                 action_pending: AtomicBool::new(false),
                 view_online: Mutex::new(false),
                 loaded_url: Mutex::new(None),
@@ -103,12 +115,24 @@ fn main() {
                 .build()?;
             let tray_items = create_tray(app.handle())?;
             if smoke_test {
-                // Exercise real windows/tray without stopping or restarting the daemon.
+                // Exercise real windows/tray without stopping or restarting the daemon. The
+                // receivers are dropped, so no menu action can install a service or an update.
                 smoke::run(app.handle().clone(), tray_items);
             } else {
-                let agent = LaunchAgent::new(app.path().home_dir()?);
+                let home = app.path().home_dir()?;
+                let bundled = BundledService::current();
                 let handle = app.handle().clone();
-                std::thread::spawn(move || service_worker(handle, receiver, tray_items, agent));
+                update::spawn(
+                    handle.clone(),
+                    update_receiver,
+                    tray_items.update.clone(),
+                    LaunchAgent::new(home.clone()),
+                    bundled.clone().ok().flatten(),
+                );
+                let agent = LaunchAgent::new(home);
+                std::thread::spawn(move || {
+                    service_worker(handle, receiver, tray_items, agent, bundled)
+                });
             }
             Ok(())
         })
@@ -150,30 +174,57 @@ fn request_refresh(app: &AppHandle) {
 fn create_tray(app: &AppHandle) -> tauri::Result<TrayItems> {
     let open = MenuItem::with_id(app, "open", "打开", true, None::<&str>)?;
     let refresh = MenuItem::with_id(app, "refresh", "刷新服务状态", true, None::<&str>)?;
-    let items = TrayItems {
-        status: MenuItem::with_id(app, "status", "服务：检查中…", false, None::<&str>)?,
-        modules: MenuItem::with_id(app, "modules", "模块：—", false, None::<&str>)?,
-        action: MenuItem::with_id(app, "action", "退出不会停止后台服务", false, None::<&str>)?,
-        start: MenuItem::with_id(app, "start", "启动服务", true, None::<&str>)?,
-        restart: MenuItem::with_id(app, "restart", "重启服务", true, None::<&str>)?,
-    };
+    let update_status = MenuItem::with_id(
+        app,
+        "update_status",
+        format!(
+            "更新：当前 {}",
+            update::tag(&app.package_info().version.to_string())
+        ),
+        false,
+        None::<&str>,
+    )?;
+    let check_update = MenuItem::with_id(app, update::CHECK_ID, "检查更新", true, None::<&str>)?;
+    // Inserted below 检查更新 only while an update is available (UpdateMenu::render).
+    let install_update =
+        MenuItem::with_id(app, update::INSTALL_ID, "安装更新", false, None::<&str>)?;
+    let status = MenuItem::with_id(app, "status", "服务：检查中…", false, None::<&str>)?;
+    let modules = MenuItem::with_id(app, "modules", "模块：—", false, None::<&str>)?;
+    let action = MenuItem::with_id(app, "action", "退出不会停止后台服务", false, None::<&str>)?;
+    let start = MenuItem::with_id(app, "start", "启动服务", true, None::<&str>)?;
+    let restart = MenuItem::with_id(app, "restart", "重启服务", true, None::<&str>)?;
+    // Enabled by render_install only while no LaunchAgent plist exists.
+    let install = MenuItem::with_id(app, "install_service", INSTALL_LABEL, false, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出", true, Some("CmdOrCtrl+Q"))?;
     let menu = Menu::with_items(
         app,
         &[
             &open,
             &PredefinedMenuItem::separator(app)?,
-            &items.status,
-            &items.modules,
+            &status,
+            &modules,
             &refresh,
             &PredefinedMenuItem::separator(app)?,
-            &items.start,
-            &items.restart,
-            &items.action,
+            &start,
+            &restart,
+            &install,
+            &action,
+            &PredefinedMenuItem::separator(app)?,
+            &update_status,
+            &check_update,
             &PredefinedMenuItem::separator(app)?,
             &quit,
         ],
     )?;
+    let items = TrayItems {
+        status,
+        modules,
+        action,
+        start,
+        restart,
+        install,
+        update: UpdateMenu::new(menu.clone(), update_status, check_update, install_update),
+    };
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(tauri::image::Image::from_bytes(include_bytes!(
             "../icons/tray-template.png"
@@ -189,18 +240,30 @@ fn create_tray(app: &AppHandle) -> tauri::Result<TrayItems> {
                 request_refresh(app);
             }
             "refresh" => request_refresh(app),
-            "start" | "restart" => {
+            id @ ("start" | "restart" | "install_service") => {
                 let state = app.state::<NativeState>();
                 if !state.action_pending.swap(true, Ordering::SeqCst) {
-                    let action = if event.id.as_ref() == "start" {
-                        JobAction::Start
-                    } else {
-                        JobAction::Restart
+                    let request = match id {
+                        "start" => Request::Job(JobAction::Start),
+                        "restart" => Request::Job(JobAction::Restart),
+                        _ => Request::Install,
                     };
-                    if state.requests.try_send(Request::Job(action)).is_err() {
+                    if state.requests.try_send(request).is_err() {
                         state.action_pending.store(false, Ordering::SeqCst);
                     }
                 }
+            }
+            update::CHECK_ID => {
+                let _ = app
+                    .state::<NativeState>()
+                    .updates
+                    .try_send(UpdateRequest::Check);
+            }
+            update::INSTALL_ID => {
+                let _ = app
+                    .state::<NativeState>()
+                    .updates
+                    .try_send(UpdateRequest::Install);
             }
             // Exit only the desktop process. There is intentionally no daemon cleanup.
             "quit" => app.exit(0),
@@ -215,6 +278,7 @@ fn service_worker(
     receiver: Receiver<Request>,
     items: TrayItems,
     agent: LaunchAgent,
+    bundled: Result<Option<BundledService>, String>,
 ) {
     let client = match health_client() {
         Ok(client) => client,
@@ -230,25 +294,52 @@ fn service_worker(
     loop {
         let health = check_health(&client);
         render_health(&app, &items, &health);
+        render_install(&app, &items, agent.plist_present());
         match receiver.recv_timeout(POLL_INTERVAL) {
-            Ok(Request::Job(action)) => {
-                let _ = items.start.set_enabled(false);
-                let _ = items.restart.set_enabled(false);
-                let _ = items.action.set_text(format!("正在{}…", action.label()));
-                let result = agent.request(action);
-                let text = match result {
-                    Ok(()) => format!("已请求{}", action.label()),
-                    Err(error) => format!("{}失败：{}", action.label(), error),
-                };
-                let _ = items.action.set_text(menu_text(&text));
-                app.state::<NativeState>()
-                    .action_pending
-                    .store(false, Ordering::SeqCst);
-            }
+            Ok(Request::Job(action)) => run_action(&app, &items, action.label(), || {
+                agent
+                    .request(action)
+                    .map(|()| format!("已请求{}", action.label()))
+            }),
+            // Blocks only this worker: the installer is bounded by a timeout.
+            Ok(Request::Install) => run_action(&app, &items, INSTALL_LABEL, || {
+                match &bundled {
+                    Ok(Some(bundled)) => agent.install(bundled),
+                    Ok(None) => Err("development builds do not bundle the service".into()),
+                    Err(error) => Err(error.clone()),
+                }
+                .map(|()| "后台服务已安装并运行".to_string())
+            }),
             Ok(Request::Refresh) | Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
+}
+
+fn run_action(
+    app: &AppHandle,
+    items: &TrayItems,
+    label: &str,
+    action: impl FnOnce() -> Result<String, String>,
+) {
+    let _ = items.start.set_enabled(false);
+    let _ = items.restart.set_enabled(false);
+    let _ = items.install.set_enabled(false);
+    let _ = items.action.set_text(format!("正在{label}…"));
+    let text = action().unwrap_or_else(|error| format!("{label}失败：{error}"));
+    let _ = items.action.set_text(menu_text(&text));
+    app.state::<NativeState>()
+        .action_pending
+        .store(false, Ordering::SeqCst);
+}
+
+/// 安装后台服务 is available only while no LaunchAgent plist exists; an existing one is never rewritten.
+fn render_install(app: &AppHandle, items: &TrayItems, plist_present: bool) {
+    let busy = app
+        .state::<NativeState>()
+        .action_pending
+        .load(Ordering::SeqCst);
+    let _ = items.install.set_enabled(!plist_present && !busy);
 }
 
 fn render_health(app: &AppHandle, items: &TrayItems, health: &Result<Health, String>) {
@@ -315,7 +406,9 @@ fn is_fallback(url: &Url) -> bool {
         && url.scheme() == "tauri"
         && url.host_str() == Some("localhost")
         && url.port().is_none()
-        && matches!(url.path(), "/" | "/index.html")
+        // Tauri opens WebviewUrl::App("index.html") as bare `tauri://localhost`: a non-special
+        // URL whose path is empty, which current WebKit passes to the policy unchanged.
+        && matches!(url.path(), "" | "/" | "/index.html")
 }
 
 fn navigation_allowed(url: &Url) -> bool {
@@ -355,6 +448,8 @@ mod tests {
             "http://127.0.0.1:9417/#logs",
             FALLBACK_URL,
             "tauri://localhost/",
+            // The window's first navigation.
+            "tauri://localhost",
         ] {
             assert!(
                 navigation_allowed(&Url::parse(allowed).unwrap()),
@@ -417,5 +512,42 @@ mod tests {
             .unwrap()
             .is_empty());
         assert_eq!(config["app"]["withGlobalTauri"], false);
+    }
+
+    #[test]
+    fn bundle_ships_the_service_runtime_and_signed_updates() {
+        let text = include_str!("../tauri.conf.json");
+        let config: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(config["version"], "../package.json");
+        assert!(config["build"]["beforeBuildCommand"]
+            .as_str()
+            .unwrap()
+            .contains("node scripts/stage-service.mjs"));
+        let bundle = &config["bundle"];
+        assert_eq!(bundle["externalBin"], serde_json::json!(["binaries/node"]));
+        assert_eq!(bundle["resources"]["resources/service/"], "service/");
+        assert_eq!(bundle["targets"], serde_json::json!(["app", "dmg"]));
+        assert_eq!(bundle["createUpdaterArtifacts"], true);
+        assert_eq!(bundle["macOS"]["signingIdentity"], "-");
+        assert_eq!(bundle["macOS"]["entitlements"], "Entitlements.plist");
+        let updater = &config["plugins"]["updater"];
+        assert_eq!(
+            updater["endpoints"],
+            serde_json::json!([
+                "https://github.com/idy/nootify/releases/latest/download/latest.json"
+            ])
+        );
+        assert!(updater["pubkey"]
+            .as_str()
+            .is_some_and(|key| key.len() > 100));
+        // Rust drives the updater; no updater permission or capability file reaches the webview.
+        assert!(!text.contains("updater:"));
+        assert!(
+            !std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/capabilities")).exists()
+        );
+        // The hardened runtime stays on; Node.js gets only the JIT entitlement V8 needs.
+        let entitlements = include_str!("../Entitlements.plist");
+        assert_eq!(entitlements.matches("<key>").count(), 1);
+        assert!(entitlements.contains("<key>com.apple.security.cs.allow-jit</key>"));
     }
 }

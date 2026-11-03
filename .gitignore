@@ -3,3 +3,5 @@ dist/
 *.tsbuildinfo
 src-tauri/target/
 src-tauri/gen/
+# Node.js downloads cached by scripts/stage-service.mjs
+.cache/

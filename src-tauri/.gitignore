@@ -1,3 +1,6 @@
 /target/
 /gen/
 /icons/Nootify.iconset/
+# Staged by scripts/stage-service.mjs (build.rs writes development placeholders)
+/binaries/
+/resources/

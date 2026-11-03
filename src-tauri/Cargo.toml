@@ -15,6 +15,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2.12", features = ["tray-icon", "image-png"] }
 tauri-plugin-single-instance = "2"
+# Used from Rust only; the webview gets no updater permissions. TLS comes from macOS (Security.framework).
+tauri-plugin-updater = { version = "2.14", default-features = false, features = ["native-tls", "system-proxy"] }
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

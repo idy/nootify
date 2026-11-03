@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install stable Rust with clippy and rustfmt
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+      - run: npm test
+
+      - name: cargo fmt
+        working-directory: src-tauri
+        run: cargo fmt --check
+
+      # Real staging (as release builds do) instead of build.rs placeholders, so a broken
+      # stage script or lockfile fails here rather than at release time.
+      - name: Cache the Node.js runtime download
+        uses: actions/cache@v6
+        with:
+          path: .cache/node
+          key: node-runtime-${{ hashFiles('scripts/stage-service.mjs') }}
+      - name: Stage the bundled service and Node.js runtime
+        run: node scripts/stage-service.mjs
+
+      - name: cargo clippy
+        working-directory: src-tauri
+        run: cargo clippy --features custom-protocol -- -D warnings
+      - name: cargo test
+        working-directory: src-tauri
+        run: cargo test --features custom-protocol

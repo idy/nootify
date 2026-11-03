@@ -1,10 +1,11 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Nootify",
-  "version": "0.1.0",
+  "version": "../package.json",
   "identifier": "dev.idy.nootify",
   "build": {
-    "frontendDist": "../desktop"
+    "frontendDist": "../desktop",
+    "beforeBuildCommand": "npm run build && node scripts/stage-service.mjs"
   },
   "app": {
     "withGlobalTauri": false,
@@ -24,7 +25,8 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app"],
+    "targets": ["app", "dmg"],
+    "createUpdaterArtifacts": true,
     "category": "DeveloperTool",
     "shortDescription": "Feishu-to-agent message bridge and pull request monitor",
     "icon": [
@@ -33,10 +35,21 @@
       "icons/128x128@2x.png",
       "icons/icon.icns"
     ],
+    "externalBin": ["binaries/node"],
+    "resources": {
+      "resources/service/": "service/"
+    },
     "macOS": {
       "minimumSystemVersion": "11.0",
       "signingIdentity": "-",
+      "entitlements": "Entitlements.plist",
       "infoPlist": "Info.plist"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": ["https://github.com/idy/nootify/releases/latest/download/latest.json"],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEY5QzdDRERFNDgzQjkyNUIKUldSYmtqdEkzczNIK2V1eXVnQzBmR1I5Z3VTRW13eHV0Q2lGRGk5SU51YVlLaDV3eFhqUXl5V0MK"
     }
   }
 }

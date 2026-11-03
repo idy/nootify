@@ -1,5 +1,6 @@
 //! Opt-in native runtime check: `nootify --smoke-test`.
-//! Run after quitting other desktop instances. No launchd operations are performed.
+//! Run after quitting other desktop instances. No launchd operations are performed, and neither
+//! the service installer nor an update check or install ever runs: their workers are not started.
 use std::{
     process::Command,
     sync::mpsc,
@@ -9,18 +10,27 @@ use std::{
 
 use serde_json::json;
 use tauri::{AppHandle, Manager, WebviewWindow};
+use tauri_plugin_updater::UpdaterExt;
 
 use crate::{
-    is_fallback, is_service_ui, render_health, restore_window,
-    service::{check_health, health_client},
-    NativeState, TrayItems, MAIN_WINDOW, TRAY_ID,
+    is_fallback, is_service_ui, render_health, render_install, restore_window,
+    service::{check_health, health_client, BundledService, LaunchAgent},
+    update::tag,
+    NativeState, TrayItems, INSTALL_LABEL, MAIN_WINDOW, TRAY_ID,
 };
+
+struct Report {
+    online: bool,
+    plist_present: bool,
+    bundled_node: Option<String>,
+    updater_ready: bool,
+}
 
 pub fn run(app: AppHandle, items: TrayItems) {
     thread::spawn(move || {
         let result = exercise(&app, &items);
         match result {
-            Ok(online) => {
+            Ok(report) => {
                 println!(
                     "{}",
                     json!({
@@ -31,10 +41,17 @@ pub fn run(app: AppHandle, items: TrayItems) {
                         "single_instance_restores_window": true,
                         "bundled_fallback": true,
                         "fallback_ipc_denied": true,
-                        "daemon_healthy": online,
-                        "live_ui_restored": online,
-                        "remote_ipc_denied": online,
-                        "daemon_control_invoked": false
+                        "daemon_healthy": report.online,
+                        "live_ui_restored": report.online,
+                        "remote_ipc_denied": report.online,
+                        "launch_agent_plist_present": report.plist_present,
+                        "service_install_enabled": !report.plist_present,
+                        "bundled_node": report.bundled_node,
+                        "updater_ready": report.updater_ready,
+                        "update_menu_rendered": true,
+                        "daemon_control_invoked": false,
+                        "service_install_invoked": false,
+                        "update_install_invoked": false
                     })
                 );
                 app.exit(0);
@@ -42,12 +59,71 @@ pub fn run(app: AppHandle, items: TrayItems) {
             Err(error) => {
                 eprintln!(
                     "{}",
-                    json!({"ok": false, "error": error, "daemon_control_invoked": false})
+                    json!({
+                        "ok": false,
+                        "error": error,
+                        "daemon_control_invoked": false,
+                        "service_install_invoked": false,
+                        "update_install_invoked": false
+                    })
                 );
                 app.exit(1);
             }
         }
     });
+}
+
+/// The bundle's runtime, updater configuration and tray items, without installing anything.
+fn exercise_bundle(app: &AppHandle, items: &TrayItems) -> Result<Report, String> {
+    let home = app.path().home_dir().map_err(|error| error.to_string())?;
+    // Only stats the plist path; nothing under ~/Library/LaunchAgents is written or loaded.
+    let plist_present = LaunchAgent::new(home).plist_present();
+    render_install(app, items, plist_present);
+    wait_for(
+        "安装后台服务 is enabled exactly when no plist exists",
+        || {
+            items.install.is_enabled().ok() == Some(!plist_present)
+                && items.install.text().ok().as_deref() == Some(INSTALL_LABEL)
+        },
+    )?;
+
+    // Inside an app bundle the runtime must start under the bundle's signature (V8 needs the JIT
+    // entitlement); `--version` starts no service. Development builds have no bundle to check.
+    let bundled = BundledService::current()?;
+    let bundled_node = bundled
+        .as_ref()
+        .map(BundledService::node_version)
+        .transpose()?;
+    let updater_ready = app.updater().is_ok();
+    if bundled.is_some() && !updater_ready {
+        return Err(format!(
+            "Updater is not configured: {}",
+            app.updater()
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_default()
+        ));
+    }
+
+    // Render an available update through the production path; the update worker that could
+    // install it is not running, and no Update exists to install.
+    let menu = &items.update;
+    let current = tag(&app.package_info().version.to_string());
+    if menu.install_shown() || !menu.check.is_enabled().unwrap_or(false) {
+        return Err("Update items are not in their initial state".into());
+    }
+    menu.render("更新：发现 v0.0.0-smoke", Some("0.0.0-smoke"), false);
+    wait_for("安装更新 appears for an available update", || {
+        menu.install_shown() && menu.install.text().ok().as_deref() == Some("安装更新 v0.0.0-smoke")
+    })?;
+    menu.render(&format!("更新：当前 {current}"), None, false);
+    wait_for("安装更新 is removed again", || !menu.install_shown())?;
+    Ok(Report {
+        online: false,
+        plist_present,
+        bundled_node,
+        updater_ready,
+    })
 }
 
 fn wait_for(description: &str, mut predicate: impl FnMut() -> bool) -> Result<(), String> {
@@ -61,7 +137,7 @@ fn wait_for(description: &str, mut predicate: impl FnMut() -> bool) -> Result<()
     Err(format!("Timed out: {description}"))
 }
 
-fn exercise(app: &AppHandle, items: &TrayItems) -> Result<bool, String> {
+fn exercise(app: &AppHandle, items: &TrayItems) -> Result<Report, String> {
     let window = app
         .get_webview_window(MAIN_WINDOW)
         .ok_or("Main window missing")?;
@@ -70,6 +146,7 @@ fn exercise(app: &AppHandle, items: &TrayItems) -> Result<bool, String> {
             .and_then(|tray| tray.rect().ok().flatten())
             .is_some_and(|rect| rect.size.to_physical::<u32>(1.0).width > 0)
     })?;
+    let mut report = exercise_bundle(app, items)?;
     restore_window(app);
     wait_for("initial window visible", || {
         window.is_visible().unwrap_or(false)
@@ -135,7 +212,8 @@ fn exercise(app: &AppHandle, items: &TrayItems) -> Result<bool, String> {
     if online {
         wait_for_live_ui(&window)?;
     }
-    Ok(online)
+    report.online = online;
+    Ok(report)
 }
 
 fn wait_for_live_ui(window: &WebviewWindow) -> Result<(), String> {
