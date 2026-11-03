@@ -130,7 +130,7 @@ export class PullRequestsService implements ServiceModule {
 
   status(): string {
     if (this.stopped) return 'stopped';
-    if (this.current.refresh.running) return 'refreshing';
+    if (this.work) return 'refreshing';
     if (this.current.refresh.error) return this.current.refresh.lastSuccessAt ? 'stale' : 'error';
     return this.current.refresh.lastSuccessAt ? 'ready' : 'idle';
   }
@@ -186,7 +186,7 @@ export class PullRequestsService implements ServiceModule {
     const visible = (pulls: PullRequest[]) => pulls.filter(pull => this.tracked(pull, byName.get(key(pull.repository))))
       .map(pull => this.associate(pull, byName.get(key(pull.repository))!));
     const internal = visible(this.current.internal); const upstream = visible(this.current.upstream);
-    return structuredClone({ internal, upstream, repositories, refresh: this.current.refresh, warnings: this.current.warnings,
+    return structuredClone({ internal, upstream, repositories, refresh: { ...this.current.refresh, running: Boolean(this.work) }, warnings: this.current.warnings,
       hidden: { internal: this.current.internal.length - internal.length, upstream: this.current.upstream.length - upstream.length } });
   }
   async setChoice(repository: string, follow: boolean | null): Promise<RepositoryEntry> {
