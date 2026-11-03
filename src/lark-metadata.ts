@@ -20,7 +20,8 @@ export async function loadCredentials(env: NodeJS.ProcessEnv, mcpConfig?: string
     mcpServers?: { lark?: { args?: string[]; env?: Record<string, string> } };
   };
   const server = config.mcpServers?.lark;
-  const args = server?.args ?? [];
+  if (!server) return;
+  const args = server.args ?? [];
   const argument = (...flags: string[]) => {
     for (const flag of flags) { const index = args.indexOf(flag); if (index >= 0) return args[index + 1]; }
   };

@@ -85,6 +85,43 @@ test('groups created before Nootify managed them are adopted from their announce
   assert.equal(state.bindings.get('oc_mine')?.sender_open_id, 'ou_owner');
 });
 
+test('progress is never sent to a group whose announcement has changed to another route', async t => {
+  const state = await State.open(await stateDir(t));
+  state.bindings.set('oc_current', { chat_id: 'oc_current', session_id: 'thread-1', adapter: 'codex', session_name: 'Original', sender_open_id: 'ou_owner' });
+  const feishu = fakeFeishu();
+  const threads = new LarkThreads(state, feishu.api);
+  for (const token of [
+    `agent-session:v1:${hostname()}:codex:thread-2`,
+    `agent-session:v1:${hostname()}:claude-code:thread-1`,
+    `agent-session:v1:${hostname()}-other:codex:thread-1`,
+    '',
+  ]) {
+    feishu.announcements.set('oc_current', token);
+    await assert.rejects(threads.send('thread-1', 'Progress', 'codex'));
+  }
+  assert.ok(!feishu.calls.some(call => call.path.startsWith('/open-apis/im/v1/messages?')));
+  feishu.announcements.set('oc_current', `agent-session:v1:${hostname()}:codex:thread-1`);
+  assert.match((await threads.send('thread-1', 'Progress', 'codex')).message_id, /^om_/);
+});
+
+test('an announcement read failure stops adoption without creating a duplicate group', async t => {
+  const state = await State.open(await stateDir(t));
+  state.settings.lark_recipient_open_id = 'ou_owner';
+  const feishu = fakeFeishu([{ chat_id: 'oc_existing', name: 'Task · Codex · thread-1', announcement: `agent-session:v1:${hostname()}:codex:thread-1` }]);
+  let failRead = true;
+  const api: LarkApi = { appId: feishu.api.appId, async request<T>(method: 'GET' | 'POST' | 'PATCH', path: string, body?: unknown): Promise<T> {
+    if (failRead && path.endsWith('/announcement')) { failRead = false; throw new Error('announcement timeout'); }
+    return feishu.api.request<T>(method, path, body);
+  } };
+  const threads = new LarkThreads(state, api);
+  await assert.rejects(threads.open('codex', 'thread-1', 'Task'), /announcement timeout/);
+  assert.equal(feishu.creates().length, 0);
+  assert.equal(state.bindings.size, 0);
+  const retried = await threads.open('codex', 'thread-1', 'Task');
+  assert.deepEqual([retried.chat_id, retried.created], ['oc_existing', false]);
+  assert.equal(feishu.creates().length, 0);
+});
+
 test('group names keep the session convention within Feishu\'s length', () => {
   const name = threadName('一个很长的任务名称'.repeat(10), 'claude-desktop', 'local_dd316d46-36e3-4dd8-b702-46945713e9a4');
   assert.ok(name.endsWith(' · Claude · dd316d46'));

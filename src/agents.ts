@@ -147,6 +147,15 @@ export class AgentPrompts implements ServiceModule {
     if (current.status === 'conflict') throw new HttpError(409, 'The prompt file has unbalanced Nootify markers; fix them by hand first');
     if (current.status === 'error') throw new HttpError(409, `Cannot read ${current.file}: ${current.error}`);
     const path = await this.target(current.file);
+    if (enabled) {
+      for (const other of AGENT_IDS.filter(id => id !== agent)) {
+        const otherPath = await realpath(this.files[other]).catch(error => {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+          throw error;
+        });
+        if (otherPath === path) throw new HttpError(409, `${names[agent]} and ${names[other]} share the same prompt file; separate their files before adding agent-specific instructions`);
+      }
+    }
     const before = await this.read(path);
     const after = enabled ? withBlock(before ?? '', current.block) : withoutBlock(before ?? '');
     if (after === (before ?? '') && (before !== undefined || !enabled)) return this.inspect(agent);

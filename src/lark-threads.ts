@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
-import { ensureAnnouncement, parseAnnouncement, readAnnouncement } from './lark-metadata.js';
+import { ensureAnnouncement, InvalidAnnouncement, parseAnnouncement, readAnnouncement } from './lark-metadata.js';
 import type { LarkApi } from './lark-metadata.js';
 import type { State } from './state.js';
-import { HttpError } from './types.js';
+import { HttpError, isAdapter } from './types.js';
 import type { Adapter, LarkBinding, RemoteBinding, ThreadInfo, ThreadMessage } from './types.js';
 
 const labels: Record<Adapter, string> = { 'claude-desktop': 'Claude', 'claude-code': 'Claude Code', codex: 'Codex', opencode: 'OpenCode' };
@@ -87,9 +87,13 @@ export class LarkThreads {
       const data = await this.api.request<{ items?: { chat_id?: string; name?: string }[]; has_more?: boolean; page_token?: string }>('GET', `/open-apis/im/v1/chats?${query}`);
       for (const chat of data.items ?? []) {
         if (!chat.chat_id || !chat.name?.toLowerCase().includes(needle)) continue;
+        // An unavailable announcement cannot establish that this is another session's group.
+        // Let the read failure abort lookup rather than creating a duplicate on a transient error.
+        const announcement = await readAnnouncement(this.api, chat.chat_id);
         let route;
-        try { route = parseAnnouncement((await readAnnouncement(this.api, chat.chat_id)).content); } catch { continue; }
-        if (route.session_id !== sessionId || (route.host_id && route.host_id !== hostname())) continue;
+        try { route = parseAnnouncement(announcement.content); }
+        catch (error) { if (error instanceof InvalidAnnouncement) continue; throw error; }
+        if (route.session_id !== sessionId || route.adapter !== adapter || (route.host_id && route.host_id !== hostname())) continue;
         return { chat_id: chat.chat_id, session_id: sessionId, adapter, session_name: sessionName, sender_open_id: this.requireRecipient(), metadata: 'announcement', pin: false };
       }
       if (!data.has_more || !data.page_token) return;
@@ -103,6 +107,12 @@ export class LarkThreads {
     if (Buffer.byteLength(text) > MAX_TEXT) throw new HttpError(413, 'Message text is too large');
     const session_name = binding.session_name ?? sessionId;
     try {
+      const route = parseAnnouncement((await readAnnouncement(this.api, binding.chat_id)).content);
+      const expectedAdapter = adapter ?? binding.adapter;
+      if (route.session_id !== sessionId || !isAdapter(route.adapter) || (expectedAdapter && route.adapter !== expectedAdapter)
+        || (route.host_id && route.host_id !== hostname())) {
+        throw new HttpError(409, 'The Feishu announcement now names another session; the progress message was not sent');
+      }
       const result = await this.api.request<{ message_id?: string }>('POST', '/open-apis/im/v1/messages?receive_id_type=chat_id', {
         receive_id: binding.chat_id, msg_type: 'text', content: JSON.stringify({ text: `[${session_name}] ${text}` }), uuid: randomUUID(),
       });

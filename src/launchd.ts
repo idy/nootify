@@ -24,6 +24,17 @@ export function launchdPlist(options: { node: string; server: string; stateDir: 
 <key>StandardErrorPath</key><string>${xml(join(options.stateDir, 'stderr.log'))}</string>
 </dict></plist>\n`;
 }
+/** Refuse an occupied port before changing launchd, including a manually started Nootify outside this job. */
+export async function assertInstallPort(port: number, replacingLoadedJob: boolean): Promise<void> {
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1000), redirect: 'error', headers: { connection: 'close' } });
+    if (response.ok && replacingLoadedJob && (await response.json() as { service?: string }).service === 'nootify') return;
+    await response.body?.cancel();
+  } catch (error) {
+    if ((error as { cause?: { code?: string } }).cause?.code === 'ECONNREFUSED') return;
+  }
+  throw new Error(`Port ${port} is already occupied or did not answer a Nootify health check; stop the existing service before installing Nootify`);
+}
 export async function installLaunchd(options: { stateDir?: string; port: number; mcpConfig?: string }): Promise<string> {
   if (process.platform !== 'darwin' || !process.getuid) throw new Error('launchd installation requires macOS');
   const state = await State.open(options.stateDir);
@@ -42,6 +53,7 @@ export async function installLaunchd(options: { stateDir?: string; port: number;
     try { await exec('launchctl', ['print', `gui/${process.getuid()}/${launchdLabel}`]); }
     catch { exists = false; }
   }
+  await assertInstallPort(options.port, exists);
   if (exists) await exec('launchctl', ['bootout', `gui/${process.getuid()}`, path]);
   await mkdir(plistDir, { recursive: true });
   await writeFile(path, launchdPlist({ node: process.execPath, server, stateDir: directory, port: options.port,

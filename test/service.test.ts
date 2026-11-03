@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { createServer } from 'node:net';
+import { createServer as createHttpServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -12,7 +13,7 @@ import { SessionsService, writeInbox } from '../src/sessions.js';
 import { LarkService, selectMessage } from '../src/lark.js';
 import { createServiceHost } from '../src/server.js';
 import { NootifyClient } from '../src/client.js';
-import { launchdPlist } from '../src/launchd.js';
+import { assertInstallPort, launchdPlist } from '../src/launchd.js';
 import { ApiError, assertMetadata, bindingToken, ensureAnnouncement, ensureBindingMessage, loadCredentials, readAnnouncement, readRemoteBinding } from '../src/lark-metadata.js';
 import type { LarkApi } from '../src/lark-metadata.js';
 import type { RemoteBinding, ServiceModule } from '../src/types.js';
@@ -178,6 +179,23 @@ test('HTTP host protects APIs, serves health, supports unrelated modules and typ
   assert.deepEqual(await (await fetch(baseUrl + '/v1/example', { headers: { authorization: `Bearer ${state.token}` } })).json(), { value: 42 });
 });
 
+test('installation rejects occupied ports before changing any launchd job', async t => {
+  let service = 'workspace-service';
+  const server = createHttpServer((_request, response) => {
+    response.setHeader('content-type', 'application/json'); response.end(JSON.stringify({ service }));
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const port = (server.address() as AddressInfo).port;
+  await assert.rejects(assertInstallPort(port, false), /stop the existing service/);
+  await assert.rejects(assertInstallPort(port, true), /stop the existing service/, 'a stale Nootify plist does not authorize replacing another server');
+  service = 'nootify';
+  await assert.rejects(assertInstallPort(port, false), /stop the existing service/, 'an unmanaged Nootify must be stopped first too');
+  await assertInstallPort(port, true);
+  server.closeAllConnections(); await new Promise<void>(resolveClose => server.close(() => resolveClose()));
+  await assertInstallPort(port, false);
+});
+
 test('launchd plist uses an absolute executable and escapes paths', () => {
   const plist = launchdPlist({ node: '/opt/bin/node', server: '/A & B/server.js', stateDir: '/private/state', port: 9417, mcpConfig: '/some config.json' });
   assert.match(plist, /dev.idy.nootify.service/); assert.match(plist, /\/A &amp; B\/server.js/);
@@ -194,4 +212,8 @@ test('MCP credential loading is explicit and does not alter its source', async t
   assert.deepEqual(await loadCredentials({}, file), { appId: 'cli_test', appSecret: 'fake-secret' });
   await assert.rejects(loadCredentials({ LARK_APP_ID: 'partial' }, file), /both/);
   assert.equal(await readFile(file, 'utf8'), source);
+  const unrelated = JSON.stringify({ mcpServers: { other: { command: 'example' } } });
+  await writeFile(file, unrelated);
+  assert.equal(await loadCredentials({}, file), undefined, 'an existing Claude config without Lark leaves notifications disabled');
+  assert.equal(await readFile(file, 'utf8'), unrelated);
 });

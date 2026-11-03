@@ -71,6 +71,20 @@ test('a file created for the block is removed with it; symlinked prompt files ke
   assert.ok((await readFile(target, 'utf8')).startsWith(`shared\n\n${BEGIN}`));
 });
 
+test('agents sharing one prompt target cannot overwrite each other\'s commands', async t => {
+  const f = await fixture(t);
+  await writeFile(f.files.claude, 'shared instructions\n');
+  await f.agents.set('claude', true);
+  const before = await readFile(f.files.claude, 'utf8');
+  await symlink(f.files.claude, f.files.codex);
+  await assert.rejects(f.agents.set('codex', true), /share the same prompt file/);
+  assert.equal(await readFile(f.files.claude, 'utf8'), before);
+  assert.ok((await lstat(f.files.codex)).isSymbolicLink());
+  assert.equal((await readdir(join(f.state, 'agent-backups'))).length, 1, 'the rejected write makes no new backup');
+  await f.agents.set('claude', false);
+  assert.equal(await readFile(f.files.codex, 'utf8'), 'shared instructions\n', 'removing a block remains possible');
+});
+
 test('sessions come from each client\'s variables; commands quote paths and name non-default service locations', () => {
   assert.deepEqual(agentSession('claude', { CLAUDE_CODE_HOST_SESSION_ID: 'local_x', CLAUDE_CODE_SESSION_ID: 'cli' }), { adapter: 'claude-desktop', session_id: 'local_x' });
   assert.deepEqual(agentSession('claude', { CLAUDE_CODE_SESSION_ID: 'cli' }), { adapter: 'claude-code', session_id: 'cli' });
