@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><title>运行日志 · Nootify</title><link rel="icon" href="data:,"><link rel="stylesheet" href="/ui/styles.css"></head>
+<body>
+<div class="app">
+<aside class="sidebar">
+  <a class="brand" href="#/logs" aria-label="Nootify 运行日志"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="3" width="8" height="8" rx="2"/><rect x="14" y="3" width="8" height="18" rx="2"/><rect x="2" y="15" width="8" height="6" rx="2"/></svg><span>Nootify</span></a>
+  <nav class="nav" aria-label="主导航">
+    <div class="nav-group">
+      <p class="nav-label">消息桥接</p>
+      <a class="nav-item" href="#/logs" data-view="logs"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 4.5h10M3 8h10M3 11.5h6"/></svg><span>运行日志</span><span class="nav-count" id="logs-count"></span></a>
+      <a class="nav-item" href="#/sessions" data-view="sessions"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3.5h10a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H7.5L4.5 14v-2.5H3a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1z"/></svg><span>路由会话</span><span class="nav-count" id="session-count"></span></a>
+    </div>
+    <div class="nav-group">
+      <p class="nav-label">GitHub</p>
+      <a class="nav-item" href="#/pulls/internal" data-view="pulls-internal"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="4.5" cy="3.5" r="1.5"/><circle cx="4.5" cy="12.5" r="1.5"/><circle cx="11.5" cy="12.5" r="1.5"/><path d="M4.5 5v6M11.5 11V6.5a2 2 0 0 0-2-2H7m0 0 1.5-1.5M7 4.5 8.5 6"/></svg><span>我们仓库的 PR</span><span class="nav-count" id="internal-count"></span></a>
+      <a class="nav-item" href="#/pulls/upstream" data-view="pulls-upstream"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 13.5V4M4.5 7.5 8 4l3.5 3.5"/><path d="M3 2.5h10"/></svg><span>提交上游的 PR</span><span class="nav-count" id="upstream-count"></span></a>
+    </div>
+  </nav>
+  <div class="sidebar-foot">
+    <div id="modules" class="module-list" aria-label="模块状态"></div>
+    <div class="status-line"><span id="connection-dot" class="dot"></span><span id="connection">正在连接</span><span id="access-label" class="value mono"></span></div>
+    <div class="status-line" id="tailnet-line" hidden><span class="dot ok"></span><span>Tailscale</span><span id="tailnet-url" class="value mono selectable"></span></div>
+  </div>
+</aside>
+<main class="content">
+  <header class="titlebar">
+    <nav class="crumbs" aria-label="当前位置"><span id="crumb-group">消息桥接</span><span aria-hidden="true">/</span><strong id="crumb-page">运行日志</strong></nav>
+    <span id="updated" class="updated"></span>
+    <button type="button" id="refresh" class="icon-button" title="立即刷新" aria-label="立即刷新"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13.2 8A5.2 5.2 0 1 1 11.7 4.3M13.2 2.6v3.1h-3.1"/></svg></button>
+  </header>
+  <div id="error" class="banner" role="alert" hidden></div>
+  <section id="logs-view" class="view" aria-label="运行日志">
+    <div class="toolbar">
+      <div class="segmented" id="outcome-tabs" aria-label="按结果筛选"></div>
+      <span class="spacer"></span>
+      <label class="search"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/></svg><input id="search" type="search" placeholder="搜索消息、会话、群 ID" autocomplete="off" aria-label="搜索日志"></label>
+      <button type="button" id="pause" class="text-button" aria-pressed="false">暂停</button>
+      <button type="button" id="export" class="text-button" title="导出当前筛选结果">导出</button>
+    </div>
+    <p class="hint">待回执：已写入客户端，还没有收到会话回执。已回复：回复已发回原飞书消息。保留最近 1,000 条，最新在前。</p>
+    <div class="group"><div class="rows" id="logs-table" role="list"></div><div id="empty" class="empty" hidden><strong>没有匹配的日志</strong><span>换个筛选条件，或在飞书群里发一条消息。</span></div></div>
+  </section>
+  <section id="sessions-view" class="view" aria-label="路由会话" hidden>
+    <p class="hint">收到消息时才按群公告查找对应的 Claude、Codex 或 OpenCode 会话。这里只列出本次运行遇到的会话和最近一次查找结果。</p>
+    <div class="group"><div class="rows" id="sessions-body" role="list"></div><div id="no-sessions" class="empty" hidden><strong>还没有会话路由记录</strong><span>群里收到带会话声明的消息后，这里会显示查找结果。</span></div></div>
+  </section>
+  <section id="pulls-view" class="view" aria-label="PR" hidden>
+    <div class="toolbar">
+      <div class="segmented" id="pull-tabs" aria-label="按状态筛选"></div>
+      <span class="spacer"></span>
+      <label class="search"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/></svg><input id="pull-search" type="search" placeholder="搜索标题、仓库、作者" autocomplete="off" aria-label="搜索 PR"></label>
+      <button type="button" id="pull-sort" class="text-button" title="切换排序方向"></button>
+    </div>
+    <div id="pull-banner" class="banner" role="status" hidden></div>
+    <div class="group">
+      <div class="group-head"><div><div class="group-title" id="pull-title"></div><div class="group-sub" id="pull-sub"></div></div><div class="group-side" id="pull-side"></div></div>
+      <div class="rows" id="pull-rows" role="list"></div>
+      <div id="pull-empty" class="empty" hidden><strong id="pull-empty-title"></strong><span id="pull-empty-detail"></span></div>
+    </div>
+    <details class="warnings" id="pull-warnings" hidden><summary></summary><ul></ul></details>
+  </section>
+</main>
+</div>
+<script type="module" src="/ui/app.js"></script>
+</body></html>

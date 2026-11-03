@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nootify · 等待服务</title>
+  <link rel="icon" href="brand.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="offline.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><img src="brand.svg" width="21" height="21" alt=""><strong>Nootify</strong></div>
+    <span class="local-label">本机服务</span>
+  </header>
+  <main>
+    <img class="mark" src="brand.svg" width="60" height="60" alt="">
+    <h1>正在等待本机服务</h1>
+    <p class="lead">服务暂时无法连接。连接恢复后，运行日志会自动显示。</p>
+    <div class="instructions">
+      <p>右键点击屏幕顶部的 Nootify 图标，选择 <strong>启动服务</strong> 启动已安装的服务。</p>
+      <p>如果服务没有响应，可选择 <strong>重启服务</strong>。菜单也会显示服务状态和操作结果。</p>
+    </div>
+    <p class="footnote">关闭此窗口后，可随时从菜单栏重新打开。退出桌面应用不会停止服务。</p>
+  </main>
+  <footer><span>每 3 秒自动检查连接</span><span>127.0.0.1:9417</span></footer>
+</body>
+</html>

@@ -1,0 +1,106 @@
+import assert from 'node:assert/strict';
+import { once } from 'node:events';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { request } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { test } from 'node:test';
+import { EventLog } from '../src/events.js';
+import type { PullSnapshot } from '../src/github.js';
+import { createServiceHost } from '../src/server.js';
+import { parseTailnet, TailnetAccess } from '../src/tailnet.js';
+import type { TailnetProbe } from '../src/tailnet.js';
+
+const status = {
+  BackendState: 'Running', User: { 42: { LoginName: 'owner@example.com' } },
+  Self: { DNSName: 'mini.example.ts.net.', TailscaleIPs: ['fd7a:115c:a1e0::7', '100.64.0.7'], UserID: 42 },
+};
+function probe(peers: Record<string, string>, counts = { whois: 0 }): TailnetProbe {
+  return {
+    status: async () => status,
+    whois: async ip => {
+      counts.whois++;
+      if (!(ip in peers)) throw new Error('not a tailnet peer');
+      return { UserProfile: { LoginName: peers[ip] } };
+    },
+  };
+}
+
+test('parses this node\'s names, listening address and owner', () => {
+  const parsed = parseTailnet(status)!;
+  assert.deepEqual(new Set(parsed.names), new Set(['mini.example.ts.net', 'mini', '100.64.0.7', '[fd7a:115c:a1e0::7]']));
+  assert.equal(parsed.address, '100.64.0.7');
+  assert.equal(parsed.owner, 'owner@example.com');
+  assert.equal(parseTailnet({ ...status, BackendState: 'Stopped' }), undefined);
+});
+
+test('a request needs this node\'s address as Host and an allowed peer identity from Tailscale', async () => {
+  const counts = { whois: 0 };
+  const access = new TailnetAccess(9417, { probe: probe({ '100.64.0.9': 'owner@example.com', '100.64.0.10': 'tagged-devices' }, counts) });
+  for (const host of ['100.64.0.7:9417', 'mini.example.ts.net:9417', 'MINI:9417', '[fd7a:115c:a1e0::7]:9417']) {
+    assert.equal(await access.authorize(host, '100.64.0.9'), undefined, host);
+  }
+  assert.equal(counts.whois, 1, 'peer identity is cached');
+  assert.equal(await access.authorize('100.64.0.7:9417', '::ffff:100.64.0.9'), undefined, 'IPv4-mapped peers resolve too');
+  assert.match((await access.authorize('100.64.0.7:9417', '100.64.0.10'))!, /identity/, 'tagged agents are not the owner');
+  assert.match((await access.authorize('100.64.0.7:9417', '192.168.1.20'))!, /identity/, 'non-tailnet sources are rejected');
+  assert.match((await access.authorize('rebinding.example:9417', '100.64.0.9'))!, /Tailscale address/);
+  assert.match((await access.authorize('127.0.0.1:9417', '100.64.0.9'))!, /Tailscale address/);
+  const before = counts.whois;
+  await access.authorize('100.64.0.7:9417', '192.168.1.20');
+  assert.equal(counts.whois, before + 1, 'failed lookups are retried instead of cached');
+  const restricted = new TailnetAccess(9417, { users: ['friend@example.com'], probe: probe({ a: 'owner@example.com', b: 'friend@example.com' }) });
+  assert.match((await restricted.authorize('mini', 'a'))!, /identity/);
+  assert.equal(await restricted.authorize('mini', 'b'), undefined);
+  const offline = new TailnetAccess(9417, { probe: { status: async () => { throw new Error('not running'); }, whois: async () => ({}) } });
+  assert.match((await offline.authorize('100.64.0.7:9417', '100.64.0.9'))!, /Tailscale address/);
+});
+
+function call(port: number, path: string, headers: Record<string, string>, method = 'GET'): Promise<{ status: number; body: string }> {
+  return new Promise((resolveCall, reject) => {
+    const req = request({ host: '127.0.0.1', port, path, method, headers }, response => {
+      let body = ''; response.setEncoding('utf8');
+      response.on('data', chunk => { body += chunk; });
+      response.on('end', () => resolveCall({ status: response.statusCode ?? 0, body }));
+    });
+    req.once('error', reject); req.end();
+  });
+}
+
+test('the tailnet listener serves the owner, starts background PR refreshes and keeps control APIs token-only', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'ws-tailnet-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const snapshot: PullSnapshot = { internal: [], upstream: [], refresh: { running: false }, warnings: ['coverage note'] };
+  let refreshes = 0;
+  const pulls = { snapshot: () => snapshot, refresh: () => { refreshes++; } };
+  // The test listener uses loopback, so the fake Tailscale lookup maps that peer address.
+  const peers: Record<string, string> = { '127.0.0.1': 'owner@example.com' };
+  const tailnet = new TailnetAccess(9417, { probe: probe(peers), ttl: 0 });
+  tailnet.setListening('100.64.0.7');
+  const logs = await EventLog.open(dir);
+  const server = createServiceHost([], 'test-token', logs, { pulls, tailnet, via: 'tailnet' });
+  const local = createServiceHost([], 'test-token', logs, { pulls, tailnet });
+  for (const listener of [server, local]) { listener.listen(0, '127.0.0.1'); await once(listener, 'listening'); }
+  t.after(() => { for (const listener of [server, local]) { listener.closeAllConnections(); listener.close(); } });
+  const port = (server.address() as AddressInfo).port;
+  const owner = { host: '100.64.0.7:9417' };
+  const browser = { ...owner, origin: 'http://100.64.0.7:9417', 'sec-fetch-site': 'same-origin' };
+
+  assert.equal((await call(port, '/', owner)).status, 200);
+  const page = await call(port, '/ui/api/snapshot', browser);
+  assert.equal(page.status, 200);
+  assert.equal(JSON.parse(page.body).access.tailnet_url, 'http://100.64.0.7:9417/');
+  assert.deepEqual(JSON.parse((await call(port, '/ui/api/pulls', browser)).body), snapshot);
+  assert.equal((await call(port, '/ui/api/snapshot', { host: '127.0.0.1:9417' })).status, 403, 'the tailnet listener needs its tailnet Host');
+  assert.equal((await call((local.address() as AddressInfo).port, '/ui/api/snapshot', owner)).status, 403, 'the loopback listener keeps loopback Hosts');
+
+  assert.equal((await call(port, '/ui/api/pulls/refresh', { ...browser, 'x-nootify-ui': '1' }, 'POST')).status, 202);
+  assert.equal((await call(port, '/ui/api/pulls/refresh', browser, 'POST')).status, 403, 'a plain cross-site form cannot add the header');
+  assert.equal((await call(port, '/ui/api/pulls/refresh', { ...browser, origin: 'http://attacker.example', 'x-nootify-ui': '1' }, 'POST')).status, 403);
+  assert.equal(refreshes, 1);
+  assert.equal((await call(port, '/v1/services', owner)).status, 401, 'a Tailscale identity is not a control-API credential');
+
+  peers['127.0.0.1'] = 'someone@example.com';
+  assert.equal((await call(port, '/ui/api/snapshot', owner)).status, 403, 'other tailnet users are rejected');
+});
