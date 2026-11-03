@@ -171,6 +171,9 @@ impl LaunchAgent {
     pub fn request(&self, action: JobAction) -> Result<(), String> {
         // Never install/rewrite a plist, run Node, or create another receiver.
         let loaded = self.loaded()?;
+        if !loaded && port_in_use(SocketAddr::from(SERVICE_ADDR)) {
+            return Err("127.0.0.1:9417 is occupied by another process; the existing service was left running".into());
+        }
         if !loaded && !self.plist.is_file() {
             return Err("LaunchAgent is not installed; use 安装后台服务 first".into());
         }

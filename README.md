@@ -26,7 +26,9 @@ npm run check
 
 The native **Nootify** app for Apple Silicon and macOS 13.5+ bundles the background service and its own Node.js runtime. It opens the web UI in a dark native window and provides a menu-bar tray with **打开**, **退出**, service controls, and update controls. PR rows open GitHub in the default browser. Closing the window hides it; quitting the desktop app leaves the independent daemon running. A single-instance guard restores the existing window.
 
-Download the DMG from [GitHub Releases](https://github.com/idy/nootify/releases/latest), drag Nootify to **Applications**, then choose **安装后台服务** in the tray. That action is available only while `~/Library/LaunchAgents/dev.idy.nootify.service.plist` is absent and port 9417 is free. It refuses installation from a read-only disk image. Keep the app in Applications: the job runs Node.js and `server.js` inside its bundle. An existing LaunchAgent is reused, and the tray never replaces its configuration.
+Download the DMG from [GitHub Releases](https://github.com/idy/nootify/releases/latest), drag Nootify to **Applications**, and open it. The first launch automatically installs and starts the background service; later launches connect to it or load its existing LaunchAgent if needed. A healthy service keeps its process and connection. The tray's start/restart/install controls are recovery actions, not setup steps.
+
+Automatic installation requires `~/Library/LaunchAgents/dev.idy.nootify.service.plist` to be absent and port 9417 to be free. It refuses installation from a read-only disk image. Keep the app in Applications: the job runs Node.js and `server.js` inside its bundle. An existing LaunchAgent is reused, and the tray never replaces its configuration.
 
 When `~/.claude.json` exists, the installer selects its `mcpServers.lark` credentials. A file without a Lark server leaves Feishu disabled and the PR pages available. Credentials stay in their original file. The web page receives no native Tauri IPC capabilities. Builds are ad-hoc signed and are not notarized; macOS may require allowing the first launch under System Settings > Privacy & Security.
 
@@ -54,7 +56,9 @@ The app checks [the signed release manifest](https://github.com/idy/nootify/rele
 
 CI runs TypeScript tests, resource staging, rustfmt, clippy, and Rust tests on macOS. To publish a release, update `package.json` and `src-tauri/Cargo.toml` to the same version, commit to `main`, then push a matching `vX.Y.Z` tag. The release workflow rejects a tag that differs from `package.json`. It publishes the DMG, updater bundle, signature, and `latest.json` using the repository secrets `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. A manually dispatched release must select a version tag too.
 
-## Install the independent service
+## Install from a source checkout
+
+The packaged app installs its service automatically. For a checkout-based installation instead:
 
 ```bash
 node dist/src/cli.js launchd-install --mcp-config ~/.claude.json

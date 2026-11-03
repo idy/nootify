@@ -191,8 +191,8 @@ fn create_tray(app: &AppHandle) -> tauri::Result<TrayItems> {
     let status = MenuItem::with_id(app, "status", "服务：检查中…", false, None::<&str>)?;
     let modules = MenuItem::with_id(app, "modules", "模块：—", false, None::<&str>)?;
     let action = MenuItem::with_id(app, "action", "退出不会停止后台服务", false, None::<&str>)?;
-    let start = MenuItem::with_id(app, "start", "启动服务", true, None::<&str>)?;
-    let restart = MenuItem::with_id(app, "restart", "重启服务", true, None::<&str>)?;
+    let start = MenuItem::with_id(app, "start", "重试启动服务", false, None::<&str>)?;
+    let restart = MenuItem::with_id(app, "restart", "重启服务", false, None::<&str>)?;
     // Enabled by render_install only while no LaunchAgent plist exists.
     let install = MenuItem::with_id(app, "install_service", INSTALL_LABEL, false, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出", true, Some("CmdOrCtrl+Q"))?;
@@ -291,6 +291,22 @@ fn service_worker(
             return;
         }
     };
+    // Opening the app is sufficient: install on first use or load the existing job.
+    // A healthy service is reused without restarting it or opening another receiver.
+    if check_health(&client).is_err() {
+        run_action(&app, &items, "启动后台服务", || {
+            if agent.plist_present() {
+                agent.request(JobAction::Start)?;
+                return Ok("后台服务正在启动".into());
+            }
+            match &bundled {
+                Ok(Some(bundled)) => agent.install(bundled)?,
+                Ok(None) => return Err("development builds do not bundle the service".into()),
+                Err(error) => return Err(error.clone()),
+            }
+            Ok("后台服务已自动安装并运行".into())
+        });
+    }
     loop {
         let health = check_health(&client);
         render_health(&app, &items, &health);
@@ -322,6 +338,9 @@ fn run_action(
     label: &str,
     action: impl FnOnce() -> Result<String, String>,
 ) {
+    app.state::<NativeState>()
+        .action_pending
+        .store(true, Ordering::SeqCst);
     let _ = items.start.set_enabled(false);
     let _ = items.restart.set_enabled(false);
     let _ = items.install.set_enabled(false);
