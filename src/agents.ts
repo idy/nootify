@@ -143,7 +143,10 @@ export class AgentPrompts implements ServiceModule {
   }
   private async apply(agent: AgentId, enabled: boolean): Promise<AgentPrompt> {
     const current = await this.inspect(agent);
-    if (current.status === 'missing') throw new HttpError(409, `${names[agent]} is not installed: ${dirname(current.file)} does not exist`);
+    if (current.status === 'missing') {
+      if (!enabled) return current;
+      await mkdir(dirname(current.file), { recursive: true, mode: 0o700 });
+    }
     if (current.status === 'conflict') throw new HttpError(409, 'The prompt file has unbalanced Nootify markers; fix them by hand first');
     if (current.status === 'error') throw new HttpError(409, `Cannot read ${current.file}: ${current.error}`);
     const path = await this.target(current.file);

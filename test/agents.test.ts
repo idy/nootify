@@ -40,7 +40,7 @@ test('the block is appended and removed again without touching the rest of the p
   assert.deepEqual(list.map(agent => [agent.agent, agent.status]), [['claude', 'absent'], ['codex', 'absent'], ['opencode', 'missing']]);
 });
 
-test('outdated blocks are refreshed in place; unbalanced markers and missing agents are never edited', async t => {
+test('outdated blocks are refreshed in place and unbalanced markers are never edited', async t => {
   const f = await fixture(t);
   await writeFile(f.files.codex, `before\n${BEGIN}\nold text\n${END}\nafter\n`);
   assert.equal((await f.agents.inspect('codex')).status, 'outdated');
@@ -54,8 +54,11 @@ test('outdated blocks are refreshed in place; unbalanced markers and missing age
   assert.equal((await f.agents.inspect('codex')).status, 'conflict');
   await assert.rejects(f.agents.set('codex', false), /unbalanced/);
   assert.equal(await readFile(f.files.codex, 'utf8'), broken);
-  await assert.rejects(f.agents.set('opencode', true), /not installed/);
+  assert.equal((await f.agents.set('opencode', false)).status, 'missing');
   await assert.rejects(stat(f.files.opencode), /ENOENT/);
+  assert.equal((await f.agents.set('opencode', true)).status, 'current');
+  assert.ok((await readFile(f.files.opencode, 'utf8')).includes('--agent opencode'));
+  assert.equal((await stat(join(f.root, 'missing', 'opencode'))).mode & 0o777, 0o700);
 });
 
 test('a file created for the block is removed with it; symlinked prompt files keep their link', async t => {

@@ -50,7 +50,7 @@ const repoTabs: [string, string][] = [['all', '全部'], ['followed', '已关注
 const agentNames: Record<string, string> = { claude: 'Claude', codex: 'Codex', opencode: 'OpenCode' };
 const promptStates: Record<string, Tone> = {
   current: { label: '已注入', tone: 'ok' }, outdated: { label: '需要更新', tone: 'warn' }, absent: { label: '未注入', tone: 'muted' },
-  missing: { label: '未安装', tone: 'muted' }, conflict: { label: '标记不完整', tone: 'error' }, error: { label: '无法读取', tone: 'error' },
+  missing: { label: '未配置', tone: 'muted' }, conflict: { label: '标记不完整', tone: 'error' }, error: { label: '无法读取', tone: 'error' },
 };
 const adapters: Record<string, string> = { 'claude-desktop': 'Claude Desktop', 'claude-code': 'Claude Code', codex: 'Codex', opencode: 'OpenCode' };
 const availability: Record<string, Tone> = {
@@ -381,7 +381,7 @@ function renderRepos(): void {
 // ---- Agents ----
 const home = (path: string): string => path.replace(/^\/(?:Users|home)\/[^/]+(?=\/)/, '~');
 function agentDetail(agent: AgentPrompt): string {
-  if (agent.status === 'missing') return '本机没有找到它的配置目录';
+  if (agent.status === 'missing') return '尚未创建提示词，勾选后自动创建';
   if (agent.status === 'conflict') return '文件里的 nootify 标记不成对，请先手动修正';
   if (agent.status === 'error') return agent.error ?? '无法读取文件';
   if (agent.status === 'outdated') return '写入内容与当前版本不同';
@@ -421,7 +421,7 @@ function renderAgents(): void {
     const item = node('div', undefined, 'entry'); item.setAttribute('role', 'listitem');
     const row = node('label', undefined, 'row');
     const box = node('input', undefined, 'check'); box.type = 'checkbox'; box.checked = agent.injected; box.dataset.key = agent.agent;
-    box.disabled = remote || state.pendingAgents.has(agent.agent) || ['missing', 'conflict', 'error'].includes(agent.status);
+    box.disabled = remote || state.pendingAgents.has(agent.agent) || ['conflict', 'error'].includes(agent.status);
     box.setAttribute('aria-label', `向 ${agent.name} 写入飞书说明`);
     box.addEventListener('change', () => { void setAgent(agent, box.checked); });
     row.append(box, rowMain(agent.name, `${home(agent.file)} · ${agentDetail(agent)}`), sideBlock(promptStates[agent.status] ?? promptStates.error));
