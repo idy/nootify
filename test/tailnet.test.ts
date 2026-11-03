@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { EventLog } from '../src/events.js';
 import type { PullSnapshot } from '../src/github.js';
+import type { AgentId, AgentPrompt } from '../src/agents.js';
 import { createServiceHost } from '../src/server.js';
 import { parseTailnet, TailnetAccess } from '../src/tailnet.js';
 import type { TailnetProbe } from '../src/tailnet.js';
@@ -81,8 +82,11 @@ test('the tailnet listener serves the owner, starts background PR refreshes and 
   const tailnet = new TailnetAccess(9417, { probe: probe(peers), ttl: 0 });
   tailnet.setListening('100.64.0.7');
   const logs = await EventLog.open(dir);
-  const server = createServiceHost([], 'test-token', logs, { pulls, tailnet, via: 'tailnet' });
-  const local = createServiceHost([], 'test-token', logs, { pulls, tailnet });
+  const agentCalls: [AgentId, boolean][] = [];
+  const agents = { list: async (): Promise<AgentPrompt[]> => [],
+    set: async (agent: AgentId, enabled: boolean): Promise<AgentPrompt> => { agentCalls.push([agent, enabled]); return { agent, name: agent, file: '/x', status: 'current', injected: enabled, block: '' }; } };
+  const server = createServiceHost([], 'test-token', logs, { pulls, tailnet, agents, via: 'tailnet' });
+  const local = createServiceHost([], 'test-token', logs, { pulls, tailnet, agents });
   for (const listener of [server, local]) { listener.listen(0, '127.0.0.1'); await once(listener, 'listening'); }
   t.after(() => { for (const listener of [server, local]) { listener.closeAllConnections(); listener.close(); } });
   const port = (server.address() as AddressInfo).port;
@@ -106,6 +110,16 @@ test('the tailnet listener serves the owner, starts background PR refreshes and 
   assert.equal((await call(port, '/ui/api/repos', browser, 'POST', choice)).status, 403, 'follow choices need the UI header too');
   assert.equal((await call(port, '/ui/api/repos', { ...browser, 'x-nootify-ui': '1' }, 'POST', 'x'.repeat(5000))).status, 413);
   assert.deepEqual(choices, [['viewer/tool', false]]);
+  const prompt = JSON.stringify({ agent: 'claude', enabled: true });
+  assert.equal((await call(port, '/ui/api/agents', { ...browser, 'x-nootify-ui': '1' }, 'POST', prompt)).status, 403, 'agent prompts cannot be changed over Tailscale');
+  assert.equal(JSON.parse((await call(port, '/ui/api/agents', browser)).body).editable, false);
+  const localPort = (local.address() as AddressInfo).port;
+  const here = { host: `127.0.0.1:${localPort}` };
+  assert.equal((await call(localPort, '/ui/api/agents', { ...here, 'x-nootify-ui': '1' }, 'POST', prompt)).status, 200);
+  assert.equal((await call(localPort, '/ui/api/agents', here, 'POST', prompt)).status, 403, 'the UI header is required on this Mac too');
+  assert.equal((await call(localPort, '/ui/api/agents', { ...here, 'x-nootify-ui': '1' }, 'POST', JSON.stringify({ agent: 'other', enabled: true }))).status, 400);
+  assert.equal(JSON.parse((await call(localPort, '/ui/api/agents', here)).body).editable, true);
+  assert.deepEqual(agentCalls, [['claude', true]]);
   assert.equal((await call(port, '/v1/services', owner)).status, 401, 'a Tailscale identity is not a control-API credential');
 
   peers['127.0.0.1'] = 'someone@example.com';

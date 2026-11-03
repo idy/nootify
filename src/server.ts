@@ -15,6 +15,8 @@ import { serveUi } from './ui.js';
 import type { PullsSource } from './ui.js';
 import { PullRequestsService } from './github.js';
 import { TailnetAccess } from './tailnet.js';
+import { AgentPrompts } from './agents.js';
+import type { AgentsSource, ChannelSummary } from './ui.js';
 
 async function readBody(request: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
@@ -30,7 +32,10 @@ async function readBody(request: IncomingMessage): Promise<unknown> {
   catch { throw new HttpError(400, 'Invalid JSON'); }
 }
 /** `via: 'tailnet'` marks the listener bound to this node's Tailscale address. */
-export interface HostOptions { pulls?: PullsSource; tailnet?: TailnetAccess; via?: 'loopback' | 'tailnet' }
+export interface HostOptions {
+  pulls?: PullsSource; tailnet?: TailnetAccess; via?: 'loopback' | 'tailnet';
+  agents?: AgentsSource; channel?: () => ChannelSummary | undefined;
+}
 const loopback = /^(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/;
 function listen(server: Server, port: number, host: string): Promise<void> {
   return new Promise((resolveListen, reject) => {
@@ -55,7 +60,8 @@ export function createServiceHost(modules: ServiceModule[], token: string, logs?
       if (!isPageNavigation && request.headers['sec-fetch-site'] && !['same-origin', 'none'].includes(String(request.headers['sec-fetch-site']))) throw new HttpError(403, 'Cross-site requests are not accepted');
       if (request.headers.origin && request.headers.origin !== `http://${host}`) throw new HttpError(403, 'Cross-origin requests are not accepted');
       const url = new URL(request.url ?? '/', 'http://127.0.0.1');
-      if (logs && await serveUi(request, response, url.pathname, { modules, logs, pulls: options.pulls, tailnetUrl: () => options.tailnet?.url() })) return;
+      if (logs && await serveUi(request, response, url.pathname, { modules, logs, pulls: options.pulls, tailnetUrl: () => options.tailnet?.url(),
+        agents: options.agents, channel: options.channel, via: options.via ?? 'loopback' })) return;
       if (request.headers.origin) throw new HttpError(403, 'Browser-origin requests are not accepted for control APIs');
       const statuses = () => modules.map(module => ({ name: module.name, status: module.status() }));
       if (request.method === 'GET' && url.pathname === '/health') { send(200, { ok: true, service: 'nootify', modules: statuses() }); return; }
@@ -92,16 +98,18 @@ export async function main(): Promise<void> {
     pullsOutcome = record.status;
     report({ source: 'pulls', ...record });
   });
-  const modules: ServiceModule[] = [sessions, lark, pulls];
   const tailnet = new TailnetAccess(port, { users: process.env.NOOTIFY_TAILNET_USERS?.split(',').map(user => user.trim()).filter(Boolean) });
-  const server = createServiceHost(modules, state.token, logs, { pulls, tailnet });
+  const agents = new AgentPrompts({ stateDir: state.directory, port, tailnetAddress: () => { const url = tailnet.url(); return url ? new URL(url).hostname : undefined; } }, report);
+  const modules: ServiceModule[] = [sessions, lark, pulls, agents];
+  const page = { pulls, tailnet, agents, channel: () => lark.channel() };
+  const server = createServiceHost(modules, state.token, logs, page);
   await listen(server, port, '127.0.0.1');
   report({ status: 'ready', service: 'nootify', port });
   for (const module of modules) await module.start?.();
 
   // A second listener on this node's Tailscale IPv4 address serves the owner's other devices.
   // It follows the address if Tailscale restarts, and logs only changes in outcome.
-  const tailnetServer = createServiceHost(modules, state.token, logs, { pulls, tailnet, via: 'tailnet' });
+  const tailnetServer = createServiceHost(modules, state.token, logs, { ...page, via: 'tailnet' });
   let bound: string | undefined;
   let lastNote: string | undefined;
   let binding: Promise<void> | undefined;

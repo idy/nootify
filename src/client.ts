@@ -1,5 +1,7 @@
-import type { Adapter, BackendConnection, BindingRequest, DeliveryResult, Health, LarkBinding, LarkReceipt, LarkReply, ModuleStatus, PublicSession, SessionRegistration } from './types.js';
-export type { Adapter, BackendConnection, BindingRequest, DeliveryResult, Health, LarkBinding, LarkReceipt, LarkReply, ModuleStatus, PublicSession, SessionRegistration } from './types.js';
+import type { Adapter, BackendConnection, BindingRequest, DeliveryResult, Health, LarkBinding, LarkReceipt, LarkReply, ModuleStatus, PublicSession, SessionRegistration, ThreadInfo, ThreadMessage, ThreadRequest } from './types.js';
+import type { AgentId, AgentPrompt } from './agents.js';
+export type { Adapter, BackendConnection, BindingRequest, DeliveryResult, Health, LarkBinding, LarkReceipt, LarkReply, ModuleStatus, PublicSession, SessionRegistration, ThreadInfo, ThreadMessage, ThreadRequest } from './types.js';
+export type { AgentId, AgentPrompt } from './agents.js';
 
 export class NootifyClient {
   private readonly baseUrl: string;
@@ -34,6 +36,15 @@ export class NootifyClient {
     return this.request('POST', `/v1/lark/messages/${encodeURIComponent(messageId)}/reply`, { text });
   }
   larkBindings(): Promise<LarkBinding[]> { return this.request('GET', '/v1/lark/bindings'); }
+  /** Find or create the session's Feishu group; the routing token is kept in its announcement. */
+  openThread(request: ThreadRequest): Promise<ThreadInfo> { return this.request('POST', '/v1/threads', request); }
+  sendThread(sessionId: string, text: string, adapter?: Adapter): Promise<ThreadMessage> {
+    return this.request('POST', `/v1/threads/${encodeURIComponent(sessionId)}/messages`, { text, adapter });
+  }
+  larkRecipient(): Promise<{ open_id?: string; source?: string }> { return this.request('GET', '/v1/lark/recipient'); }
+  setLarkRecipient(openId: string): Promise<{ open_id?: string; source?: string }> { return this.request('PUT', '/v1/lark/recipient', { open_id: openId }); }
+  agents(): Promise<AgentPrompt[]> { return this.request('GET', '/v1/agents'); }
+  setAgent(agent: AgentId, enabled: boolean): Promise<AgentPrompt> { return this.request('PUT', `/v1/agents/${agent}`, { enabled }); }
   bindLark(chatId: string, binding: BindingRequest): Promise<LarkBinding> {
     return this.request('PUT', `/v1/lark/bindings/${encodeURIComponent(chatId)}`, binding);
   }

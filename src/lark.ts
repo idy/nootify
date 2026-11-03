@@ -2,9 +2,10 @@ import * as sdk from '@larksuiteoapi/node-sdk';
 import type { State } from './state.js';
 import { SessionsService, SessionUnavailable } from './sessions.js';
 import { hostname } from 'node:os';
-import type { LarkBinding, LarkDelivery, RemoteBinding, RouteRequest, RouteResponse, ServiceModule } from './types.js';
+import type { Adapter, LarkBinding, LarkDelivery, RemoteBinding, RouteRequest, RouteResponse, ServiceModule } from './types.js';
 import { HttpError, identifier, object, isAdapter, text } from './types.js';
 import { forwardedLarkMessage, LarkReplies } from './lark-replies.js';
+import { LarkThreads } from './lark-threads.js';
 import { createLarkApi, ensureAnnouncement, ensureBindingMessage, quietLogger, readAnnouncement, parseAnnouncement, InvalidAnnouncement } from './lark-metadata.js';
 import type { Credentials, LarkApi } from './lark-metadata.js';
 
@@ -33,10 +34,11 @@ export class LarkService implements ServiceModule {
   private seen = new Set<string>();
   readonly api?: LarkApi;
   private readonly replies?: LarkReplies;
+  readonly threads?: LarkThreads;
   constructor(readonly state: State, readonly sessions: SessionsService, readonly credentials?: Credentials,
     private readonly report: (record: Record<string, unknown>) => void = () => {}, api?: LarkApi, private readonly port = 9417) {
     this.api = api ?? (credentials ? createLarkApi(credentials) : undefined);
-    if (this.api) this.replies = new LarkReplies(state, this.api, report);
+    if (this.api) { this.replies = new LarkReplies(state, this.api, report); this.threads = new LarkThreads(state, this.api, report); }
   }
   status(): string { return this.connection; }
   private remote(binding: LarkBinding): RemoteBinding {
@@ -115,8 +117,33 @@ export class LarkService implements ServiceModule {
     return true;
   }
   drain(): Promise<void> { return this.queue; }
+  /** Channel summary for the Agents page; never includes credentials. */
+  channel(): { name: 'feishu'; configured: boolean; recipient?: string; groups: number } {
+    return { name: 'feishu', configured: Boolean(this.api), recipient: this.threads?.recipient()?.open_id, groups: this.state.bindings.size };
+  }
+  private requireThreads(): LarkThreads {
+    if (!this.threads) throw new HttpError(503, 'Feishu is not configured; other services remain available');
+    return this.threads;
+  }
   async handle(request: RouteRequest): Promise<RouteResponse | undefined> {
     if (request.path === '/v1/lark/bindings' && request.method === 'GET') return { body: [...this.state.bindings.values()] };
+    if (request.path === '/v1/threads' && request.method === 'POST') {
+      const body = object(request.body);
+      if (!isAdapter(body.adapter)) throw new HttpError(400, 'Unsupported session adapter');
+      const name = text(body.session_name, 'session_name').trim().slice(0, 80);
+      return { body: await this.requireThreads().open(body.adapter, identifier(body.session_id, 'session_id'), name) };
+    }
+    const thread = /^\/v1\/threads\/([^/]+)\/messages$/.exec(request.path);
+    if (thread && request.method === 'POST') {
+      const body = object(request.body);
+      if (body.adapter !== undefined && !isAdapter(body.adapter)) throw new HttpError(400, 'Unsupported session adapter');
+      return { body: await this.requireThreads().send(identifier(decodeURIComponent(thread[1]), 'session_id'), text(body.text, 'text'), body.adapter as Adapter | undefined) };
+    }
+    if (request.path === '/v1/lark/recipient') {
+      if (request.method === 'PUT') await this.requireThreads().setRecipient(text(object(request.body).open_id, 'open_id'));
+      else if (request.method !== 'GET') return;
+      return { body: this.requireThreads().recipient() ?? {} };
+    }
     const callback = /^\/v1\/lark\/messages\/([^/]+)\/(ack|reply)$/.exec(request.path);
     if (callback && request.method === 'POST') {
       if (!this.replies) throw new HttpError(503, 'Feishu is not configured');

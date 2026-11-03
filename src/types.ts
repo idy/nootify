@@ -52,6 +52,10 @@ export interface LarkDelivery {
   acknowledged_at?: string;
   replies: { digest: string; message_id: string; time: string }[];
 }
+/** One Feishu group per agent session; Slack and other channels will return the same shapes. */
+export interface ThreadRequest { adapter: Adapter; session_id: string; session_name: string }
+export interface ThreadInfo { channel: 'feishu'; chat_id: string; session_id: string; adapter: Adapter; session_name: string; created: boolean }
+export interface ThreadMessage { channel: 'feishu'; chat_id: string; message_id: string }
 export interface LarkReceipt { status: 'session_acknowledged'; message_id: string; acknowledged_at: string }
 export interface LarkReply { status: 'replied'; message_id: string; reply_id: string }
 export interface ModuleStatus { name: string; status: string }

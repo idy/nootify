@@ -10,6 +10,7 @@
       <p class="nav-label">消息桥接</p>
       <a class="nav-item" href="#/logs" data-view="logs"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 4.5h10M3 8h10M3 11.5h6"/></svg><span>运行日志</span><span class="nav-count" id="logs-count"></span></a>
       <a class="nav-item" href="#/sessions" data-view="sessions"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3.5h10a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H7.5L4.5 14v-2.5H3a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1z"/></svg><span>路由会话</span><span class="nav-count" id="session-count"></span></a>
+      <a class="nav-item" href="#/agents" data-view="agents"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1.5"/><path d="M6.5 1.5V4M9.5 1.5V4M6.5 12v2.5M9.5 12v2.5M1.5 6.5H4M1.5 9.5H4M12 6.5h2.5M12 9.5h2.5"/></svg><span>Agents</span><span class="nav-count" id="agents-count"></span></a>
     </div>
     <div class="nav-group">
       <p class="nav-label">GitHub</p>
@@ -60,6 +61,14 @@
       <div id="pull-empty" class="empty" hidden><strong id="pull-empty-title"></strong><span id="pull-empty-detail"></span></div>
     </div>
     <details class="warnings" id="pull-warnings" hidden><summary></summary><ul></ul></details>
+  </section>
+  <section id="agents-view" class="view" aria-label="Agents" hidden>
+    <p class="hint">勾选后，Nootify 会在该 agent 的全局提示词文件末尾写入一段飞书说明，只改动 nootify 标记之间的内容。之后的对话会各自建一个飞书群，把会话标识写进群公告并在群里汇报进度；群里的回复会转发回对应会话。每次修改前都会把原文件备份到 Nootify 的状态目录。</p>
+    <div id="agents-banner" class="banner" role="alert" hidden></div>
+    <div class="group">
+      <div class="group-head"><div><div class="group-title">通知渠道 · 飞书</div><div class="group-sub" id="channel-sub"></div></div><div class="group-side" id="channel-side"></div></div>
+      <div class="rows" id="agent-rows" role="list"></div>
+    </div>
   </section>
   <section id="repos-view" class="view" aria-label="关注的仓库" hidden>
     <div class="toolbar">

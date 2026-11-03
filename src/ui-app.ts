@@ -1,18 +1,21 @@
 import type { LogEntry } from './events.js';
 import type { PullRequest, PullSnapshot, RepositoryEntry } from './github.js';
 import type { ModuleStatus, PublicSession } from './types.js';
+import type { AgentPrompt } from './agents.js';
 
 interface PullSummary { internal: number; upstream: number; followed: number; running: boolean; lastSuccessAt?: string; error?: string }
 interface Snapshot {
   time: string; modules: ModuleStatus[]; sessions: PublicSession[]; logs: LogEntry[];
   pulls?: PullSummary; access?: { tailnet_url?: string };
 }
-type View = 'logs' | 'sessions' | 'pulls-internal' | 'pulls-upstream' | 'repos';
+type View = 'logs' | 'sessions' | 'agents' | 'pulls-internal' | 'pulls-upstream' | 'repos';
+interface AgentsPage { agents: AgentPrompt[]; editable: boolean; channel?: { name: string; configured: boolean; recipient?: string; groups: number } }
 interface Tone { label: string; tone: string }
 
 const views: Record<View, { hash: string; group: string; title: string; section: string }> = {
   logs: { hash: '#/logs', group: '消息桥接', title: '运行日志', section: 'logs-view' },
   sessions: { hash: '#/sessions', group: '消息桥接', title: '路由会话', section: 'sessions-view' },
+  agents: { hash: '#/agents', group: '消息桥接', title: 'Agents', section: 'agents-view' },
   'pulls-internal': { hash: '#/pulls/internal', group: 'GitHub', title: '我们仓库的 PR', section: 'pulls-view' },
   'pulls-upstream': { hash: '#/pulls/upstream', group: 'GitHub', title: '提交上游的 PR', section: 'pulls-view' },
   repos: { hash: '#/repos', group: 'GitHub', title: '关注的仓库', section: 'repos-view' },
@@ -24,6 +27,8 @@ const descriptions: Record<string, string> = {
   delivery_failed: '消息转发失败', ignored: '已跳过此消息', queue_full: '消息队列已满', registered: '本机会话已注册',
   bound: '已保存会话绑定', stopped: '监听已停止', connecting: '正在连接飞书', pin_failed: '绑定消息置顶失败',
   reconnecting: '飞书正在重连', reconnected: '飞书已重新连接', refresh_completed: 'GitHub PR 已刷新', refresh_failed: 'GitHub PR 刷新失败',
+  thread_created: '已为会话创建飞书群', thread_reused: '会话已连接飞书群', thread_message: '会话发送了进度消息', thread_failed: '进度消息发送失败',
+  prompt_injected: '已写入 agent 提示词', prompt_removed: '已移除 agent 提示词',
   tailnet_listening: 'Tailscale 访问已开启', tailnet_failed: 'Tailscale 监听失败', tailnet_unavailable: 'Tailscale 未运行，仅本机可访问',
 };
 const reasons: Record<string, string> = {
@@ -33,7 +38,7 @@ const reasons: Record<string, string> = {
   sender_not_allowed: '发送者不在允许名单', duplicate: '重复消息', unsupported_message: '暂不处理此消息类型',
   host_mismatch: '会话位于另一台机器', invalid_content: '消息内容无效', delivery_failed: '投递失败',
 };
-const sourceNames: Record<string, string> = { host: '服务', sessions: '会话', lark: '飞书', pulls: 'GitHub' };
+const sourceNames: Record<string, string> = { host: '服务', sessions: '会话', lark: '飞书', pulls: 'GitHub', agents: 'Agents' };
 const categories: Record<string, Tone> = {
   received: { label: '已收件', tone: 'info' }, forwarded: { label: '待回执', tone: 'warn' },
   acknowledged: { label: '已确认', tone: 'ok' }, replied: { label: '已回复', tone: 'ok' },
@@ -43,6 +48,10 @@ const outcomeTabs: [string, string][] = [['all', '全部'], ['forwarded', '待�
 const pullTabs: [string, string][] = [['all', '全部'], ['attention', '需跟进'], ['draft', '草稿']];
 const repoTabs: [string, string][] = [['all', '全部'], ['followed', '已关注'], ['muted', '未关注']];
 const agentNames: Record<string, string> = { claude: 'Claude', codex: 'Codex', opencode: 'OpenCode' };
+const promptStates: Record<string, Tone> = {
+  current: { label: '已注入', tone: 'ok' }, outdated: { label: '需要更新', tone: 'warn' }, absent: { label: '未注入', tone: 'muted' },
+  missing: { label: '未安装', tone: 'muted' }, conflict: { label: '标记不完整', tone: 'error' }, error: { label: '无法读取', tone: 'error' },
+};
 const adapters: Record<string, string> = { 'claude-desktop': 'Claude Desktop', 'claude-code': 'Claude Code', codex: 'Codex', opencode: 'OpenCode' };
 const availability: Record<string, Tone> = {
   active: { label: '可投递', tone: 'ok' }, archived: { label: '已归档', tone: 'muted' }, offline: { label: '未运行', tone: 'warn' },
@@ -86,6 +95,7 @@ const state = {
   pullsError: '',
   outcome: 'all', pullFilter: 'all', pullSort: 'asc' as 'asc' | 'desc', repoFilter: 'all',
   pendingRepos: new Set<string>(), repoError: '',
+  agents: undefined as AgentsPage | undefined, agentsError: '', pendingAgents: new Set<string>(), openPreviews: new Set<string>(),
   paused: false, loading: false, loadingPulls: false, connected: false,
   expanded: new Set<string>(),
   signatures: new Map<string, string>(),
@@ -156,7 +166,7 @@ function category(entry: LogEntry): string {
   if (entry.status === 'ignored') return 'ignored';
   if (entry.status === 'received') return 'received';
   if (entry.status === 'session_acknowledged') return 'acknowledged';
-  if (entry.status === 'replied') return 'replied';
+  if (entry.status === 'replied' || entry.status === 'thread_message') return 'replied';
   if (entry.status === 'socket_written' || entry.status === 'input_accepted') return 'forwarded';
   if (entry.error || entry.status.includes('failed') || entry.status === 'queue_full') return 'error';
   return 'system';
@@ -165,7 +175,7 @@ const summary = (entry: LogEntry): string => (entry.reason && reasons[entry.reas
 function sessionLabel(entry: LogEntry): string | undefined {
   return entry.session_name ?? state.snapshot.sessions.find(session => session.session_id === entry.session_id)?.session_name ?? entry.session_id;
 }
-const logTitle = (entry: LogEntry): string => entry.preview && (entry.status === 'received' || entry.status === 'replied') ? entry.preview : summary(entry);
+const logTitle = (entry: LogEntry): string => entry.preview && ['received', 'replied', 'thread_message'].includes(entry.status) ? entry.preview : summary(entry);
 function logMeta(entry: LogEntry): string {
   const parts = [ago(entry.time), sourceNames[source(entry)] ?? source(entry)];
   if (logTitle(entry) !== summary(entry)) parts.push(summary(entry));
@@ -368,6 +378,69 @@ function renderRepos(): void {
   }));
 }
 
+// ---- Agents ----
+const home = (path: string): string => path.replace(/^\/(?:Users|home)\/[^/]+(?=\/)/, '~');
+function agentDetail(agent: AgentPrompt): string {
+  if (agent.status === 'missing') return '本机没有找到它的配置目录';
+  if (agent.status === 'conflict') return '文件里的 nootify 标记不成对，请先手动修正';
+  if (agent.status === 'error') return agent.error ?? '无法读取文件';
+  if (agent.status === 'outdated') return '写入内容与当前版本不同';
+  return agent.injected ? '新对话会按说明使用飞书' : '勾选后写入飞书说明';
+}
+async function loadAgents(): Promise<void> {
+  try {
+    const response = await fetch('/ui/api/agents', { cache: 'no-store', signal: AbortSignal.timeout(8000) });
+    if (!response.ok) throw new Error(response.status === 404 ? 'Agents 模块未启用' : `HTTP ${response.status}`);
+    state.agents = await response.json() as AgentsPage;
+  } catch (error) { state.agentsError = `无法读取 agent 状态：${(error as Error).message}`; }
+  renderChrome(); renderAgents();
+}
+async function setAgent(agent: AgentPrompt, enabled: boolean): Promise<void> {
+  state.pendingAgents.add(agent.agent); state.agentsError = ''; renderAgents();
+  try {
+    const response = await fetch('/ui/api/agents', { method: 'POST', headers: { 'x-nootify-ui': '1', 'content-type': 'application/json' },
+      body: JSON.stringify({ agent: agent.agent, enabled }), signal: AbortSignal.timeout(8000) });
+    if (!response.ok) throw new Error(((await response.json().catch(() => ({}))) as { error?: string }).error ?? `HTTP ${response.status}`);
+  } catch (error) { state.agentsError = `无法修改 ${agent.name}：${(error as Error).message}`; }
+  state.pendingAgents.delete(agent.agent);
+  await loadAgents();
+}
+function renderAgents(): void {
+  const page = state.agents;
+  $('agents-count').textContent = page ? String(page.agents.filter(agent => agent.injected).length || '') : '';
+  const remote = page && !page.editable;
+  const banner = state.agentsError || (remote ? '通过 Tailscale 访问时只能查看；请在这台 Mac 上修改 agent 提示词。' : '');
+  $('agents-banner').hidden = !banner; $('agents-banner').textContent = banner;
+  const channel = page?.channel;
+  $('channel-sub').textContent = !channel ? '飞书模块未启用' : !channel.configured ? '未配置飞书应用凭据，提示词写入后也无法建群'
+    : channel.recipient ? `接收人 ${channel.recipient.slice(0, 7)}…${channel.recipient.slice(-4)} · 已绑定 ${channel.groups} 个群` : '还没有设置接收人：在终端运行 lark-recipient --open-id <ou_…>';
+  $('channel-side').textContent = 'Slack 等渠道之后支持';
+  if (state.view !== 'agents' || !page) return;
+  if (!changed('agent-rows', [page, [...state.pendingAgents]])) return;
+  replaceRows($('agent-rows'), page.agents.map(agent => {
+    const item = node('div', undefined, 'entry'); item.setAttribute('role', 'listitem');
+    const row = node('label', undefined, 'row');
+    const box = node('input', undefined, 'check'); box.type = 'checkbox'; box.checked = agent.injected; box.dataset.key = agent.agent;
+    box.disabled = remote || state.pendingAgents.has(agent.agent) || ['missing', 'conflict', 'error'].includes(agent.status);
+    box.setAttribute('aria-label', `向 ${agent.name} 写入飞书说明`);
+    box.addEventListener('change', () => { void setAgent(agent, box.checked); });
+    row.append(box, rowMain(agent.name, `${home(agent.file)} · ${agentDetail(agent)}`), sideBlock(promptStates[agent.status] ?? promptStates.error));
+    const extra = node('div', undefined, 'agent-extra');
+    if (agent.status === 'outdated' && !remote) {
+      const update = node('button', '更新为当前内容', 'text-button'); update.type = 'button';
+      update.disabled = state.pendingAgents.has(agent.agent);
+      update.addEventListener('click', () => { void setAgent(agent, true); });
+      extra.append(update);
+    }
+    const details = node('details');
+    details.open = state.openPreviews.has(agent.agent);
+    details.addEventListener('toggle', () => { if (details.open) state.openPreviews.add(agent.agent); else state.openPreviews.delete(agent.agent); });
+    details.append(node('summary', agent.injected ? '查看写入的内容' : '查看将写入的内容'), node('pre', agent.block, 'mono'));
+    extra.append(details);
+    item.append(row, extra); return item;
+  }));
+}
+
 // ---- Chrome, loading and events ----
 function renderChrome(): void {
   const meta = views[state.view];
@@ -376,7 +449,7 @@ function renderChrome(): void {
   for (const link of document.querySelectorAll<HTMLAnchorElement>('.nav-item')) {
     if (link.dataset.view === state.view) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current');
   }
-  for (const section of ['logs-view', 'sessions-view', 'pulls-view', 'repos-view']) $(section).hidden = section !== meta.section;
+  for (const section of ['logs-view', 'sessions-view', 'agents-view', 'pulls-view', 'repos-view']) $(section).hidden = section !== meta.section;
   const pullSummary = state.snapshot.pulls;
   const internal = pullSummary?.internal ?? state.pulls?.internal.length;
   const upstream = pullSummary?.upstream ?? state.pulls?.upstream.length;
@@ -392,7 +465,7 @@ function renderChrome(): void {
     ? (busy ? '后台刷新中' : state.pulls?.refresh.lastSuccessAt ? `${ago(state.pulls.refresh.lastSuccessAt)}刷新` : '')
     : state.snapshot.time ? `更新于 ${clock(state.snapshot.time)}` : '';
   if (changed('modules', state.snapshot.modules)) {
-    $('modules').replaceChildren(...state.snapshot.modules.map(module => {
+    $('modules').replaceChildren(...state.snapshot.modules.filter(module => module.name in moduleNames).map(module => {
       const status = moduleStates[module.status] ?? { label: module.status, tone: 'muted' };
       const display = module.name === 'lark' && module.status === 'ready' ? { label: '已连接', tone: 'ok' } : status;
       const line = node('div', undefined, 'status-line');
@@ -407,7 +480,7 @@ function renderChrome(): void {
   $('tailnet-url').textContent = tailnet ? tailnet.replace(/^https?:\/\//, '').replace(/\/$/, '') : '';
   $('tailnet-url').title = tailnet ? `tailnet 内其他设备的访问地址：${tailnet}` : '';
 }
-function renderAll(): void { renderChrome(); renderLogs(); renderSessions(); renderPulls(); renderRepos(); }
+function renderAll(): void { renderChrome(); renderLogs(); renderSessions(); renderAgents(); renderPulls(); renderRepos(); }
 async function loadSnapshot(): Promise<void> {
   if (state.loading) return;
   state.loading = true;
@@ -438,6 +511,7 @@ async function loadPulls(): Promise<void> {
   finally { state.loadingPulls = false; renderChrome(); renderPulls(); renderRepos(); }
 }
 async function refreshNow(): Promise<void> {
+  if (state.view === 'agents') { await Promise.all([loadSnapshot(), loadAgents()]); return; }
   if (!usesPulls(state.view)) { await loadSnapshot(); return; }
   $('refresh').classList.add('busy');
   try {
@@ -451,6 +525,7 @@ window.addEventListener('hashchange', () => {
   state.view = viewFromHash();
   renderAll();
   if (usesPulls(state.view)) void loadPulls();
+  if (state.view === 'agents') void loadAgents();
   $(views[state.view].section).scrollTop = 0;
 });
 $('refresh').addEventListener('click', () => { void refreshNow(); });
@@ -480,6 +555,7 @@ document.addEventListener('keydown', event => {
 
 renderAll();
 void loadSnapshot();
+void loadAgents();
 if (usesPulls(state.view)) void loadPulls();
 setInterval(() => { void loadSnapshot(); }, 2000);
 setInterval(() => { if (usesPulls(state.view)) void loadPulls(); }, 10000);

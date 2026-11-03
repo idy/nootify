@@ -5,20 +5,22 @@ import { parseArgs } from 'node:util';
 import { NootifyClient } from './client.js';
 import { defaultStateDir } from './state.js';
 import { installLaunchd } from './launchd.js';
-import type { SessionRegistration } from './types.js';
+import type { Adapter, SessionRegistration } from './types.js';
 import { isAdapter } from './types.js';
+import { agentSession, isAgent } from './agents.js';
 
 export async function main(argv = process.argv.slice(2)): Promise<void> {
   const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, options: {
     'state-dir': { type: 'string' }, 'mcp-config': { type: 'string' }, port: { type: 'string', default: '9417' },
-    'session-id': { type: 'string' }, 'session-name': { type: 'string' }, adapter: { type: 'string', default: 'claude-desktop' },
+    'session-id': { type: 'string' }, 'session-name': { type: 'string' }, adapter: { type: 'string' }, agent: { type: 'string' }, 'open-id': { type: 'string' },
     'chat-id': { type: 'string' }, 'sender-id': { type: 'string' }, pin: { type: 'boolean', default: false },
     metadata: { type: 'string', default: 'announcement' }, text: { type: 'string' }, help: { type: 'boolean', short: 'h' },
     url: { type: 'string' }, directory: { type: 'string' },
     'message-id': { type: 'string' }, 'text-file': { type: 'string' },
   } });
   const command = positionals[0];
-  if (values.help) { console.log('Usage: cli.js <launchd-install|health|register|sessions|send|lark-bind|lark-ack|lark-reply|backend-set> [options]'); return; }
+  if (values.help) { console.log('Usage: cli.js <launchd-install|health|register|sessions|send|thread-open|thread-send|lark-bind|lark-ack|lark-reply|lark-recipient|backend-set> [options]'); return; }
+  const adapter = values.adapter ?? 'claude-desktop';
   const port = Number(values.port);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid port');
   if (command === 'launchd-install') {
@@ -30,24 +32,55 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   const required = (name: 'session-id' | 'session-name' | 'chat-id' | 'sender-id' | 'text' | 'message-id'): string => {
     const value = values[name]; if (!value) throw new Error(`Missing --${name}`); return value;
   };
+  async function readText(): Promise<string | undefined> {
+    if (values.text !== undefined && values['text-file'] !== undefined) throw new Error('Use --text or --text-file, not both');
+    if (values['text-file'] === '-') {
+      const parts: Buffer[] = []; let bytes = 0;
+      for await (const chunk of process.stdin) {
+        const part = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        bytes += part.length; if (bytes > 48000) throw new Error('Text is too large'); parts.push(part);
+      }
+      return Buffer.concat(parts).toString('utf8');
+    }
+    if (values['text-file']) return readFile(values['text-file'], 'utf8');
+    return values.text;
+  }
+  /** `--agent` reads the calling session from the variables its client sets; explicit flags take precedence. */
+  function threadTarget(): { adapter: Adapter; session_id: string } {
+    if (values.agent !== undefined && !isAgent(values.agent)) throw new Error('Use --agent claude, codex or opencode');
+    const detected = values.agent ? agentSession(values.agent) : undefined;
+    const target = values.adapter ?? detected?.adapter;
+    if (!isAdapter(target)) throw new Error('Pass --agent claude|codex|opencode, or --adapter with --session-id');
+    const session_id = values['session-id'] || detected?.session_id;
+    if (!session_id) throw new Error(values.agent === 'opencode' ? 'Pass --session-id with this OpenCode session ID (ses_…)' : 'This session ID is not in the environment; pass --session-id');
+    return { adapter: target, session_id };
+  }
   let result: unknown;
   switch (command) {
     case 'health': result = await client.health(); break;
     case 'sessions': result = await client.listSessions(); break;
     case 'register': {
-      if (!isAdapter(values.adapter)) throw new Error('Unsupported adapter');
-      const claude = values.adapter === 'claude-code' || values.adapter === 'claude-desktop';
+      if (!isAdapter(adapter)) throw new Error('Unsupported adapter');
+      const claude = adapter === 'claude-code' || adapter === 'claude-desktop';
       const socket_path = claude ? process.env.CLAUDE_CODE_MESSAGING_SOCKET : undefined;
       if (claude && !socket_path) throw new Error('Register from the target session: its inbox environment is missing');
-      const registration: SessionRegistration = { adapter: values.adapter, session_name: required('session-name'), socket_path,
+      const registration: SessionRegistration = { adapter, session_name: required('session-name'), socket_path,
         ...(claude && process.env.CLAUDE_CODE_MESSAGING_TOKEN ? { socket_token: process.env.CLAUDE_CODE_MESSAGING_TOKEN } : {}) };
       result = await client.registerSession(required('session-id'), registration);
       break;
     }
     case 'send': {
-      if (!isAdapter(values.adapter)) throw new Error('Unsupported adapter');
-      result = await client.sendMessage(required('session-id'), required('text'), values.adapter); break;
+      if (!isAdapter(adapter)) throw new Error('Unsupported adapter');
+      result = await client.sendMessage(required('session-id'), required('text'), adapter); break;
     }
+    case 'thread-open': result = await client.openThread({ ...threadTarget(), session_name: required('session-name') }); break;
+    case 'thread-send': {
+      const target = threadTarget();
+      const message = await readText();
+      if (!message?.trim()) throw new Error('Provide --text or --text-file for the message');
+      result = await client.sendThread(target.session_id, message, target.adapter); break;
+    }
+    case 'lark-recipient': result = values['open-id'] ? await client.setLarkRecipient(values['open-id']) : await client.larkRecipient(); break;
     case 'backend-set': {
       if (values.adapter !== 'codex' && values.adapter !== 'opencode') throw new Error('Choose --adapter codex or opencode');
       if (!values.url) throw new Error('Missing --url');
@@ -59,23 +92,14 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     }
     case 'lark-ack': result = await client.acknowledgeLark(required('message-id')); break;
     case 'lark-reply': {
-      if (values.text !== undefined && values['text-file'] !== undefined) throw new Error('Use --text or --text-file, not both');
-      let replyText = values.text;
-      if (values['text-file'] === '-') {
-        const parts: Buffer[] = []; let bytes = 0;
-        for await (const chunk of process.stdin) {
-          const part = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-          bytes += part.length; if (bytes > 48000) throw new Error('Reply text is too large'); parts.push(part);
-        }
-        replyText = Buffer.concat(parts).toString('utf8');
-      } else if (values['text-file']) replyText = await readFile(values['text-file'], 'utf8');
+      const replyText = await readText();
       if (!replyText?.trim()) throw new Error('Provide --text or --text-file for the Feishu reply');
       result = await client.replyLark(required('message-id'), replyText); break;
     }
     case 'lark-bind': {
       if (values.metadata !== 'message' && values.metadata !== 'announcement') throw new Error('Invalid --metadata');
-      if (!isAdapter(values.adapter)) throw new Error('Unsupported adapter');
-      result = await client.bindLark(required('chat-id'), { session_id: required('session-id'), sender_open_id: required('sender-id'), adapter: values.adapter, session_name: values['session-name'], pin: values.pin, metadata: values.metadata });
+      if (!isAdapter(adapter)) throw new Error('Unsupported adapter');
+      result = await client.bindLark(required('chat-id'), { session_id: required('session-id'), sender_open_id: required('sender-id'), adapter, session_name: values['session-name'], pin: values.pin, metadata: values.metadata });
       break;
     }
     default: throw new Error('Use --help for supported commands');

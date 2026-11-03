@@ -144,9 +144,33 @@ Delivery logs distinguish `socket_written`/`input_accepted` (**waiting for a ses
 
 Only one process should receive an application's Feishu WebSocket events: multiple clients divide deliveries rather than broadcasting them. This service supports several registered sessions on this machine, but does not yet coordinate several machines.
 
+## Agents and Feishu updates
+
+The **Agents** page lists Claude Code (`~/.claude/CLAUDE.md`, honoring `CLAUDE_CONFIG_DIR`), Codex (`~/.codex/AGENTS.md`, honoring `CODEX_HOME`) and OpenCode (`~/.config/opencode/AGENTS.md`, honoring `XDG_CONFIG_HOME`). Ticking an agent appends a short Feishu section to its global prompt file between `<!-- nootify:begin -->` and `<!-- nootify:end -->`; unticking removes it. Nothing outside the markers changes, symlinked prompt files are edited at their target, the previous file is copied to `agent-backups/` in the state directory (last ten per agent), and files with unbalanced markers are left alone. "Needs update" means the block differs from what this installation would write, for example after the app moved. Prompts can only be changed from this Mac; over Tailscale the page is read-only.
+
+The section tells new conversations to use two commands, which find the calling session from the variables each client sets (`CLAUDE_CODE_HOST_SESSION_ID` for Claude Desktop, `CLAUDE_CODE_SESSION_ID` for the Claude Code CLI, `CODEX_THREAD_ID` for Codex). OpenCode does not export its session ID, so its section asks for `--session-id ses_…`.
+
+```bash
+node dist/src/cli.js thread-open --agent claude --session-name "Fix login"
+```
+
+```bash
+node dist/src/cli.js thread-send --agent claude --text "Tests pass; opening the PR next"
+```
+
+`thread-open` reuses the session's group if Nootify knows one or finds one among the bot's groups whose name carries the session's short ID and whose announcement names the session; otherwise it creates `<task> · <client> · <short ID>`, invites the recipient, and writes the routing token to the announcement. `thread-send` posts `[session name] text`; use `--text-file -` for multi-line text. Replies in that group are routed back like any other bound group.
+
+The recipient is the Feishu user who is invited to new groups and trusted as their sender. It is the open_id saved with the command below, else `LARK_NOTIFY_OPEN_ID`, else the single sender shared by existing bindings:
+
+```bash
+node dist/src/cli.js lark-recipient --open-id ou_example
+```
+
+Group creation needs the bot's chat-creation permission (`im:chat:create` or `im:chat`), adoption needs `im:chat:readonly`, and progress messages need `im:message:send_as_bot`. Codex runs commands in a sandbox: the CLI needs local network access to `127.0.0.1:9417`, so Codex may ask to run it outside the sandbox. Feishu is the only channel today; the thread commands are channel-neutral so that Slack and others can be added behind them.
+
 ## Web UI
 
-Open `http://127.0.0.1:9417`. The dark layout has a navigation column grouped by **message bridge** (run logs, routing sessions) and **GitHub** (pull requests to our repositories, pull requests we sent upstream, followed repositories), with module and connection status at its foot. Each page uses one bordered list of two-line rows: the primary text, a dot-separated metadata line, and status on the right. Segmented filters show counts; search and `/` focus the page's search field. On narrow screens the navigation becomes a scrolling top bar.
+Open `http://127.0.0.1:9417`. The dark layout has a navigation column grouped by **message bridge** (run logs, routing sessions, agents) and **GitHub** (pull requests to our repositories, pull requests we sent upstream, followed repositories), with module and connection status at its foot. Each page uses one bordered list of two-line rows: the primary text, a dot-separated metadata line, and status on the right. Segmented filters show counts; search and `/` focus the page's search field. On narrow screens the navigation becomes a scrolling top bar.
 
 Log rows expand in place for full IDs, reasons, and message text; logs can be paused and the filtered set exported as NDJSON. The routing-session page displays only targets encountered by incoming messages or explicit sends, with their last lookup time and result. Refreshing it performs no client lookups. These are historical observations, not a live inventory.
 
@@ -212,6 +236,11 @@ Read the bearer token from the private state file in your local application; nev
 | `POST /ui/api/repos` | Set a follow choice: `{"repository": "owner/name", "follow": true \| false \| null}`; needs the same header |
 | `GET /v1/pulls`, `POST /v1/pulls/refresh` | The same PR snapshot and refresh for token-authenticated clients |
 | `GET /v1/repos`, `PUT /v1/repos/:owner/:name` | Repository list and follow choices for token-authenticated clients |
+| `GET /ui/api/agents`, `POST /ui/api/agents` | Agent prompt status and `{"agent", "enabled"}` changes; changes need the UI header and the loopback listener |
+| `GET /v1/agents`, `PUT /v1/agents/:agent` | The same for token-authenticated clients |
+| `POST /v1/threads` | Find or create a session's Feishu group: `{"adapter", "session_id", "session_name"}` |
+| `POST /v1/threads/:session_id/messages` | Post `{"text"}` to that group, prefixed with the session name |
+| `GET /v1/lark/recipient`, `PUT /v1/lark/recipient` | Read or set the Feishu recipient's open_id |
 | `GET /v1/sessions` | In-memory routing observations; never queries clients |
 | `PUT /v1/backends/:adapter` | Configure an existing local Codex or OpenCode endpoint |
 | `PUT /v1/sessions/:id` | Register/update an inbox from an authorized local client |
@@ -238,6 +267,8 @@ Read the bearer token from the private state file in your local application; nev
 | `src/lark.ts`, `src/lark-metadata.ts` | Feishu WebSocket and binding metadata module |
 | `src/launchd.ts`, `src/cli.ts` | LaunchAgent installation, acknowledgments, replies, and local control commands |
 | `src/lark-replies.ts` | Forwarding context, receipt tracking, and deduplicated Feishu replies |
+| `src/lark-threads.ts` | One Feishu group per agent session: lookup, adoption, creation, progress messages |
+| `src/agents.ts` | Marked Feishu section in each agent's global prompt file |
 | `src-tauri/`, `desktop/`, `scripts/desktop.mjs` | Native window, tray, offline view, and desktop build launcher |
 | `test/` | Disposable HTTP/socket/state and routing tests |
 

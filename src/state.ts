@@ -5,13 +5,16 @@ import { join } from 'node:path';
 import type { Adapter, BackendConnection, LarkBinding, LarkDelivery, PublicSession, SessionRecord } from './types.js';
 import { HttpError } from './types.js';
 
-interface StoredState { version: 1; sessions: SessionRecord[]; lark_bindings: LarkBinding[]; backends?: [Adapter, BackendConnection][]; lark_deliveries?: LarkDelivery[] }
+/** Owner choices that are not tied to one session or binding. */
+export interface Settings { lark_recipient_open_id?: string }
+interface StoredState { version: 1; sessions: SessionRecord[]; lark_bindings: LarkBinding[]; backends?: [Adapter, BackendConnection][]; lark_deliveries?: LarkDelivery[]; settings?: Settings }
 export const defaultStateDir = () => join(homedir(), '.local/state/nootify');
 export class State {
   readonly sessions = new Map<string, SessionRecord>();
   readonly bindings = new Map<string, LarkBinding>();
   readonly backends = new Map<Adapter, BackendConnection>();
   readonly deliveries = new Map<string, LarkDelivery>();
+  readonly settings: Settings = {};
   private writes: Promise<void> = Promise.resolve();
   private constructor(readonly directory: string, readonly token: string) {}
   static async open(directory = defaultStateDir()): Promise<State> {
@@ -30,6 +33,7 @@ export class State {
       for (const binding of data.lark_bindings) state.bindings.set(binding.chat_id, binding);
       for (const [adapter, backend] of data.backends ?? []) state.backends.set(adapter, backend);
       for (const delivery of data.lark_deliveries ?? []) state.deliveries.set(delivery.message_id, delivery);
+      if (typeof data.settings?.lark_recipient_open_id === 'string') state.settings.lark_recipient_open_id = data.settings.lark_recipient_open_id;
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     return state;
   }
@@ -42,7 +46,7 @@ export class State {
     return [...this.sessions.values()].map(({ session_id, host_id, adapter, session_name }) => ({ session_id, host_id, adapter, session_name }));
   }
   async save(): Promise<void> {
-    const snapshot = JSON.stringify({ version: 1, sessions: [...this.sessions.values()], lark_bindings: [...this.bindings.values()], backends: [...this.backends.entries()], lark_deliveries: [...this.deliveries.values()] }, null, 2) + '\n';
+    const snapshot = JSON.stringify({ version: 1, sessions: [...this.sessions.values()], lark_bindings: [...this.bindings.values()], backends: [...this.backends.entries()], lark_deliveries: [...this.deliveries.values()], settings: this.settings }, null, 2) + '\n';
     const pending = this.writes.catch(() => {}).then(async () => {
       const temp = join(this.directory, `.state-${randomUUID()}.tmp`);
       await writeFile(temp, snapshot, { flag: 'wx', mode: 0o600 });

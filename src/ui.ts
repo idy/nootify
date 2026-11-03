@@ -2,10 +2,18 @@ import { readFile } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { EventLog } from './events.js';
 import type { PullSnapshot, RepositoryEntry } from './github.js';
+import { isAgent, type AgentId, type AgentPrompt } from './agents.js';
 import { HttpError, type ServiceModule } from './types.js';
 
 export interface PullsSource { snapshot(): PullSnapshot; refresh(): void; setChoice(repository: string, follow: boolean | null): Promise<RepositoryEntry> }
-export interface UiContext { modules: ServiceModule[]; logs: EventLog; pulls?: PullsSource; tailnetUrl?: () => string | undefined }
+export interface AgentsSource { list(): Promise<AgentPrompt[]>; set(agent: AgentId, enabled: boolean): Promise<AgentPrompt> }
+export interface ChannelSummary { name: 'feishu'; configured: boolean; recipient?: string; groups: number }
+export interface UiContext {
+  modules: ServiceModule[]; logs: EventLog; pulls?: PullsSource; tailnetUrl?: () => string | undefined;
+  agents?: AgentsSource; channel?: () => ChannelSummary | undefined;
+  /** Requests on the Tailscale listener can read everything but cannot change agent prompts. */
+  via?: 'loopback' | 'tailnet';
+}
 
 const policy = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
 const assets = new Map([
@@ -30,8 +38,22 @@ async function smallJson(request: IncomingMessage): Promise<Record<string, unkno
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new HttpError(400, 'Expected a JSON object');
   return value as Record<string, unknown>;
 }
-/** Read-only page data plus two page actions: a coalesced background GitHub refresh and repository follow choices. */
+/** Read-only page data plus page actions: a background GitHub refresh, repository follow choices, and (on this Mac only) agent prompts. */
 export async function serveUi(request: IncomingMessage, response: ServerResponse, path: string, context: UiContext): Promise<boolean> {
+  if (request.method === 'POST' && path === '/ui/api/agents') {
+    if (request.headers['x-nootify-ui'] !== '1') { request.resume(); json(response, 403, { error: 'Missing UI request header' }); }
+    // A prompt edit changes what every future agent session does, so it is never accepted from another device.
+    else if (context.via === 'tailnet') { request.resume(); json(response, 403, { error: 'Agent prompts can only be changed on this Mac' }); }
+    else if (!context.agents) { request.resume(); json(response, 404, { error: 'Agents module is not enabled' }); }
+    else {
+      try {
+        const body = await smallJson(request);
+        if (!isAgent(body.agent) || typeof body.enabled !== 'boolean') throw new HttpError(400, 'Expected {"agent": "claude" | "codex" | "opencode", "enabled": boolean}');
+        json(response, 200, await context.agents.set(body.agent, body.enabled));
+      } catch (error) { json(response, error instanceof HttpError ? error.status : 500, { error: (error as Error).message }); }
+    }
+    return true;
+  }
   if (request.method === 'POST' && (path === '/ui/api/pulls/refresh' || path === '/ui/api/repos')) {
     // A custom header forces a CORS preflight, which this server never grants to other origins.
     if (request.headers['x-nootify-ui'] !== '1') { request.resume(); json(response, 403, { error: 'Missing UI request header' }); }
@@ -50,6 +72,11 @@ export async function serveUi(request: IncomingMessage, response: ServerResponse
   if (asset) {
     response.writeHead(200, { 'content-type': asset.type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'content-security-policy': policy });
     response.end(await readFile(asset.path));
+    return true;
+  }
+  if (path === '/ui/api/agents') {
+    if (!context.agents) json(response, 404, { error: 'Agents module is not enabled' });
+    else json(response, 200, { agents: await context.agents.list(), editable: context.via !== 'tailnet', channel: context.channel?.() });
     return true;
   }
   if (path === '/ui/api/pulls') {
