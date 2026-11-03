@@ -76,7 +76,7 @@ test('the tailnet listener serves the owner, starts background PR refreshes and 
   let refreshes = 0;
   const choices: [string, boolean | null][] = [];
   const pulls = { snapshot: () => snapshot, refresh: () => { refreshes++; },
-    setChoice: async (repository: string, follow: boolean | null) => { choices.push([repository, follow]); return { repository, followed: follow !== false, agents: [], sessions: 0, authored: 0, pulls: { internal: 0, upstream: 0 } }; } };
+    setChoice: async (repository: string, follow: boolean | null) => { choices.push([repository, follow]); return { repository, followed: follow !== false, agents: [], sessions: 0, sources: [], allPulls: false, linkedPulls: 0, authored: 0, pulls: { internal: 0, upstream: 0 } }; } };
   // The test listener uses loopback, so the fake Tailscale lookup maps that peer address.
   const peers: Record<string, string> = { '127.0.0.1': 'owner@example.com' };
   const tailnet = new TailnetAccess(9417, { probe: probe(peers), ttl: 0 });

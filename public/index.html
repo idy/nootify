@@ -16,7 +16,7 @@
       <p class="nav-label">GitHub</p>
       <a class="nav-item" href="#/pulls/internal" data-view="pulls-internal"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="4.5" cy="3.5" r="1.5"/><circle cx="4.5" cy="12.5" r="1.5"/><circle cx="11.5" cy="12.5" r="1.5"/><path d="M4.5 5v6M11.5 11V6.5a2 2 0 0 0-2-2H7m0 0 1.5-1.5M7 4.5 8.5 6"/></svg><span>我们仓库的 PR</span><span class="nav-count" id="internal-count"></span></a>
       <a class="nav-item" href="#/pulls/upstream" data-view="pulls-upstream"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 13.5V4M4.5 7.5 8 4l3.5 3.5"/><path d="M3 2.5h10"/></svg><span>提交上游的 PR</span><span class="nav-count" id="upstream-count"></span></a>
-      <a class="nav-item" href="#/repos" data-view="repos"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 2h8v9.5h-8A1.5 1.5 0 0 0 3 13V3.5A1.5 1.5 0 0 1 4.5 2z"/><path d="M3 13a1.5 1.5 0 0 0 1.5 1.5h8v-3"/></svg><span>关注的仓库</span><span class="nav-count" id="repos-count"></span></a>
+      <a class="nav-item" href="#/repos" data-view="repos"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 2h8v9.5h-8A1.5 1.5 0 0 0 3 13V3.5A1.5 1.5 0 0 1 4.5 2z"/><path d="M3 13a1.5 1.5 0 0 0 1.5 1.5h8v-3"/></svg><span>PR 订阅</span><span class="nav-count" id="repos-count"></span></a>
     </div>
   </nav>
   <div class="sidebar-foot">
@@ -70,13 +70,13 @@
       <div class="rows" id="agent-rows" role="list"></div>
     </div>
   </section>
-  <section id="repos-view" class="view" aria-label="关注的仓库" hidden>
+  <section id="repos-view" class="view" aria-label="PR 订阅" hidden>
     <div class="toolbar">
       <div class="segmented" id="repo-tabs" aria-label="按关注状态筛选"></div>
       <span class="spacer"></span>
-      <label class="search"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/></svg><input id="repo-search" type="search" placeholder="搜索仓库" autocomplete="off" aria-label="搜索仓库"></label>
+      <label class="search"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/></svg><input id="repo-search" type="search" placeholder="搜索仓库、会话、PR" autocomplete="off" aria-label="搜索 PR 订阅"></label>
     </div>
-    <p class="hint">勾选要关注的仓库，两个 PR 页面只显示已关注仓库的 PR。未手动选择的仓库，在 Claude、Codex、OpenCode 对话中出现过或有我们提交的 PR 时自动关注。</p>
+    <p class="hint">从本机会话找到关联的 PR 和仓库，作为订阅来源。会话仓库跟踪它的 PR；仅关联某个 PR 时只跟踪那一条。展开可查看来源会话，取消勾选可停止关注；两个 PR 页面仅显示当前 Open 与草稿。</p>
     <div id="repo-banner" class="banner" role="alert" hidden></div>
     <div class="group"><div class="rows" id="repo-rows" role="list"></div><div id="repo-empty" class="empty" hidden><strong id="repo-empty-title"></strong><span id="repo-empty-detail"></span></div></div>
   </section>

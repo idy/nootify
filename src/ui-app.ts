@@ -18,7 +18,7 @@ const views: Record<View, { hash: string; group: string; title: string; section:
   agents: { hash: '#/agents', group: '消息桥接', title: 'Agents', section: 'agents-view' },
   'pulls-internal': { hash: '#/pulls/internal', group: 'GitHub', title: '我们仓库的 PR', section: 'pulls-view' },
   'pulls-upstream': { hash: '#/pulls/upstream', group: 'GitHub', title: '提交上游的 PR', section: 'pulls-view' },
-  repos: { hash: '#/repos', group: 'GitHub', title: '关注的仓库', section: 'repos-view' },
+  repos: { hash: '#/repos', group: 'GitHub', title: 'PR 订阅', section: 'repos-view' },
 };
 const descriptions: Record<string, string> = {
   ready: '服务已启动', lark_ready: '飞书长连接已建立', lark_failed: '飞书连接失败',
@@ -94,7 +94,7 @@ const state = {
   pulls: undefined as PullSnapshot | undefined,
   pullsError: '',
   outcome: 'all', pullFilter: 'all', pullSort: 'asc' as 'asc' | 'desc', repoFilter: 'all',
-  pendingRepos: new Set<string>(), repoError: '',
+  pendingRepos: new Set<string>(), repoError: '', openRepoSources: new Set<string>(),
   agents: undefined as AgentsPage | undefined, agentsError: '', pendingAgents: new Set<string>(), openPreviews: new Set<string>(),
   paused: false, loading: false, loadingPulls: false, connected: false,
   expanded: new Set<string>(),
@@ -277,7 +277,7 @@ function renderPulls(): void {
   });
   $('pull-sort').textContent = state.pullSort === 'asc' ? '最久未更新在前' : '最近更新在前';
   $('pull-title').textContent = upstream ? '我们提交给上游的 PR' : '提交到我们仓库的 PR';
-  $('pull-sub').textContent = upstream ? '来自我们账号或 fork 的跨仓库 PR，仅 Open 与草稿' : '所有作者提交到我们账号与组织仓库的 PR，仅 Open 与草稿';
+  $('pull-sub').textContent = upstream ? '会话关联的上游 PR，以及会话仓库中的上游贡献' : '来自会话关联的 PR 和仓库订阅，所有作者的 Open 与草稿';
   const hidden = data?.hidden?.[upstream ? 'upstream' : 'internal'] ?? 0;
   $('pull-hidden').hidden = !hidden;
   $('pull-hidden').textContent = hidden ? `另有 ${hidden} 个 PR 在未关注的仓库` : '';
@@ -292,7 +292,7 @@ function renderPulls(): void {
   const query = $<HTMLInputElement>('pull-search').value.trim().toLocaleLowerCase();
   const direction = state.pullSort === 'asc' ? 1 : -1;
   const pulls = all.filter(pull => (state.pullFilter === 'all' || (state.pullFilter === 'draft' ? pull.isDraft : attention(pull))) &&
-    (!query || [pull.title, pull.repository, pull.author, pull.headRepository ?? '', `#${pull.number}`].join(' ').toLocaleLowerCase().includes(query)))
+    (!query || [pull.title, pull.repository, pull.author, pull.headRepository ?? '', `#${pull.number}`, ...(pull.sessions ?? []).map(session => `${session.name} ${session.id}`)].join(' ').toLocaleLowerCase().includes(query)))
     .sort((a, b) => direction * (Date.parse(a.updatedAt) - Date.parse(b.updatedAt)) || a.repository.localeCompare(b.repository) || a.number - b.number);
   const empty = $('pull-empty');
   empty.hidden = pulls.length > 0;
@@ -300,7 +300,7 @@ function renderPulls(): void {
     const first = !refresh?.lastSuccessAt;
     $('pull-empty-title').textContent = !data ? '正在读取 PR 数据' : first && refresh?.running ? '正在首次从 GitHub 拉取' : first ? '还没有 GitHub 数据' : all.length ? '没有匹配的 PR' : '没有打开的 PR';
     $('pull-empty-detail').textContent = first ? '数据在后台刷新，完成后自动显示。' : all.length ? '换个筛选条件或搜索词。'
-      : hidden ? '已关注的仓库没有打开的 PR；在「关注的仓库」中勾选更多仓库。' : '刷新完成后，新的 Open PR 会出现在这里。';
+      : hidden ? '已关注的仓库没有打开的 PR；在「PR 订阅」中勾选更多来源。' : '刷新完成后，新的 Open PR 会出现在这里。';
   }
   const warnings = $<HTMLDetailsElement>('pull-warnings');
   warnings.hidden = !data?.warnings.length;
@@ -315,7 +315,10 @@ function renderPulls(): void {
     link.dataset.key = pull.url; link.title = `最后更新 ${fullTime(pull.updatedAt)}`;
     const title: Node[] = pull.isDraft ? [node('span', '草稿', 'tag'), document.createTextNode(pull.title)] : [document.createTextNode(pull.title)];
     const meta = [`${pull.repository}#${pull.number}`, pull.author, `${ago(pull.updatedAt)}更新`];
-    if (upstream && pull.headRepository && pull.headRepository !== pull.repository) meta.push(`来自 ${pull.headRepository}`);
+    if (pull.sessions?.length) {
+      const names = pull.sessions.map(session => session.name).join('、');
+      meta.push(`会话：${names}`);
+    }
     link.append(rowMain(title, meta.join(' · ')), sideBlock(reviews[pull.reviewDecision] ?? { label: '暂无审查结论', tone: 'muted' }, ciSummary(pull)));
     item.append(link); return item;
   }));
@@ -325,9 +328,10 @@ function renderPulls(): void {
 function repoMeta(entry: RepositoryEntry): string {
   const parts: string[] = [];
   if (entry.agents.length) parts.push(entry.agents.map(agent => agentNames[agent] ?? agent).join('、'));
-  if (entry.sessions) parts.push(`${entry.sessions} 个对话`);
+  if (entry.sessions) parts.push(`${entry.sessions} 个会话`);
+  if (entry.linkedPulls) parts.push(`关联 PR ${entry.linkedPulls} 个`);
+  parts.push(entry.allPulls ? '仓库订阅' : '关联 PR 订阅');
   if (entry.lastActive) parts.push(`最近活跃${ago(entry.lastActive)}`);
-  if (entry.authored) parts.push(`我们提交的 PR ${entry.authored} 个`);
   if (!parts.length) parts.push('未在本机对话中出现');
   return parts.join(' · ');
 }
@@ -345,6 +349,7 @@ async function setFollow(entry: RepositoryEntry, follow: boolean): Promise<void>
     const response = await fetch('/ui/api/repos', { method: 'POST', headers: { 'x-nootify-ui': '1', 'content-type': 'application/json' },
       body: JSON.stringify({ repository: entry.repository, follow }), signal: AbortSignal.timeout(8000) });
     if (!response.ok) throw new Error(((await response.json().catch(() => ({}))) as { error?: string }).error ?? `HTTP ${response.status}`);
+    await response.json();
   } catch (error) { state.repoError = `无法保存 ${entry.repository} 的关注设置：${(error as Error).message}`; }
   state.pendingRepos.delete(entry.repository);
   await loadPulls();
@@ -359,7 +364,7 @@ function renderRepos(): void {
   if (state.view !== 'repos') return;
   const query = $<HTMLInputElement>('repo-search').value.trim().toLocaleLowerCase();
   const visible = entries.filter(entry => (state.repoFilter === 'all' || (state.repoFilter === 'followed') === entry.followed)
-    && (!query || entry.repository.toLocaleLowerCase().includes(query)));
+    && (!query || [entry.repository, ...entry.sources.map(source => `${source.name} ${source.id} ${source.branch ?? ''} ${source.pulls.map(pull => `#${pull.number}`).join(' ')}`)].join(' ').toLocaleLowerCase().includes(query)));
   $('repo-empty').hidden = visible.length > 0;
   if (!visible.length) {
     $('repo-empty-title').textContent = !state.pulls ? '正在读取仓库' : entries.length ? '没有匹配的仓库' : '还没有发现仓库';
@@ -374,12 +379,33 @@ function renderRepos(): void {
     box.setAttribute('aria-label', `关注 ${entry.repository}`);
     box.addEventListener('change', () => { void setFollow(entry, box.checked); });
     row.append(box, rowMain(entry.repository, repoMeta(entry)), repoSide(entry));
-    item.append(row); return item;
+    item.append(row);
+    if (entry.sources.length) {
+      const extra = node('div', undefined, 'agent-extra');
+      const details = node('details'); details.open = state.openRepoSources.has(entry.repository);
+      details.addEventListener('toggle', () => { if (details.open) state.openRepoSources.add(entry.repository); else state.openRepoSources.delete(entry.repository); });
+      const summary = node('summary', `来源会话 · ${entry.sources.length}`); summary.dataset.key = `sources:${entry.repository}`;
+      const list = node('div', undefined, 'session-sources');
+      for (const source of entry.sources) {
+        const item = node('div', undefined, 'session-source');
+        item.append(node('strong', source.name), node('span', [adapters[source.adapter], source.fromRepository ? '会话仓库' : '关联 PR', source.branch, source.archived ? '已归档' : ''].filter(Boolean).join(' · '), 'source-meta'), node('span', source.id, 'mono source-id'));
+        if (source.pulls.length) {
+          const links = node('div', undefined, 'source-links');
+          for (const pull of source.pulls) {
+            const link = node('a', `#${pull.number}`); link.href = pull.url; link.target = '_blank'; link.rel = 'noopener noreferrer'; link.title = pull.url; links.append(link);
+          }
+          item.append(links);
+        }
+        list.append(item);
+      }
+      details.append(summary, list); extra.append(details); item.append(extra);
+    }
+    return item;
   }));
 }
 
 // ---- Agents ----
-const home = (path: string): string => path.replace(/^\/(?:Users|home)\/[^/]+(?=\/)/, '~');
+const home = (path: string): string => path.replace(/^(?:\/Volumes\/[^/]+)?\/(?:Users|home)\/[^/]+(?=\/)/, '~');
 function agentDetail(agent: AgentPrompt): string {
   if (agent.status === 'missing') return '尚未创建提示词，勾选后自动创建';
   if (agent.status === 'conflict') return '文件里的 nootify 标记不成对，请先手动修正';
@@ -401,6 +427,7 @@ async function setAgent(agent: AgentPrompt, enabled: boolean): Promise<void> {
     const response = await fetch('/ui/api/agents', { method: 'POST', headers: { 'x-nootify-ui': '1', 'content-type': 'application/json' },
       body: JSON.stringify({ agent: agent.agent, enabled }), signal: AbortSignal.timeout(8000) });
     if (!response.ok) throw new Error(((await response.json().catch(() => ({}))) as { error?: string }).error ?? `HTTP ${response.status}`);
+    await response.json();
   } catch (error) { state.agentsError = `无法修改 ${agent.name}：${(error as Error).message}`; }
   state.pendingAgents.delete(agent.agent);
   await loadAgents();

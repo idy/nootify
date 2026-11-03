@@ -1,20 +1,18 @@
 import { execFile, type ChildProcess } from 'node:child_process';
 import { constants } from 'node:fs';
-import { access, readFile, readdir, realpath, stat } from 'node:fs/promises';
+import { access, readFile, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import type { PullRequest } from './github.js';
 import { classifyPull, comparePulls, key, normalizePull, ownerOf, parseGitHubRemote, unique, type GitHubPull, type PullScope } from './github-model.js';
 
-const BASE_FIELDS = `id number url title state isDraft isCrossRepository updatedAt
+const BASE_FIELDS = `id number url title state isDraft isCrossRepository headRefName updatedAt
   author { login } repository { nameWithOwner } headRepository { nameWithOwner }`;
 const DETAIL_FIELDS = `id state updatedAt mergeable reviewDecision
   commits(last: 1) { nodes { commit { statusCheckRollup { state contexts(first: 100) { totalCount nodes {
     __typename ... on CheckRun { status conclusion } ... on StatusContext { state }
   } } } } } }
   reviews(last: 30) { totalCount nodes { author { login } state submittedAt } }`;
-const IGNORED_DIRECTORIES = new Set(['.git', 'node_modules', 'vendor', '.venv', 'venv', 'Pods', '.cache', '.pnpm-store', '.next', '.nuxt', '.turbo', '.gradle', 'target', 'dist', 'build', 'coverage', '__pycache__']);
-const MAX_UPSTREAMS = 120;
 const expandHome = (path: string): string => path === '~' ? homedir() : path.startsWith('~/') ? join(homedir(), path.slice(2)) : path;
 const isMissing = (error: unknown): boolean => (error as NodeJS.ErrnoException).code === 'ENOENT';
 
@@ -138,10 +136,10 @@ export class GitHubCommands {
     }
     throw new Error(`GitHub CLI is unavailable${explicit ? ` at GH_BIN=${explicit}` : '; checked Homebrew and standard executable paths'}. Install/authenticate gh or set an absolute GH_BIN.${failures.length ? ` ${failures.join('; ')}` : ''}`);
   }
-  async graphql(query: string, variables: Record<string, string | null> = {}, partial = false): Promise<{ data: Record<string, any>; errors?: { message: string; path?: (string | number)[] }[] }> {
+  async graphql(query: string, variables: Record<string, string | number | null> = {}, partial = false): Promise<{ data: Record<string, any>; errors?: { message: string; path?: (string | number)[] }[] }> {
     if (!/^\s*query\s/.test(query)) throw new Error('Only read-only GitHub queries are allowed.');
     const args = ['api', 'graphql', '--hostname', 'github.com', '-f', `query=${query}`];
-    for (const [name, value] of Object.entries(variables)) args.push(value === null ? '-F' : '-f', `${name}=${value}`);
+    for (const [name, value] of Object.entries(variables)) args.push(value === null || typeof value === 'number' ? '-F' : '-f', `${name}=${value}`);
     let output: string;
     try { output = await this.run(await this.findGh(), args); }
     catch (error) {
@@ -207,12 +205,17 @@ export interface PullCollection {
   incompleteInternal: boolean; incompleteUpstream: boolean; observedUrls: string[];
 }
 
-/** `directories` are working directories of local agent conversations; their upstream remotes join outgoing coverage like scanned clones. */
-export async function collectPulls(config: PullConfig, commands: GitHubCommands, signal: AbortSignal, directories: string[] = []): Promise<PullCollection> {
+export interface PullTarget { repository: string; number: number }
+export interface PullTargets { repositories: string[]; pulls: PullTarget[]; localForks?: string[] }
+
+/** Collect only repositories and exact PRs discovered by the caller's agent sessions. */
+export async function collectPulls(config: PullConfig, commands: GitHubCommands, signal: AbortSignal, targets: PullTargets = { repositories: [], pulls: [] }): Promise<PullCollection> {
   const warnings = new Set<string>(); const failures: string[] = [];
   const warn = (message: string): void => { warnings.add(safeError(new Error(message))); };
   const limit = limiter(4);
-  const graphql = (query: string, variables: Record<string, string | null> = {}, partial = false) => limit(async () => { signal.throwIfAborted(); return commands.graphql(query, variables, partial); });
+  const graphql = (query: string, variables: Record<string, string | number | null> = {}, partial = false) => limit(async () => {
+    signal.throwIfAborted(); const result = await commands.graphql(query, variables, partial); signal.throwIfAborted(); return result;
+  });
   let incompleteInternal = false; let incompleteUpstream = false;
   async function pages<T>(source: string, maximum: number, fetch: (cursor: string | null) => Promise<unknown>, receive: (node: T) => void): Promise<boolean> {
     let cursor: string | null = null; let scanned = 0; let total = 0; let more = false;
@@ -231,11 +234,10 @@ export async function collectPulls(config: PullConfig, commands: GitHubCommands,
       if (!result.pageInfo.endCursor || result.pageInfo.endCursor === cursor) throw new Error(`${source}: GitHub pagination did not advance.`);
       cursor = result.pageInfo.endCursor;
     }
-    warn(`${source}: truncated at ${scanned} of ${total} records (${maximum} pages${source.startsWith('internal:') || source.startsWith('authored:') ? "; GitHub search is limited to 1,000 results" : ''}).`);
+    warn(`${source}: truncated at ${scanned} of ${total} records (${maximum} pages).`);
     return true;
   }
-  type Owner = { login: string; kind: 'User' | 'Organization' | undefined; viewer?: boolean };
-  const owners = new Map<string, Owner>(); let viewer = '';
+  const owners = new Map<string, string>(); let viewer = '';
   try {
     await pages<{ login: string }>('organizations', 10, async cursor => {
       const { data } = await graphql(`query PullViewer($cursor: String) {
@@ -245,123 +247,61 @@ export async function collectPulls(config: PullConfig, commands: GitHubCommands,
       viewer = data.viewer.login;
       return data.viewer.organizations;
     }, org => {
-      if (!config.upstreamOwners.some(owner => key(owner) === key(org.login))) owners.set(key(org.login), { login: org.login, kind: 'Organization' });
+      if (!config.upstreamOwners.some(owner => key(owner) === key(org.login))) owners.set(key(org.login), org.login);
     }).then(incomplete => { incompleteInternal ||= incomplete; incompleteUpstream ||= incomplete; });
   } catch (error) {
     signal.throwIfAborted(); throw new PullCollectionError(`Cannot establish GitHub viewer and internal organizations: ${safeError(error)}`, [...warnings]);
   }
-  owners.set(key(viewer), { login: viewer, kind: 'User', viewer: true });
-  for (const login of config.ownedOwners) if (!owners.has(key(login))) owners.set(key(login), { login, kind: undefined });
-  await Promise.all([...owners.values()].filter(owner => !owner.kind).map(async owner => {
-    try {
-      const { data } = await graphql(`query PullOwnerKind($login: String!) { repositoryOwner(login: $login) { __typename login } }`, { login: owner.login });
-      if (!['User', 'Organization'].includes(data.repositoryOwner?.__typename)) throw new Error('Owner is inaccessible to the current account.');
-      owner.kind = data.repositoryOwner.__typename; owner.login = data.repositoryOwner.login;
-    } catch (error) { signal.throwIfAborted(); failures.push(`owner:${owner.login}: ${safeError(error)}`); }
-  }));
-  const scope: PullScope = { authors: unique([viewer, ...config.authors]), ownedOwners: [...owners.values()].map(owner => owner.login), excludeRepositories: config.excludeRepositories, localForks: [] };
-  const retained = new Map<string, GitHubPull>(); const upstreams = new Map<string, string>();
-  function addUpstream(repository: string): void {
-    if (repository && !scope.ownedOwners.some(owner => key(owner) === key(ownerOf(repository))) && !config.excludeRepositories.some(name => key(name) === key(repository))) upstreams.set(key(repository), repository);
+  owners.set(key(viewer), viewer);
+  for (const login of config.ownedOwners) if (!owners.has(key(login))) owners.set(key(login), login);
+  const scope: PullScope = { authors: unique([viewer, ...config.authors]), ownedOwners: [...owners.values()], excludeRepositories: config.excludeRepositories, localForks: unique(targets.localForks ?? []) };
+  const owned = new Set(scope.ownedOwners.map(key)); const excluded = new Set(scope.excludeRepositories.map(key));
+  const retained = new Map<string, GitHubPull>(); const observedUrls = new Set<string>(); const linkedUrls = new Set<string>();
+  function classify(pr: GitHubPull): 'internal' | 'upstream' | undefined {
+    if (!linkedUrls.has(key(pr.url))) return classifyPull(pr, scope);
+    if (pr.state !== 'OPEN' || excluded.has(key(pr.repository.nameWithOwner))) return;
+    return owned.has(key(ownerOf(pr.repository.nameWithOwner))) ? 'internal' : 'upstream';
   }
-  function retain(pr: GitHubPull): void {
+  function retain(pr: GitHubPull, linked = false): void {
     if (typeof pr.id !== 'string' || !pr.id || typeof pr.url !== 'string' || typeof pr.title !== 'string'
-      || typeof pr.repository?.nameWithOwner !== 'string' || !pr.repository.nameWithOwner
+      || typeof pr.repository?.nameWithOwner !== 'string' || !pr.repository.nameWithOwner || typeof pr.state !== 'string'
       || typeof pr.updatedAt !== 'string' || !Number.isInteger(pr.number) || pr.number < 1) throw new Error('GitHub returned an incomplete pull request.');
-    if (classifyPull(pr, scope)) {
-      const previous = retained.get(key(pr.url));
-      if (!previous || pr.updatedAt >= previous.updatedAt) retained.set(key(pr.url), pr);
-      if (classifyPull(pr, scope) === 'upstream') addUpstream(pr.repository.nameWithOwner);
+    const url = key(pr.url); observedUrls.add(url);
+    // Exact links decide subscription and state even if a repository page saw an earlier open version.
+    if (linked) linkedUrls.add(url); else if (linkedUrls.has(url)) return;
+    const previous = retained.get(url);
+    if (linked || !previous || pr.updatedAt >= previous.updatedAt) {
+      if (classify(pr)) retained.set(url, pr); else retained.delete(url);
     }
   }
   const source = async (name: string, operation: () => Promise<void>): Promise<void> => {
     try { await operation(); }
     catch (error) { signal.throwIfAborted(); const message = `${name}: ${safeError(error)}`; failures.push(message); warn(`${message} Coverage for this source failed; the last good snapshot is retained.`); }
   };
-  const upstreamRemotes = (remotes: { name: string; repository: string }[]): void => {
-    const origin = remotes.find(remote => key(remote.name) === 'origin');
-    for (const remote of remotes.filter(remote => /^upstream(?:[-_].*)?$/i.test(remote.name))) {
-      addUpstream(remote.repository);
-      if (origin && key(origin.repository) !== key(remote.repository)) scope.localForks!.push(origin.repository);
-    }
-  };
-  // Conversation directories may be deleted worktrees or non-repositories; those simply contribute nothing.
-  const conversations = async (): Promise<void> => {
-    for (const directory of [...new Set(directories)]) {
-      signal.throwIfAborted();
-      try { upstreamRemotes(await commands.remotes(directory)); } catch { signal.throwIfAborted(); }
-    }
-  };
-  const local = async (): Promise<void> => {
-    const queue = config.scanRoots.map(path => ({ path, depth: 0 })); const visited = new Set<string>();
-    let position = 0; let repositories = 0;
-    while (position < queue.length) {
-      signal.throwIfAborted();
-      if (visited.size >= 25_000 || repositories >= 2000) { incompleteUpstream = true; warn('local: repository scan stopped at 25,000 directories or 2,000 repositories.'); break; }
-      const entry = queue[position++]; let directory: string; let children;
-      try {
-        directory = await realpath(entry.path);
-        if (directory.split(/[\\/]/).some(part => IGNORED_DIRECTORIES.has(part)) || visited.has(directory)) continue;
-        visited.add(directory); children = await readdir(directory, { withFileTypes: true });
-      } catch (error) { incompleteUpstream = true; warn(`local:${entry.path}: could not scan directory: ${safeError(error)}`); continue; }
-      if (children.some(child => child.name === '.git')) {
-        repositories++;
-        try { upstreamRemotes(await commands.remotes(directory)); } catch (error) { signal.throwIfAborted(); incompleteUpstream = true; warn(`local:${directory}: remotes are outside coverage: ${safeError(error)}`); }
-      }
-      for (const child of children) {
-        if (IGNORED_DIRECTORIES.has(child.name) || !child.isDirectory() && !child.isSymbolicLink()) continue;
-        if (entry.depth >= config.maxScanDepth) { incompleteUpstream = true; warn(`local: configured depth ${config.maxScanDepth} excludes deeper directories.`); break; }
-        const path = join(directory, child.name);
-        if (child.isSymbolicLink()) { try { if (!(await stat(path)).isDirectory()) continue; } catch { continue; } }
-        if (queue.length < 25_000) queue.push({ path, depth: entry.depth + 1 });
-        else { incompleteUpstream = true; warn('local: directory queue reached its 25,000-entry safety bound.'); }
-      }
-    }
-  };
-  const internal = [...owners.values()].filter(owner => owner.kind).map(owner => source(`internal:${owner.login}`, async () => {
-    incompleteInternal = await pages<GitHubPull>(`internal:${owner.login}`, config.maxSearchPages, async cursor => {
-      const searchQuery = `is:pr is:open ${owner.kind === 'Organization' ? 'org' : 'user'}:${owner.login} sort:updated-asc`;
-      const { data } = await graphql(`query PullInternal($searchQuery: String!, $cursor: String) {
-        search(query: $searchQuery, type: ISSUE, first: 100, after: $cursor) { issueCount nodes { ... on PullRequest { ${BASE_FIELDS} } } pageInfo { hasNextPage endCursor } }
-      }`, { searchQuery, cursor }); return data.search;
-    }, retain) || incompleteInternal;
-  }));
-  const authored = scope.authors.map(author => source(`authored:${author}`, async () => {
-    // Separate author searches each receive GitHub's 1,000-result search allowance.
-    incompleteUpstream = await pages<GitHubPull>(`authored:${author}`, config.maxSearchPages, async cursor => {
-      const searchQuery = `is:pr is:open author:${author} sort:updated-asc`;
-      const { data } = await graphql(`query PullAuthored($searchQuery: String!, $cursor: String) {
-        search(query: $searchQuery, type: ISSUE, first: 100, after: $cursor) { issueCount nodes { ... on PullRequest { ${BASE_FIELDS} } } pageInfo { hasNextPage endCursor } }
-      }`, { searchQuery, cursor }); return data.search;
-    }, retain) || incompleteUpstream;
-  }));
-  const forks = [...owners.values()].filter(owner => owner.kind).map(owner => source(`forks:${owner.login}`, async () => {
-    const selection = owner.viewer ? 'viewer' : `${owner.kind === 'Organization' ? 'organization' : 'user'}(login: $owner)`;
-    const definition = owner.viewer ? '$cursor: String' : '$owner: String!, $cursor: String';
-    incompleteUpstream = await pages<{ nameWithOwner: string; parent?: { nameWithOwner: string } | null }>(`forks:${owner.login}`, config.maxForkPages, async cursor => {
-      const { data } = await graphql(`query PullForks(${definition}) { owner: ${selection} {
-        repositories(first: 100, isFork: true, after: $cursor${owner.kind === 'User' ? ', ownerAffiliations: [OWNER]' : ''}) {
-          totalCount nodes { nameWithOwner parent { nameWithOwner } } pageInfo { hasNextPage endCursor }
-        }
-      } }`, owner.viewer ? { cursor } : { owner: owner.login, cursor }); return data.owner?.repositories;
-    }, fork => {
-      if (fork.parent?.nameWithOwner) addUpstream(fork.parent.nameWithOwner);
-      else { incompleteUpstream = true; warn(`forks:${owner.login}: a fork parent is not visible; its upstream PRs are outside coverage.`); }
-    }) || incompleteUpstream;
-  }));
-  await Promise.all([local(), conversations(), ...internal, ...authored, ...forks]);
-  const targets = [...upstreams.values()].sort();
-  if (targets.length > MAX_UPSTREAMS) { incompleteUpstream = true; warn(`upstream: only ${MAX_UPSTREAMS} of ${targets.length} discovered repositories were scheduled.`); }
-  await Promise.all(targets.slice(0, MAX_UPSTREAMS).map(repository => source(`upstream:${repository}`, async () => {
-    const [owner, name] = repository.split('/');
-    incompleteUpstream = await pages<GitHubPull>(`upstream:${repository}`, config.maxUpstreamPages, async cursor => {
-      const { data } = await graphql(`query PullUpstream($owner: String!, $name: String!, $cursor: String) {
-        repository(owner: $owner, name: $name) { pullRequests(states: [OPEN], first: 100, after: $cursor, orderBy: {field: UPDATED_AT, direction: ASC}) {
-          totalCount nodes { ${BASE_FIELDS} } pageInfo { hasNextPage endCursor }
-        } }
-      }`, { owner, name, cursor }); return data.repository?.pullRequests;
-    }, retain) || incompleteUpstream;
-  })));
+  const repositories = unique(targets.repositories).filter(repository => !excluded.has(key(repository)));
+  const pulls = [...new Map(targets.pulls.filter(pr => !excluded.has(key(pr.repository)))
+    .map(pr => [`${key(pr.repository)}#${pr.number}`, pr])).values()];
+  await Promise.all([
+    ...repositories.map(repository => source(`repository:${repository}`, async () => {
+      const [owner, name] = repository.split('/');
+      const incomplete = await pages<GitHubPull>(`repository:${repository}`, config.maxUpstreamPages, async cursor => {
+        const { data } = await graphql(`query PullRepository($owner: String!, $name: String!, $cursor: String) {
+          repository(owner: $owner, name: $name) { pullRequests(states: [OPEN], first: 100, after: $cursor, orderBy: {field: UPDATED_AT, direction: ASC}) {
+            totalCount nodes { ${BASE_FIELDS} } pageInfo { hasNextPage endCursor }
+          } }
+        }`, { owner, name, cursor }); return data.repository?.pullRequests;
+      }, retain);
+      if (owned.has(key(owner))) incompleteInternal ||= incomplete; else incompleteUpstream ||= incomplete;
+    })),
+    ...pulls.map(pr => source(`pull:${pr.repository}#${pr.number}`, async () => {
+      const [owner, name] = pr.repository.split('/');
+      const { data } = await graphql(`query PullTarget($owner: String!, $name: String!, $number: Int!) {
+        repository(owner: $owner, name: $name) { pullRequest(number: $number) { ${BASE_FIELDS} } }
+      }`, { owner, name, number: pr.number });
+      if (!data.repository?.pullRequest) throw new Error('Linked pull request is inaccessible to the current account.');
+      retain(data.repository.pullRequest, true);
+    })),
+  ]);
   if (failures.length) throw new PullCollectionError(`GitHub source collection failed: ${failures.join('; ')}`, [...warnings]);
   const entries = [...retained.values()];
   const batches: GitHubPull[][] = [];
@@ -375,21 +315,23 @@ export async function collectPulls(config: PullConfig, commands: GitHubCommands,
       batch.forEach((pr, index) => {
         const detail = data[`p${index}`];
         const errorsForPull = errors.filter(error => !error.path?.length || error.path[0] === `p${index}`);
-        if (detail?.id !== pr.id || errorsForPull.length) {
-          warn(`${pr.repository.nameWithOwner}#${pr.number}: review/merge/CI details unavailable; values are UNKNOWN. ${errorsForPull.map(error => error.message).join('; ')}`); return;
+        if (detail?.id === pr.id && ['OPEN', 'CLOSED', 'MERGED'].includes(detail.state)) pr.state = detail.state;
+        const missing = ['mergeable', 'reviewDecision', 'commits', 'reviews'].filter(field => !detail || !Object.hasOwn(detail, field));
+        if (detail?.id !== pr.id || errorsForPull.length || missing.length) {
+          warn(`${pr.repository.nameWithOwner}#${pr.number}: review/merge/CI details unavailable; values are UNKNOWN. ${errorsForPull.map(error => error.message).join('; ')}${missing.length ? ` Missing fields: ${missing.join(', ')}.` : ''}`); return;
         }
         Object.assign(pr, detail);
       });
     } catch (error) { signal.throwIfAborted(); warn(`details: ${batch.length} PRs have UNKNOWN review/merge/CI values: ${safeError(error)}`); }
   }));
-  const result: PullCollection = { internal: [], upstream: [], warnings: [], scope, incompleteInternal, incompleteUpstream, observedUrls: entries.map(pr => key(pr.url)) };
+  const result: PullCollection = { internal: [], upstream: [], warnings: [], scope, incompleteInternal, incompleteUpstream, observedUrls: [...observedUrls] };
   for (const pr of entries) {
-    const queue = classifyPull(pr, scope);
+    const queue = classify(pr);
     if (queue) result[queue].push(normalizePull(pr, warn));
   }
-  warn(`Source coverage: gh account ${viewer}; internal owners: ${scope.ownedOwners.sort().join(', ')}; outgoing authors: ${scope.authors.join(', ')} plus visible owned/local forks.`);
-  warn('Only github.com PRs visible to the authenticated gh account are covered; private repositories and organization SSO depend on its permissions. Authored searches apply their result limit before internal/same-repository PRs are filtered.');
-  warn('Organization memberships count as internal unless listed in upstreamOwners; explicit ownedOwners takes precedence. Outgoing scans cover discovered fork parents and authored open-PR destinations, not every external repository.');
+  warn(`Source coverage: gh account ${viewer}; internal owners: ${scope.ownedOwners.sort().join(', ')}; outgoing authors: ${scope.authors.join(', ')} plus owned/local forks.`);
+  warn('Only targeted github.com repositories and linked PRs visible to the authenticated gh account are covered; private repositories and organization SSO depend on its permissions.');
+  warn('Organization memberships count as internal unless listed in upstreamOwners; explicit ownedOwners takes precedence. Linked open PRs are followed regardless of author or fork.');
   result.internal.sort(comparePulls); result.upstream.sort(comparePulls); result.warnings = [...warnings].sort();
   return result;
 }

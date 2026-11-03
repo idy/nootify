@@ -4,7 +4,7 @@ A general-purpose local **TypeScript service host**, managed as a per-user macOS
 
 The HTTP listener binds to `127.0.0.1:9417`, plus this computer's Tailscale IPv4 address on the same port for the owner's other devices. Open either address for message-bridge logs, **encountered routing targets**, and the two GitHub pull-request queues. `/health` and the read-only `/ui/*` page data are available to permitted browsers; every `/v1/` control endpoint requires the per-user bearer token on both listeners. Host/origin checks prevent cross-site reads and DNS rebinding. The service routes input to existing Claude, Codex, or OpenCode clients rather than calling a model API directly.
 
-Routing lookup is lazy: only a message with a concrete adapter and session ID resolves that adapter's inbox or connects to its backend. The routing page lists at most 1,000 targets actually encountered during this process lifetime, including missing/archived/unavailable results. Repository discovery separately reads local conversation directories and timestamps to build the follow list.
+Routing lookup is lazy: only a message with a concrete adapter and session ID resolves that adapter's inbox or connects to its backend. The routing page lists at most 1,000 targets actually encountered during this process lifetime, including missing/archived/unavailable results. PR subscription discovery separately reads session identities, explicit PR links, repository anchors, branches, and timestamps.
 
 ## Build and test
 
@@ -202,26 +202,31 @@ Two Open/Draft queues are queried live from GitHub through the authenticated `gh
 
 | Page | Contents |
 | --- | --- |
-| 我们仓库的 PR | PRs by anyone, to repositories owned by the signed-in account or its internal organizations, including repositories not cloned locally |
-| 提交上游的 PR | Cross-repository PRs from our accounts or forks to external upstreams |
+| 我们仓库的 PR | Open PRs in session-derived subscriptions whose destination belongs to our account or internal organizations |
+| 提交上游的 PR | Session-linked external PRs, plus our outgoing contributions in the repositories used by those sessions |
 
 Both default to the **least recently updated first**; the sort toggle reverses it. "Needs follow-up" means failed CI, requested changes, a merge conflict, or a non-draft PR untouched for 14 days. Rows show the target `owner/repo#number`, author, relative update time, review decision, and CI/conflict state.
 
-Refreshes run in the background every five minutes and from the page's refresh button. A request only starts or joins the running refresh and returns immediately; the page keeps showing the previous data and updates when it finishes. A failed refresh keeps the last good snapshot and says so. The snapshot is cached privately in `pulls-cache.json` in the state directory, so a restart shows the last data at once. Coverage limits (search caps, private or SSO visibility, scan depth) are listed under the collapsed "data scope" details. Routine successful refreshes are not written to the run log; only changes in outcome are.
+Refreshes run in the background every five minutes and from the page's refresh button. A request only starts or joins the running refresh and returns immediately; the page keeps showing the previous data and updates when it finishes. A failed refresh keeps the last good snapshot and says so. The snapshot is cached privately in `pulls-cache.json` in the state directory, so a restart shows the last data at once. Coverage limits (repository pagination and private or SSO visibility) are listed under the collapsed "data scope" details. Routine successful refreshes are not written to the run log; only changes in outcome are.
 
-### Followed repositories
+### Session-derived subscriptions
 
-The 关注的仓库 page lists every repository found in local agent conversations or in either queue, with a checkbox. Both PR pages show only followed repositories and say how many PRs are hidden. Each refresh reads conversation metadata only, never message text:
+The **PR 订阅** page follows the relationship **session → linked PRs and repository → GitHub status**. Every candidate comes from a discovered session or a deliberate saved choice. Each repository expands to show the session name, full ID, branch, and explicit PR links that explain the subscription. PR rows show their source sessions too.
 
-| Agent | Source |
+| Agent | Structured association data |
 | --- | --- |
-| Claude | The `cwd` recorded at the top of the newest transcript in each `~/.claude/projects/*` folder (honoring `CLAUDE_CONFIG_DIR`); folders that keep only `memory/` are decoded back to their path |
-| Codex | `cwd` and `git_origin_url` per thread in the latest `state_*.sqlite` under `CODEX_HOME` |
-| OpenCode | `directory` per session in `opencode.db` (or the older JSON session files) under `$XDG_DATA_HOME/opencode` |
+| Claude Desktop | `local_<id>.json` under the app's `claude-code-sessions/<account>/<profile>/`: `sessionId`, `cliSessionId`, `priorCliSessionIds`, `prs[]`, `cwd`, `originCwd`, `worktreePath`, and `gitAnchors[].gitRoot` |
+| Claude Code CLI | Individual transcript IDs, working directories, branches, and standalone `pr-link` records under `~/.claude/projects` (honoring `CLAUDE_CONFIG_DIR`) |
+| Codex | Individual thread IDs, titles, `cwd`, `git_branch`, and `git_origin_url` in the latest `state_*.sqlite` under `CODEX_HOME` |
+| OpenCode | Individual IDs, titles, and directories in `opencode.db` or the older JSON metadata under `$XDG_DATA_HOME/opencode` |
 
-The GitHub remotes of those directories name the repositories; an `upstream` remote also adds that repository to the outgoing-PR scan, like the disk scan does. Without an explicit choice, a repository is followed when it appears in a conversation or has an open PR by our accounts. Ticking or unticking stores a choice in the private `repo-preferences.json`; choosing the automatic value again removes the choice. Set `"followDefault": "all"` in the pulls configuration to follow every repository by default instead.
+Desktop host IDs are joined to current and previous CLI IDs rather than counted twice. Its persisted `prs[]` takes precedence over transcript history, including an empty array after unlinking. No PR subscriptions are inferred from URLs in message text. Existing explicit PR links remain associated when the session's current branch differs from the PR's branch. Matching head branches can supply a more specific source session for repository results when no explicit link is recorded.
 
-Configuration is re-read on each refresh, first found wins: `NOOTIFY_PULLS_CONFIG`, then `pulls.config.json` in the state directory. Fields are `authors`, `ownedOwners`, `upstreamOwners`, `excludeRepositories`, `scanRoots`, and `followDefault`. Organization membership counts as internal unless the organization is listed in `upstreamOwners`. Set an absolute `GH_BIN` if `gh` is not in Homebrew or a standard location; the launchd job does not inherit your shell's `PATH`.
+A session's checkout repositories are resolved from its Git remotes. Those repositories receive repository-scoped PR queries. An explicit link to a PR in another repository adds **only that PR**, not all the PRs in that destination. GitHub's authenticated account and organizations classify the resulting subscriptions as internal/upstream; their global PR inventories do not create subscriptions. Exact linked Open PRs are retained regardless of author or whether they cross repositories.
+
+Subscriptions discovered from sessions are selected by default. Unticking saves a choice in the private `repo-preferences.json`; selecting the automatic value again clears the override. A follow change updates the view immediately and starts a background query for the new targets. The version-3 cache contains only session-scoped results; earlier account-wide caches are rebuilt.
+
+Configuration is re-read on each refresh, first found wins: `NOOTIFY_PULLS_CONFIG`, then `pulls.config.json` in the state directory. `authors`, `ownedOwners`, `upstreamOwners`, and `excludeRepositories` affect classification and exclusion; `maxUpstreamPages` bounds each repository query. Legacy scan/search/default-follow fields remain accepted as data but do not define subscriptions. Set an absolute `GH_BIN` if `gh` is outside Homebrew or standard locations; launchd does not inherit the shell's `PATH`.
 
 ## Tailscale access
 
@@ -277,7 +282,7 @@ Read the bearer token from the private state file in your local application; nev
 | `src/server.ts` | Loopback and Tailscale HTTP listeners, authentication, lifecycle |
 | `src/tailnet.ts` | Tailscale address discovery and peer identity checks |
 | `src/github.ts`, `src/github-api.ts`, `src/github-model.ts` | Background GitHub queries, classification, sorting, follow choices, private cache |
-| `src/conversations.ts` | Working directories of local Claude, Codex and OpenCode conversations |
+| `src/conversations.ts` | Individual Claude, Codex and OpenCode sessions, repository anchors, and explicit PR associations |
 | `src/types.ts` | Public request/response and module contracts |
 | `src/client.ts` | Typed client for other TypeScript tools |
 | `src/state.ts` | Private local session and binding persistence |

@@ -12,6 +12,7 @@ export interface GitHubPull {
   repository: { nameWithOwner: string };
   author?: { login: string } | null;
   headRepository?: { nameWithOwner: string } | null;
+  headRefName?: string;
   reviewDecision?: string | null;
   mergeable?: string | null;
   commits?: { nodes?: ({ commit?: { statusCheckRollup?: {
@@ -41,6 +42,22 @@ export function parseGitHubRemote(value: string): string | undefined {
   }
   path = path.replace(/^\/+|\/+$/g, '').replace(/\.git$/i, '');
   return /^[a-z\d][a-z\d-]*\/[a-z\d_.-]+$/i.test(path) && !['.', '..'].includes(path.split('/')[1]) ? path : undefined;
+}
+
+export interface GitHubPullReference { repository: string; number: number; url: string }
+/** Normalize explicit PR links from session metadata; external hosts and URL credentials never become subscriptions. */
+export function parseGitHubPull(value: unknown): GitHubPullReference | undefined {
+  if (typeof value !== 'string') return;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'https:' || url.hostname.toLowerCase() !== 'github.com' || url.username || url.password || url.port) return;
+    const match = /^\/([^/]+\/[^/]+)\/pull\/(\d+)(?:\/|$)/.exec(url.pathname);
+    if (!match) return;
+    const repository = parseGitHubRemote(`https://github.com/${match[1]}`);
+    const number = Number(match[2]);
+    if (!repository || !Number.isSafeInteger(number) || number < 1) return;
+    return { repository, number, url: `https://github.com/${repository}/pull/${number}` };
+  } catch { return; }
 }
 
 /** Destinations in internal owners qualify regardless of author or local clones. */
@@ -103,7 +120,7 @@ export function normalizePull(pr: GitHubPull, warn: (message: string) => void = 
   return {
     number: pr.number, url: pr.url, title: pr.title ?? '', isDraft: Boolean(pr.isDraft), repository: pr.repository.nameWithOwner,
     author: pr.author?.login ?? 'ghost', ...(pr.headRepository?.nameWithOwner ? { headRepository: pr.headRepository.nameWithOwner } : {}),
-    updatedAt: pr.updatedAt, reviewDecision, mergeable: pr.mergeable || 'UNKNOWN', ci,
+    updatedAt: pr.updatedAt, ...(pr.headRefName ? { headBranch: pr.headRefName } : {}), reviewDecision, mergeable: pr.mergeable || 'UNKNOWN', ci,
   };
 }
 
