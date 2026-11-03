@@ -4,7 +4,7 @@ A general-purpose local **TypeScript service host**, managed as a per-user macOS
 
 The HTTP listener binds to `127.0.0.1:9417`, plus this computer's Tailscale IPv4 address on the same port for the owner's other devices. Open either address for message-bridge logs, **encountered routing targets**, and the two GitHub pull-request queues. `/health` and the read-only `/ui/*` page data are available to permitted browsers; every `/v1/` control endpoint requires the per-user bearer token on both listeners. Host/origin checks prevent cross-site reads and DNS rebinding. The service routes input to existing Claude, Codex, or OpenCode clients rather than calling a model API directly.
 
-Lookup is lazy: startup and UI polling never enumerate client sessions or connect to a client backend. Only a message with a concrete adapter and session ID invokes that adapter's lookup. The page lists at most 1,000 targets actually encountered during this process lifetime, including missing/archived/unavailable results. It does not preload registrations or local history.
+Routing lookup is lazy: only a message with a concrete adapter and session ID resolves that adapter's inbox or connects to its backend. The routing page lists at most 1,000 targets actually encountered during this process lifetime, including missing/archived/unavailable results. Repository discovery separately reads local conversation directories and timestamps to build the follow list.
 
 ## Build and test
 
@@ -24,19 +24,35 @@ npm run check
 
 ## Tauri desktop application and system tray
 
-The native macOS **Nootify** app opens the existing web UI in a dark native window and provides a menu-bar tray. PR rows open GitHub in the default browser; the window itself cannot navigate elsewhere. The tray restores the window, reports daemon/module health, and can start or restart the already installed `dev.idy.nootify.service` launchd job. Closing the window hides it; quitting the desktop app leaves the independent daemon running. A single-instance guard focuses the existing app instead of creating another tray icon.
+The native **Nootify** app for Apple Silicon and macOS 13.5+ bundles the background service and its own Node.js runtime. It opens the web UI in a dark native window and provides a menu-bar tray with **打开**, **退出**, service controls, and update controls. PR rows open GitHub in the default browser. Closing the window hides it; quitting the desktop app leaves the independent daemon running. A single-instance guard restores the existing window.
 
-Build requirements are Rust, Xcode command-line tools, and the npm dependencies above. The build helper finds Rust under `CARGO_HOME/bin` or `~/.cargo/bin` without changing global settings.
+Download the DMG from [GitHub Releases](https://github.com/idy/nootify/releases/latest), drag Nootify to **Applications**, then choose **安装后台服务** in the tray. That action is available only while `~/Library/LaunchAgents/dev.idy.nootify.service.plist` is absent and port 9417 is free. It refuses installation from a read-only disk image. Keep the app in Applications: the job runs Node.js and `server.js` inside its bundle. An existing LaunchAgent is reused, and the tray never replaces its configuration.
+
+When `~/.claude.json` exists, the installer selects its `mcpServers.lark` credentials. A file without a Lark server leaves Feishu disabled and the PR pages available. Credentials stay in their original file. The web page receives no native Tauri IPC capabilities. Builds are ad-hoc signed and are not notarized; macOS may require allowing the first launch under System Settings > Privacy & Security.
+
+### Build the desktop app
+
+Requires stable Rust, Xcode command-line tools, and the npm dependencies above. The build helper finds Rust under `CARGO_HOME/bin` or `~/.cargo/bin`.
 
 ```bash
 npm run desktop:dev
 ```
 
+For a release build, supply `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` in the environment, then run:
+
 ```bash
 npm run desktop:build
 ```
 
-The macOS bundle is produced at `src-tauri/target/release/bundle/macos/Nootify.app`. Install the independent service first using the next section. The native app is a desktop front end for that service; it does not bundle a second Node process or copy credentials. If the service is unavailable, it shows a bundled offline page. The local web page receives no native Tauri IPC capabilities.
+Before bundling, the build compiles TypeScript and stages the service, `public/`, and production dependencies in `src-tauri/resources/service/`. It downloads a pinned official Node.js runtime, checks its SHA-256 against both the pinned value and the release's `SHASUMS256.txt`, and stages it as the `binaries/node` sidecar. `npm run desktop:stage` performs only staging. `cargo test` and `cargo clippy` work without staging; release builds require real staged resources. The Node runtime needs the JIT entitlement in `src-tauri/Entitlements.plist`.
+
+Outputs under `src-tauri/target/release/bundle/` are `macos/Nootify.app`, the Apple Silicon DMG in `dmg/`, and `macos/Nootify.app.tar.gz` with its updater signature. Set `CARGO_TARGET_DIR` to reuse another target directory when needed.
+
+### Automatic updates and releases
+
+The app checks [the signed release manifest](https://github.com/idy/nootify/releases/latest/download/latest.json) about 30 seconds after launch, every six hours, and when **检查更新** is selected. When a newer version exists, the tray offers **安装更新 vX.Y.Z**. Installation verifies the update signature, replaces the app, restarts the background service if its LaunchAgent runs this app's Node.js, and relaunches the app. Progress and errors appear in the tray's update status line.
+
+CI runs TypeScript tests, resource staging, rustfmt, clippy, and Rust tests on macOS. To publish a release, update `package.json` and `src-tauri/Cargo.toml` to the same version, commit to `main`, then push a matching `vX.Y.Z` tag. The release workflow rejects a tag that differs from `package.json`. It publishes the DMG, updater bundle, signature, and `latest.json` using the repository secrets `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. A manually dispatched release must select a version tag too.
 
 ## Install the independent service
 
@@ -270,6 +286,9 @@ Read the bearer token from the private state file in your local application; nev
 | `src/lark-threads.ts` | One Feishu group per agent session: lookup, adoption, creation, progress messages |
 | `src/agents.ts` | Marked Feishu section in each agent's global prompt file |
 | `src-tauri/`, `desktop/`, `scripts/desktop.mjs` | Native window, tray, offline view, and desktop build launcher |
+| `scripts/stage-service.mjs` | Stage the compiled service, dependencies, and verified Node.js sidecar |
+| `src-tauri/src/update.rs` | GitHub Release checks and signature-verified updates from the native tray |
+| `.github/workflows/` | macOS checks and version-tag-driven DMG/updater publication |
 | `test/` | Disposable HTTP/socket/state and routing tests |
 
 Official references: [Feishu Node SDK](https://github.com/larksuite/node-sdk), [message receive event](https://open.feishu.cn/document/server-docs/im-v1/message/events/receive), and [Claude Code inbox sockets](https://code.claude.com/docs/en/cross-session-messaging#the-sessions-inbox-socket).

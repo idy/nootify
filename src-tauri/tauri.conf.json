@@ -40,7 +40,7 @@
       "resources/service/": "service/"
     },
     "macOS": {
-      "minimumSystemVersion": "11.0",
+      "minimumSystemVersion": "13.5",
       "signingIdentity": "-",
       "entitlements": "Entitlements.plist",
       "infoPlist": "Info.plist"
