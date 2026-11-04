@@ -50,14 +50,28 @@
     document.querySelector('meta[name="theme-color"]')?.setAttribute("content", theme === "dark" ? "#142033" : "#f7f9fc");
   }
   function t(key) { return dictionaries[language][key] ?? dictionaries.en[key] ?? key; }
+  // Missing page dictionaries must leave the authored HTML fallback intact.
+  function translatedString(key) {
+    const value = dictionaries[language][key];
+    if (typeof value === "string") return value;
+    const fallback = dictionaries.en[key];
+    return typeof fallback === "string" ? fallback : undefined;
+  }
   function translate() {
     root.lang = language === "zh" ? "zh-CN" : "en";
-    document.querySelectorAll("[data-i18n]").forEach(node => { node.textContent = t(node.dataset.i18n); });
+    document.querySelectorAll("[data-i18n]").forEach(node => {
+      const value = translatedString(node.dataset.i18n);
+      if (value !== undefined) node.textContent = value;
+    });
     // Only authored, local translations use HTML; release data is never passed here.
-    document.querySelectorAll("[data-i18n-html]").forEach(node => { node.innerHTML = t(node.dataset.i18nHtml); });
+    document.querySelectorAll("[data-i18n-html]").forEach(node => {
+      const value = translatedString(node.dataset.i18nHtml);
+      if (value !== undefined) node.innerHTML = value;
+    });
     for (const attribute of ["aria-label", "title", "alt"]) {
       document.querySelectorAll(`[data-i18n-${attribute}]`).forEach(node => {
-        node.setAttribute(attribute, t(node.getAttribute(`data-i18n-${attribute}`)));
+        const value = translatedString(node.getAttribute(`data-i18n-${attribute}`));
+        if (value !== undefined) node.setAttribute(attribute, value);
       });
     }
     if (dictionaries[language].pageTitle) document.title = t("pageTitle");
