@@ -1,25 +1,55 @@
 :root {
-  color-scheme: dark;
-  --bg: #18181b;
-  --sidebar: #1d1d20;
-  --panel: #1c1c1f;
-  --raised: #202024;
-  --field: #232327;
-  --line: #2c2c31;
-  --line-soft: #252529;
-  --hover: #232328;
-  --selected: #2d2d33;
-  --text: #ececef;
-  --muted: #9b9ba4;
-  --faint: #6d6d76;
-  --green: #4fc27d;
-  --amber: #e2a541;
-  --red: #f07a73;
-  --blue: #82a9ff;
+  color-scheme: light dark;
+  --bg: #f7f7f8;
+  --sidebar: #efeff1;
+  --panel: #ffffff;
+  --raised: #f5f5f7;
+  --field: #ededf0;
+  --line: #d9d9df;
+  --line-soft: #e6e6eb;
+  --hover: #e8e8ed;
+  --selected: #dedee5;
+  --text: #27272a;
+  --muted: #61616b;
+  --faint: #6f6f78;
+  --green: #1d7b45;
+  --amber: #93630b;
+  --red: #bd322b;
+  --blue: #245dc1;
+  --banner-line: rgba(189, 50, 43, .32);
+  --banner-bg: rgba(189, 50, 43, .06);
+  --banner-text: #a52b25;
+  --focus-line: #9999a3;
+  --check-line: #868690;
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Helvetica Neue", sans-serif;
   font-size: 13px;
   line-height: 1.4;
   -webkit-font-smoothing: antialiased;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #18181b;
+    --sidebar: #1d1d20;
+    --panel: #1c1c1f;
+    --raised: #202024;
+    --field: #232327;
+    --line: #2c2c31;
+    --line-soft: #252529;
+    --hover: #232328;
+    --selected: #2d2d33;
+    --text: #ececef;
+    --muted: #9b9ba4;
+    --faint: #6d6d76;
+    --green: #4fc27d;
+    --amber: #e2a541;
+    --red: #f07a73;
+    --blue: #82a9ff;
+    --banner-line: rgba(240, 122, 115, .32);
+    --banner-bg: rgba(240, 122, 115, .08);
+    --banner-text: #ffbab4;
+    --focus-line: #4a4a53;
+    --check-line: #55555e;
+  }
 }
 * { box-sizing: border-box; }
 html, body { height: 100%; }
@@ -77,7 +107,7 @@ svg { flex: none; }
 .icon-button.busy svg { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .view { flex: 1; min-height: 0; overflow: auto; padding: 2px 22px 24px; }
-.banner { margin: 0 22px 12px; padding: 9px 12px; border: 1px solid rgba(240, 122, 115, .32); border-radius: 8px; background: rgba(240, 122, 115, .08); color: #ffbab4; font-size: 12.5px; }
+.banner { margin: 0 22px 12px; padding: 9px 12px; border: 1px solid var(--banner-line); border-radius: 8px; background: var(--banner-bg); color: var(--banner-text); font-size: 12.5px; }
 .view .banner { margin: 0 0 12px; }
 
 .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 12px; }
@@ -88,7 +118,7 @@ svg { flex: none; }
 .segmented .count { color: var(--faint); font-size: 11.5px; font-variant-numeric: tabular-nums; }
 .spacer { flex: 1; }
 .search { display: flex; align-items: center; gap: 8px; width: 264px; height: 30px; padding: 0 10px; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--field); }
-.search:focus-within, .setting-field:focus { border-color: #4a4a53; }
+.search:focus-within, .setting-field:focus { border-color: var(--focus-line); }
 .search svg { width: 13px; height: 13px; fill: none; stroke: var(--faint); stroke-width: 1.6; stroke-linecap: round; }
 .search input { flex: 1; min-width: 0; height: 100%; padding: 0; border: 0; outline: none; background: transparent; }
 .search input::placeholder { color: var(--faint); }
@@ -133,7 +163,7 @@ a.row:hover, button.row:hover { background: var(--hover); }
 .row-side .primary { height: 20px; font-size: 13px; line-height: 20px; }
 .row-side .secondary { height: 17px; margin-top: 2px; color: var(--faint); font-size: 11.5px; line-height: 17px; }
 /* Repository rows: a checkbox in front of the usual two-line row. */
-.check { appearance: none; display: grid; flex: none; place-content: center; width: 16px; height: 16px; margin: 0; border: 1.5px solid #55555e; border-radius: 4px; background: transparent; cursor: pointer; }
+.check { appearance: none; display: grid; flex: none; place-content: center; width: 16px; height: 16px; margin: 0; border: 1.5px solid var(--check-line); border-radius: 4px; background: transparent; cursor: pointer; }
 .check::after { content: ""; width: 8px; height: 4.5px; border: 2px solid var(--bg); border-top: 0; border-right: 0; transform: translateY(-1px) rotate(-45deg); opacity: 0; }
 .check:checked { border-color: var(--blue); background: var(--blue); }
 .check:checked::after { opacity: 1; }

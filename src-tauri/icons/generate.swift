@@ -1,5 +1,5 @@
 // Run with: swift generate.swift /absolute/path/to/src-tauri/icons
-// Uses the same three-cell grid and #235dcc blue as the service's existing UI.
+// Draws the penguin from desktop/brand.svg in the UI's #27272a text color on a white plate, and in black for the tray template.
 import AppKit
 
 let output = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
@@ -15,8 +15,10 @@ func png(_ pixels: Int, template: Bool = false) -> Data {
     NSGraphicsContext.current = context
     context.cgContext.clear(CGRect(x: 0, y: 0, width: pixels, height: pixels))
     if template {
-        context.cgContext.scaleBy(x: CGFloat(pixels) / 24, y: CGFloat(pixels) / 24)
-        NSColor.black.setFill()
+        // A 26-unit canvas keeps the glyph about 18 pt tall in the 22 pt menu-bar slot.
+        context.cgContext.scaleBy(x: CGFloat(pixels) / 26, y: CGFloat(pixels) / 26)
+        context.cgContext.translateBy(x: 1, y: 1)
+        NSColor.black.set()
     } else {
         context.cgContext.scaleBy(x: CGFloat(pixels) / 1024, y: CGFloat(pixels) / 1024)
         NSColor.white.setFill()
@@ -27,13 +29,28 @@ func png(_ pixels: Int, template: Bool = false) -> Data {
         outline.stroke()
         context.cgContext.translateBy(x: 200, y: 200)
         context.cgContext.scaleBy(x: 26, y: 26)
-        NSColor(srgbRed: 35/255, green: 93/255, blue: 204/255, alpha: 1).setFill()
+        NSColor(srgbRed: 39/255, green: 39/255, blue: 42/255, alpha: 1).set()
     }
-    for rect in [NSRect(x: 2, y: 13, width: 8, height: 8),
-                 NSRect(x: 14, y: 3, width: 8, height: 18),
-                 NSRect(x: 2, y: 3, width: 8, height: 6)] {
-        NSBezierPath(roundedRect: rect, xRadius: 2, yRadius: 2).fill()
-    }
+    // From here on, brand.svg's y-down coordinates inside its rotate(14 12 12).
+    context.cgContext.translateBy(x: 12, y: 12)
+    context.cgContext.scaleBy(x: 1, y: -1)
+    context.cgContext.rotate(by: 14 * .pi / 180)
+    context.cgContext.translateBy(x: -12, y: -12)
+    let body = NSBezierPath(roundedRect: NSRect(x: 5.4, y: 1.2, width: 12.4, height: 21.6), xRadius: 6.2, yRadius: 6.2)
+    body.append(NSBezierPath(roundedRect: NSRect(x: 8.8, y: 10, width: 7.4, height: 10.9), xRadius: 3.7, yRadius: 3.7))
+    body.append(NSBezierPath(ovalIn: NSRect(x: 12.2, y: 4.8, width: 2, height: 2)))
+    body.windingRule = .evenOdd
+    body.fill()
+    // brand.svg's beak path is this triangle grown by a 0.3 round join; its first corner hides inside the head.
+    let beak = NSBezierPath()
+    beak.move(to: NSPoint(x: 16.4, y: 4.13))
+    beak.line(to: NSPoint(x: 20.8, y: 6.2))
+    beak.line(to: NSPoint(x: 17.4, y: 7.8))
+    beak.close()
+    beak.lineWidth = 0.6
+    beak.lineJoinStyle = .round
+    beak.fill()
+    beak.stroke()
     NSGraphicsContext.restoreGraphicsState()
     return NSBitmapImageRep(cgImage: cg.makeImage()!).representation(using: .png, properties: [:])!
 }

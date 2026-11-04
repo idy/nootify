@@ -95,9 +95,8 @@ fn main() {
                 .inner_size(1180.0, 760.0)
                 .min_inner_size(640.0, 420.0)
                 .center()
-                // Match the dark page so the native title bar and first paint do not flash white.
-                .theme(Some(tauri::Theme::Dark))
-                .background_color(tauri::window::Color(24, 24, 27, 255))
+                // Let macOS and WebKit follow changes to the system appearance.
+                .theme(None)
                 // WebKit asks this policy first even for target=_blank links, so GitHub must be
                 // handed to the default browser here; cancelling also keeps this window in place.
                 .on_navigation(move |url| {
