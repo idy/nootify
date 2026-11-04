@@ -24,7 +24,7 @@ npm run check
 
 ## Tauri desktop application and system tray
 
-The native **Nootify** app for Apple Silicon and macOS 13.5+ bundles the background service and its own Node.js runtime. It opens the web UI in a dark native window and provides a menu-bar tray with **打开**, **退出**, service controls, and update controls. PR rows open GitHub in the default browser. Closing the window hides it; quitting the desktop app leaves the independent daemon running. A single-instance guard restores the existing window.
+The native **Nootify** app for Apple Silicon and macOS 13.5+ bundles the background service and its own Node.js runtime. Its native window, web UI, and offline page follow the system's light or dark appearance, including changes while the app is open. It provides a menu-bar tray with **打开**, **退出**, service controls, and update controls. PR rows open GitHub in the default browser. Closing the window hides it; quitting the desktop app leaves the independent daemon running. A single-instance guard restores the existing window.
 
 Download the DMG from [GitHub Releases](https://github.com/idy/nootify/releases/latest), drag Nootify to **Applications**, and open it. The first launch automatically installs and starts the background service; later launches connect to it or load its existing LaunchAgent if needed. A healthy service keeps its process and connection. The tray's start/restart/install controls are recovery actions, not setup steps.
 
@@ -190,7 +190,7 @@ Group creation needs the bot's chat-creation permission (`im:chat:create` or `im
 
 ## Web UI
 
-Open `http://127.0.0.1:9417`. The dark layout has a navigation column grouped by **message bridge** (run logs, routing sessions, agents) and **GitHub** (pull requests to our repositories, pull requests we sent upstream, followed repositories), with module and connection status at its foot. Each page uses one bordered list of two-line rows: the primary text, a dot-separated metadata line, and status on the right. Segmented filters show counts; search and `/` focus the page's search field. On narrow screens the navigation becomes a scrolling top bar.
+Open `http://127.0.0.1:9417`. The layout follows the system's light or dark appearance without reloading and has a navigation column grouped by **message bridge** (run logs, routing sessions, agents) and **GitHub** (pull requests to our repositories, pull requests we sent upstream, followed repositories), with module and connection status at its foot. Each page uses one bordered list of two-line rows: the primary text, a dot-separated metadata line, and status on the right. Segmented filters show counts; search and `/` focus the page's search field. On narrow screens the navigation becomes a scrolling top bar.
 
 Log rows expand in place for full IDs, reasons, and message text; logs can be paused and the filtered set exported as NDJSON. The routing-session page displays only targets encountered by incoming messages or explicit sends, with their last lookup time and result. Refreshing it performs no client lookups. These are historical observations, not a live inventory.
 
