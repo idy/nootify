@@ -48,6 +48,7 @@
     <button type="button" id="update-banner-later" class="text-button">稍后</button>
     <button type="button" id="update-banner-install" class="text-button primary">立即更新</button>
   </div>
+  <div id="github-signin" class="banner note" role="status" hidden>还没有登录 GitHub，PR 数据不会更新。<a class="inline-link" href="#/settings/github">去登录</a></div>
   <section id="logs-view" class="view" aria-label="运行日志">
     <div class="toolbar">
       <div class="segmented" id="outcome-tabs" aria-label="按结果筛选"></div>
@@ -100,10 +101,10 @@
     <div id="settings-banner" class="banner" role="alert" hidden></div>
     <div data-panel="settings-github" hidden>
       <div class="group">
-        <div class="setting"><div class="setting-main"><div class="setting-title">GitHub 账号</div><div class="setting-sub" id="github-status"></div></div><span id="github-state"></span><div class="setting-actions"><button type="button" id="github-login" class="text-button primary" hidden>登录</button></div></div>
+        <div class="setting"><div class="setting-main"><div class="setting-title">GitHub 账号</div><div class="setting-sub" id="github-status"></div></div><span id="github-state"></span><div class="setting-actions"><button type="button" id="github-login" class="text-button primary" hidden>登录</button><button type="button" id="github-logout" class="text-button" hidden>退出登录</button></div></div>
         <div class="setting" id="github-flow" hidden><div class="setting-main"><div class="setting-title" id="github-flow-title"></div><div class="setting-sub" id="github-flow-sub"></div></div><span id="github-code" class="device-code mono"></span><div class="setting-actions"><button type="button" id="github-cancel" class="text-button">取消</button><button type="button" id="github-copy" class="text-button">复制</button><a id="github-open" class="text-button primary" href="https://github.com/login/device" target="_blank" rel="noopener noreferrer">打开 GitHub</a></div></div>
       </div>
-      <p class="hint">登录由 GitHub CLI（gh）的设备码流程完成：在浏览器里输入验证码并授权后，这里会自动更新。凭据由 gh 保存，和终端共用，不经过 Nootify。</p>
+      <p class="hint">在浏览器里输入验证码并授权后，这里会自动更新。令牌只保存在 Nootify 的状态目录（权限 0600），和终端里的 gh 互不影响，也不需要安装 gh。GitHub 没有私有仓库的只读授权，所以会申请 repo 和 read:org；Nootify 只发送只读查询。</p>
     </div>
     <div data-panel="settings-lark" hidden>
       <div class="group">
@@ -123,7 +124,7 @@
         <div class="setting"><div class="setting-main"><div class="setting-title">导入配置</div><div class="setting-sub">选择导出的文件，确认内容后再写入</div></div><div class="setting-actions"><input id="import-file" type="file" accept=".json,application/json" aria-label="选择配置文件" hidden><button type="button" id="import-choose" class="text-button primary">选择文件…</button></div></div>
         <div class="setting" id="import-preview" hidden><div class="setting-main"><div class="setting-title" id="import-name"></div><div class="setting-sub" id="import-date"></div><ul id="import-lines" class="setting-list"></ul></div><div class="setting-actions"><button type="button" id="import-cancel" class="text-button">取消</button><button type="button" id="import-apply" class="text-button primary">写入这些设置</button></div></div>
       </div>
-      <p class="hint">配置文件包含飞书凭据和接收人、PR 配置与关注选择、Codex 和 OpenCode 连接、已启用的 Agents。其中有明文密钥，文件权限是 0600，不要提交到仓库或转发。导入只覆盖文件里有的设置；Agents 只会启用，不会关闭。GitHub 登录由 gh 保存，不在文件里。</p>
+      <p class="hint">配置文件包含飞书凭据和接收人、PR 配置与关注选择、Codex 和 OpenCode 连接、已启用的 Agents。其中有明文密钥，文件权限是 0600，不要提交到仓库或转发。导入只覆盖文件里有的设置；Agents 只会启用，不会关闭。GitHub 登录不在文件里，换机器后重新登录。</p>
     </div>
     <div data-panel="settings-about" hidden>
       <div class="group">

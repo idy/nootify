@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { PullRequestsService, type PullRequest, type PullSnapshot } from '../src/github.js';
-import { GitHubCommands, loadPullConfig, parsePullConfig, type PullCollection, type PullTargets } from '../src/github-api.js';
+import { GitHubCommands, GitHubSignedOut, loadPullConfig, parsePullConfig, type PullCollection, type PullTargets } from '../src/github-api.js';
 import { classifyPull, comparePulls, normalizePull, parseGitHubRemote, type GitHubPull } from '../src/github-model.js';
 
 const date = '2026-10-01T00:00:00Z';
@@ -189,17 +189,47 @@ test('account-wide legacy caches cannot populate session subscriptions', async t
   await settled(f.service); assert.ok(!f.service.repositories().some(entry => entry.repository === 'viewer/unrelated'));
 });
 
-test('GH_BIN must identify as GitHub CLI, and stop reaps an unresponsive query process', async t => {
-  const f = await fixture(t); const binary = join(f.root, 'fake-gh.cjs'); const childPid = join(f.root, 'child.pid');
-  const prior = process.env.GH_BIN; process.env.GH_BIN = binary;
-  t.after(() => { if (prior === undefined) delete process.env.GH_BIN; else process.env.GH_BIN = prior; });
-  await writeFile(binary, `#!${process.execPath}\nprocess.stdout.write('something else\\n');\n`, { mode: 0o700 });
-  const first = new GitHubCommands(f.directory, new AbortController().signal);
-  await assert.rejects(first.findGh(), /did not identify itself/); await first.stop();
-  await writeFile(binary, `#!${process.execPath}\nif (process.argv.includes('--version')) { process.stdout.write('gh version 2.99.0\\n'); } else { require('node:fs').writeFileSync(${JSON.stringify(childPid)}, String(process.pid)); process.on('SIGTERM', () => {}); setInterval(() => {}, 1000); }\n`, { mode: 0o700 });
+test('stop reaps an unresponsive child process', async t => {
+  const f = await fixture(t); const script = join(f.root, 'stubborn.cjs'); const childPid = join(f.root, 'child.pid');
+  await writeFile(script, `require('node:fs').writeFileSync(${JSON.stringify(childPid)}, String(process.pid)); process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);\n`);
   const controller = new AbortController(); const commands = new GitHubCommands(f.directory, controller.signal);
-  const pending = commands.graphql('query Test { viewer { login } }').catch(error => error);
+  const run = (commands as unknown as { run(file: string, args: string[]): Promise<string> }).run.bind(commands);
+  const pending = run(process.execPath, [script]).catch(error => error);
   await waitFor(async () => { try { await stat(childPid); return true; } catch { return false; } });
   const pid = Number(await readFile(childPid, 'utf8')); controller.abort(); await commands.stop(); await pending;
   assert.throws(() => process.kill(pid, 0), /ESRCH/);
+});
+
+test('nobody signed in keeps session subscriptions and the last data, without calling it a failure', async t => {
+  const f = await fixture(t); await f.service.start(); const good = await settled(f.service);
+  f.setBehavior(async () => { throw new GitHubSignedOut(); });
+  f.service.refresh(); const signedOut = await settled(f.service);
+  assert.deepEqual([signedOut.refresh.signedOut, signedOut.refresh.error, f.service.status()], [true, undefined, 'signed_out']);
+  assert.deepEqual(signedOut.internal, good.internal);
+  assert.deepEqual(signedOut.repositories.map(entry => entry.repository), good.repositories.map(entry => entry.repository));
+  assert.ok(!f.reports.some(record => record.status === 'refresh_failed'));
+  f.setBehavior(async () => { throw new Error('HTTP 502'); });
+  f.service.refresh(); const failed = await settled(f.service);
+  assert.deepEqual([failed.refresh.signedOut, failed.refresh.error, f.service.status()], [undefined, 'HTTP 502', 'stale']);
+});
+
+test('a sign-in during a refresh gets a query of its own', async t => {
+  const f = await fixture(t); let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  f.setBehavior(async () => { await gate; throw new GitHubSignedOut(); });
+  await f.service.start(); await waitFor(() => f.calls.length === 1);
+  f.setBehavior(async () => collection([normalizePull(internalPull(1))]));
+  f.service.refreshSoon(); release();
+  await waitFor(() => f.calls.length === 2);
+  assert.deepEqual([(await settled(f.service)).refresh.signedOut, f.service.status()], [undefined, 'ready']);
+});
+
+test('without a token the real collection stops before any request', async t => {
+  const request = t.mock.method(globalThis, 'fetch', async () => assert.fail('No request may be sent without a token'));
+  const f = await fixture(t);
+  const service = new PullRequestsService(f.directory, () => {}, { desktopRoots: [join(f.root, 'desktop')] });
+  t.after(() => service.stop());
+  await service.start();
+  assert.equal((await settled(service)).refresh.signedOut, true);
+  assert.equal(request.mock.calls.length, 0);
 });

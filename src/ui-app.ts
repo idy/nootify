@@ -5,7 +5,7 @@ import type { AgentPrompt } from './agents.js';
 import type { GitHubLogin } from './github-auth.js';
 import type { GitHubSettings, ImportSummary, SettingsPage } from './settings.js';
 
-interface PullSummary { internal: number; upstream: number; followed: number; running: boolean; lastSuccessAt?: string; error?: string }
+interface PullSummary { internal: number; upstream: number; followed: number; running: boolean; lastSuccessAt?: string; error?: string; signedOut?: boolean }
 interface Snapshot {
   time: string; modules: ModuleStatus[]; sessions: PublicSession[]; logs: LogEntry[];
   pulls?: PullSummary; access?: { tailnet_url?: string };
@@ -40,7 +40,7 @@ const descriptions: Record<string, string> = {
   reconnecting: '飞书正在重连', reconnected: '飞书已重新连接', refresh_completed: 'GitHub PR 已刷新', refresh_failed: 'GitHub PR 刷新失败',
   thread_created: '已为会话创建飞书群', thread_reused: '会话已连接飞书群', thread_message: '会话发送了进度消息', thread_failed: '进度消息发送失败',
   prompt_injected: '已写入 agent 提示词', prompt_removed: '已移除 agent 提示词',
-  github_login: 'GitHub 已登录', lark_configured: '飞书应用凭据已更新', config_exported: '配置已导出', config_imported: '配置已导入',
+  github_login: 'GitHub 已登录', github_logout: 'GitHub 已退出登录', lark_configured: '飞书应用凭据已更新', config_exported: '配置已导出', config_imported: '配置已导入',
   tailnet_listening: 'Tailscale 访问已开启', tailnet_failed: 'Tailscale 监听失败', tailnet_unavailable: 'Tailscale 未运行，仅本机可访问',
 };
 const reasons: Record<string, string> = {
@@ -77,6 +77,7 @@ const moduleStates: Record<string, Tone> = {
   ready: { label: '就绪', tone: 'ok' }, idle: { label: '等待刷新', tone: 'warn' }, refreshing: { label: '刷新中', tone: 'warn' },
   stale: { label: '刷新失败', tone: 'error' }, error: { label: '异常', tone: 'error' }, failed: { label: '异常', tone: 'error' },
   connecting: { label: '连接中', tone: 'warn' }, reconnecting: { label: '重连中', tone: 'warn' }, disabled: { label: '未启用', tone: 'muted' }, stopped: { label: '已停止', tone: 'muted' },
+  signed_out: { label: '未登录', tone: 'warn' },
 };
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
@@ -316,7 +317,7 @@ function renderPulls(): void {
   if (!pulls.length) {
     const first = !refresh?.lastSuccessAt;
     $('pull-empty-title').textContent = !data ? '正在读取 PR 数据' : first && refresh?.running ? '正在首次从 GitHub 拉取' : first ? '还没有 GitHub 数据' : all.length ? '没有匹配的 PR' : '没有打开的 PR';
-    $('pull-empty-detail').textContent = first ? '数据在后台刷新，完成后自动显示。' : all.length ? '换个筛选条件或搜索词。'
+    $('pull-empty-detail').textContent = first ? (refresh?.signedOut ? '登录 GitHub 后自动显示。' : '数据在后台刷新，完成后自动显示。') : all.length ? '换个筛选条件或搜索词。'
       : hidden ? '已关注的仓库没有打开的 PR；在「PR 订阅」中勾选更多来源。' : '刷新完成后，新的 Open PR 会出现在这里。';
   }
   const warnings = $<HTMLDetailsElement>('pull-warnings');
@@ -487,6 +488,10 @@ function renderAgents(): void {
 
 // ---- Settings ----
 const credentialSources: Record<string, string> = { environment: '环境变量', settings: '这里保存的凭据', 'mcp-config': 'MCP 配置文件' };
+const githubErrors: Record<string, string> = {
+  access_denied: '已在 GitHub 上拒绝授权', expired_token: '验证码已过期，请重新登录', device_flow_disabled: 'GitHub OAuth App 没有开启 Device Flow',
+  'Not Found': 'GitHub 找不到这个 OAuth App，请检查 Client ID', missing_client_id: '这个版本没有配置 GitHub OAuth Client ID',
+};
 const loginActive = (login?: GitHubLogin): boolean => login?.status === 'starting' || login?.status === 'waiting';
 /** Skips unchanged text, so polling never clears a selection such as the device code. */
 function setText(id: string, text: string): void { if ($(id).textContent !== text) $(id).textContent = text; }
@@ -542,8 +547,7 @@ async function settingsRun(key: string, failure: string, action: () => Promise<s
 function githubStatus(): { text: string; tone: Tone } {
   const account = state.github?.account;
   if (!account) return { text: loginActive(state.github?.login) ? '正在登录' : '正在检查登录状态…', tone: { label: '', tone: 'muted' } };
-  if (!account.installed) return { text: '没有找到 GitHub CLI：先安装 gh（brew install gh），或设置绝对路径 GH_BIN', tone: { label: '未安装', tone: 'error' } };
-  if (account.signedIn) return { text: `${account.login} · 和终端里的 gh 共用`, tone: { label: '已登录', tone: 'ok' } };
+  if (account.signedIn) return { text: `${account.login} · 和终端里的 gh 互不影响`, tone: { label: '已登录', tone: 'ok' } };
   if (account.error) return { text: `无法确认登录状态：${account.error}`, tone: { label: '未确认', tone: 'warn' } };
   return { text: '登录后才能读取 PR 和订阅', tone: { label: '未登录', tone: 'warn' } };
 }
@@ -552,15 +556,17 @@ function renderGitHub(remote: boolean): void {
   const active = loginActive(login); const waiting = login?.status === 'waiting';
   const status = githubStatus();
   setText('github-status', status.text); setTone('github-state', status.tone);
-  const start = $<HTMLButtonElement>('github-login');
-  start.hidden = remote || !github || active || github.account?.installed === false;
-  start.disabled = state.pendingSettings.has('github');
-  setText('github-login', github?.account?.signedIn ? '重新登录' : '登录');
+  const signedIn = github?.account?.signedIn === true;
+  const start = $<HTMLButtonElement>('github-login'); const leave = $<HTMLButtonElement>('github-logout');
+  start.hidden = remote || !github || active || signedIn;
+  leave.hidden = remote || active || !signedIn;
+  start.disabled = leave.disabled = state.pendingSettings.has('github');
   $('github-flow').hidden = !active || remote;
   setText('github-flow-title', waiting ? '在 GitHub 页面输入这个验证码' : '正在向 GitHub 申请验证码…');
   setText('github-flow-sub', waiting && login?.expiresAt ? `${clock(login.expiresAt)} 前有效，授权后这里会自动更新` : '');
   setText('github-code', login?.code ?? '');
   $('github-copy').hidden = !waiting;
+  if (!waiting) setText('github-copy', '复制');
   const open = $<HTMLAnchorElement>('github-open');
   open.hidden = !waiting;
   if (login?.url) open.href = login.url;
@@ -610,7 +616,7 @@ function renderSettings(): void {
   if (!isSettingsView(state.view)) return;
   const remote = state.settings?.editable === false;
   const login = state.github?.login;
-  const note = state.settingsNote ?? (state.view === 'settings-github' && login?.status === 'failed' ? { text: `GitHub 登录失败：${login.error}`, error: true }
+  const note = state.settingsNote ?? (state.view === 'settings-github' && login?.status === 'failed' ? { text: `GitHub 登录失败：${githubErrors[login.error ?? ''] ?? login.error}`, error: true }
     : remote ? { text: '通过 Tailscale 访问时只能查看；请在这台 Mac 上修改设置。', error: false } : undefined);
   const banner = $('settings-banner');
   banner.hidden = !note; banner.className = note && !note.error ? 'banner note' : 'banner';
@@ -674,6 +680,7 @@ function renderChrome(): void {
   $('settings-subnav').hidden = !isSettingsView(state.view);
   $('settings-link').toggleAttribute('data-open', isSettingsView(state.view));
   const pullSummary = state.snapshot.pulls;
+  $('github-signin').hidden = !usesPulls(state.view) || !(pullSummary?.signedOut ?? state.pulls?.refresh.signedOut);
   const internal = pullSummary?.internal ?? state.pulls?.internal.length;
   const upstream = pullSummary?.upstream ?? state.pulls?.upstream.length;
   $('internal-count').textContent = internal === undefined ? '' : String(internal);
@@ -770,14 +777,17 @@ $('github-login').addEventListener('click', () => {
 $('github-cancel').addEventListener('click', () => {
   void settingsRun('github', '无法取消登录', async () => { await post('/ui/api/settings/github/login', { action: 'cancel' }); await loadGitHub(); });
 });
+$('github-logout').addEventListener('click', () => {
+  void settingsRun('github', '无法退出登录', async () => { await post('/ui/api/settings/github/login', { action: 'sign-out' }); await loadGitHub(); return '已退出 GitHub 登录'; });
+});
 $('github-copy').addEventListener('click', () => {
   const code = state.github?.login.code;
   if (!code) return;
-  // The clipboard API exists only in secure contexts; gh has usually copied the code already.
+  // The clipboard API can be missing or refused; selecting the code then leaves ⌘C.
   void (navigator.clipboard?.writeText(code) ?? Promise.reject(new Error('Clipboard is unavailable'))).then(() => {
     setText('github-copy', '已复制');
     setTimeout(() => setText('github-copy', '复制'), 2000);
-  }, () => setText('github-copy', '请手动复制'));
+  }, () => { getSelection()?.selectAllChildren($('github-code')); setText('github-copy', '已选中，按 ⌘C'); });
 });
 function saveLark(): void {
   void settingsRun('lark', '无法保存飞书凭据', async () => {

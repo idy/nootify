@@ -9,7 +9,7 @@ import { HttpError, type ServiceModule } from './types.js';
 export interface PullsSource { snapshot(): PullSnapshot; refresh(): void; setChoice(repository: string, follow: boolean | null): Promise<RepositoryEntry> }
 export interface AgentsSource { list(): Promise<AgentPrompt[]>; set(agent: AgentId, enabled: boolean): Promise<AgentPrompt> }
 export interface ChannelSummary { name: 'feishu'; configured: boolean; recipient?: string; groups: number }
-export type SettingsSource = Pick<SettingsService, 'page' | 'github' | 'startGitHubLogin' | 'cancelGitHubLogin' | 'saveLark' | 'clearLark' | 'setRecipient' | 'exportConfig' | 'previewImport' | 'importConfig' | 'reveal'>;
+export type SettingsSource = Pick<SettingsService, 'page' | 'github' | 'startGitHubLogin' | 'cancelGitHubLogin' | 'signOutGitHub' | 'saveLark' | 'clearLark' | 'setRecipient' | 'exportConfig' | 'previewImport' | 'importConfig' | 'reveal'>;
 export interface UiContext {
   modules: ServiceModule[]; logs: EventLog; pulls?: PullsSource; tailnetUrl?: () => string | undefined;
   agents?: AgentsSource; channel?: () => ChannelSummary | undefined; settings?: SettingsSource;
@@ -49,7 +49,8 @@ async function settingsAction(request: IncomingMessage, path: string, settings: 
   if (path === '/ui/api/settings/github/login') {
     if (body.action === 'start') return settings.startGitHubLogin();
     if (body.action === 'cancel') return settings.cancelGitHubLogin();
-    throw new HttpError(400, 'Expected {"action": "start" | "cancel"}');
+    if (body.action === 'sign-out') { await settings.signOutGitHub(); return { accepted: true }; }
+    throw new HttpError(400, 'Expected {"action": "start" | "cancel" | "sign-out"}');
   }
   if (path === '/ui/api/settings/lark') {
     if (body.clear === true) await settings.clearLark(); else await settings.saveLark(body.app_id, body.app_secret);
@@ -111,7 +112,7 @@ export async function serveUi(request: IncomingMessage, response: ServerResponse
     else if (path === '/ui/api/settings') json(response, 200, { ...await context.settings.page(), editable: context.via !== 'tailnet' });
     else {
       const github = await context.settings.github();
-      // A device code authorizes this Mac's gh, so it stays with whoever is sitting at it.
+      // A device code signs this Mac's Nootify in, so it stays with whoever is sitting at it.
       json(response, 200, context.via === 'tailnet' ? { ...github, login: { status: github.login.status } } : github);
     }
     return true;
@@ -134,7 +135,7 @@ export async function serveUi(request: IncomingMessage, response: ServerResponse
     sessions: sessions?.body ?? [], logs: context.logs.recent(),
     ...(pulls ? { pulls: { internal: pulls.internal.length, upstream: pulls.upstream.length, running: pulls.refresh.running,
       followed: pulls.repositories.filter(entry => entry.followed).length,
-      lastSuccessAt: pulls.refresh.lastSuccessAt, error: pulls.refresh.error } } : {}),
+      lastSuccessAt: pulls.refresh.lastSuccessAt, error: pulls.refresh.error, signedOut: pulls.refresh.signedOut } } : {}),
     access: tailnet ? { tailnet_url: tailnet } : {},
   });
   return true;

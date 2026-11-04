@@ -100,11 +100,11 @@ export async function main(): Promise<void> {
     if (record.status === pullsOutcome) return;
     pullsOutcome = record.status;
     report({ source: 'pulls', ...record });
-  });
+  }, undefined, undefined, () => state.settings.github_token);
   const tailnet = new TailnetAccess(port, { users: process.env.NOOTIFY_TAILNET_USERS?.split(',').map(user => user.trim()).filter(Boolean) });
   const agents = new AgentPrompts({ stateDir: state.directory, port, tailnetAddress: () => { const url = tailnet.url(); return url ? new URL(url).hostname : undefined; } }, report);
   const modules: ServiceModule[] = [sessions, lark, pulls, agents];
-  const github = new GitHubAuth(state.directory, report, () => pulls.refresh());
+  const github = new GitHubAuth(state, report, () => pulls.refreshSoon());
   const settings = new SettingsService({ state, lark, github, pulls, agents, mcpConfig: values['mcp-config'], source: resolved?.source, report });
   const page = { pulls, tailnet, agents, channel: () => lark.channel(), settings };
   const server = createServiceHost(modules, state.token, logs, page);

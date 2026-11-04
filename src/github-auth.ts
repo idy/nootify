@@ -1,86 +1,99 @@
-import { spawn, type ChildProcess } from 'node:child_process';
-import { GitHubCommands, ghEnvironment, safeError } from './github-api.js';
+import { setTimeout as delay } from 'node:timers/promises';
+import { GitHubCommands, GitHubSignedOut, safeError, USER_AGENT } from './github-api.js';
+import type { State } from './state.js';
 
-/** GitHub's device codes last 15 minutes; gh gives up by itself, this only bounds a stuck child. */
-const LOGIN_TIMEOUT = 16 * 60_000;
-const CODE_LIFETIME = 15 * 60_000;
+/** Names Nootify's OAuth App, which has Device Flow enabled. Client IDs are public and this flow uses no client secret. */
+export const GITHUB_CLIENT_ID = process.env.NOOTIFY_GITHUB_CLIENT_ID?.trim() || '';
+/** Private repositories need `repo`: OAuth has no read-only scope for them. Nootify only sends read-only queries. */
+const SCOPES = 'repo read:org';
+const DEVICE_PAGE = 'https://github.com/login/device';
+const REQUEST_TIMEOUT = 15_000;
 const ACCOUNT_TIMEOUT = 15_000;
+/** GitHub's documented values, for a reply that leaves them out. */
+const CODE_LIFETIME = 900;
+const POLL_INTERVAL = 5;
 
-/** `installed: false` means no usable gh. `error` means the login could not be checked, not that it is gone. */
-export interface GitHubAccount { installed: boolean; signedIn: boolean; login?: string; error?: string }
+/** `error` means the login could not be checked, not that it is gone. */
+export interface GitHubAccount { signedIn: boolean; login?: string; error?: string }
+/** `error` is GitHub's error code when it gave one, such as `access_denied`. */
 export interface GitHubLogin { status: 'idle' | 'starting' | 'waiting' | 'failed'; code?: string; url?: string; expiresAt?: string; error?: string }
+interface DeviceCode { device_code?: string; user_code?: string; verification_uri?: string; expires_in?: number; interval?: number; error?: string }
+interface TokenReply { access_token?: string; interval?: number; error?: string }
 
-/** gh writes `One-time code (X) copied to clipboard` or `First copy your one-time code: X`, after a warning if copying failed. */
-export function deviceCode(output: string): { code: string; url: string } | undefined {
-  const code = /[Oo]ne-time code[^\n]*?\b([A-Z0-9]{4}-[A-Z0-9]{4})\b/.exec(output)?.[1];
-  const url = /https:\/\/github\.com\/login\/device\S*/.exec(output)?.[0];
-  return code && url ? { code, url } : undefined;
+async function post<T>(path: string, fields: Record<string, string>, signal: AbortSignal): Promise<T> {
+  const response = await fetch(`https://github.com/${path}`, { method: 'POST', redirect: 'error', body: new URLSearchParams(fields),
+    headers: { accept: 'application/json', 'user-agent': USER_AGENT }, signal: AbortSignal.any([signal, AbortSignal.timeout(REQUEST_TIMEOUT)]) });
+  return await response.json() as T;
 }
 
 /**
- * Signs the GitHub CLI in through its device flow. Without a terminal, `gh auth login --web` prints the
- * code and URL and then waits for the browser, so the page can show both. The credential stays with gh,
- * shared with the terminal, and never passes through this service.
+ * Signs in through GitHub's device flow: the page shows the code, this service polls until it is
+ * authorized, and the token stays in the private state file. The token is Nootify's own, so
+ * signing in or out never touches the GitHub CLI's login on this Mac.
  */
 export class GitHubAuth {
   private flow: GitHubLogin = { status: 'idle' };
-  private child?: ChildProcess;
-  private closed?: Promise<void>;
-  /** Bumped by every start and cancel, so a superseded attempt cannot report over the current one. */
-  private attempt = 0;
-  constructor(private readonly directory: string, private readonly report: (record: Record<string, unknown>) => void = () => {},
-    private readonly signedIn: () => void = () => {}) {}
+  private controller?: AbortController;
+  private running?: Promise<void>;
+  constructor(private readonly state: State, private readonly report: (record: Record<string, unknown>) => void = () => {},
+    private readonly changed: () => void = () => {}, private readonly clientId = GITHUB_CLIENT_ID) {}
 
   login(): GitHubLogin { return { ...this.flow }; }
   private active(): boolean { return this.flow.status === 'starting' || this.flow.status === 'waiting'; }
   async account(): Promise<GitHubAccount> {
-    const commands = new GitHubCommands(this.directory, AbortSignal.timeout(ACCOUNT_TIMEOUT));
-    try { await commands.findGh(); } catch (error) { return { installed: false, signedIn: false, error: safeError(error) }; }
+    const commands = new GitHubCommands(this.state.directory, AbortSignal.timeout(ACCOUNT_TIMEOUT), () => this.state.settings.github_token);
     try {
       const { data } = await commands.graphql('query NootifyViewer { viewer { login } }');
-      return { installed: true, signedIn: true, login: String(data.viewer?.login) };
-    } catch (error) {
-      // gh ends both "no token" and a rejected token by suggesting this command; anything else says nothing about the login.
-      const expired = String((error as { stderr?: string }).stderr).includes('gh auth login');
-      return { installed: true, signedIn: false, ...(expired ? {} : { error: safeError(error) }) };
-    } finally { await commands.stop(); }
+      return { signedIn: true, login: String(data.viewer?.login) };
+    } catch (error) { return { signedIn: false, ...(error instanceof GitHubSignedOut ? {} : { error: safeError(error) }) }; }
   }
   start(): GitHubLogin {
     if (this.active()) return this.login();
-    const attempt = ++this.attempt;
+    if (!this.clientId) { this.flow = { status: 'failed', error: 'missing_client_id' }; return this.login(); }
+    const controller = new AbortController();
+    this.controller = controller;
     this.flow = { status: 'starting' };
-    this.run(attempt).catch(error => { if (attempt === this.attempt) this.flow = { status: 'failed', error: safeError(error) }; });
+    this.running = this.run(controller.signal).catch(error => { if (!controller.signal.aborted) this.flow = { status: 'failed', error: safeError(error) }; });
     return this.login();
   }
-  private async run(attempt: number): Promise<void> {
-    const gh = await new GitHubCommands(this.directory, AbortSignal.timeout(ACCOUNT_TIMEOUT)).findGh();
-    if (attempt !== this.attempt) return;
-    const child = spawn(gh, ['auth', 'login', '--hostname', 'github.com', '--web'],
-      { cwd: this.directory, env: ghEnvironment(), stdio: ['ignore', 'pipe', 'pipe'], timeout: LOGIN_TIMEOUT });
-    this.child = child;
-    let output = '';
-    const read = (chunk: Buffer) => {
-      output = (output + chunk.toString('utf8')).slice(-8192);
-      const found = deviceCode(output);
-      if (found && attempt === this.attempt && this.flow.status === 'starting') {
-        this.flow = { status: 'waiting', ...found, expiresAt: new Date(Date.now() + CODE_LIFETIME).toISOString() };
+  private async run(signal: AbortSignal): Promise<void> {
+    const device = await post<DeviceCode>('login/device/code', { client_id: this.clientId, scope: SCOPES }, signal);
+    if (!device.device_code || !device.user_code) throw new Error(device.error ?? 'unexpected_reply');
+    const expires = Date.now() + (device.expires_in ?? CODE_LIFETIME) * 1000;
+    this.flow = { status: 'waiting', code: device.user_code, url: device.verification_uri ?? DEVICE_PAGE, expiresAt: new Date(expires).toISOString() };
+    let interval = device.interval ?? POLL_INTERVAL;
+    for (;;) {
+      await delay(interval * 1000, undefined, { signal });
+      if (Date.now() > expires) throw new Error('expired_token');
+      let reply: TokenReply;
+      try {
+        reply = await post<TokenReply>('login/oauth/access_token', { client_id: this.clientId, device_code: device.device_code,
+          grant_type: 'urn:ietf:params:oauth:grant-type:device_code' }, signal);
+      } catch { signal.throwIfAborted(); continue; } // A dropped connection says nothing about the code.
+      if (reply.access_token) {
+        signal.throwIfAborted();
+        this.state.settings.github_token = reply.access_token;
+        await this.state.save();
+        this.flow = { status: 'idle' };
+        this.report({ source: 'pulls', status: 'github_login' });
+        this.changed();
+        return;
       }
-    };
-    child.stdout!.on('data', read); child.stderr!.on('data', read);
-    const exit = new Promise<number | null>((accept, reject) => { child.once('error', reject); child.once('close', accept); });
-    this.closed = exit.then(() => {}, () => {});
-    const code = await exit;
-    if (this.child === child) this.child = undefined;
-    if (attempt !== this.attempt) return;
-    if (code === 0) {
-      this.flow = { status: 'idle' };
-      this.report({ source: 'pulls', status: 'github_login' });
-      this.signedIn();
-    } else this.flow = { status: 'failed', error: safeError({ stderr: output || `gh exited with ${code}` }) };
+      if (reply.error === 'slow_down') interval = reply.interval ?? interval + POLL_INTERVAL;
+      else if (reply.error !== 'authorization_pending') throw new Error(reply.error ?? 'unexpected_reply');
+    }
   }
   cancel(): GitHubLogin {
-    if (this.active()) { this.attempt++; this.flow = { status: 'idle' }; this.child?.kill(); }
+    if (this.active()) { this.controller?.abort(); this.flow = { status: 'idle' }; }
     return this.login();
   }
-  async stop(): Promise<void> { this.cancel(); await this.closed; }
+  /** Forgets the token here. Revoking it needs the OAuth App's secret, which Nootify does not have, so that stays on GitHub's settings page. */
+  async signOut(): Promise<void> {
+    this.cancel();
+    delete this.state.settings.github_token;
+    await this.state.save();
+    this.report({ source: 'pulls', status: 'github_logout' });
+    this.changed();
+  }
+  async stop(): Promise<void> { this.cancel(); await this.running; }
 }

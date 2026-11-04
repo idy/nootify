@@ -143,7 +143,7 @@ export class SettingsService {
       lark: { status: lark.status(), source: this.source, app_id: lark.credentials?.appId, saved: Boolean(state.settings.lark_app_id),
         recipient: channel.recipient ?? state.settings.lark_recipient_open_id, groups: channel.groups } };
   }
-  /** Asking gh costs a network round trip, so polling during a login reads only the flow. */
+  /** Asking GitHub costs a network round trip, so polling during a login reads only the flow. */
   async github(): Promise<GitHubSettings> {
     const { github } = this.options;
     const login = github.login();
@@ -152,6 +152,7 @@ export class SettingsService {
   }
   startGitHubLogin(): GitHubLogin { return this.options.github.start(); }
   cancelGitHubLogin(): GitHubLogin { return this.options.github.cancel(); }
+  signOutGitHub(): Promise<void> { return this.options.github.signOut(); }
   async stop(): Promise<void> { await this.options.github.stop(); await this.writes.catch(() => {}); }
 
   /** Re-derives the active bot from its sources and moves the connection only if that changed it. */

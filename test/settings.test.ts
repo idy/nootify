@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { chmod, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import type { AgentPrompt } from '../src/agents.js';
 import { EventLog } from '../src/events.js';
-import { deviceCode, GitHubAuth } from '../src/github-auth.js';
+import { GitHubAuth } from '../src/github-auth.js';
 import { PullRequestsService } from '../src/github.js';
 import { resolveCredentials, type Credentials, type LarkApi } from '../src/lark-metadata.js';
 import { LarkService } from '../src/lark.js';
@@ -30,29 +30,27 @@ async function until<T>(read: () => T | undefined | false): Promise<T> {
   }
   throw new Error('Timed out');
 }
-/** Stands in for gh, as GH_BIN: a login prints its code and waits for `<gh>.go`; `<gh>.deny` makes it fail. */
-async function fakeGh(t: TestContext, dir: string): Promise<string> {
-  const path = join(dir, 'gh');
-  await writeFile(path, `#!/bin/sh
-case "$1" in
-  --version) echo 'gh version 2.0.0 (test)' ;;
-  auth)
-    echo '! One-time code (ABCD-1234) copied to clipboard' >&2
-    echo 'Open this URL to continue in your web browser: https://github.com/login/device' >&2
-    while [ ! -f "$0.go" ]; do sleep 0.02; done
-    if [ -f "$0.deny" ]; then echo 'access_denied: the user cancelled' >&2; exit 1; fi
-    touch "$0.ok" ;;
-  api)
-    if [ -f "$0.offline" ]; then echo 'dial tcp: lookup api.github.com: no such host' >&2; exit 1; fi
-    if [ -f "$0.ok" ]; then echo '{"data":{"viewer":{"login":"octo"}}}'; exit 0; fi
-    echo 'To get started with GitHub CLI, please run:  gh auth login' >&2; exit 4 ;;
-esac
-`);
-  await chmod(path, 0o755);
-  const previous = process.env.GH_BIN;
-  process.env.GH_BIN = path;
-  t.after(() => { if (previous === undefined) delete process.env.GH_BIN; else process.env.GH_BIN = previous; });
-  return path;
+/** GitHub's device login and GraphQL in memory, with replies to polling queued in `replies`. Requests to the test's own servers pass through. */
+function fakeGitHub(t: TestContext) {
+  const github = { token: 'gho_fake-token', replies: [] as string[], offline: false, deviceReply: undefined as Record<string, unknown> | undefined, requests: [] as { url: string; fields: URLSearchParams }[] };
+  const real = globalThis.fetch;
+  t.mock.method(globalThis, 'fetch', async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const url = String(input);
+    if (url.startsWith('http://127.0.0.1')) return real(input, init);
+    if (github.offline) throw new TypeError('fetch failed', { cause: new Error('getaddrinfo ENOTFOUND github.com') });
+    if (url === 'https://api.github.com/graphql') {
+      return new Headers(init?.headers).get('authorization') === `Bearer ${github.token}`
+        ? Response.json({ data: { viewer: { login: 'octo' } } }) : Response.json({ message: 'Bad credentials' }, { status: 401 });
+    }
+    github.requests.push({ url, fields: new URLSearchParams(String(init?.body)) });
+    if (url === 'https://github.com/login/device/code') {
+      return Response.json(github.deviceReply ?? { device_code: 'device-1', user_code: 'ABCD-1234', verification_uri: 'https://github.com/login/device', expires_in: 900, interval: 0 });
+    }
+    assert.equal(url, 'https://github.com/login/oauth/access_token');
+    const reply = github.replies.shift() ?? 'authorization_pending';
+    return Response.json(reply === 'token' ? { access_token: github.token, token_type: 'bearer', scope: 'repo,read:org' } : { error: reply, ...(reply === 'slow_down' ? { interval: 0 } : {}) });
+  });
+  return github;
 }
 async function mcpFile(t: TestContext): Promise<string> {
   const path = join(await temporary(t), 'mcp.json');
@@ -72,7 +70,7 @@ async function harness(t: TestContext, options: { env?: NodeJS.ProcessEnv; mcpCo
   };
   const pulls = new PullRequestsService(dir);
   const revealed: string[] = []; const reports: Record<string, unknown>[] = [];
-  const settings = new SettingsService({ state, lark, pulls, agents, github: new GitHubAuth(dir), env: options.env ?? {}, mcpConfig: options.mcpConfig,
+  const settings = new SettingsService({ state, lark, pulls, agents, github: new GitHubAuth(state, () => {}, () => {}, 'client-1'), env: options.env ?? {}, mcpConfig: options.mcpConfig,
     verify: options.verify ?? (async () => {}), reveal: async path => { revealed.push(path); }, report: record => reports.push(record) });
   return { dir, state, lark, pulls, settings, configured, enabled, revealed, reports };
 }
@@ -85,63 +83,95 @@ async function serve(t: TestContext, logs: EventLog, options: HostOptions): Prom
 const action = (origin: string, path: string, body?: unknown, headers: Record<string, string> = { 'x-nootify-ui': '1' }) => fetch(origin + path,
   { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
 
-test('device codes are read from either gh wording, even after a clipboard warning', () => {
-  const url = 'Open this URL to continue in your web browser: https://github.com/login/device\n';
-  assert.deepEqual(deviceCode(`! One-time code (ABCD-1234) copied to clipboard\n${url}`), { code: 'ABCD-1234', url: 'https://github.com/login/device' });
-  assert.equal(deviceCode(`failed to copy one-time code to clipboard: exec: "pbcopy"\n! First copy your one-time code: WXYZ-9876\n${url}`)?.code, 'WXYZ-9876');
-  assert.equal(deviceCode('! One-time code (ABCD-1234) copied to clipboard\n'), undefined, 'still waiting for the URL');
-  assert.equal(deviceCode(url), undefined);
-  assert.equal(deviceCode(`Reference ABCD-1234\n${url}`), undefined, 'only gh\'s own code line counts');
-});
-
-test('a device login shows gh\'s code, leaves the credential to gh and refreshes afterwards', async t => {
-  const dir = await temporary(t); const gh = await fakeGh(t, dir);
-  let refreshed = 0; const reports: Record<string, unknown>[] = [];
-  const auth = new GitHubAuth(dir, record => reports.push(record), () => { refreshed++; });
-  assert.deepEqual(await auth.account(), { installed: true, signedIn: false });
+test('a device login shows the code, keeps the token private and refreshes afterwards', async t => {
+  const github = fakeGitHub(t);
+  const dir = await temporary(t); const state = await State.open(dir);
+  let changed = 0; const reports: Record<string, unknown>[] = [];
+  const auth = new GitHubAuth(state, record => reports.push(record), () => { changed++; }, 'client-1');
+  assert.deepEqual(await auth.account(), { signedIn: false });
   assert.equal(auth.start().status, 'starting');
   assert.equal(auth.start().status, 'starting', 'a second start joins the running login');
   const waiting = await until(() => auth.login().status === 'waiting' && auth.login());
   assert.deepEqual([waiting.code, waiting.url], ['ABCD-1234', 'https://github.com/login/device']);
   assert.ok(Date.parse(waiting.expiresAt!) > Date.now());
-  await writeFile(`${gh}.go`, '');
-  await until(() => refreshed === 1);
+  assert.deepEqual(Object.fromEntries(github.requests[0].fields), { client_id: 'client-1', scope: 'repo read:org' });
+  github.replies.push('slow_down', 'token');
+  await until(() => changed === 1);
+  assert.deepEqual(Object.fromEntries(github.requests.at(-1)!.fields), { client_id: 'client-1', device_code: 'device-1', grant_type: 'urn:ietf:params:oauth:grant-type:device_code' });
   assert.deepEqual(auth.login(), { status: 'idle' });
-  assert.deepEqual(await auth.account(), { installed: true, signedIn: true, login: 'octo' });
+  assert.deepEqual(await auth.account(), { signedIn: true, login: 'octo' });
+  assert.equal((await State.open(dir)).settings.github_token, github.token);
+  assert.equal((await stat(join(dir, 'state.json'))).mode & 0o777, 0o600);
   assert.deepEqual(reports.map(record => record.status), ['github_login']);
+  assert.ok(!JSON.stringify(reports).includes(github.token));
 });
 
-test('a cancelled or refused login reports its outcome and can be retried', async t => {
-  const dir = await temporary(t); const gh = await fakeGh(t, dir);
-  let refreshed = 0;
-  const auth = new GitHubAuth(dir, () => {}, () => { refreshed++; });
+test('a cancelled, refused or expired login reports its outcome and can be retried', async t => {
+  const github = fakeGitHub(t);
+  const state = await State.open(await temporary(t));
+  let changed = 0;
+  const auth = new GitHubAuth(state, () => {}, () => { changed++; }, 'client-1');
   auth.start();
   await until(() => auth.login().status === 'waiting');
   assert.deepEqual(auth.cancel(), { status: 'idle' });
   await auth.stop();
-  assert.deepEqual(auth.login(), { status: 'idle' }, 'the killed child does not report over the cancellation');
-  await writeFile(`${gh}.go`, ''); await writeFile(`${gh}.deny`, '');
+  const polls = github.requests.length;
+  await new Promise(done => setTimeout(done, 30));
+  assert.equal(github.requests.length, polls, 'polling stops with the cancellation');
+  for (const error of ['access_denied', 'expired_token', 'device_flow_disabled']) {
+    github.replies.push(error);
+    auth.start();
+    assert.equal((await until(() => auth.login().status === 'failed' && auth.login())).error, error);
+  }
+  assert.deepEqual([changed, state.settings.github_token], [0, undefined]);
+  github.replies.push('token');
   auth.start();
-  const failed = await until(() => auth.login().status === 'failed' && auth.login());
-  assert.match(failed.error!, /access_denied/);
-  assert.equal(refreshed, 0);
-  await rm(`${gh}.deny`);
-  auth.start();
-  await until(() => refreshed === 1);
-  assert.equal((await auth.account()).login, 'octo');
+  await until(() => changed === 1);
+  assert.equal(state.settings.github_token, github.token);
 });
 
-test('a missing gh or an unreachable GitHub is not reported as signed out', async t => {
-  const dir = await temporary(t); const gh = await fakeGh(t, dir);
-  await writeFile(`${gh}.offline`, '');
-  const auth = new GitHubAuth(dir);
-  const offline = await auth.account();
-  assert.deepEqual([offline.installed, offline.signedIn], [true, false]);
-  assert.match(offline.error!, /no such host/);
-  process.env.GH_BIN = join(dir, 'missing-gh');
-  assert.equal((await auth.account()).installed, false);
+test('a dropped connection does not end a login, and GitHub refusing the app does', async t => {
+  const github = fakeGitHub(t);
+  const state = await State.open(await temporary(t));
+  let changed = 0;
+  const auth = new GitHubAuth(state, () => {}, () => { changed++; }, 'client-1');
   auth.start();
-  assert.match((await until(() => auth.login().status === 'failed' && auth.login())).error!, /GitHub CLI is unavailable/);
+  await until(() => auth.login().status === 'waiting');
+  github.offline = true;
+  await new Promise(done => setTimeout(done, 30));
+  assert.equal(auth.login().status, 'waiting');
+  github.offline = false; github.replies.push('token');
+  await until(() => changed === 1);
+  await auth.signOut();
+  github.deviceReply = { error: 'Not Found' };
+  auth.start();
+  assert.equal((await until(() => auth.login().status === 'failed' && auth.login())).error, 'Not Found');
+});
+
+test('a build without a client ID says so instead of calling GitHub', async t => {
+  const github = fakeGitHub(t);
+  const auth = new GitHubAuth(await State.open(await temporary(t)), () => {}, () => {}, '');
+  assert.deepEqual(auth.start(), { status: 'failed', error: 'missing_client_id' });
+  assert.equal(github.requests.length, 0);
+});
+
+test('a rejected token reads as signed out, an unreachable GitHub does not, and signing out forgets the token', async t => {
+  const github = fakeGitHub(t);
+  const dir = await temporary(t); const state = await State.open(dir);
+  state.settings.github_token = github.token; await state.save();
+  let changed = 0; const reports: Record<string, unknown>[] = [];
+  const auth = new GitHubAuth(state, record => reports.push(record), () => { changed++; }, 'client-1');
+  assert.deepEqual(await auth.account(), { signedIn: true, login: 'octo' });
+  github.offline = true;
+  const offline = await auth.account();
+  assert.equal(offline.signedIn, false);
+  assert.match(offline.error!, /Cannot reach GitHub: getaddrinfo ENOTFOUND/);
+  github.offline = false;
+  state.settings.github_token = 'gho_revoked';
+  assert.deepEqual(await auth.account(), { signedIn: false });
+  await auth.signOut();
+  assert.equal((await State.open(dir)).settings.github_token, undefined);
+  assert.deepEqual([changed, reports.map(record => record.status)], [1, ['github_logout']]);
 });
 
 test('credentials come from the environment, then saved settings, then the MCP file', async t => {
@@ -209,8 +239,10 @@ test('an export keeps its secrets in a private file and keeps only the newest te
   await assert.doesNotReject(settings.reveal());
   lark.credentials = { appId, appSecret: 'export-secret' };
   state.settings.lark_recipient_open_id = 'ou_owner';
+  state.settings.github_token = 'gho_stays-here';
   state.backends.set('opencode', { url: 'http://127.0.0.1:4096', password: 'backend-secret' });
   const { path, summary } = await settings.exportConfig();
+  assert.ok(!(await readFile(path, 'utf8')).includes('gho_stays-here'), 'the GitHub sign-in is not part of an export');
   assert.equal((await stat(path)).mode & 0o777, 0o600);
   assert.equal((await stat(dirname(path))).mode & 0o777, 0o700);
   const file = JSON.parse(await readFile(path, 'utf8'));
@@ -299,7 +331,7 @@ test('environment credentials stay in use after an import, and the import says s
 
 test('settings pages never carry secrets, and only this Mac can change anything', async t => {
   const { dir, state, settings, configured } = await harness(t);
-  const gh = await fakeGh(t, dir);
+  const github = fakeGitHub(t);
   const logs = await EventLog.open(dir);
   const local = await serve(t, logs, { settings });
   const remote = await serve(t, logs, { settings, via: 'tailnet', tailnet: { authorize: async () => undefined, url: () => undefined } as unknown as TailnetAccess });
@@ -309,6 +341,7 @@ test('settings pages never carry secrets, and only this Mac can change anything'
   assert.equal((await action(remote, '/ui/api/settings/lark', save)).status, 403, 'refused on the Tailscale listener');
   assert.equal((await action(remote, '/ui/api/settings/export')).status, 403);
   assert.equal((await action(remote, '/ui/api/settings/github/login', { action: 'start' })).status, 403);
+  assert.equal((await action(remote, '/ui/api/settings/github/login', { action: 'sign-out' })).status, 403);
   assert.equal((await action(remote, '/ui/api/settings/import', { document: {}, apply: true })).status, 403);
   assert.equal(state.settings.lark_app_id, undefined);
 
@@ -334,8 +367,12 @@ test('settings pages never carry secrets, and only this Mac can change anything'
   assert.deepEqual(((await (await fetch(`${remote}/ui/api/settings/github`)).json()) as { login: unknown }).login, { status: 'waiting' }, 'the code stays on this Mac');
   assert.equal((await action(local, '/ui/api/settings/github/login', { action: 'cancel' })).status, 200);
   await settings.stop();
-  await writeFile(`${gh}.ok`, '');
-  assert.equal(((await (await fetch(`${local}/ui/api/settings/github`)).json()) as { account: { login: string } }).account.login, 'octo');
+  state.settings.github_token = github.token;
+  const account = await (await fetch(`${local}/ui/api/settings/github`)).text();
+  assert.equal((JSON.parse(account) as { account: { login: string } }).account.login, 'octo');
+  for (const path of ['/ui/api/settings', '/ui/api/settings/github', '/ui/api/snapshot']) assert.ok(!(await (await fetch(local + path)).text()).includes(github.token), path);
+  assert.equal((await action(local, '/ui/api/settings/github/login', { action: 'sign-out' })).status, 200);
+  assert.equal(state.settings.github_token, undefined);
 });
 
 test('restoring pull preferences replaces only what it names', async t => {
