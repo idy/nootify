@@ -30,7 +30,7 @@ Download the DMG from [GitHub Releases](https://github.com/idy/nootify/releases/
 
 Automatic installation requires `~/Library/LaunchAgents/dev.idy.nootify.service.plist` to be absent and port 9417 to be free. It refuses installation from a read-only disk image. Keep the app in Applications: the job runs Node.js and `server.js` inside its bundle. An existing LaunchAgent is reused, and the tray never replaces its configuration.
 
-When `~/.claude.json` exists, the installer selects its `mcpServers.lark` credentials. A file without a Lark server leaves Feishu disabled and the PR pages available. Credentials stay in their original file. The web page receives no native Tauri IPC capabilities. Builds are ad-hoc signed and are not notarized; macOS may require allowing the first launch under System Settings > Privacy & Security.
+When `~/.claude.json` exists, the installer selects its `mcpServers.lark` credentials. A file without a Lark server leaves Feishu disabled and the PR pages available until credentials are saved under **设置 · 飞书**. Credentials stay in their original file. The web page receives no native Tauri IPC capabilities: the one exception to its isolation is the update bridge described under [Automatic updates](#automatic-updates-and-releases). Builds are ad-hoc signed and are not notarized; macOS may require allowing the first launch under System Settings > Privacy & Security.
 
 ### Build the desktop app
 
@@ -52,7 +52,9 @@ Outputs under `src-tauri/target/release/bundle/` are `macos/Nootify.app`, the Ap
 
 ### Automatic updates and releases
 
-The app checks [the signed release manifest](https://github.com/idy/nootify/releases/latest/download/latest.json) about 30 seconds after launch, every six hours, and when **检查更新** is selected. When a newer version exists, the tray offers **安装更新 vX.Y.Z**. Installation verifies the update signature, replaces the app, restarts the background service if its LaunchAgent runs this app's Node.js, and relaunches the app. Progress and errors appear in the tray's update status line.
+The app checks [the signed release manifest](https://github.com/idy/nootify/releases/latest/download/latest.json) about 30 seconds after launch, every six hours, and when **检查更新** is selected in the tray or under **设置 · 关于**. When a newer version exists, the tray offers **安装更新 vX.Y.Z** and every page shows a prompt with **立即更新** and **稍后**; nothing is downloaded until one of them is chosen. Installation verifies the update signature, replaces the app, restarts the background service if its LaunchAgent runs this app's Node.js, and relaunches the app. The page shows the downloaded size, percentage, and a progress bar, then the install and restart steps; errors appear there and in the tray's update status line.
+
+The update worker runs in Rust. It pushes its state into the page as a `nootify-update` DOM event, replayed on every page load, and the page asks for a check or an install by navigating to `nootify://update/check` or `nootify://update/install`, which the window's navigation policy cancels. Those are the only two requests; the page still has no IPC. A plain browser receives no such event, so **设置 · 关于** shows only the service version there.
 
 CI runs TypeScript tests, resource staging, rustfmt, clippy, and Rust tests on macOS. To publish a release, update `package.json` and `src-tauri/Cargo.toml` to the same version, commit to `main`, then push a matching `vX.Y.Z` tag. The release workflow rejects a tag that differs from `package.json`. It publishes the DMG, updater bundle, signature, and `latest.json` using the repository secrets `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. A manually dispatched release must select a version tag too.
 
@@ -66,9 +68,9 @@ node dist/src/cli.js launchd-install --mcp-config ~/.claude.json
 
 The installer creates `~/Library/LaunchAgents/dev.idy.nootify.service.plist` and loads it into the current user's GUI launchd domain. It uses an absolute Node executable and compiled server path, launches at login, and restarts on failure. No root privileges are needed. The checkout must remain at its installed path; build and reinstall after moving it.
 
-Feishu credentials may come from the explicitly selected `mcpServers.lark` MCP configuration, or `LARK_APP_ID`/`LARK_APP_SECRET` when running directly. A launchd job does not inherit your interactive shell environment: use the MCP-config option for the installed service. Omitting Feishu configuration leaves that module disabled while the other services remain available.
+Feishu credentials come from, in order: `LARK_APP_ID`/`LARK_APP_SECRET` when running directly, credentials saved under **设置 · 飞书**, or the explicitly selected `mcpServers.lark` MCP configuration. A launchd job does not inherit your interactive shell environment: use Settings or the MCP-config option for the installed service. Omitting Feishu configuration leaves that module disabled while the other services remain available.
 
-The default private state directory is `~/.local/state/nootify/`. It contains the HTTP authentication token, registered sessions/bindings, and logs. The state directory is private, and credential-bearing files use mode `0600`. Session inbox tokens must be registered with the independent daemon; they are stored only in this private state, never in the repository, group messages, or logs. HTTP responses list public session information without socket credentials.
+The default private state directory is `~/.local/state/nootify/`. It contains the HTTP authentication token, registered sessions/bindings, Feishu credentials saved in Settings, exported configuration files, and logs. The state directory is private, and credential-bearing files use mode `0600`. Session inbox tokens must be registered with the independent daemon; they are stored only in this private state, never in the repository, group messages, or logs. HTTP responses list public session information without socket credentials.
 
 ```bash
 node dist/src/cli.js health
@@ -180,7 +182,7 @@ node dist/src/cli.js thread-send --agent claude --text "Tests pass; opening the 
 
 `thread-open` reuses the session's group if Nootify knows one or finds one among the bot's groups whose name carries the session's short ID and whose announcement names the session; otherwise it creates `<task> · <client> · <short ID>`, invites the recipient, and writes the routing token to the announcement. `thread-send` posts `[session name] text`; use `--text-file -` for multi-line text. Replies in that group are routed back like any other bound group.
 
-The recipient is the Feishu user who is invited to new groups and trusted as their sender. It is the open_id saved with the command below, else `LARK_NOTIFY_OPEN_ID`, else the single sender shared by existing bindings:
+The recipient is the Feishu user who is invited to new groups and trusted as their sender. It is the open_id saved under **设置 · 飞书** or with the command below, else `LARK_NOTIFY_OPEN_ID`, else the single sender shared by existing bindings:
 
 ```bash
 node dist/src/cli.js lark-recipient --open-id ou_example
@@ -190,11 +192,30 @@ Group creation needs the bot's chat-creation permission (`im:chat:create` or `im
 
 ## Web UI
 
-Open `http://127.0.0.1:9417`. The dark layout has a navigation column grouped by **message bridge** (run logs, routing sessions, agents) and **GitHub** (pull requests to our repositories, pull requests we sent upstream, followed repositories), with module and connection status at its foot. Each page uses one bordered list of two-line rows: the primary text, a dot-separated metadata line, and status on the right. Segmented filters show counts; search and `/` focus the page's search field. On narrow screens the navigation becomes a scrolling top bar.
+Open `http://127.0.0.1:9417`. The dark layout has a navigation column grouped by **message bridge** (run logs, routing sessions, agents) and **GitHub** (pull requests to our repositories, pull requests we sent upstream, followed repositories), with **设置** and module and connection status at its foot. Each page uses one bordered list of two-line rows: the primary text, a dot-separated metadata line, and status on the right. Segmented filters show counts; search and `/` focus the page's search field. On narrow screens the navigation becomes a scrolling top bar.
 
 Log rows expand in place for full IDs, reasons, and message text; logs can be paused and the filtered set exported as NDJSON. The routing-session page displays only targets encountered by incoming messages or explicit sends, with their last lookup time and result. Refreshing it performs no client lookups. These are historical observations, not a live inventory.
 
 The page polls a read-only snapshot every two seconds and needs no control token. It accepts loopback hosts or this computer's Tailscale address, and same-origin requests only. The control API remains bearer-authenticated. Logs persist in the private `events.ndjson` file, capped at 1,000 entries; a first launch imports available JSON entries from the prior stdout log. Events explicitly distinguish `received`, `socket_written`, `ignored` with a reason, and failures. For accepted senders, message previews are limited to 240 characters; unknown fields and credentials are not logged. A successful socket write is not proof of model processing.
+
+## Settings
+
+**设置** at the foot of the navigation opens four pages. Everything can be read over Tailscale, but changes are accepted only from this Mac: credentials and imports decide who can reach local sessions.
+
+| Page | Purpose |
+| --- | --- |
+| GitHub | Shows the `gh` account and signs it in with GitHub's device flow |
+| 飞书 | Feishu App ID, App Secret, and recipient |
+| 导入导出 | Export and import the configuration |
+| 关于 | App and service versions, update checks, and installation |
+
+**GitHub** runs `gh auth login --web`, shows its one-time code and link on the page, and refreshes pull requests when authorization finishes. The credential stays with `gh`, shared with the terminal, and never passes through this service; the code is never sent to the Tailscale listener. A rejected or missing token shows as signed out, while other failures, such as no network, show as unconfirmed. Install [GitHub CLI](https://cli.github.com) first, or set an absolute `GH_BIN`.
+
+**飞书** asks Feishu for a tenant token before saving, so a mistyped ID or secret cannot replace a working bot. Saved credentials go in the private `state.json` and the bot reconnects in place: queued messages finish on the old client first. The secret is write-only: a blank field keeps it, and no page or log receives it. Clearing saved credentials returns to the MCP file, or disables Feishu without one. `LARK_APP_ID` and `LARK_APP_SECRET` take precedence for their process, so saving is refused while they are set.
+
+**导入导出** writes `exports/nootify-config-<time>.json` in the state directory, mode `0600`, keeping the newest ten. The file has the active Feishu credentials and recipient, the pulls configuration and follow choices, Codex and OpenCode connections, and which agents are enabled. **It contains plaintext secrets, so it is only ever written to disk** and the page receives its path, because the page has no bearer token. The `gh` login is not included.
+
+Importing validates the whole file and previews what it will change, without showing secrets, before anything is applied. An import replaces only the settings its file names: follow choices are replaced as a set, and agents listed in the file are enabled but none are disabled. Imported Feishu credentials are not checked against Feishu, so an import works offline; a failed connection shows on the page. A newer file version is refused.
 
 ## GitHub pull requests
 
@@ -262,6 +283,11 @@ Read the bearer token from the private state file in your local application; nev
 | `GET /v1/pulls`, `POST /v1/pulls/refresh` | The same PR snapshot and refresh for token-authenticated clients |
 | `GET /v1/repos`, `PUT /v1/repos/:owner/:name` | Repository list and follow choices for token-authenticated clients |
 | `GET /ui/api/agents`, `POST /ui/api/agents` | Agent prompt status and `{"agent", "enabled"}` changes; changes need the UI header and the loopback listener |
+| `GET /ui/api/settings`, `GET /ui/api/settings/github` | Settings page data and the GitHub account; neither carries a secret |
+| `POST /ui/api/settings/lark`, `POST /ui/api/settings/recipient` | Save `{"app_id", "app_secret"}`, clear with `{"clear": true}`, or set `{"open_id"}`; these and the actions below need the UI header and the loopback listener |
+| `POST /ui/api/settings/github/login` | `{"action": "start" \| "cancel"}` for the device login |
+| `POST /ui/api/settings/export`, `POST /ui/api/settings/reveal` | Write a configuration file and return its path; show it in Finder |
+| `POST /ui/api/settings/import` | Preview `{"document"}`, or apply it with `"apply": true` |
 | `GET /v1/agents`, `PUT /v1/agents/:agent` | The same for token-authenticated clients |
 | `POST /v1/threads` | Find or create a session's Feishu group: `{"adapter", "session_id", "session_name"}` |
 | `POST /v1/threads/:session_id/messages` | Post `{"text"}` to that group, prefixed with the session name |
@@ -294,9 +320,10 @@ Read the bearer token from the private state file in your local application; nev
 | `src/lark-replies.ts` | Forwarding context, receipt tracking, and deduplicated Feishu replies |
 | `src/lark-threads.ts` | One Feishu group per agent session: lookup, adoption, creation, progress messages |
 | `src/agents.ts` | Marked Feishu section in each agent's global prompt file |
+| `src/settings.ts`, `src/github-auth.ts` | Settings pages' actions: Feishu credentials, configuration export and import, GitHub device login |
 | `src-tauri/`, `desktop/`, `scripts/desktop.mjs` | Native window, tray, offline view, and desktop build launcher |
 | `scripts/stage-service.mjs` | Stage the compiled service, dependencies, and verified Node.js sidecar |
-| `src-tauri/src/update.rs` | GitHub Release checks and signature-verified updates from the native tray |
+| `src-tauri/src/update.rs` | GitHub Release checks and signature-verified updates from the tray and the page |
 | `.github/workflows/` | macOS checks and version-tag-driven DMG/updater publication |
 | `test/` | Disposable HTTP/socket/state and routing tests |
 

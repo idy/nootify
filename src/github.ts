@@ -205,6 +205,25 @@ export class PullRequestsService implements ServiceModule {
     return this.repositories().find(entry => key(entry.repository) === key(name))
       ?? { repository: name, followed: false, sources: [], sessions: 0, agents: [], allPulls: false, linkedPulls: 0, authored: 0, pulls: { internal: 0, upstream: 0 } };
   }
+  /** What an exported configuration carries: the pulls configuration as written, and deliberate follow choices. */
+  async preferences(): Promise<{ config?: unknown; follow: { repository: string; follow: boolean }[] }> {
+    const { source } = await loadPullConfig(this.directory);
+    return { ...(source === 'defaults' ? {} : { config: JSON.parse(await readFile(source, 'utf8')) as unknown }), follow: [...this.choices.values()] };
+  }
+  /** `follow` replaces every saved choice. Both values are validated by the caller. */
+  async restore(preferences: { config?: unknown; follow?: { repository: string; follow: boolean }[] }): Promise<void> {
+    if (preferences.config !== undefined) await writePrivate(this.directory, 'pulls.config.json', preferences.config);
+    if (preferences.follow) {
+      this.choices.clear();
+      for (const choice of preferences.follow) this.choices.set(key(choice.repository), choice);
+      const snapshot = { version: 1, choices: [...this.choices.values()] };
+      const pending = this.choiceWrites.catch(() => {}).then(() => writePrivate(this.directory, 'repo-preferences.json', snapshot));
+      this.choiceWrites = pending; await pending;
+    }
+    if (this.started && !this.stopped) {
+      if (this.work) this.refreshQueued = true; else this.refresh();
+    }
+  }
   async start(): Promise<void> {
     if (this.started) return this.initializing;
     this.started = true; this.stopped = false;

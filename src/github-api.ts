@@ -92,6 +92,8 @@ export function safeError(error: unknown): string {
     .replace(/Bearer\s+[^\s"']+/gi, 'Bearer [redacted]').replace(/\s+/g, ' ').trim().slice(0, 700);
 }
 
+export const ghEnvironment = (): NodeJS.ProcessEnv => ({ ...process.env, GH_PROMPT_DISABLED: '1', GIT_TERMINAL_PROMPT: '0', GH_HOST: 'github.com' });
+
 /** Own subprocesses so stop() can cancel network work and reap unresponsive children. */
 export class GitHubCommands {
   private readonly children = new Set<ChildProcess>();
@@ -103,8 +105,7 @@ export class GitHubCommands {
     this.signal.throwIfAborted();
     return new Promise((accept, reject) => {
       const child = execFile(file, args, {
-        cwd: this.directory, encoding: 'utf8', timeout, maxBuffer: 16 * 1024 * 1024, signal: this.signal,
-        env: { ...process.env, GH_PROMPT_DISABLED: '1', GIT_TERMINAL_PROMPT: '0', GH_HOST: 'github.com' },
+        cwd: this.directory, encoding: 'utf8', timeout, maxBuffer: 16 * 1024 * 1024, signal: this.signal, env: ghEnvironment(),
       }, (error, stdout, stderr) => {
         if (error) { Object.assign(error, { stdout, stderr }); reject(error); }
         else accept(stdout);

@@ -19,6 +19,17 @@
       <a class="nav-item" href="#/repos" data-view="repos"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 2h8v9.5h-8A1.5 1.5 0 0 0 3 13V3.5A1.5 1.5 0 0 1 4.5 2z"/><path d="M3 13a1.5 1.5 0 0 0 1.5 1.5h8v-3"/></svg><span>PR 订阅</span><span class="nav-count" id="repos-count"></span></a>
     </div>
   </nav>
+  <nav class="nav settings-nav" aria-label="设置">
+    <div class="nav-group">
+      <a class="nav-item" id="settings-link" href="#/settings/github"><svg class="gear" viewBox="0 0 24 24" aria-hidden="true"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg><span>设置</span><span class="update-dot" title="有新版本" hidden></span></a>
+      <div class="subnav" id="settings-subnav" hidden>
+        <a class="nav-item" href="#/settings/github" data-view="settings-github"><span>GitHub</span></a>
+        <a class="nav-item" href="#/settings/lark" data-view="settings-lark"><span>飞书</span></a>
+        <a class="nav-item" href="#/settings/backup" data-view="settings-backup"><span>导入导出</span></a>
+        <a class="nav-item" href="#/settings/about" data-view="settings-about"><span>关于</span><span class="update-dot" title="有新版本" hidden></span></a>
+      </div>
+    </div>
+  </nav>
   <div class="sidebar-foot">
     <div id="modules" class="module-list" aria-label="模块状态"></div>
     <div class="status-line"><span id="connection-dot" class="dot"></span><span id="connection">正在连接</span><span id="access-label" class="value mono"></span></div>
@@ -32,6 +43,11 @@
     <button type="button" id="refresh" class="icon-button" title="立即刷新" aria-label="立即刷新"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13.2 8A5.2 5.2 0 1 1 11.7 4.3M13.2 2.6v3.1h-3.1"/></svg></button>
   </header>
   <div id="error" class="banner" role="alert" hidden></div>
+  <div id="update-banner" class="update-banner" role="status" hidden>
+    <div class="update-body"><span id="update-banner-text"></span><progress id="update-banner-progress" class="update-progress" max="1" aria-label="下载进度" hidden></progress></div>
+    <button type="button" id="update-banner-later" class="text-button">稍后</button>
+    <button type="button" id="update-banner-install" class="text-button primary">立即更新</button>
+  </div>
   <section id="logs-view" class="view" aria-label="运行日志">
     <div class="toolbar">
       <div class="segmented" id="outcome-tabs" aria-label="按结果筛选"></div>
@@ -79,6 +95,43 @@
     <p class="hint">从本机会话找到关联的 PR 和仓库，作为订阅来源。会话仓库跟踪它的 PR；仅关联某个 PR 时只跟踪那一条。展开可查看来源会话，取消勾选可停止关注；两个 PR 页面仅显示当前 Open 与草稿。</p>
     <div id="repo-banner" class="banner" role="alert" hidden></div>
     <div class="group"><div class="rows" id="repo-rows" role="list"></div><div id="repo-empty" class="empty" hidden><strong id="repo-empty-title"></strong><span id="repo-empty-detail"></span></div></div>
+  </section>
+  <section id="settings-view" class="view" aria-label="设置" hidden>
+    <div id="settings-banner" class="banner" role="alert" hidden></div>
+    <div data-panel="settings-github" hidden>
+      <div class="group">
+        <div class="setting"><div class="setting-main"><div class="setting-title">GitHub 账号</div><div class="setting-sub" id="github-status"></div></div><span id="github-state"></span><div class="setting-actions"><button type="button" id="github-login" class="text-button primary" hidden>登录</button></div></div>
+        <div class="setting" id="github-flow" hidden><div class="setting-main"><div class="setting-title" id="github-flow-title"></div><div class="setting-sub" id="github-flow-sub"></div></div><span id="github-code" class="device-code mono"></span><div class="setting-actions"><button type="button" id="github-cancel" class="text-button">取消</button><button type="button" id="github-copy" class="text-button">复制</button><a id="github-open" class="text-button primary" href="https://github.com/login/device" target="_blank" rel="noopener noreferrer">打开 GitHub</a></div></div>
+      </div>
+      <p class="hint">登录由 GitHub CLI（gh）的设备码流程完成：在浏览器里输入验证码并授权后，这里会自动更新。凭据由 gh 保存，和终端共用，不经过 Nootify。</p>
+    </div>
+    <div data-panel="settings-lark" hidden>
+      <div class="group">
+        <div class="setting"><div class="setting-main"><div class="setting-title">飞书机器人</div><div class="setting-sub" id="lark-status"></div></div><span id="lark-state"></span></div>
+        <label class="setting"><span class="setting-main"><span class="setting-title">App ID</span></span><input id="lark-app-id" class="setting-field mono" type="text" placeholder="cli_…" autocomplete="off" spellcheck="false"></label>
+        <label class="setting"><span class="setting-main"><span class="setting-title">App Secret</span></span><input id="lark-app-secret" class="setting-field mono" type="password" autocomplete="off" spellcheck="false"></label>
+        <div class="setting"><div class="setting-main"><div class="setting-sub">保存前会先向飞书验证；密钥不会显示在页面上。</div></div><div class="setting-actions"><button type="button" id="lark-clear" class="text-button" hidden></button><button type="button" id="lark-save" class="text-button primary">验证并保存</button></div></div>
+      </div>
+      <div class="group">
+        <div class="setting"><label class="setting-main" for="lark-recipient"><span class="setting-title">接收人</span><span class="setting-sub">新群邀请的飞书用户，也是群里被信任的发送者</span></label><input id="lark-recipient" class="setting-field mono" type="text" placeholder="ou_…" autocomplete="off" spellcheck="false"><div class="setting-actions"><button type="button" id="recipient-save" class="text-button primary">保存</button></div></div>
+      </div>
+      <p class="hint">App ID 和 App Secret 在飞书开放平台应用的「凭证与基础信息」页。优先级：环境变量、这里保存的凭据、MCP 配置文件。保存后机器人会用新凭据重新连接；密钥保存在状态目录的 state.json（权限 0600）。</p>
+    </div>
+    <div data-panel="settings-backup" hidden>
+      <div class="group">
+        <div class="setting"><div class="setting-main"><div class="setting-title">导出配置</div><div class="setting-sub" id="export-path"></div></div><div class="setting-actions"><button type="button" id="export-reveal" class="text-button" hidden>在访达中显示</button><button type="button" id="export-config" class="text-button primary">导出</button></div></div>
+        <div class="setting"><div class="setting-main"><div class="setting-title">导入配置</div><div class="setting-sub">选择导出的文件，确认内容后再写入</div></div><div class="setting-actions"><input id="import-file" type="file" accept=".json,application/json" aria-label="选择配置文件" hidden><button type="button" id="import-choose" class="text-button primary">选择文件…</button></div></div>
+        <div class="setting" id="import-preview" hidden><div class="setting-main"><div class="setting-title" id="import-name"></div><div class="setting-sub" id="import-date"></div><ul id="import-lines" class="setting-list"></ul></div><div class="setting-actions"><button type="button" id="import-cancel" class="text-button">取消</button><button type="button" id="import-apply" class="text-button primary">写入这些设置</button></div></div>
+      </div>
+      <p class="hint">配置文件包含飞书凭据和接收人、PR 配置与关注选择、Codex 和 OpenCode 连接、已启用的 Agents。其中有明文密钥，文件权限是 0600，不要提交到仓库或转发。导入只覆盖文件里有的设置；Agents 只会启用，不会关闭。GitHub 登录由 gh 保存，不在文件里。</p>
+    </div>
+    <div data-panel="settings-about" hidden>
+      <div class="group">
+        <div class="setting"><div class="setting-main"><div class="setting-title">Nootify</div><div class="setting-sub" id="about-version"></div></div><div class="setting-actions"><a class="text-button" href="https://github.com/idy/nootify/releases" target="_blank" rel="noopener noreferrer">发布记录</a></div></div>
+        <div class="setting"><div class="setting-main"><div class="setting-title">软件更新</div><div class="setting-sub" id="update-status"></div><progress id="update-progress" class="update-progress" max="1" aria-label="下载进度" hidden></progress></div><div class="setting-actions"><button type="button" id="update-check" class="text-button" hidden>检查更新</button><button type="button" id="update-install" class="text-button primary" hidden></button></div></div>
+      </div>
+      <p class="hint">桌面应用启动约 30 秒后和之后每 6 小时检查一次 GitHub Releases。发现新版本时会在窗口顶部和托盘菜单提示，下载和安装由你确认后才开始，更新包会先校验签名。</p>
+    </div>
   </section>
 </main>
 </div>

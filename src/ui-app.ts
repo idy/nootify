@@ -2,15 +2,22 @@ import type { LogEntry } from './events.js';
 import type { PullRequest, PullSnapshot, RepositoryEntry } from './github.js';
 import type { ModuleStatus, PublicSession } from './types.js';
 import type { AgentPrompt } from './agents.js';
+import type { GitHubLogin } from './github-auth.js';
+import type { GitHubSettings, ImportSummary, SettingsPage } from './settings.js';
 
 interface PullSummary { internal: number; upstream: number; followed: number; running: boolean; lastSuccessAt?: string; error?: string }
 interface Snapshot {
   time: string; modules: ModuleStatus[]; sessions: PublicSession[]; logs: LogEntry[];
   pulls?: PullSummary; access?: { tailnet_url?: string };
 }
-type View = 'logs' | 'sessions' | 'agents' | 'pulls-internal' | 'pulls-upstream' | 'repos';
+type View = 'logs' | 'sessions' | 'agents' | 'pulls-internal' | 'pulls-upstream' | 'repos' | 'settings-github' | 'settings-lark' | 'settings-backup' | 'settings-about';
 interface AgentsPage { agents: AgentPrompt[]; editable: boolean; channel?: { name: string; configured: boolean; recipient?: string; groups: number } }
 interface Tone { label: string; tone: string }
+/** Pushed by the desktop shell as a `nootify-update` event; mirrors `UpdateView` in src-tauri/src/update.rs. A plain browser never receives it. */
+interface UpdateView {
+  phase: 'idle' | 'checking' | 'current' | 'available' | 'downloading' | 'installing' | 'restarting' | 'failed';
+  current: string; version: string | null; received: number; total: number | null; error: string | null; checked_at: number | null;
+}
 
 const views: Record<View, { hash: string; group: string; title: string; section: string }> = {
   logs: { hash: '#/logs', group: '消息桥接', title: '运行日志', section: 'logs-view' },
@@ -19,6 +26,10 @@ const views: Record<View, { hash: string; group: string; title: string; section:
   'pulls-internal': { hash: '#/pulls/internal', group: 'GitHub', title: '我们仓库的 PR', section: 'pulls-view' },
   'pulls-upstream': { hash: '#/pulls/upstream', group: 'GitHub', title: '提交上游的 PR', section: 'pulls-view' },
   repos: { hash: '#/repos', group: 'GitHub', title: 'PR 订阅', section: 'repos-view' },
+  'settings-github': { hash: '#/settings/github', group: '设置', title: 'GitHub', section: 'settings-view' },
+  'settings-lark': { hash: '#/settings/lark', group: '设置', title: '飞书', section: 'settings-view' },
+  'settings-backup': { hash: '#/settings/backup', group: '设置', title: '导入导出', section: 'settings-view' },
+  'settings-about': { hash: '#/settings/about', group: '设置', title: '关于', section: 'settings-view' },
 };
 const descriptions: Record<string, string> = {
   ready: '服务已启动', lark_ready: '飞书长连接已建立', lark_failed: '飞书连接失败',
@@ -29,6 +40,7 @@ const descriptions: Record<string, string> = {
   reconnecting: '飞书正在重连', reconnected: '飞书已重新连接', refresh_completed: 'GitHub PR 已刷新', refresh_failed: 'GitHub PR 刷新失败',
   thread_created: '已为会话创建飞书群', thread_reused: '会话已连接飞书群', thread_message: '会话发送了进度消息', thread_failed: '进度消息发送失败',
   prompt_injected: '已写入 agent 提示词', prompt_removed: '已移除 agent 提示词',
+  github_login: 'GitHub 已登录', lark_configured: '飞书应用凭据已更新', config_exported: '配置已导出', config_imported: '配置已导入',
   tailnet_listening: 'Tailscale 访问已开启', tailnet_failed: 'Tailscale 监听失败', tailnet_unavailable: 'Tailscale 未运行，仅本机可访问',
 };
 const reasons: Record<string, string> = {
@@ -87,6 +99,7 @@ function viewFromHash(): View {
 const isPullView = (view: View): view is 'pulls-internal' | 'pulls-upstream' => view.startsWith('pulls-');
 /** Views backed by the GitHub module's snapshot, loaded separately from the two-second page snapshot. */
 const usesPulls = (view: View): boolean => isPullView(view) || view === 'repos';
+const isSettingsView = (view: View): boolean => view.startsWith('settings-');
 
 const state = {
   view: viewFromHash(),
@@ -96,6 +109,10 @@ const state = {
   outcome: 'all', pullFilter: 'all', pullSort: 'asc' as 'asc' | 'desc', repoFilter: 'all',
   pendingRepos: new Set<string>(), repoError: '', openRepoSources: new Set<string>(),
   agents: undefined as AgentsPage | undefined, agentsError: '', pendingAgents: new Set<string>(), openPreviews: new Set<string>(),
+  settings: undefined as (SettingsPage & { editable: boolean }) | undefined, github: undefined as GitHubSettings | undefined, loadingGitHub: false,
+  settingsNote: undefined as { text: string; error: boolean } | undefined, pendingSettings: new Set<string>(),
+  larkEdited: false, confirmClear: false, importing: undefined as { name: string; content: unknown; summary: ImportSummary } | undefined,
+  update: undefined as UpdateView | undefined, updateLater: '',
   paused: false, loading: false, loadingPulls: false, connected: false,
   expanded: new Set<string>(),
   signatures: new Map<string, string>(),
@@ -439,8 +456,8 @@ function renderAgents(): void {
   const banner = state.agentsError || (remote ? '通过 Tailscale 访问时只能查看；请在这台 Mac 上修改 agent 提示词。' : '');
   $('agents-banner').hidden = !banner; $('agents-banner').textContent = banner;
   const channel = page?.channel;
-  $('channel-sub').textContent = !channel ? '飞书模块未启用' : !channel.configured ? '未配置飞书应用凭据，提示词写入后也无法建群'
-    : channel.recipient ? `接收人 ${channel.recipient.slice(0, 7)}…${channel.recipient.slice(-4)} · 已绑定 ${channel.groups} 个群` : '还没有设置接收人：在终端运行 lark-recipient --open-id <ou_…>';
+  $('channel-sub').textContent = !channel ? '飞书模块未启用' : !channel.configured ? '未配置飞书应用凭据，提示词写入后也无法建群：到「设置 · 飞书」配置'
+    : channel.recipient ? `接收人 ${channel.recipient.slice(0, 7)}…${channel.recipient.slice(-4)} · 已绑定 ${channel.groups} 个群` : '还没有设置接收人：到「设置 · 飞书」填写';
   $('channel-side').textContent = 'Slack 等渠道之后支持';
   if (state.view !== 'agents' || !page) return;
   if (!changed('agent-rows', [page, [...state.pendingAgents]])) return;
@@ -468,6 +485,182 @@ function renderAgents(): void {
   }));
 }
 
+// ---- Settings ----
+const credentialSources: Record<string, string> = { environment: '环境变量', settings: '这里保存的凭据', 'mcp-config': 'MCP 配置文件' };
+const loginActive = (login?: GitHubLogin): boolean => login?.status === 'starting' || login?.status === 'waiting';
+/** Skips unchanged text, so polling never clears a selection such as the device code. */
+function setText(id: string, text: string): void { if ($(id).textContent !== text) $(id).textContent = text; }
+function setTone(id: string, tone: Tone): void { setText(id, tone.label); $(id).className = `tone-${tone.tone}`; }
+const field = (id: string): HTMLInputElement => $<HTMLInputElement>(id);
+async function post<T>(path: string, body?: unknown): Promise<T> {
+  const response = await fetch(path, { method: 'POST', headers: { 'x-nootify-ui': '1', 'content-type': 'application/json' },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(20000) });
+  if (!response.ok) throw new Error(((await response.json().catch(() => ({}))) as { error?: string }).error ?? `HTTP ${response.status}`);
+  return await response.json() as T;
+}
+function fillLark(): void {
+  const lark = state.settings?.lark;
+  field('lark-app-id').value = lark?.app_id ?? '';
+  field('lark-app-secret').value = '';
+  field('lark-recipient').value = lark?.recipient ?? '';
+}
+async function loadSettings(): Promise<void> {
+  try {
+    const response = await fetch('/ui/api/settings', { cache: 'no-store', signal: AbortSignal.timeout(8000) });
+    if (!response.ok) throw new Error(response.status === 404 ? '设置模块未启用' : `HTTP ${response.status}`);
+    state.settings = await response.json() as SettingsPage & { editable: boolean };
+    if (!state.larkEdited) fillLark();
+  } catch (error) { state.settingsNote = { text: `无法读取设置：${(error as Error).message}`, error: true }; }
+  renderSettings();
+}
+async function loadGitHub(): Promise<void> {
+  if (state.loadingGitHub) return;
+  state.loadingGitHub = true;
+  try {
+    const response = await fetch('/ui/api/settings/github', { cache: 'no-store', signal: AbortSignal.timeout(20000) });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const next = await response.json() as GitHubSettings;
+    // While a login runs the service reports only its progress.
+    state.github = { account: next.account ?? state.github?.account, login: next.login };
+  } catch (error) { state.settingsNote = { text: `无法读取 GitHub 状态：${(error as Error).message}`, error: true }; }
+  finally { state.loadingGitHub = false; renderSettings(); }
+}
+function loadSettingsView(): void {
+  if (!isSettingsView(state.view)) return;
+  void loadSettings();
+  if (state.view === 'settings-github') void loadGitHub();
+}
+/** Runs one page action: its buttons are disabled meanwhile, and the result replaces the page's note. */
+async function settingsRun(key: string, failure: string, action: () => Promise<string | void>): Promise<void> {
+  state.pendingSettings.add(key); state.settingsNote = undefined; renderSettings();
+  try {
+    const note = await action();
+    if (note) state.settingsNote = { text: note, error: false };
+  } catch (error) { state.settingsNote = { text: `${failure}：${(error as Error).message}`, error: true }; }
+  state.pendingSettings.delete(key); renderSettings();
+}
+function githubStatus(): { text: string; tone: Tone } {
+  const account = state.github?.account;
+  if (!account) return { text: loginActive(state.github?.login) ? '正在登录' : '正在检查登录状态…', tone: { label: '', tone: 'muted' } };
+  if (!account.installed) return { text: '没有找到 GitHub CLI：先安装 gh（brew install gh），或设置绝对路径 GH_BIN', tone: { label: '未安装', tone: 'error' } };
+  if (account.signedIn) return { text: `${account.login} · 和终端里的 gh 共用`, tone: { label: '已登录', tone: 'ok' } };
+  if (account.error) return { text: `无法确认登录状态：${account.error}`, tone: { label: '未确认', tone: 'warn' } };
+  return { text: '登录后才能读取 PR 和订阅', tone: { label: '未登录', tone: 'warn' } };
+}
+function renderGitHub(remote: boolean): void {
+  const github = state.github; const login = github?.login;
+  const active = loginActive(login); const waiting = login?.status === 'waiting';
+  const status = githubStatus();
+  setText('github-status', status.text); setTone('github-state', status.tone);
+  const start = $<HTMLButtonElement>('github-login');
+  start.hidden = remote || !github || active || github.account?.installed === false;
+  start.disabled = state.pendingSettings.has('github');
+  setText('github-login', github?.account?.signedIn ? '重新登录' : '登录');
+  $('github-flow').hidden = !active || remote;
+  setText('github-flow-title', waiting ? '在 GitHub 页面输入这个验证码' : '正在向 GitHub 申请验证码…');
+  setText('github-flow-sub', waiting && login?.expiresAt ? `${clock(login.expiresAt)} 前有效，授权后这里会自动更新` : '');
+  setText('github-code', login?.code ?? '');
+  $('github-copy').hidden = !waiting;
+  const open = $<HTMLAnchorElement>('github-open');
+  open.hidden = !waiting;
+  if (login?.url) open.href = login.url;
+}
+function renderLark(remote: boolean): void {
+  const lark = state.settings?.lark;
+  const status = state.snapshot.modules.find(module => module.name === 'lark')?.status ?? lark?.status ?? 'disabled';
+  setTone('lark-state', status === 'ready' ? { label: '已连接', tone: 'ok' } : moduleStates[status] ?? { label: status, tone: 'muted' });
+  setText('lark-status', !lark ? '' : lark.app_id ? `${lark.app_id} · 来自${credentialSources[lark.source ?? 'settings']}${lark.recipient ? '' : ' · 还没有接收人'}` : '还没有配置应用凭据');
+  const environment = lark?.source === 'environment';
+  field('lark-app-secret').placeholder = lark?.saved ? '已保存，留空则不修改' : '';
+  const busy = state.pendingSettings.has('lark');
+  for (const id of ['lark-app-id', 'lark-app-secret']) field(id).disabled = remote || environment || busy;
+  field('lark-recipient').disabled = remote || state.pendingSettings.has('recipient');
+  $<HTMLButtonElement>('lark-save').disabled = remote || environment || busy;
+  $<HTMLButtonElement>('recipient-save').disabled = remote || state.pendingSettings.has('recipient');
+  const clear = $<HTMLButtonElement>('lark-clear');
+  clear.hidden = remote || !lark?.saved; clear.disabled = busy;
+  setText('lark-clear', state.confirmClear ? '再点一次确认清除' : '清除保存的凭据');
+}
+function importLines(summary: ImportSummary): string[] {
+  const lines: string[] = [];
+  if (summary.app_id) lines.push(`飞书应用 ${summary.app_id} 和它的 App Secret`);
+  if (summary.recipient) lines.push(`飞书接收人 ${summary.recipient}`);
+  if (summary.pulls_config) lines.push('GitHub PR 配置');
+  if (summary.follow !== undefined) lines.push(`用文件里的 ${summary.follow} 条选择替换现有的仓库关注选择`);
+  if (summary.backends.length) lines.push(`${summary.backends.map(adapter => adapters[adapter] ?? adapter).join('、')} 连接`);
+  if (summary.agents.length) lines.push(`启用 ${summary.agents.map(agent => agentNames[agent] ?? agent).join('、')} 的飞书说明`);
+  return lines.length ? lines : ['这个文件没有可导入的设置'];
+}
+function renderBackup(remote: boolean): void {
+  const page = state.settings;
+  setText('export-path', !page ? '' : page.last_export ? `最近导出到 ${home(page.last_export)}` : `写入 ${home(page.exports_dir)}`);
+  $('export-reveal').hidden = remote || !page?.last_export;
+  for (const [id, key] of [['export-config', 'export'], ['import-choose', 'import'], ['import-apply', 'import'], ['import-cancel', 'import']] as const) {
+    $<HTMLButtonElement>(id).disabled = remote || state.pendingSettings.has(key);
+  }
+  const importing = state.importing;
+  $('import-preview').hidden = !importing;
+  if (!importing) return;
+  setText('import-name', `${importing.name} 将写入：`);
+  setText('import-date', importing.summary.exported_at ? `导出于 ${fullTime(importing.summary.exported_at)}` : '');
+  if (changed('import-lines', importing.summary)) $('import-lines').replaceChildren(...importLines(importing.summary).map(line => node('li', line)));
+}
+function renderSettings(): void {
+  renderUpdate();
+  if (!isSettingsView(state.view)) return;
+  const remote = state.settings?.editable === false;
+  const login = state.github?.login;
+  const note = state.settingsNote ?? (state.view === 'settings-github' && login?.status === 'failed' ? { text: `GitHub 登录失败：${login.error}`, error: true }
+    : remote ? { text: '通过 Tailscale 访问时只能查看；请在这台 Mac 上修改设置。', error: false } : undefined);
+  const banner = $('settings-banner');
+  banner.hidden = !note; banner.className = note && !note.error ? 'banner note' : 'banner';
+  setText('settings-banner', note?.text ?? '');
+  renderGitHub(remote); renderLark(remote); renderBackup(remote);
+}
+
+// ---- Updates ----
+const updateTag = (update: UpdateView): string => update.version ? `v${update.version.replace(/^v/, '')}` : '';
+const megabytes = (bytes: number): string => `${(bytes / 1048576).toFixed(1)} MB`;
+/** The native window's policy cancels this navigation and hands the request to its update worker. */
+function askNative(action: 'check' | 'install'): void { location.href = `nootify://update/${action}`; }
+function updateStatus(update: UpdateView): string {
+  const tag = updateTag(update);
+  if (update.phase === 'checking') return '正在检查更新…';
+  if (update.phase === 'available') return `发现新版本 ${tag}${update.error ? `；${update.error}` : ''}`;
+  if (update.phase === 'downloading') {
+    const amount = update.total ? `${megabytes(update.received)} / ${megabytes(update.total)} · ${Math.min(100, Math.floor(update.received * 100 / update.total))}%` : megabytes(update.received);
+    return `正在下载 ${tag} · ${amount}`;
+  }
+  if (update.phase === 'installing') return `正在安装 ${tag}…`;
+  if (update.phase === 'restarting') return `已安装 ${tag}，正在重启…`;
+  if (update.phase === 'failed') return `检查更新失败：${update.error ?? '未知错误'}`;
+  if (update.phase === 'current') return `已是最新版本${update.checked_at ? ` · ${ago(new Date(update.checked_at).toISOString())}检查` : ''}`;
+  return '启动约 30 秒后自动检查';
+}
+function paintProgress(id: string, update: UpdateView): void {
+  const bar = $<HTMLProgressElement>(id);
+  bar.hidden = update.phase !== 'downloading';
+  if (update.phase !== 'downloading') return;
+  if (update.total) bar.value = Math.min(1, update.received / update.total); else bar.removeAttribute('value');
+}
+function renderUpdate(): void {
+  const update = state.update;
+  const available = update?.phase === 'available';
+  const working = !!update && ['downloading', 'installing', 'restarting'].includes(update.phase);
+  for (const dot of document.querySelectorAll<HTMLElement>('.update-dot')) dot.hidden = !available;
+  const prompted = working || (available && state.updateLater !== update.version);
+  $('update-banner').hidden = !prompted || state.view === 'settings-about';
+  $('update-banner-install').hidden = !available; $('update-banner-later').hidden = !available;
+  if (update && prompted) { setText('update-banner-text', updateStatus(update)); paintProgress('update-banner-progress', update); }
+  const service = state.settings?.version;
+  setText('about-version', [update ? `应用 ${update.current}` : '', service ? `后台服务 ${service}` : ''].filter(Boolean).join(' · ') || '—');
+  setText('update-status', update ? updateStatus(update) : '在 Nootify 桌面应用里检查和安装更新');
+  const check = $<HTMLButtonElement>('update-check');
+  check.hidden = !update; check.disabled = working || update?.phase === 'checking';
+  $('update-install').hidden = !available;
+  if (update) { setText('update-install', `安装 ${updateTag(update)}`); paintProgress('update-progress', update); }
+}
+
 // ---- Chrome, loading and events ----
 function renderChrome(): void {
   const meta = views[state.view];
@@ -476,7 +669,10 @@ function renderChrome(): void {
   for (const link of document.querySelectorAll<HTMLAnchorElement>('.nav-item')) {
     if (link.dataset.view === state.view) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current');
   }
-  for (const section of ['logs-view', 'sessions-view', 'agents-view', 'pulls-view', 'repos-view']) $(section).hidden = section !== meta.section;
+  for (const section of ['logs-view', 'sessions-view', 'agents-view', 'pulls-view', 'repos-view', 'settings-view']) $(section).hidden = section !== meta.section;
+  for (const panel of document.querySelectorAll<HTMLElement>('[data-panel]')) panel.hidden = panel.dataset.panel !== state.view;
+  $('settings-subnav').hidden = !isSettingsView(state.view);
+  $('settings-link').toggleAttribute('data-open', isSettingsView(state.view));
   const pullSummary = state.snapshot.pulls;
   const internal = pullSummary?.internal ?? state.pulls?.internal.length;
   const upstream = pullSummary?.upstream ?? state.pulls?.upstream.length;
@@ -507,7 +703,7 @@ function renderChrome(): void {
   $('tailnet-url').textContent = tailnet ? tailnet.replace(/^https?:\/\//, '').replace(/\/$/, '') : '';
   $('tailnet-url').title = tailnet ? `tailnet 内其他设备的访问地址：${tailnet}` : '';
 }
-function renderAll(): void { renderChrome(); renderLogs(); renderSessions(); renderAgents(); renderPulls(); renderRepos(); }
+function renderAll(): void { renderChrome(); renderLogs(); renderSessions(); renderAgents(); renderPulls(); renderRepos(); renderSettings(); }
 async function loadSnapshot(): Promise<void> {
   if (state.loading) return;
   state.loading = true;
@@ -518,7 +714,7 @@ async function loadSnapshot(): Promise<void> {
     state.connected = true;
     $('error').hidden = true;
     $('connection').textContent = '实时更新'; $('connection-dot').className = 'dot ok';
-    renderChrome(); renderLogs(); renderSessions();
+    renderChrome(); renderLogs(); renderSessions(); renderSettings();
     if (usesPulls(state.view) && (state.snapshot.pulls?.running || state.pulls?.refresh.running)) void loadPulls();
   } catch (error) {
     state.connected = false;
@@ -539,6 +735,10 @@ async function loadPulls(): Promise<void> {
 }
 async function refreshNow(): Promise<void> {
   if (state.view === 'agents') { await Promise.all([loadSnapshot(), loadAgents()]); return; }
+  if (isSettingsView(state.view)) {
+    await Promise.all([loadSnapshot(), loadSettings(), ...(state.view === 'settings-github' ? [loadGitHub()] : [])]);
+    return;
+  }
   if (!usesPulls(state.view)) { await loadSnapshot(); return; }
   $('refresh').classList.add('busy');
   try {
@@ -550,10 +750,96 @@ async function refreshNow(): Promise<void> {
 
 window.addEventListener('hashchange', () => {
   state.view = viewFromHash();
+  state.settingsNote = undefined;
   renderAll();
   if (usesPulls(state.view)) void loadPulls();
   if (state.view === 'agents') void loadAgents();
+  loadSettingsView();
   $(views[state.view].section).scrollTop = 0;
+});
+window.addEventListener('nootify-update', event => { state.update = (event as CustomEvent<UpdateView>).detail; renderUpdate(); });
+$('update-banner-install').addEventListener('click', () => askNative('install'));
+$('update-install').addEventListener('click', () => askNative('install'));
+$('update-check').addEventListener('click', () => askNative('check'));
+$('update-banner-later').addEventListener('click', () => { state.updateLater = state.update?.version ?? ''; renderUpdate(); });
+$('github-login').addEventListener('click', () => {
+  void settingsRun('github', '无法开始登录', async () => {
+    state.github = { account: state.github?.account, login: await post<GitHubLogin>('/ui/api/settings/github/login', { action: 'start' }) };
+  });
+});
+$('github-cancel').addEventListener('click', () => {
+  void settingsRun('github', '无法取消登录', async () => { await post('/ui/api/settings/github/login', { action: 'cancel' }); await loadGitHub(); });
+});
+$('github-copy').addEventListener('click', () => {
+  const code = state.github?.login.code;
+  if (!code) return;
+  // The clipboard API exists only in secure contexts; gh has usually copied the code already.
+  void (navigator.clipboard?.writeText(code) ?? Promise.reject(new Error('Clipboard is unavailable'))).then(() => {
+    setText('github-copy', '已复制');
+    setTimeout(() => setText('github-copy', '复制'), 2000);
+  }, () => setText('github-copy', '请手动复制'));
+});
+function saveLark(): void {
+  void settingsRun('lark', '无法保存飞书凭据', async () => {
+    await post('/ui/api/settings/lark', { app_id: field('lark-app-id').value.trim(), app_secret: field('lark-app-secret').value });
+    state.larkEdited = false;
+    await loadSettings();
+    return '凭据已验证并保存';
+  });
+}
+function saveRecipient(): void {
+  void settingsRun('recipient', '无法保存接收人', async () => {
+    await post('/ui/api/settings/recipient', { open_id: field('lark-recipient').value.trim() });
+    await loadSettings();
+    return '接收人已保存';
+  });
+}
+$('lark-save').addEventListener('click', saveLark);
+$('recipient-save').addEventListener('click', saveRecipient);
+for (const id of ['lark-app-id', 'lark-app-secret', 'lark-recipient']) {
+  field(id).addEventListener('input', () => { state.larkEdited = true; });
+  field(id).addEventListener('keydown', event => { if (event.key === 'Enter') { if (id === 'lark-recipient') saveRecipient(); else saveLark(); } });
+}
+$('lark-clear').addEventListener('click', () => {
+  if (!state.confirmClear) {
+    state.confirmClear = true; renderSettings();
+    setTimeout(() => { state.confirmClear = false; renderSettings(); }, 4000);
+    return;
+  }
+  state.confirmClear = false;
+  void settingsRun('lark', '无法清除飞书凭据', async () => {
+    await post('/ui/api/settings/lark', { clear: true });
+    state.larkEdited = false;
+    await loadSettings();
+    return '已清除保存的凭据';
+  });
+});
+$('export-config').addEventListener('click', () => {
+  void settingsRun('export', '无法导出配置', async () => { await post('/ui/api/settings/export'); await loadSettings(); return '配置已导出'; });
+});
+$('export-reveal').addEventListener('click', () => { void settingsRun('export', '无法打开访达', async () => { await post('/ui/api/settings/reveal'); }); });
+$('import-choose').addEventListener('click', () => $('import-file').click());
+$('import-file').addEventListener('change', () => {
+  const input = field('import-file'); const file = input.files?.[0];
+  input.value = ''; // The same file can be chosen again after a change to it.
+  if (!file) return;
+  void settingsRun('import', `无法读取 ${file.name}`, async () => {
+    if (file.size > 1024 * 1024) throw new Error('文件超过 1 MiB');
+    let content: unknown;
+    try { content = JSON.parse(await file.text()); } catch { throw new Error('不是有效的 JSON 文件'); }
+    state.importing = { name: file.name, content, summary: await post<ImportSummary>('/ui/api/settings/import', { document: content }) };
+  });
+});
+$('import-cancel').addEventListener('click', () => { state.importing = undefined; renderSettings(); });
+$('import-apply').addEventListener('click', () => {
+  const importing = state.importing;
+  if (!importing) return;
+  void settingsRun('import', '无法导入配置', async () => {
+    const result = await post<ImportSummary>('/ui/api/settings/import', { document: importing.content, apply: true });
+    state.importing = undefined; state.larkEdited = false;
+    await Promise.all([loadSettings(), loadAgents()]);
+    return `配置已导入${result.warnings.length ? `；${result.warnings.join('；')}` : ''}`;
+  });
 });
 $('refresh').addEventListener('click', () => { void refreshNow(); });
 $('search').addEventListener('input', () => renderLogs(true));
@@ -584,5 +870,6 @@ renderAll();
 void loadSnapshot();
 void loadAgents();
 if (usesPulls(state.view)) void loadPulls();
-setInterval(() => { void loadSnapshot(); }, 2000);
+loadSettingsView();
+setInterval(() => { void loadSnapshot(); if (state.view === 'settings-github' && loginActive(state.github?.login)) void loadGitHub(); }, 2000);
 setInterval(() => { if (usesPulls(state.view)) void loadPulls(); }, 10000);

@@ -7,7 +7,7 @@ import { parseArgs } from 'node:util';
 import { State } from './state.js';
 import { SessionsService } from './sessions.js';
 import { LarkService } from './lark.js';
-import { loadCredentials } from './lark-metadata.js';
+import { resolveCredentials } from './lark-metadata.js';
 import { HttpError } from './types.js';
 import type { ServiceModule } from './types.js';
 import { EventLog } from './events.js';
@@ -16,7 +16,9 @@ import type { PullsSource } from './ui.js';
 import { PullRequestsService } from './github.js';
 import { TailnetAccess } from './tailnet.js';
 import { AgentPrompts } from './agents.js';
-import type { AgentsSource, ChannelSummary } from './ui.js';
+import { GitHubAuth } from './github-auth.js';
+import { SettingsService } from './settings.js';
+import type { AgentsSource, ChannelSummary, SettingsSource } from './ui.js';
 
 async function readBody(request: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
@@ -34,7 +36,7 @@ async function readBody(request: IncomingMessage): Promise<unknown> {
 /** `via: 'tailnet'` marks the listener bound to this node's Tailscale address. */
 export interface HostOptions {
   pulls?: PullsSource; tailnet?: TailnetAccess; via?: 'loopback' | 'tailnet';
-  agents?: AgentsSource; channel?: () => ChannelSummary | undefined;
+  agents?: AgentsSource; channel?: () => ChannelSummary | undefined; settings?: SettingsSource;
 }
 const loopback = /^(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/;
 function listen(server: Server, port: number, host: string): Promise<void> {
@@ -61,7 +63,7 @@ export function createServiceHost(modules: ServiceModule[], token: string, logs?
       if (request.headers.origin && request.headers.origin !== `http://${host}`) throw new HttpError(403, 'Cross-origin requests are not accepted');
       const url = new URL(request.url ?? '/', 'http://127.0.0.1');
       if (logs && await serveUi(request, response, url.pathname, { modules, logs, pulls: options.pulls, tailnetUrl: () => options.tailnet?.url(),
-        agents: options.agents, channel: options.channel, via: options.via ?? 'loopback' })) return;
+        agents: options.agents, channel: options.channel, settings: options.settings, via: options.via ?? 'loopback' })) return;
       if (request.headers.origin) throw new HttpError(403, 'Browser-origin requests are not accepted for control APIs');
       const statuses = () => modules.map(module => ({ name: module.name, status: module.status() }));
       if (request.method === 'GET' && url.pathname === '/health') { send(200, { ok: true, service: 'nootify', modules: statuses() }); return; }
@@ -90,7 +92,8 @@ export async function main(): Promise<void> {
   const logs = await EventLog.open(state.directory);
   const report = (record: Record<string, unknown>) => { logs.report(record); };
   const sessions = new SessionsService(state, undefined, report);
-  const lark = new LarkService(state, sessions, await loadCredentials(process.env, values['mcp-config']), report, undefined, port);
+  const resolved = await resolveCredentials(process.env, state.settings, values['mcp-config']);
+  const lark = new LarkService(state, sessions, resolved?.credentials, report, undefined, port);
   // Routine five-minute refreshes would push Feishu events out of the bounded log; record outcome changes only.
   let pullsOutcome: unknown;
   const pulls = new PullRequestsService(state.directory, record => {
@@ -101,7 +104,9 @@ export async function main(): Promise<void> {
   const tailnet = new TailnetAccess(port, { users: process.env.NOOTIFY_TAILNET_USERS?.split(',').map(user => user.trim()).filter(Boolean) });
   const agents = new AgentPrompts({ stateDir: state.directory, port, tailnetAddress: () => { const url = tailnet.url(); return url ? new URL(url).hostname : undefined; } }, report);
   const modules: ServiceModule[] = [sessions, lark, pulls, agents];
-  const page = { pulls, tailnet, agents, channel: () => lark.channel() };
+  const github = new GitHubAuth(state.directory, report, () => pulls.refresh());
+  const settings = new SettingsService({ state, lark, github, pulls, agents, mcpConfig: values['mcp-config'], source: resolved?.source, report });
+  const page = { pulls, tailnet, agents, channel: () => lark.channel(), settings };
   const server = createServiceHost(modules, state.token, logs, page);
   await listen(server, port, '127.0.0.1');
   report({ status: 'ready', service: 'nootify', port });
@@ -145,6 +150,7 @@ export async function main(): Promise<void> {
     clearInterval(tailnetTimer);
     await binding;
     await unbind();
+    await settings.stop();
     for (const module of [...modules].reverse()) await module.stop?.();
     await logs.flush();
     server.closeAllConnections();

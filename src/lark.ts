@@ -32,13 +32,27 @@ export class LarkService implements ServiceModule {
   private queue: Promise<void> = Promise.resolve();
   private pending = 0;
   private seen = new Set<string>();
-  readonly api?: LarkApi;
-  private readonly replies?: LarkReplies;
-  readonly threads?: LarkThreads;
-  constructor(readonly state: State, readonly sessions: SessionsService, readonly credentials?: Credentials,
+  credentials?: Credentials;
+  api?: LarkApi;
+  private replies?: LarkReplies;
+  threads?: LarkThreads;
+  constructor(readonly state: State, readonly sessions: SessionsService, credentials?: Credentials,
     private readonly report: (record: Record<string, unknown>) => void = () => {}, api?: LarkApi, private readonly port = 9417) {
+    this.use(credentials, api);
+  }
+  private use(credentials?: Credentials, api?: LarkApi): void {
+    this.credentials = credentials;
     this.api = api ?? (credentials ? createLarkApi(credentials) : undefined);
-    if (this.api) { this.replies = new LarkReplies(state, this.api, report); this.threads = new LarkThreads(state, this.api, report); }
+    this.replies = this.api ? new LarkReplies(this.state, this.api, this.report) : undefined;
+    this.threads = this.api ? new LarkThreads(this.state, this.api, this.report) : undefined;
+  }
+  /** Swaps the bot in place: queued messages finish on the old client, then the new one connects in the background. */
+  async configure(credentials?: Credentials): Promise<void> {
+    this.ws?.close({ force: true }); this.ws = undefined;
+    await this.queue;
+    this.use(credentials);
+    this.connection = 'disabled';
+    this.start().catch(error => { this.connection = 'failed'; this.report({ status: 'lark_failed', error: (error as Error).message }); });
   }
   status(): string { return this.connection; }
   private remote(binding: LarkBinding): RemoteBinding {

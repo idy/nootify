@@ -6,7 +6,7 @@ import type { Adapter, BackendConnection, LarkBinding, LarkDelivery, PublicSessi
 import { HttpError } from './types.js';
 
 /** Owner choices that are not tied to one session or binding. */
-export interface Settings { lark_recipient_open_id?: string }
+export interface Settings { lark_recipient_open_id?: string; lark_app_id?: string; lark_app_secret?: string }
 interface StoredState { version: 1; sessions: SessionRecord[]; lark_bindings: LarkBinding[]; backends?: [Adapter, BackendConnection][]; lark_deliveries?: LarkDelivery[]; settings?: Settings }
 export const defaultStateDir = () => join(homedir(), '.local/state/nootify');
 export class State {
@@ -33,7 +33,10 @@ export class State {
       for (const binding of data.lark_bindings) state.bindings.set(binding.chat_id, binding);
       for (const [adapter, backend] of data.backends ?? []) state.backends.set(adapter, backend);
       for (const delivery of data.lark_deliveries ?? []) state.deliveries.set(delivery.message_id, delivery);
-      if (typeof data.settings?.lark_recipient_open_id === 'string') state.settings.lark_recipient_open_id = data.settings.lark_recipient_open_id;
+      for (const field of ['lark_recipient_open_id', 'lark_app_id', 'lark_app_secret'] as const) {
+        const value = data.settings?.[field];
+        if (typeof value === 'string') state.settings[field] = value;
+      }
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     return state;
   }

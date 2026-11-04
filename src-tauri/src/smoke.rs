@@ -3,7 +3,7 @@
 //! the service installer nor an update check or install ever runs: their workers are not started.
 use std::{
     process::Command,
-    sync::mpsc,
+    sync::{atomic::Ordering, mpsc},
     thread,
     time::{Duration, Instant},
 };
@@ -15,7 +15,7 @@ use tauri_plugin_updater::UpdaterExt;
 use crate::{
     is_fallback, is_service_ui, render_health, render_install, restore_window,
     service::{check_health, health_client, BundledService, LaunchAgent},
-    update::tag,
+    update::{tag, UpdateView},
     NativeState, TrayItems, INSTALL_LABEL, MAIN_WINDOW, TRAY_ID,
 };
 
@@ -44,6 +44,7 @@ pub fn run(app: AppHandle, items: TrayItems) {
                         "daemon_healthy": report.online,
                         "live_ui_restored": report.online,
                         "remote_ipc_denied": report.online,
+                        "page_update_bridge": report.online,
                         "launch_agent_plist_present": report.plist_present,
                         "service_install_enabled": !report.plist_present,
                         "bundled_node": report.bundled_node,
@@ -192,6 +193,7 @@ fn exercise(app: &AppHandle, items: &TrayItems) -> Result<Report, String> {
         render_health(app, items, &health);
         wait_for_live_ui(&window)?;
         check_ipc_denied(&window)?;
+        check_update_bridge(&window)?;
     }
 
     // Simulate an offline result through the production display path, not by
@@ -241,6 +243,32 @@ fn evaluate(window: &WebviewWindow, expression: &str) -> Result<bool, String> {
         .recv_timeout(Duration::from_secs(2))
         .map_err(|error| error.to_string())?;
     Ok(result == "true")
+}
+
+/// In WebKit itself: pushed state reaches a listener under the page's CSP, and an update request
+/// reaches the navigation policy and leaves the page in place. No worker runs to act on it.
+fn check_update_bridge(window: &WebviewWindow) -> Result<(), String> {
+    window
+        .eval("window.addEventListener('nootify-update', event => { window.__nootifySmokeUpdate = event.detail.phase; })")
+        .map_err(|error| error.to_string())?;
+    window
+        .eval(UpdateView::idle("0.0.0-smoke".into()).script())
+        .map_err(|error| error.to_string())?;
+    let delivered = "window.__nootifySmokeUpdate === 'idle'";
+    wait_for("update state reaches the page", || {
+        evaluate(window, delivered).unwrap_or(false)
+    })?;
+    let state = window.state::<NativeState>();
+    let before = state.page_requests.load(Ordering::SeqCst);
+    window
+        .eval("location.href = 'nootify://update/check'")
+        .map_err(|error| error.to_string())?;
+    wait_for("update request reaches the navigation policy", || {
+        state.page_requests.load(Ordering::SeqCst) > before
+    })?;
+    wait_for("the page survives the cancelled navigation", || {
+        evaluate(window, delivered).unwrap_or(false)
+    })
 }
 
 fn check_ipc_denied(window: &WebviewWindow) -> Result<(), String> {
