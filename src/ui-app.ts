@@ -264,6 +264,25 @@ function renderSessions(): void {
 }
 
 // ---- Pull requests ----
+const repositoryColors = new Map<string, number>();
+const repositoryColorsKey = 'nootify-repository-colors-v1';
+// Keep a repository's color through reloads as well as filtering and sorting. Storage is optional.
+try {
+  const saved: unknown = JSON.parse(localStorage.getItem(repositoryColorsKey) ?? '[]');
+  if (Array.isArray(saved)) for (const entry of saved) {
+    if (Array.isArray(entry) && typeof entry[0] === 'string' && Number.isInteger(entry[1]) && entry[1] >= 0 && entry[1] < 16) repositoryColors.set(entry[0], entry[1]);
+  }
+} catch { /* A blocked or invalid browser store does not prevent rendering. */ }
+function assignRepositoryColors(pulls: PullSnapshot): void {
+  const repositories = [...new Set([...pulls.internal, ...pulls.upstream].map(pull => pull.repository.toLowerCase()))].sort();
+  const usage = Array.from({ length: 16 }, (_, color) => [...repositoryColors.values()].filter(value => value === color).length);
+  let added = false;
+  for (const repository of repositories) if (!repositoryColors.has(repository)) {
+    const color = usage.indexOf(Math.min(...usage));
+    repositoryColors.set(repository, color); usage[color]++; added = true;
+  }
+  if (added) try { localStorage.setItem(repositoryColorsKey, JSON.stringify([...repositoryColors])); } catch { /* The in-memory assignment still stays stable. */ }
+}
 function attention(pull: PullRequest): boolean {
   const stale = !pull.isDraft && Date.now() - Date.parse(pull.updatedAt) > 14 * 86_400_000;
   return pull.ci.failed > 0 || pull.reviewDecision === 'CHANGES_REQUESTED' || pull.mergeable === 'CONFLICTING' || stale;
@@ -331,8 +350,13 @@ function renderPulls(): void {
     const item = node('div', undefined, 'entry'); item.setAttribute('role', 'listitem');
     const link = node('a', undefined, 'row'); link.href = pull.url; link.target = '_blank'; link.rel = 'noopener noreferrer';
     link.dataset.key = pull.url; link.title = `最后更新 ${fullTime(pull.updatedAt)}`;
-    const title: Node[] = pull.isDraft ? [node('span', '草稿', 'tag'), document.createTextNode(pull.title)] : [document.createTextNode(pull.title)];
-    const meta = [`${pull.repository}#${pull.number}`, pull.author, `${ago(pull.updatedAt)}更新`];
+    const repository = node('span', pull.repository, 'pull-repository'); repository.title = pull.repository;
+    const color = repositoryColors.get(pull.repository.toLowerCase()) ?? 0;
+    repository.dataset.color = String(color % 8); repository.classList.toggle('repository-deep', color >= 8);
+    const title: Node[] = [repository, document.createTextNode(' ')];
+    if (pull.isDraft) title.push(node('span', '草稿', 'tag'), document.createTextNode(' '));
+    title.push(node('span', pull.title, 'pull-title-text'));
+    const meta = [`#${pull.number}`, pull.author, `${ago(pull.updatedAt)}更新`];
     if (pull.sessions?.length) {
       const names = pull.sessions.map(session => session.name).join('、');
       meta.push(`会话：${names}`);
@@ -736,6 +760,7 @@ async function loadPulls(): Promise<void> {
     const response = await fetch('/ui/api/pulls', { cache: 'no-store', signal: AbortSignal.timeout(8000) });
     if (!response.ok) throw new Error(response.status === 404 ? 'PR 模块未启用' : `HTTP ${response.status}`);
     state.pulls = await response.json() as PullSnapshot;
+    assignRepositoryColors(state.pulls);
     state.pullsError = '';
   } catch (error) { state.pullsError = (error as Error).message; }
   finally { state.loadingPulls = false; renderChrome(); renderPulls(); renderRepos(); }

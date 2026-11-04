@@ -115,6 +115,20 @@ a.row:hover, button.row:hover { background: var(--hover); }
 .row-title, .row-meta, .row-side .primary, .row-side .secondary { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row-title { height: 20px; font-size: 13.5px; line-height: 20px; }
 .row-meta { height: 17px; margin-top: 2px; color: var(--muted); font-size: 12px; line-height: 17px; }
+/* PR rows lead with their repository, so it remains visible before long titles and session names. */
+#pull-rows .row-title { display: flex; align-items: center; gap: 8px; }
+.pull-repository { --repository-color: #3987e5; --repository-tint: 16%; flex: none; max-width: 50%; overflow: hidden; padding: 0 6px; border: 1px solid color-mix(in srgb, var(--repository-color) 50%, var(--line)); border-radius: 5px; background: color-mix(in srgb, var(--repository-color) var(--repository-tint), var(--panel)); color: var(--text); font-size: 12px; font-weight: 600; line-height: 18px; text-overflow: ellipsis; }
+/* Fixed identity colors, separate from the review and CI status tokens. Deeper tints extend the set. */
+.pull-repository[data-color="1"] { --repository-color: #d95926; }
+.pull-repository[data-color="2"] { --repository-color: #199e70; }
+.pull-repository[data-color="3"] { --repository-color: #c98500; }
+.pull-repository[data-color="4"] { --repository-color: #d55181; }
+.pull-repository[data-color="5"] { --repository-color: #008300; }
+.pull-repository[data-color="6"] { --repository-color: #9085e9; }
+.pull-repository[data-color="7"] { --repository-color: #e66767; }
+.pull-repository.repository-deep { --repository-tint: 34%; }
+.pull-title-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+#pull-rows .tag { flex: none; margin: 0; }
 .row-side { flex: none; max-width: 40%; text-align: right; font-variant-numeric: tabular-nums; }
 .row-side .primary { height: 20px; font-size: 13px; line-height: 20px; }
 .row-side .secondary { height: 17px; margin-top: 2px; color: var(--faint); font-size: 11.5px; line-height: 17px; }
@@ -208,5 +222,8 @@ label.row:hover { background: var(--hover); }
   .toolbar .spacer { display: none; }
   .search { order: 3; width: 100%; }
   .row { gap: 10px; }
+  #pull-rows .row-title { height: auto; flex-wrap: wrap; row-gap: 4px; }
+  .pull-repository { max-width: 100%; }
+  .pull-title-text { flex-basis: 100%; }
   .agent-extra { padding-left: 42px; }
 }
