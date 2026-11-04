@@ -3,7 +3,7 @@ import { GitHubCommands, GitHubSignedOut, safeError, USER_AGENT } from './github
 import type { State } from './state.js';
 
 /** Names Nootify's OAuth App, which has Device Flow enabled. Client IDs are public and this flow uses no client secret. */
-export const GITHUB_CLIENT_ID = process.env.NOOTIFY_GITHUB_CLIENT_ID?.trim() || '';
+export const GITHUB_CLIENT_ID = process.env.NOOTIFY_GITHUB_CLIENT_ID?.trim() || 'Ov23liMl1ElZD0hh84y1';
 /** Private repositories need `repo`: OAuth has no read-only scope for them. Nootify only sends read-only queries. */
 const SCOPES = 'repo read:org';
 const DEVICE_PAGE = 'https://github.com/login/device';
