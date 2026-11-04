@@ -1,0 +1,63 @@
+"use strict";
+
+(() => {
+  const en = {
+    pageTitle: "Nootify — your coding session, one reply away",
+    pageDescription: "Follow your coding sessions in Feishu and send replies back to Claude Code, Codex, and OpenCode on your Mac. Nootify also keeps your GitHub pull requests in view.",
+    browseReleases: "Browse releases",
+    downloadMac: "Download for Apple Silicon",
+    installerMissing: "This release has no Apple Silicon DMG. Open the release page for available files.",
+    releaseReady: "Version and installer link are current with GitHub Releases.",
+  };
+  for (const node of document.querySelectorAll("[data-i18n]")) en[node.dataset.i18n] = node.textContent;
+  for (const node of document.querySelectorAll("[data-i18n-html]")) en[node.dataset.i18nHtml] = node.innerHTML;
+
+  IdySite.init({
+    en,
+    zh: {
+      pageTitle: "Nootify — 会话在电脑上，回复在飞书里",
+      pageDescription: "在飞书接收开发进度，将回复送回 Mac 上已有的 Claude Code、Codex 与 OpenCode 会话。Nootify 也帮你关注 GitHub PR 状态。",
+      features: "功能", setup: "开始使用",
+      heroTitle: "会话在电脑上。<br>回复在飞书里。",
+      heroDescription: "在飞书跟进 Claude Code、Codex 和 OpenCode。每段会话有自己的群，进度会发到群里，你的回复会送回 Mac 上已有的会话。",
+      setupGuide: "了解如何开始", platforms: "适用于 Apple Silicon Mac，需 macOS 13.5 或更高版本。",
+      sampleSession: "修复登录问题", sampleGroup: "这段会话专属的飞书群",
+      sampleProgress: "测试已通过，PR 已准备好评审。", you: "你", sampleReply: "也检查一下空状态。",
+      sampleReceipt: "你的回复会送回同一段本地会话。",
+      sampleNote: "对话示意。Mac、智能体会话与已配置的飞书机器人需要保持运行。",
+      featuresTitle: "保留上下文，接着聊。",
+      featuresIntro: "Nootify 把 Mac 上正在进行的工作，连接到你查看进度的地方。",
+      groupsTitle: "一段会话，一个群。",
+      groupsDescription: "智能体将进度、阻塞和结果发到专属飞书群。每条更新都带有会话名称，并行任务也容易区分。",
+      repliesTitle: "回复你原来开启的会话。",
+      repliesDescription: "群内回复会路由到对应的 Claude Code、Codex 或 OpenCode 会话，使用已有客户端，保留对话上下文。",
+      pullsTitle: "看见需要关注的 PR。",
+      pullsDescription: "分别查看自己仓库的 PR 和提交给上游的贡献。集中了解评审、CI 失败与合并冲突，查看过程不会修改 GitHub 上的内容。",
+      localTitle: "安静待在菜单栏。",
+      localDescription: "原生 macOS 窗口和菜单栏控件连接独立的本地服务。关闭窗口后，服务仍然可用；需要时可查看进度和路由日志。",
+      setupTitle: "一个小应用，少一点等待。",
+      setupIntro: "macOS 应用自带服务和 Node.js 运行时。你只需准备开发客户端和飞书机器人。",
+      installTitle: "安装到 Mac。",
+      installDescription: "下载 DMG，将 Nootify 拖入“应用程序”后从那里打开。全新安装时，应用会安装并启动后台服务。",
+      connectTitle: "连接飞书和开发客户端。",
+      connectDescription: "配置飞书机器人及群聊权限，再到 Agents 页面启用你使用的客户端。凭据、可信发送者和客户端连接请按设置指南配置。",
+      conversationStepTitle: "开启一段会话。",
+      conversationStepDescription: "新开启的智能体会话会收到建立飞书群、发送进度的说明。在群中回复，就能继续 Mac 上对应的会话。",
+      fullSetup: "阅读完整设置指南", downloadTitle: "让会话跟得上你。",
+      downloadDescription: "目前的 macOS 安装包面向 Apple Silicon。这里的版本号和安装包链接直接从 GitHub Releases 获取。",
+      signingNote: "公开构建使用 ad-hoc 签名，尚未经 Apple 公证。首次打开前，请阅读发布说明与 macOS“隐私与安全性”相关提示。",
+      releaseNotes: "发布说明与全部下载", questionsTitle: "使用前，了解这些。",
+      modelQuestion: "Nootify 会替我运行模型吗？",
+      modelAnswer: "不会。它连接你已经运行的 Claude Code、Codex 或 OpenCode 客户端，不调用模型 API，也不替代开发智能体。",
+      offlineQuestion: "Mac 离线时还能回复吗？",
+      offlineAnswer: "本地服务和目标会话必须可用。Nootify 不会恢复已归档或未运行的会话，送达消息也不会自动批准权限请求。",
+      dataQuestion: "数据会去哪里？",
+      dataAnswer: "进度和回复通过你的飞书群传递。服务状态、路由信息与凭据保存在 Mac 本地。这个公开网站不会连接你的本地服务。",
+      quitQuestion: "关闭应用后会怎样？",
+      quitAnswer: "关闭窗口会将其隐藏。退出桌面应用后，独立的后台服务仍继续运行，你可以通过菜单栏中的服务控件单独管理它。",
+      browseReleases: "浏览发布版本", downloadMac: "下载 Apple Silicon 版",
+      installerMissing: "此版本未提供 Apple Silicon DMG，请前往发布页面查看可用文件。",
+      releaseReady: "版本和安装包链接已从 GitHub Releases 更新。",
+    },
+  });
+})();

@@ -1,0 +1,82 @@
+/* Shared by the idy.dev sites. Keep this file and idy.js in sync. */
+@font-face {
+  font-family: Manrope;
+  font-style: normal;
+  font-weight: 400 800;
+  font-display: swap;
+  src: url("manrope-latin.woff2") format("woff2");
+}
+:root {
+  --idy-font: Manrope, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --idy-bg: #f7f9fc;
+  --idy-surface: #ffffff;
+  --idy-ink: #17243a;
+  --idy-muted: #52647b;
+  --idy-line: #dce4ef;
+  --idy-accent: #3458ce;
+}
+:root[data-theme="dark"] {
+  --idy-bg: #142033;
+  --idy-surface: #1c2b42;
+  --idy-ink: #edf2fa;
+  --idy-muted: #acbdd4;
+  --idy-line: #35465e;
+  --idy-accent: #a3baff;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --idy-bg: #142033;
+    --idy-surface: #1c2b42;
+    --idy-ink: #edf2fa;
+    --idy-muted: #acbdd4;
+    --idy-line: #35465e;
+    --idy-accent: #a3baff;
+  }
+}
+body, h1, h2, h3, h4, button, select, input, textarea { font-family: var(--idy-font); }
+body { -webkit-font-smoothing: antialiased; }
+h1, h2, h3 { text-wrap: balance; }
+h1 { font-weight: 750; letter-spacing: -.045em; }
+h2 { font-weight: 700; letter-spacing: -.025em; }
+:root:lang(zh) h1, :root:lang(zh) h2, :root:lang(zh) h3 { letter-spacing: -.015em; line-height: 1.3; }
+.idy-header, .idy-footer { background: var(--idy-bg); color: var(--idy-ink); font-family: var(--idy-font); }
+.idy-header { border-bottom: 1px solid var(--idy-line); }
+.idy-header-inner, .idy-footer-inner { width: min(100% - 56px, 1120px); margin-inline: auto; }
+.idy-header-inner { min-height: 84px; display: flex; align-items: center; gap: 22px; }
+.idy-home { display: inline-flex; align-items: center; min-height: 44px; color: var(--idy-ink); font-size: 19px; font-weight: 800; letter-spacing: -.055em; text-decoration: none; white-space: nowrap; }
+.idy-project { border-left: 1px solid var(--idy-line); padding-left: 22px; color: var(--idy-muted); font-size: 14px; font-weight: 650; text-decoration: none; white-space: nowrap; }
+.idy-nav { display: flex; align-items: center; justify-content: flex-end; flex: 1; gap: 20px; }
+.idy-nav a, .idy-footer nav a { display: inline-flex; align-items: center; min-height: 44px; color: var(--idy-muted); font-size: 13px; font-weight: 600; text-decoration: none; white-space: nowrap; }
+.idy-header a:hover, .idy-footer a:hover { color: var(--idy-accent); text-decoration: underline; text-underline-offset: 5px; }
+.idy-preferences { display: flex; align-items: center; gap: 12px; }
+.idy-preferences label { display: grid; gap: 3px; color: var(--idy-muted); font-size: 10px; line-height: 1.2; }
+.idy-preferences select { min-height: 34px; max-width: 124px; border: 1px solid var(--idy-line); border-radius: 7px; padding: 5px 22px 5px 9px; background-color: var(--idy-surface); color: var(--idy-ink); font-size: 12px; cursor: pointer; }
+.idy-header :focus-visible, .idy-footer :focus-visible { outline: 2px solid var(--idy-accent); outline-offset: 4px; }
+.idy-footer { margin-top: 56px; border-top: 1px solid var(--idy-line); }
+.idy-footer-inner { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding-block: 30px; }
+.idy-footer p { margin: 2px 0 0; color: var(--idy-muted); font-size: 12px; line-height: 1.7; }
+.idy-footer nav { display: flex; flex-wrap: wrap; gap: 8px 22px; }
+@media (max-width: 900px) {
+  .idy-header-inner { flex-wrap: wrap; gap: 8px 18px; padding-block: 15px; }
+  .idy-nav { flex: 1 1 auto; }
+  .idy-preferences { margin-left: auto; }
+  .idy-project { padding-left: 18px; }
+}
+@media (max-width: 600px) {
+  .idy-header-inner, .idy-footer-inner { width: calc(100% - 40px); }
+  .idy-header-inner { gap: 8px 14px; }
+  .idy-home { font-size: 18px; }
+  .idy-project { padding-left: 14px; font-size: 13px; }
+  .idy-nav { order: 3; flex-basis: 100%; justify-content: flex-start; gap: 22px; }
+  .idy-preferences { gap: 8px; }
+  .idy-preferences select { min-height: 36px; font-size: 11px; padding-left: 7px; padding-right: 16px; max-width: 108px; }
+  .idy-preferences label > span { font-size: 9px; }
+  .idy-footer-inner { align-items: flex-start; flex-direction: column; gap: 12px; padding-block: 24px; }
+  .idy-footer { margin-top: 36px; }
+}
+@media (max-width: 420px) {
+  .idy-preferences { flex-basis: 100%; justify-content: flex-start; margin-left: 0; }
+  .idy-preferences label { display: flex; align-items: center; gap: 7px; }
+  .idy-preferences label > span { font-size: 11px; }
+}
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }

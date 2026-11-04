@@ -6,6 +6,26 @@ The HTTP listener binds to `127.0.0.1:9417`, plus this computer's Tailscale IPv4
 
 Routing lookup is lazy: only a message with a concrete adapter and session ID resolves that adapter's inbox or connects to its backend. The routing page lists at most 1,000 targets actually encountered during this process lifetime, including missing/archived/unavailable results. PR subscription discovery separately reads session identities, explicit PR links, repository anchors, branches, and timestamps.
 
+## Project website
+
+The public landing page is prepared for [nootify.idy.dev](https://nootify.idy.dev/). Its static files live in `site/`, separate from the service dashboard in `public/`. The website has no access to the local service, account data, or credentials.
+
+English/Chinese follows the browser by default; light/dark appearance follows the system. Header controls persist explicit choices when storage is available. The common idy.dev shell and locally hosted Manrope font live in `site/shared/` and should stay identical to the other idy.dev sites; the font license is included. The penguin mark comes from `desktop/brand.svg`.
+
+The latest stable GitHub Release supplies the actual Apple Silicon DMG URL, filename, size, and version. Preview-only repositories fall back to the newest published prerelease. Missing installers, rate limits, and network failures leave usable release-page links without claiming a fixed latest version. No API token is used.
+
+Preview and test from the repository root:
+
+```bash
+python3 -m http.server 4173 --directory site
+```
+
+```bash
+node --test test/website.test.cjs
+```
+
+The website workflow validates relevant pull requests and deploys `site/` only after a change reaches `main` (or a manual dispatch on `main`). First-time setup requires enabling GitHub Pages with GitHub Actions as the source, reserving the custom domain `nootify.idy.dev` in Pages, and adding a DNS CNAME from `nootify.idy.dev` to `idy.github.io`. After DNS and certificate issuance, enable HTTPS enforcement. The checked-in CNAME and workflow do not perform those account/DNS operations. Enable Pages before merging the first website PR so the deployment job can run. The idy.dev homepage links to this domain and should be published once the site is reachable.
+
 ## Build and test
 
 Requires Node.js 22.13+ and npm; Codex metadata lookup uses the built-in `node:sqlite`. From the repository root:
