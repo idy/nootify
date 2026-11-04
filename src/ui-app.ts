@@ -367,21 +367,9 @@ function renderPulls(): void {
 }
 
 // ---- Followed repositories ----
-function repoMeta(entry: RepositoryEntry): string {
-  const parts: string[] = [];
-  if (entry.agents.length) parts.push(entry.agents.map(agent => agentNames[agent] ?? agent).join('、'));
-  if (entry.sessions) parts.push(`${entry.sessions} 个会话`);
-  if (entry.linkedPulls) parts.push(`关联 PR ${entry.linkedPulls} 个`);
-  parts.push(entry.allPulls ? '仓库订阅' : '关联 PR 订阅');
-  if (entry.lastActive) parts.push(`最近活跃${ago(entry.lastActive)}`);
-  if (!parts.length) parts.push('未在本机对话中出现');
-  return parts.join(' · ');
-}
-function repoSide(entry: RepositoryEntry): HTMLElement {
-  const total = entry.pulls.internal + entry.pulls.upstream;
-  const counts = [entry.pulls.internal ? `我们仓库 ${entry.pulls.internal}` : '', entry.pulls.upstream ? `上游 ${entry.pulls.upstream}` : ''].filter(Boolean).join(' · ');
-  const mode = entry.choice === 'follow' ? '手动关注' : entry.choice === 'mute' ? '手动取消' : entry.followed ? '自动关注' : '未关注';
-  return sideBlock(total ? { label: `${total} 个 PR`, tone: entry.followed ? 'info' : 'muted' } : { label: '无打开的 PR', tone: 'muted' }, counts ? `${counts} · ${mode}` : mode);
+function repoCell(text: string, className: string, label: string): HTMLTableCellElement {
+  const cell = node('td', text, className); cell.dataset.label = label; cell.title = text;
+  return cell;
 }
 async function setFollow(entry: RepositoryEntry, follow: boolean): Promise<void> {
   // Show the new state at once; the reload below restores the server's view if saving fails.
@@ -408,41 +396,64 @@ function renderRepos(): void {
   const visible = entries.filter(entry => (state.repoFilter === 'all' || (state.repoFilter === 'followed') === entry.followed)
     && (!query || [entry.repository, ...entry.sources.map(source => `${source.name} ${source.id} ${source.branch ?? ''} ${source.pulls.map(pull => `#${pull.number}`).join(' ')}`)].join(' ').toLocaleLowerCase().includes(query)));
   $('repo-empty').hidden = visible.length > 0;
+  $('repo-table').hidden = visible.length === 0;
   if (!visible.length) {
     $('repo-empty-title').textContent = !state.pulls ? '正在读取仓库' : entries.length ? '没有匹配的仓库' : '还没有发现仓库';
     $('repo-empty-detail').textContent = entries.length ? '换个筛选条件或搜索词。' : '后台刷新会读取本机 Claude、Codex、OpenCode 对话的工作目录和 GitHub PR。';
   }
   if (!changed('repo-rows', [visible, [...state.pendingRepos]])) return;
-  replaceRows($('repo-rows'), visible.map(entry => {
-    const item = node('div', undefined, 'entry'); item.setAttribute('role', 'listitem');
-    const row = node('label', undefined, 'row');
+  replaceRows($('repo-rows'), visible.flatMap(entry => {
+    const row = node('tr', undefined, 'repo-row');
+    const follow = node('td', undefined, 'repo-follow-cell');
+    const label = node('label', undefined, 'repo-follow');
+    label.title = entry.choice === 'follow' ? '手动关注' : entry.choice === 'mute' ? '手动取消' : entry.followed ? '自动关注' : '未关注';
     const box = node('input', undefined, 'check'); box.type = 'checkbox'; box.checked = entry.followed;
     box.disabled = state.pendingRepos.has(entry.repository); box.dataset.key = entry.repository;
     box.setAttribute('aria-label', `关注 ${entry.repository}`);
     box.addEventListener('change', () => { void setFollow(entry, box.checked); });
-    row.append(box, rowMain(entry.repository, repoMeta(entry)), repoSide(entry));
-    item.append(row);
-    if (entry.sources.length) {
-      const extra = node('div', undefined, 'agent-extra');
-      const details = node('details'); details.open = state.openRepoSources.has(entry.repository);
-      details.addEventListener('toggle', () => { if (details.open) state.openRepoSources.add(entry.repository); else state.openRepoSources.delete(entry.repository); });
-      const summary = node('summary', `来源会话 · ${entry.sources.length}`); summary.dataset.key = `sources:${entry.repository}`;
-      const list = node('div', undefined, 'session-sources');
-      for (const source of entry.sources) {
-        const item = node('div', undefined, 'session-source');
-        item.append(node('strong', source.name), node('span', [adapters[source.adapter], source.fromRepository ? '会话仓库' : '关联 PR', source.branch, source.archived ? '已归档' : ''].filter(Boolean).join(' · '), 'source-meta'), node('span', source.id, 'mono source-id'));
-        if (source.pulls.length) {
-          const links = node('div', undefined, 'source-links');
-          for (const pull of source.pulls) {
-            const link = node('a', `#${pull.number}`); link.href = pull.url; link.target = '_blank'; link.rel = 'noopener noreferrer'; link.title = pull.url; links.append(link);
-          }
-          item.append(links);
+    label.append(box); follow.append(label);
+    const name = node('th', undefined, 'repo-name-cell'); name.scope = 'row';
+    const repository = node('span', entry.repository, 'repo-name'); repository.title = entry.repository;
+    const total = entry.pulls.internal + entry.pulls.upstream;
+    const open = repoCell(String(total), `repo-open-cell${total && entry.followed ? ' tone-info' : ''}`, 'Open PR');
+    open.title = `我们仓库 ${entry.pulls.internal} 个，上游 ${entry.pulls.upstream} 个`;
+    const scope = repoCell(entry.allPulls ? '整个仓库' : '指定 PR', 'repo-scope-cell', '范围');
+    scope.title = entry.allPulls ? '跟踪仓库中的 Open 与草稿 PR' : '仅跟踪来源会话明确关联的 PR';
+    const active = repoCell(ago(entry.lastActive), 'repo-active-cell', '活跃');
+    if (entry.lastActive) active.title = fullTime(entry.lastActive);
+    row.append(follow, name, repoCell(entry.agents.map(agent => agentNames[agent] ?? agent).join('、') || '—', 'repo-agents-cell', '来源'), scope,
+      repoCell(String(entry.sessions), 'repo-sessions-cell', '会话'), repoCell(String(entry.linkedPulls), 'repo-linked-cell', '关联 PR'), open, active);
+    if (!entry.sources.length) { name.append(repository); return [row]; }
+
+    const details = node('tr', undefined, 'repo-details'); details.id = `repo-sources-${encodeURIComponent(entry.repository)}`;
+    details.hidden = !state.openRepoSources.has(entry.repository);
+    const toggle = node('button', undefined, 'repo-toggle'); toggle.type = 'button'; toggle.dataset.key = `sources:${entry.repository}`;
+    toggle.setAttribute('aria-expanded', String(!details.hidden)); toggle.setAttribute('aria-controls', details.id);
+    toggle.setAttribute('aria-label', `${entry.repository}，${entry.sources.length} 个来源会话`);
+    toggle.append(chevron(), repository); name.append(toggle);
+    toggle.addEventListener('click', () => {
+      const open = details.hidden;
+      if (open) state.openRepoSources.add(entry.repository); else state.openRepoSources.delete(entry.repository);
+      details.hidden = !open; toggle.setAttribute('aria-expanded', String(open));
+    });
+    const cell = node('td'); cell.colSpan = 8;
+    const list = node('div', undefined, 'session-sources'); list.setAttribute('role', 'list'); list.setAttribute('aria-label', `${entry.repository} 的来源会话`);
+    for (const source of entry.sources) {
+      const item = node('div', undefined, 'session-source'); item.setAttribute('role', 'listitem');
+      const meta = node('span', [adapters[source.adapter], source.fromRepository ? '会话仓库' : '关联 PR', source.branch, source.archived ? '已归档' : ''].filter(Boolean).join(' · '), 'source-meta');
+      meta.title = meta.textContent ?? '';
+      item.append(node('strong', source.name), meta, node('span', source.id, 'mono source-id'));
+      if (source.pulls.length) {
+        const links = node('div', undefined, 'source-links');
+        for (const pull of source.pulls) {
+          const link = node('a', `#${pull.number}`); link.href = pull.url; link.target = '_blank'; link.rel = 'noopener noreferrer'; link.title = pull.url; links.append(link);
         }
-        list.append(item);
+        item.append(links);
       }
-      details.append(summary, list); extra.append(details); item.append(extra);
+      list.append(item);
     }
-    return item;
+    cell.append(list); details.append(cell);
+    return [row, details];
   }));
 }
 

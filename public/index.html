@@ -93,9 +93,15 @@
       <span class="spacer"></span>
       <label class="search"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/></svg><input id="repo-search" type="search" placeholder="搜索仓库、会话、PR" autocomplete="off" aria-label="搜索 PR 订阅"></label>
     </div>
-    <p class="hint">从本机会话找到关联的 PR 和仓库，作为订阅来源。会话仓库跟踪它的 PR；仅关联某个 PR 时只跟踪那一条。展开可查看来源会话，取消勾选可停止关注；两个 PR 页面仅显示当前 Open 与草稿。</p>
+    <p class="hint">点击仓库查看来源会话，勾选或取消关注。Open PR 包含草稿。</p>
     <div id="repo-banner" class="banner" role="alert" hidden></div>
-    <div class="group"><div class="rows" id="repo-rows" role="list"></div><div id="repo-empty" class="empty" hidden><strong id="repo-empty-title"></strong><span id="repo-empty-detail"></span></div></div>
+    <div class="group">
+      <table class="repo-table" id="repo-table" aria-label="PR 订阅">
+        <thead><tr><th scope="col" class="repo-follow-cell">关注</th><th scope="col" class="repo-name-cell">仓库</th><th scope="col" class="repo-agents-cell">来源</th><th scope="col" class="repo-scope-cell">订阅范围</th><th scope="col" class="repo-sessions-cell">会话</th><th scope="col" class="repo-linked-cell">关联 PR</th><th scope="col" class="repo-open-cell">Open PR</th><th scope="col" class="repo-active-cell">最近活跃</th></tr></thead>
+        <tbody id="repo-rows"></tbody>
+      </table>
+      <div id="repo-empty" class="empty" hidden><strong id="repo-empty-title"></strong><span id="repo-empty-detail"></span></div>
+    </div>
   </section>
   <section id="settings-view" class="view" aria-label="设置" hidden>
     <div id="settings-banner" class="banner" role="alert" hidden></div>

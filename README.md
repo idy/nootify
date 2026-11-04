@@ -234,7 +234,7 @@ Refreshes run in the background every five minutes and from the page's refresh b
 
 ### Session-derived subscriptions
 
-The **PR 订阅** page follows the relationship **session → linked PRs and repository → GitHub status**. Every candidate comes from a discovered session or a deliberate saved choice. Each repository expands to show the session name, full ID, branch, and explicit PR links that explain the subscription. PR rows show their source sessions too.
+The **PR 订阅** page follows the relationship **session → linked PRs and repository → GitHub status**. Every candidate comes from a discovered session or a deliberate saved choice. A compact table aligns the follow checkbox, repository, source agents, subscription scope, session count, linked PR count, open PR count, and last activity. Clicking a repository expands its source sessions, including the full ID, branch, and explicit PR links, without changing its follow choice. Narrow screens stack the same fields into compact rows. PR rows show their source sessions too.
 
 | Agent | Structured association data |
 | --- | --- |

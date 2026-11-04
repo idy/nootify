@@ -145,12 +145,37 @@ label.row:hover { background: var(--hover); }
 .agent-extra { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; padding: 0 16px 11px 48px; }
 .agent-extra summary { width: fit-content; color: var(--muted); font-size: 12px; cursor: pointer; }
 .agent-extra details { flex-basis: 100%; min-width: 0; }
-.session-sources { margin-top: 8px; }
-.session-source { display: grid; gap: 3px; padding: 8px 0; }
-.session-source + .session-source { border-top: 1px solid var(--line-soft); }
+/* Subscriptions: one compact row per repository; only an expanded source list takes extra space. */
+.repo-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.repo-table th, .repo-table td { padding: 6px 10px; text-align: left; }
+.repo-table thead { background: var(--raised); color: var(--muted); font-size: 11.5px; }
+.repo-table thead th { height: 32px; font-weight: 500; white-space: nowrap; }
+.repo-row { height: 40px; border-top: 1px solid var(--line-soft); }
+.repo-row:hover { background: var(--hover); }
+.repo-row td { overflow: hidden; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.repo-row .tone-info { color: var(--blue); }
+.repo-table .repo-follow-cell { width: 44px; padding: 0 8px; text-align: center; }
+.repo-follow { display: grid; place-items: center; min-height: 36px; cursor: pointer; }
+.repo-name-cell { font-weight: 500; }
+.repo-name { display: block; overflow: hidden; color: var(--text); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.repo-name-cell > .repo-name { padding-left: 20px; }
+.repo-toggle { display: flex; align-items: center; gap: 6px; width: 100%; min-height: 28px; text-align: left; border-radius: 4px; }
+.repo-toggle .repo-name { min-width: 0; }
+.repo-toggle[aria-expanded="true"] .chevron { transform: rotate(90deg); }
+.repo-agents-cell { width: 126px; }
+.repo-scope-cell { width: 80px; }
+.repo-table .repo-sessions-cell { width: 52px; text-align: right; font-variant-numeric: tabular-nums; }
+.repo-table .repo-linked-cell { width: 72px; text-align: right; font-variant-numeric: tabular-nums; }
+.repo-table .repo-open-cell { width: 76px; text-align: right; font-variant-numeric: tabular-nums; }
+.repo-table .repo-active-cell { width: 88px; text-align: right; }
+.repo-details > td { padding: 2px 16px 8px 64px; background: var(--raised); }
+.session-source { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, .85fr) auto; gap: 2px 16px; align-items: center; padding: 6px 0; }
+.session-source + .session-source { border-top: 1px solid var(--line); }
 .session-source strong { font-size: 12.5px; font-weight: 500; overflow-wrap: anywhere; }
-.source-meta, .source-id { color: var(--faint); font-size: 11.5px; overflow-wrap: anywhere; }
-.source-links { display: flex; flex-wrap: wrap; gap: 10px; color: var(--blue); font-size: 12px; }
+.source-meta, .source-id { color: var(--muted); font-size: 11.5px; overflow-wrap: anywhere; }
+.source-meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.source-id { grid-column: 1 / 3; }
+.source-links { display: flex; grid-column: 3; grid-row: 1 / 3; flex-wrap: wrap; gap: 4px 10px; max-width: 180px; color: var(--blue); font-size: 12px; }
 .source-links a:hover { text-decoration: underline; }
 .agent-extra pre { margin: 8px 0 0; padding: 10px 12px; overflow-x: auto; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--bg); color: var(--muted); font-size: 11.5px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
 .agent-extra .text-button { height: 24px; padding: 0 8px; color: var(--blue); font-size: 12px; }
@@ -202,6 +227,26 @@ label.row:hover { background: var(--hover); }
   .icon-button.busy svg { animation: none; }
   .chevron { transition: none; }
 }
+@media (max-width: 1100px) {
+  .repo-table, .repo-table tbody { display: block; }
+  .repo-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .repo-row { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto auto auto; gap: 0 12px; height: auto; padding: 6px 12px; }
+  .repo-table .repo-row > * { width: auto; padding: 0; text-align: left; }
+  .repo-row .repo-follow-cell { grid-column: 1; grid-row: 1 / 3; align-self: center; }
+  .repo-row .repo-name-cell { grid-column: 2; grid-row: 1; min-width: 0; }
+  .repo-row .repo-agents-cell { grid-column: 2; grid-row: 2; }
+  .repo-row .repo-active-cell { grid-column: 4 / -1; grid-row: 1; align-self: center; text-align: right; }
+  .repo-row .repo-scope-cell { grid-column: 3; grid-row: 1; align-self: center; text-align: right; }
+  .repo-row .repo-sessions-cell { grid-column: 3; grid-row: 2; }
+  .repo-row .repo-linked-cell { grid-column: 4; grid-row: 2; }
+  .repo-row .repo-open-cell { grid-column: 5; grid-row: 2; }
+  .repo-sessions-cell::before, .repo-linked-cell::before, .repo-open-cell::before { content: attr(data-label) " "; color: var(--muted); font-size: 11px; }
+  .repo-details, .repo-details > td { display: block; }
+  .repo-details > td { padding: 2px 16px 8px 60px; }
+  .session-source { grid-template-columns: minmax(0, 1fr) auto; }
+  .source-meta, .source-id { grid-column: 1; }
+  .source-links { grid-column: 2; grid-row: 1 / 4; max-width: 90px; }
+}
 @media (max-width: 760px) {
   .app { display: block; height: auto; }
   .sidebar { position: sticky; top: 0; z-index: 2; flex-direction: row; align-items: center; gap: 8px; padding: 8px 10px; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); scrollbar-width: none; }
@@ -226,4 +271,12 @@ label.row:hover { background: var(--hover); }
   .pull-repository { max-width: 100%; }
   .pull-title-text { flex-basis: 100%; }
   .agent-extra { padding-left: 42px; }
+  .repo-row { grid-template-columns: 24px minmax(0, 1fr) auto auto auto; gap: 2px 8px; padding: 7px 10px; }
+  .repo-row .repo-follow-cell { grid-row: 1 / 4; }
+  .repo-row .repo-name-cell { grid-column: 2 / -1; }
+  .repo-row .repo-active-cell { grid-column: 4 / -1; grid-row: 3; }
+  .repo-row .repo-scope-cell { grid-column: 2 / 4; grid-row: 3; text-align: left; }
+  .repo-linked-cell::before { content: "关联 "; }
+  .repo-open-cell::before { content: "Open "; }
+  .repo-details > td { padding-left: 44px; }
 }
