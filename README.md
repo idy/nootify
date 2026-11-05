@@ -10,7 +10,7 @@ Routing lookup is lazy: only a message with a concrete adapter and session ID re
 
 The public landing page is prepared for [nootify.idy.dev](https://nootify.idy.dev/). Its static files live in `site/`, separate from the service dashboard in `public/`. The website has no access to the local service, account data, or credentials.
 
-English/Chinese follows the browser by default; light/dark appearance follows the system. Header controls persist explicit choices when storage is available. The common idy.dev shell and locally hosted Manrope font live in `site/shared/` and should stay identical to the other idy.dev sites; the font license is included. The penguin mark comes from `desktop/brand.svg`.
+English/Chinese follows the browser by default; light/dark appearance follows the system. Header controls persist explicit choices when storage is available. The common idy.dev shell and locally hosted fonts with their licenses live in `site/shared/` and should stay identical to the other idy.dev sites. Montserrat is used for headings, Monda for body text, Lato for notes, and Phosphor for icons; Manrope remains a fallback. The penguin mark comes from `desktop/brand.svg`.
 
 The latest stable GitHub Release supplies the actual Apple Silicon DMG URL, filename, size, and version. Preview-only repositories fall back to the newest published prerelease. Missing installers, rate limits, and network failures leave usable release-page links without claiming a fixed latest version. No API token is used.
 

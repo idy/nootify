@@ -1,0 +1,71 @@
+/* Shared idy.dev header and typography. Keep this file in sync across sites. */
+@font-face { font-family: Montserrat; font-style: normal; font-weight: 400 800; font-display: swap; src: url("montserrat-latin.woff2") format("woff2"); }
+@font-face { font-family: Monda; font-style: normal; font-weight: 400 700; font-display: swap; src: url("monda-latin.woff2") format("woff2"); }
+@font-face { font-family: Lato; font-style: normal; font-weight: 400; font-display: swap; src: url("lato-regular-latin.woff2") format("woff2"); }
+@font-face { font-family: Lato; font-style: normal; font-weight: 700; font-display: swap; src: url("lato-bold-latin.woff2") format("woff2"); }
+@font-face { font-family: Phosphor; font-style: normal; font-weight: 400; font-display: block; src: url("phosphor-regular.woff2") format("woff2"); }
+:root { --idy-font: Monda, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif; --idy-heading: Montserrat, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif; --idy-small: Lato, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif; }
+body, button, select, input, textarea { font-family: var(--idy-font); }
+h1, h2, h3, h4 { font-family: var(--idy-heading); letter-spacing: -.03em; }
+.idy-footer, .idy-footer nav a, .idy-footer p, .release-status, .copy-status, .concept-disclaimer, .hero-note, .hero-footnote, .download-caveat, .terminal-note, .access-note, .download-other, .release-note, .project-release, .scope-note p, .boundary-note, .platform-note, .signing-note, .code-heading, .detail-note { font-family: var(--idy-small); }
+.ph { display: inline-block; flex: none; font-family: Phosphor !important; font-style: normal; font-weight: 400 !important; font-size: 18px; font-variant: normal; line-height: 1; letter-spacing: 0; text-transform: none; -webkit-font-smoothing: antialiased; }
+.ph::before { display: block; }
+.ph-sun::before { content: "\e472"; } .ph-moon::before { content: "\e330"; }
+.ph-translate::before { content: "\e4a2"; } .ph-list::before { content: "\e2f0"; }
+.ph-desktop::before { content: "\e560"; } .ph-check::before { content: "\e182"; }
+.ph-github-logo::before { content: "\e576"; } .ph-star::before { content: "\e46a"; }
+.idy-header.compact-header { border-bottom: 1px solid var(--idy-line); background: var(--idy-surface); }
+.compact-header .idy-header-inner { width: min(1160px, calc(100% - 64px)); min-height: 72px; display: flex; flex-wrap: nowrap; align-items: center; gap: 36px; padding-block: 0; }
+.compact-header .idy-home { min-height: 44px; flex: none; font-family: var(--idy-heading); font-size: 21px; font-weight: 700; letter-spacing: -.035em; }
+.compact-header .idy-nav { display: flex; align-items: center; justify-content: flex-start; gap: 25px; flex: 1 1 auto; min-width: 0; }
+.compact-header .idy-nav a { min-height: 44px; color: var(--idy-muted); font-family: var(--idy-font); font-size: 13px; font-weight: 400; text-decoration: none; }
+.compact-header .idy-nav a:hover, .compact-header .idy-nav a:focus-visible { color: var(--idy-ink); }
+.compact-header .header-actions { display: flex; align-items: center; gap: 14px; margin-left: auto; flex: none; }
+.compact-header .idy-preferences { display: flex; align-items: center; gap: 6px; margin: 0; }
+/* Keep the header steady until icon controls replace the native fallback. */
+:root[data-idy-header-pending] .compact-header .idy-preferences { visibility: hidden; width: 91px; flex: none; overflow: hidden; }
+/* Preferences require the shared script; keep the no-script header usable. */
+:root:not([data-theme]) .compact-header .idy-preferences { display: none; }
+.compact-header .idy-preferences label { display: block; color: var(--idy-muted); font-size: 12px; }
+.compact-header .idy-preferences label > span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.compact-header .idy-preferences select { min-height: 44px; max-width: 118px; padding: 5px; border: 0; border-radius: 7px; background-color: transparent; color: var(--idy-ink); font-size: 12px; }
+.compact-header .header-controls { display: flex; align-items: center; gap: 3px; }
+.compact-header .preference-control { position: relative; }
+.compact-header .icon-button { display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px; padding: 0; border: 0; border-radius: 7px; background: transparent; color: var(--idy-muted); cursor: pointer; }
+.compact-header .icon-button:hover, .compact-header .icon-button[aria-expanded="true"], .compact-header .idy-mobile > summary:hover, .compact-header .idy-mobile[open] > summary { color: var(--idy-ink); background: var(--idy-bg); }
+.compact-header .preference-panel, .compact-header .idy-mobile-panel { position: absolute; z-index: 20; top: calc(100% + 8px); right: 0; min-width: 180px; padding: 5px; border: 1px solid var(--idy-line); border-radius: 10px; background: var(--idy-surface); box-shadow: 0 8px 26px rgb(10 22 42 / .12); }
+.compact-header .preference-option, .compact-header .idy-mobile-panel a { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 44px; padding: 9px 10px; border: 0; border-radius: 6px; background: transparent; color: var(--idy-muted); font-family: var(--idy-font); font-size: 12px; font-weight: 400; line-height: 1.5; text-align: left; text-decoration: none; cursor: pointer; white-space: nowrap; }
+.compact-header .preference-option:hover, .compact-header .preference-option:focus-visible, .compact-header .idy-mobile-panel a:hover, .compact-header .idy-mobile-panel a:focus-visible { background: var(--idy-bg); color: var(--idy-ink); }
+.compact-header .preference-option[aria-checked="true"] { color: var(--idy-ink); font-weight: 700; }
+.compact-header .option-label { flex: 1; }
+.compact-header .option-check { width: 15px; color: var(--idy-accent); font-size: 15px; visibility: hidden; }
+.compact-header .preference-option[aria-checked="true"] .option-check { visibility: visible; }
+.compact-header .idy-action { display: inline-flex; align-items: center; justify-content: center; min-width: 44px; min-height: 44px; color: var(--idy-ink); text-decoration: none; white-space: nowrap; }
+.compact-header .idy-action-pill { display: inline-flex; align-items: center; gap: 7px; min-height: 33px; padding: 6px 12px; border: 1px solid var(--idy-ink); border-radius: 7px; background: var(--idy-ink); color: var(--idy-surface); font-family: var(--idy-font); font-size: 12px; font-weight: 700; line-height: 19px; }
+.compact-header .idy-action:hover { text-decoration: none; }
+.compact-header .idy-action:hover .idy-action-pill { opacity: .85; }
+.compact-header .idy-action-pill .ph { font-size: 15px; }
+.compact-header .idy-mobile { position: relative; display: none; flex: none; }
+.compact-header .idy-mobile > summary { display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px; border-radius: 7px; color: var(--idy-muted); list-style: none; cursor: pointer; }
+.compact-header .idy-mobile > summary::-webkit-details-marker { display: none; }
+.compact-header .idy-mobile-panel { left: 0; right: auto; min-width: 168px; }
+.compact-header :focus-visible { outline: 2px solid var(--idy-accent); outline-offset: 3px; }
+@media (max-width: 880px) { .compact-header .idy-header-inner { gap: 18px; } .compact-header .idy-nav { gap: 16px; } }
+@media (max-width: 760px) {
+  .compact-header .idy-header-inner { width: calc(100% - 32px); min-height: 64px; gap: 10px; }
+  .compact-header .idy-home { font-size: 19px; }
+  .compact-header .idy-nav { display: none; }
+  .compact-header .idy-mobile { display: block; }
+  .compact-header .header-actions { gap: 8px; }
+  .compact-header .icon-button, .compact-header .idy-mobile > summary { width: 44px; }
+  .compact-header .preference-panel { min-width: 168px; }
+  .compact-header .idy-action-pill .ph { display: none; }
+}
+@media (max-width: 360px) {
+  .compact-header .idy-header-inner { width: calc(100% - 24px); gap: 5px; }
+  .compact-header .idy-home { font-size: 17px; }
+  .compact-header .header-actions { gap: 3px; }
+  .compact-header .idy-preferences select { width: 54px; }
+  .compact-header .icon-button, .compact-header .idy-mobile > summary { width: 44px; }
+  .compact-header .idy-action-pill { padding-inline: 8px; font-size: 11px; }
+}
