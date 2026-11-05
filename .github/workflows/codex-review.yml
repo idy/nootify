@@ -78,8 +78,52 @@ jobs:
             });
             core.info(`Requested a review of PR ${number} on the trusted default branch.`);
 
+  resolve_review_target:
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'issue_comment' && github.event.issue.pull_request != null)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      number: ${{ steps.target.outputs.number }}
+    steps:
+      - id: target
+        env:
+          CODEX_REVIEW_EVENT_NAME: ${{ github.event_name }}
+          CODEX_REVIEW_IS_PR: ${{ github.event.issue.pull_request != null }}
+          CODEX_REVIEW_PR_INPUT: ${{ inputs.pull_request_number }}
+          CODEX_REVIEW_ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const event = process.env.CODEX_REVIEW_EVENT_NAME;
+          if (!['issue_comment', 'workflow_dispatch'].includes(event)
+            || (event === 'issue_comment' && process.env.CODEX_REVIEW_IS_PR !== 'true')) {
+            throw new Error('Unsupported review event');
+          }
+          const requestedNumber = Number(process.env.CODEX_REVIEW_PR_INPUT);
+          let number;
+          if (Number.isSafeInteger(requestedNumber) && requestedNumber > 0) {
+            number = requestedNumber;
+          } else if (event === 'issue_comment') {
+            number = Number(process.env.CODEX_REVIEW_ISSUE_NUMBER);
+          } else {
+            number = requestedNumber;
+          }
+          if (!Number.isSafeInteger(number) || number < 1) {
+            throw new Error('A positive safe integer pull request number is required');
+          }
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `number=${number}\n`);
+          NODE
+
   review:
+    needs: resolve_review_target
     if: github.event_name != 'issues' && github.event_name != 'pull_request_target'
+    concurrency:
+      group: openai-pr-review-invoke-${{ needs.resolve_review_target.outputs.number }}
+      queue: max
+      cancel-in-progress: false
     uses: GizClaw/github-workflows/.github/workflows/codex-openai-review.yml@latest
     with:
       review-instructions: >-
@@ -154,6 +198,10 @@ jobs:
       fail-fast: false
       matrix:
         pull_request_number: ${{ fromJSON(needs.resolve_linked_prs.outputs.pull_requests) }}
+    concurrency:
+      group: openai-pr-review-invoke-${{ matrix.pull_request_number }}
+      queue: max
+      cancel-in-progress: false
     uses: GizClaw/github-workflows/.github/workflows/codex-openai-review.yml@latest
     with:
       review-instructions: >-
