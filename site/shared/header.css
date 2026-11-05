@@ -49,7 +49,7 @@ h1, h2, h3, h4 { font-family: var(--idy-heading); letter-spacing: -.03em; }
 .compact-header .idy-mobile-panel { left: 0; right: auto; min-width: 168px; }
 .compact-header :focus-visible { outline: 2px solid var(--idy-accent); outline-offset: 3px; }
 @media (max-width: 880px) { .compact-header .idy-header-inner { gap: 18px; } .compact-header .idy-nav { gap: 16px; } }
-@media (max-width: 720px) {
+@media (max-width: 760px) {
   .compact-header .idy-header-inner { width: calc(100% - 32px); min-height: 64px; gap: 10px; }
   .compact-header .idy-home { font-size: 19px; }
   .compact-header .idy-nav { display: none; }
