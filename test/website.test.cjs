@@ -31,6 +31,10 @@ async function render(fetcher) {
   }
   fields["[data-i18n]"] = textNodes;
   fields["[data-i18n-html]"] = htmlNodes;
+  fields["[data-i18n-aria-label]"] = Array.from(html.matchAll(/<[^>]+\baria-label="([^"]+)"[^>]+\bdata-i18n-aria-label="([^"]+)"/g), match => {
+    const attributes = { "aria-label": match[1], "data-i18n-aria-label": match[2] };
+    return { getAttribute: name => attributes[name], setAttribute: (name, value) => { attributes[name] = value; } };
+  });
   const listeners = new Map();
   const events = {};
   const context = {
@@ -117,4 +121,31 @@ test("static links have no pinned release and all website assets exist", () => {
     const path = match[1];
     if (!path.includes(":") && !path.startsWith("#")) assert.ok(existsSync(join(site, path)), path);
   }
+});
+
+test("mobile navigation retains every desktop link without JavaScript", () => {
+  const links = className => {
+    const nav = html.match(new RegExp(`<nav class="${className}"[^>]*>([\\s\\S]*?)<\\/nav>`));
+    assert.ok(nav, `${className} navigation`);
+    return Array.from(nav[1].matchAll(/<a href="([^"]+)"(?: data-i18n="([^"]+)")?/g), match => [match[1], match[2] || null]);
+  };
+  assert.deepEqual(links("idy-mobile-panel"), links("idy-nav"));
+  assert.match(html, /<details class="idy-mobile">\s*<summary aria-label="Main navigation"/);
+  assert.match(html, /<select data-idy-language>/);
+  assert.match(html, /<select data-idy-theme>/);
+  assert.match(html, /class="idy-action" href="https:\/\/github\.com\/idy\/nootify"[^>]*target="_blank"[^>]*data-i18n-aria-label="starLabel"/);
+});
+
+test("header navigation and repository action have bilingual accessible labels", async () => {
+  const page = await render(async () => response(release()));
+  const labels = page.fields["[data-i18n-aria-label]"];
+  const star = labels.find(node => node.getAttribute("data-i18n-aria-label") === "starLabel");
+  const navigation = labels.filter(node => node.getAttribute("data-i18n-aria-label") === "navigation");
+  assert.equal(star.getAttribute("aria-label"), "Star Nootify on GitHub (opens in a new tab)");
+  assert.equal(navigation.length, 3);
+  page.language("zh");
+  assert.equal(star.getAttribute("aria-label"), "在 GitHub 为 Nootify 点星（在新标签页打开）");
+  assert.ok(navigation.every(node => node.getAttribute("aria-label") === "主导航"));
+  page.language("en");
+  assert.equal(star.getAttribute("aria-label"), "Star Nootify on GitHub (opens in a new tab)");
 });
