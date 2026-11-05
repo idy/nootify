@@ -119,7 +119,9 @@
           else if (event.key === "Tab") close(true);
         });
         root.addEventListener("focusout", event => {
-          if (opened === menu && !root.contains(event.relatedTarget)) close(false);
+          // Safari may blur with no related target before dispatching a menu click.
+          // Outside pointer presses and Tab already close the menu separately.
+          if (opened === menu && event.relatedTarget && !root.contains(event.relatedTarget)) close(false);
         });
         select.addEventListener("change", render);
         root.append(trigger, panel);
@@ -135,6 +137,7 @@
         if (opened && !opened.root.contains(event.target)) close(false);
         if (mobile?.open && !mobile.contains(event.target)) mobile.open = false;
       });
+      window.addEventListener("blur", () => close(false));
       document.addEventListener("keydown", event => {
         if (event.key !== "Escape") return;
         if (opened) { event.preventDefault(); close(true); }
