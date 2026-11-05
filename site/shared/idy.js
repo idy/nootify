@@ -3,6 +3,10 @@
   "use strict";
 
   const root = document.documentElement;
+  // Reserve the icon controls' space until the header is enhanced. If the
+  // header script fails, the native selects reappear when the page loads.
+  root.dataset.idyHeaderPending = "true";
+  window.addEventListener("load", () => { delete root.dataset.idyHeaderPending; }, { once: true });
   const media = window.matchMedia("(prefers-color-scheme: dark)");
   const read = (key, fallback) => {
     try { return localStorage.getItem(key) || fallback; } catch { return fallback; }

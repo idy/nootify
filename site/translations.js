@@ -4,6 +4,7 @@
   const en = {
     pageTitle: "Nootify — your coding session, one reply away",
     pageDescription: "Follow your coding sessions in Feishu and send replies back to Claude Code, Codex, and OpenCode on your Mac. Nootify also keeps your GitHub pull requests in view.",
+    starLabel: "Star Nootify on GitHub (opens in a new tab)",
     browseReleases: "Browse releases",
     downloadMac: "Download for Apple Silicon",
     installerMissing: "This release has no Apple Silicon DMG. Open the release page for available files.",
@@ -17,6 +18,7 @@
     zh: {
       pageTitle: "Nootify — 会话在电脑上，回复在飞书里",
       pageDescription: "在飞书接收开发进度，将回复送回 Mac 上已有的 Claude Code、Codex 与 OpenCode 会话。Nootify 也帮你关注 GitHub PR 状态。",
+      starLabel: "star — 在 GitHub 为 Nootify 点星（在新标签页打开）",
       features: "功能", setup: "开始使用",
       heroTitle: "会话在电脑上。<br>回复在飞书里。",
       heroDescription: "在飞书跟进 Claude Code、Codex 和 OpenCode。每段会话有自己的群，进度会发到群里，你的回复会送回 Mac 上已有的会话。",
