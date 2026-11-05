@@ -148,5 +148,6 @@
       window.addEventListener("resize", () => { if (opened) place(opened.panel); });
       render();
     }
+    delete document.documentElement.dataset.idyHeaderPending;
   });
 })();

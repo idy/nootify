@@ -22,6 +22,8 @@ h1, h2, h3, h4 { font-family: var(--idy-heading); letter-spacing: -.03em; }
 .compact-header .idy-nav a:hover, .compact-header .idy-nav a:focus-visible { color: var(--idy-ink); }
 .compact-header .header-actions { display: flex; align-items: center; gap: 14px; margin-left: auto; flex: none; }
 .compact-header .idy-preferences { display: flex; align-items: center; gap: 6px; margin: 0; }
+/* Keep the header steady until icon controls replace the native fallback. */
+:root[data-idy-header-pending] .compact-header .idy-preferences { visibility: hidden; width: 91px; flex: none; overflow: hidden; }
 /* Preferences require the shared script; keep the no-script header usable. */
 :root:not([data-theme]) .compact-header .idy-preferences { display: none; }
 .compact-header .idy-preferences label { display: block; color: var(--idy-muted); font-size: 12px; }
