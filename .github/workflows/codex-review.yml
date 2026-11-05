@@ -163,7 +163,7 @@ jobs:
                   issue(number: $number) {
                     closedByPullRequestsReferences(first: 50) {
                       totalCount
-                      nodes { number state }
+                      nodes { number state repository { nameWithOwner } }
                     }
                   }
                 }
@@ -183,8 +183,14 @@ jobs:
                 'Could not resolve every linked pull request within the configured bound',
               );
             }
+            if (references.nodes.some((pullRequest) =>
+              typeof pullRequest?.repository?.nameWithOwner !== 'string')) {
+              throw new Error('Could not establish a linked pull request repository');
+            }
+            const repository = `${context.repo.owner}/${context.repo.repo}`.toLowerCase();
             const pullRequests = references.nodes
-              .filter((pullRequest) => pullRequest.state === 'OPEN')
+              .filter((pullRequest) => pullRequest.state === 'OPEN'
+                && pullRequest.repository.nameWithOwner.toLowerCase() === repository)
               .map((pullRequest) => pullRequest.number);
             core.setOutput('pull_requests', JSON.stringify(pullRequests));
             core.setOutput('pull_request_count', String(pullRequests.length));
