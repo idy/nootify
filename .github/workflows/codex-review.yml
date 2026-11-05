@@ -1,0 +1,173 @@
+name: OpenAI PR review
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, edited, ready_for_review]
+  issue_comment:
+    types: [created]
+  issues:
+    types: [edited, reopened, typed, untyped]
+  workflow_dispatch:
+    inputs:
+      pull_request_number:
+        description: Open internal pull request to review.
+        required: true
+        type: string
+      dispatch_source_run_id:
+        description: Original PR-event run for an automatic review; leave empty for manual reviews.
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  actions: write
+  checks: write
+  contents: read
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: openai-pr-review-${{ github.event_name == 'pull_request_target' && 'dispatch' || 'worker' }}-${{ github.event.pull_request.number || github.event.issue.number || inputs.pull_request_number }}
+  # Retain every pending approval; cancel-in-progress: false alone still drops
+  # the older pending worker in GitHub's default single-slot queue.
+  queue: max
+  cancel-in-progress: false
+
+jobs:
+  dispatch_review:
+    if: github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Dispatch review on the trusted default branch
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            if (context.eventName !== 'pull_request_target'
+              || Number(process.env.GITHUB_RUN_ATTEMPT) !== 1) {
+              throw new Error('Create a new review request instead of rerunning a PR dispatch.');
+            }
+            const number = Number(context.payload.pull_request?.number);
+            if (!Number.isSafeInteger(number) || number < 1) throw new Error('Invalid pull request number');
+            const { data: pr } = await github.rest.pulls.get({
+              ...context.repo, pull_number: number,
+            });
+            if (pr.state !== 'open' || pr.draft
+              || pr.head.sha !== context.payload.pull_request.head.sha) {
+              core.info('The pull request is closed, draft, or has a newer head; no review was dispatched.');
+              return;
+            }
+            const [{ data: repository }, { data: run }] = await Promise.all([
+              github.rest.repos.get(context.repo),
+              github.rest.actions.getWorkflowRun({ ...context.repo, run_id: context.runId }),
+            ]);
+            if (!repository.default_branch || !Number.isSafeInteger(run.workflow_id)
+              || run.id !== context.runId || run.event !== 'pull_request_target') {
+              throw new Error('Could not establish the trusted caller workflow and default branch.');
+            }
+            // workflow_dispatch events created with GITHUB_TOKEN start a new run.
+            // Never run the worker from the PR branch or modify native Check results.
+            await github.rest.actions.createWorkflowDispatch({
+              ...context.repo, workflow_id: run.workflow_id,
+              ref: repository.default_branch,
+              inputs: { pull_request_number: String(number), dispatch_source_run_id: String(context.runId) },
+            });
+            core.info(`Requested a review of PR ${number} on the trusted default branch.`);
+
+  review:
+    if: github.event_name != 'issues' && github.event_name != 'pull_request_target'
+    uses: GizClaw/github-workflows/.github/workflows/codex-openai-review.yml@latest
+    with:
+      review-instructions: >-
+        Review the complete pull-request diff for actionable correctness,
+        security, compatibility, and test-coverage findings. Pay particular
+        attention to local listener authentication and origin checks, Feishu and
+        session routing, credential privacy, service lifecycle, signed desktop
+        updates, and the project website.
+      issue-review-instructions: >-
+        Follow the trusted-base AGENTS.md hierarchy and the Issue-review
+        documents it requires.
+      pr-readiness-instructions: >-
+        Require valid PR metadata, validation evidence, and no actionable findings.
+        Closing Issues are optional; check Issue linkage and plan conformance when present.
+      pull_request_number: ${{ inputs.pull_request_number }}
+      dispatch_source_run_id: ${{ inputs.dispatch_source_run_id }}
+    secrets:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+  resolve_linked_prs:
+    if: github.event_name == 'issues'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: read
+      pull-requests: read
+    outputs:
+      pull_requests: ${{ steps.links.outputs.pull_requests }}
+      pull_request_count: ${{ steps.links.outputs.pull_request_count }}
+    steps:
+      - id: links
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const data = await github.graphql(`
+              query($owner: String!, $repo: String!, $number: Int!) {
+                repository(owner: $owner, name: $repo) {
+                  issue(number: $number) {
+                    closedByPullRequestsReferences(first: 50) {
+                      totalCount
+                      nodes { number state }
+                    }
+                  }
+                }
+              }
+            `, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              number: Number(context.payload.issue.number),
+            });
+            const references = data.repository.issue
+              ?.closedByPullRequestsReferences;
+            if (!references) {
+              throw new Error('Issue was not found');
+            }
+            if (references.totalCount > references.nodes.length) {
+              throw new Error(
+                'Could not resolve every linked pull request within the configured bound',
+              );
+            }
+            const pullRequests = references.nodes
+              .filter((pullRequest) => pullRequest.state === 'OPEN')
+              .map((pullRequest) => pullRequest.number);
+            core.setOutput('pull_requests', JSON.stringify(pullRequests));
+            core.setOutput('pull_request_count', String(pullRequests.length));
+
+  refresh_linked_prs:
+    needs: resolve_linked_prs
+    if: >-
+      needs.resolve_linked_prs.result == 'success'
+      && needs.resolve_linked_prs.outputs.pull_request_count != '0'
+    strategy:
+      fail-fast: false
+      matrix:
+        pull_request_number: ${{ fromJSON(needs.resolve_linked_prs.outputs.pull_requests) }}
+    uses: GizClaw/github-workflows/.github/workflows/codex-openai-review.yml@latest
+    with:
+      review-instructions: >-
+        Review the complete pull-request diff for actionable correctness,
+        security, compatibility, and test-coverage findings. Pay particular
+        attention to local listener authentication and origin checks, Feishu and
+        session routing, credential privacy, service lifecycle, signed desktop
+        updates, and the project website.
+      issue-review-instructions: >-
+        Follow the trusted-base AGENTS.md hierarchy and the Issue-review
+        documents it requires.
+      pr-readiness-instructions: >-
+        Require valid PR metadata, validation evidence, and no actionable findings.
+        Closing Issues are optional; check Issue linkage and plan conformance when present.
+      pull_request_number: ${{ matrix.pull_request_number }}
+    secrets:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
