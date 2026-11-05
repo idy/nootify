@@ -273,6 +273,7 @@ export class PullRequestsService implements ServiceModule {
     const controller = new AbortController(); this.controller = controller;
     this.current.refresh = { ...this.current.refresh, running: true, startedAt: new Date().toISOString() };
     delete this.current.refresh.error;
+    delete this.current.refresh.signedOut;
     this.work = this.update(controller.signal).finally(() => {
       this.work = undefined; if (this.controller === controller) this.controller = undefined;
       if (this.refreshQueued && !this.stopped) { this.refreshQueued = false; this.refresh(); }
@@ -335,7 +336,11 @@ export class PullRequestsService implements ServiceModule {
       this.emit({ source: 'pulls', status: 'refresh_completed', reason: `会话订阅：我们仓库 ${visible.internal.length} 个、上游 ${visible.upstream.length} 个；来源仓库 ${visible.repositories.length} 个` });
     } catch (error) {
       const finishedAt = new Date().toISOString();
-      if (error instanceof GitHubSignedOut) { this.current.refresh = { ...this.current.refresh, running: false, finishedAt, signedOut: true }; return; }
+      if (error instanceof GitHubSignedOut) {
+        const { error: _error, ...refresh } = this.current.refresh;
+        this.current.refresh = { ...refresh, running: false, finishedAt, signedOut: true };
+        return;
+      }
       this.current.refresh = { ...this.current.refresh, running: false, finishedAt, signedOut: undefined, ...(signal.aborted ? {} : { error: safeError(error) }) };
       if (!signal.aborted) {
         this.current.warnings = [...new Set([...this.current.warnings, ...(error instanceof PullCollectionError ? error.warnings : []), 'Refresh failed; displaying the last good session-scoped PR snapshot.'])];

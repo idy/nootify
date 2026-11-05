@@ -9,6 +9,9 @@ import { LarkThreads } from './lark-threads.js';
 import { createLarkApi, ensureAnnouncement, ensureBindingMessage, quietLogger, readAnnouncement, parseAnnouncement, InvalidAnnouncement } from './lark-metadata.js';
 import type { Credentials, LarkApi } from './lark-metadata.js';
 
+type LarkSocket = Pick<sdk.WSClient, 'start' | 'close'>;
+export type LarkSocketFactory = (options: ConstructorParameters<typeof sdk.WSClient>[0]) => LarkSocket;
+
 interface IncomingEvent {
   sender?: { sender_type?: string; sender_id?: { open_id?: string } };
   message?: { chat_id?: string; message_id?: string; thread_id?: string; message_type?: string; content?: string };
@@ -28,7 +31,9 @@ export function selectMessage(payload: unknown, binding: LarkBinding): { id: str
 export class LarkService implements ServiceModule {
   readonly name = 'lark';
   private connection = 'disabled';
-  private ws?: sdk.WSClient;
+  private ws?: LarkSocket;
+  private socketGeneration = 0;
+  private lifecycle: Promise<void> = Promise.resolve();
   private queue: Promise<void> = Promise.resolve();
   private pending = 0;
   private seen = new Set<string>();
@@ -37,7 +42,8 @@ export class LarkService implements ServiceModule {
   private replies?: LarkReplies;
   threads?: LarkThreads;
   constructor(readonly state: State, readonly sessions: SessionsService, credentials?: Credentials,
-    private readonly report: (record: Record<string, unknown>) => void = () => {}, api?: LarkApi, private readonly port = 9417) {
+    private readonly report: (record: Record<string, unknown>) => void = () => {}, api?: LarkApi, private readonly port = 9417,
+    private readonly createSocket: LarkSocketFactory = options => new sdk.WSClient(options)) {
     this.use(credentials, api);
   }
   private use(credentials?: Credentials, api?: LarkApi): void {
@@ -46,13 +52,26 @@ export class LarkService implements ServiceModule {
     this.replies = this.api ? new LarkReplies(this.state, this.api, this.report) : undefined;
     this.threads = this.api ? new LarkThreads(this.state, this.api, this.report) : undefined;
   }
-  /** Swaps the bot in place: queued messages finish on the old client, then the new one connects in the background. */
-  async configure(credentials?: Credentials): Promise<void> {
-    this.ws?.close({ force: true }); this.ws = undefined;
-    await this.queue;
-    this.use(credentials);
-    this.connection = 'disabled';
-    this.start().catch(error => { this.connection = 'failed'; this.report({ status: 'lark_failed', error: (error as Error).message }); });
+  private serialized(operation: () => Promise<void>): Promise<void> {
+    const pending = this.lifecycle.catch(() => {}).then(operation);
+    this.lifecycle = pending;
+    return pending;
+  }
+  private closeSocket(): void {
+    // Retire callbacks before close: it may itself deliver a final connection event.
+    this.socketGeneration++;
+    const socket = this.ws; this.ws = undefined;
+    socket?.close({ force: true });
+  }
+  /** Initial startup, settings changes and shutdown share one queue; accepted messages finish on the old API. */
+  configure(credentials?: Credentials): Promise<void> {
+    return this.serialized(async () => {
+      this.closeSocket();
+      this.connection = credentials ? 'connecting' : 'disabled';
+      await this.queue;
+      this.use(credentials);
+      await this.connect();
+    });
   }
   status(): string { return this.connection; }
   private remote(binding: LarkBinding): RemoteBinding {
@@ -60,20 +79,35 @@ export class LarkService implements ServiceModule {
     return { ...binding, host_id: hostname(), adapter: binding.adapter ?? saved?.adapter ?? (binding.session_id.startsWith('local_') ? 'claude-desktop' : 'claude-code'),
       session_name: binding.session_name ?? saved?.session_name ?? binding.session_id };
   }
-  async start(): Promise<void> {
-    if (!this.credentials) return;
+  start(): Promise<void> { return this.serialized(() => this.connect()); }
+  private async connect(): Promise<void> {
+    if (!this.credentials || this.ws) return;
+    const generation = ++this.socketGeneration;
+    const current = () => generation === this.socketGeneration;
     this.connection = 'connecting';
-    this.ws = new sdk.WSClient({ ...this.credentials, domain: sdk.Domain.Feishu, logger: quietLogger,
-      onReady: () => { this.connection = 'ready'; this.report({ status: 'lark_ready' }); },
-      onReconnecting: () => { this.connection = 'reconnecting'; },
-      onReconnected: () => { this.connection = 'ready'; },
-      onError: error => { this.connection = 'failed'; this.report({ status: 'lark_failed', error: error.message }); },
-    });
-    await this.ws.start({ eventDispatcher: new sdk.EventDispatcher({ logger: quietLogger }).register({
-      'im.message.receive_v1': async data => { this.enqueue(data); },
-    }) });
+    try {
+      this.ws = this.createSocket({ ...this.credentials, domain: sdk.Domain.Feishu, logger: quietLogger,
+        onReady: () => { if (current()) { this.connection = 'ready'; this.report({ status: 'lark_ready' }); } },
+        onReconnecting: () => { if (current()) this.connection = 'reconnecting'; },
+        onReconnected: () => { if (current()) this.connection = 'ready'; },
+        onError: error => { if (current()) { this.connection = 'failed'; this.report({ status: 'lark_failed', error: error.message }); } },
+      });
+      // SDK start returns before network handshakes finish; every later callback must still belong to this client.
+      await this.ws.start({ eventDispatcher: new sdk.EventDispatcher({ logger: quietLogger }).register({
+        'im.message.receive_v1': async data => { if (current()) this.enqueue(data); },
+      }) });
+    } catch (error) {
+      // Feishu failing must not reject the host's startup loop and prevent unrelated modules from starting.
+      if (current()) {
+        this.closeSocket();
+        this.connection = 'failed';
+        this.report({ status: 'lark_failed', error: (error as Error).message });
+      }
+    }
   }
-  async stop(): Promise<void> { this.ws?.close({ force: true }); await this.queue; this.connection = 'stopped'; }
+  stop(): Promise<void> {
+    return this.serialized(async () => { this.closeSocket(); this.connection = 'stopped'; await this.queue; });
+  }
   enqueue(payload: unknown): boolean {
     if (!this.api || !payload || typeof payload !== 'object') return false;
     const event = ((payload as { event?: unknown }).event ?? payload) as IncomingEvent;

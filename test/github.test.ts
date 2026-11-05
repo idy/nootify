@@ -213,15 +213,50 @@ test('nobody signed in keeps session subscriptions and the last data, without ca
   assert.deepEqual([failed.refresh.signedOut, failed.refresh.error, f.service.status()], [undefined, 'HTTP 502', 'stale']);
 });
 
-test('a sign-in during a refresh gets a query of its own', async t => {
-  const f = await fixture(t); let release!: () => void;
+test('a sign-in during a refresh clears signed-out state as soon as the queued query starts', async t => {
+  const f = await fixture(t); let release!: () => void; let finish!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
+  const signedInQuery = new Promise<void>(resolve => { finish = resolve; });
   f.setBehavior(async () => { await gate; throw new GitHubSignedOut(); });
   await f.service.start(); await waitFor(() => f.calls.length === 1);
-  f.setBehavior(async () => collection([normalizePull(internalPull(1))]));
+  f.setBehavior(async () => { await signedInQuery; return collection([normalizePull(internalPull(1))]); });
   f.service.refreshSoon(); release();
-  await waitFor(() => f.calls.length === 2);
+  try {
+    await waitFor(() => f.calls.length === 2);
+    const pending = f.service.snapshot().refresh;
+    assert.deepEqual([pending.running, pending.signedOut, pending.error], [true, undefined, undefined]);
+  } finally { finish(); }
   assert.deepEqual([(await settled(f.service)).refresh.signedOut, f.service.status()], [undefined, 'ready']);
+});
+
+test('starting a refresh resets its previous outcome while keeping the last good data', async t => {
+  const f = await fixture(t); await f.service.start(); const good = await settled(f.service);
+  for (const previous of [new GitHubSignedOut(), new Error('previous refresh failed')]) {
+    f.setBehavior(async () => { throw previous; });
+    f.service.refresh(); await settled(f.service);
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    f.setBehavior(async () => { await gate; return collection([normalizePull(internalPull(1))]); });
+    f.service.refreshSoon();
+    try {
+      const pending = f.service.snapshot();
+      assert.deepEqual([pending.refresh.running, pending.refresh.signedOut, pending.refresh.error], [true, undefined, undefined]);
+      assert.ok(pending.refresh.lastSuccessAt);
+      assert.ok(pending.internal.length > 0);
+    } finally { release(); }
+    await settled(f.service);
+  }
+  assert.ok(good.refresh.lastSuccessAt);
+});
+
+test('signing out after a failed refresh does not retain its error', async t => {
+  const f = await fixture(t);
+  f.setBehavior(async () => { throw new Error('previous refresh failed'); });
+  await f.service.start(); const failed = await settled(f.service);
+  assert.equal(failed.refresh.error, 'previous refresh failed');
+  f.setBehavior(async () => { throw new GitHubSignedOut(); });
+  f.service.refresh(); const signedOut = await settled(f.service);
+  assert.deepEqual([signedOut.refresh.signedOut, signedOut.refresh.error, f.service.status()], [true, undefined, 'signed_out']);
 });
 
 test('without a token the real collection stops before any request', async t => {
