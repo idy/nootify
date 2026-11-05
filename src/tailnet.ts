@@ -1,7 +1,3 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-
-const exec = promisify(execFile);
 export interface TailnetStatus { names: string[]; address?: string; owner?: string }
 export interface TailnetProbe { status(): Promise<unknown>; whois(ip: string): Promise<unknown> }
 
@@ -21,24 +17,12 @@ export function parseTailnet(status: unknown): TailnetStatus | undefined {
   return { names: [...names], ...(address ? { address } : {}), ...(typeof owner === 'string' ? { owner } : {}) };
 }
 export function parseWhois(value: unknown): string | undefined {
-  const login = (value as { UserProfile?: { LoginName?: unknown } } | undefined)?.UserProfile?.LoginName;
+  const identity = value as { Node?: { Tags?: unknown }; UserProfile?: { LoginName?: unknown } } | undefined;
+  // A tagged node acts as its tags, not as the user who originally enrolled it.
+  if (Array.isArray(identity?.Node?.Tags) && identity.Node.Tags.length) return;
+  const login = identity?.UserProfile?.LoginName;
   return typeof login === 'string' && login ? login : undefined;
 }
-async function tailscale(args: string[]): Promise<unknown> {
-  // launchd does not inherit an interactive PATH, so check the usual absolute locations.
-  const binaries = [process.env.TAILSCALE_BIN, '/Applications/Tailscale.app/Contents/MacOS/Tailscale', '/opt/homebrew/bin/tailscale', '/usr/local/bin/tailscale']
-    .filter((value): value is string => Boolean(value));
-  for (const binary of binaries) {
-    try {
-      // Without a terminal the macOS app binary tries to open its GUI unless told to act as the CLI.
-      const { stdout } = await exec(binary, args, { timeout: 5000, maxBuffer: 8 << 20, env: { ...process.env, TAILSCALE_BE_CLI: '1' } });
-      return JSON.parse(stdout);
-    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-  }
-  throw new Error('Tailscale CLI was not found');
-}
-export const cliProbe: TailnetProbe = { status: () => tailscale(['status', '--json']), whois: ip => tailscale(['whois', '--json', ip]) };
-
 /**
  * Admits requests that arrive on this node's Tailscale address from an allowed user's device.
  * Identity comes from Tailscale's own peer lookup of the connecting address, never from headers.
@@ -49,27 +33,40 @@ export class TailnetAccess {
   private pending?: Promise<void>;
   private listening?: string;
   private readonly identities = new Map<string, { login: string; until: number }>();
-  constructor(private readonly port: number, private readonly options: { users?: string[]; probe?: TailnetProbe; ttl?: number } = {}) {}
-  private get probe(): TailnetProbe { return this.options.probe ?? cliProbe; }
+  constructor(private readonly port: number, private readonly options: { users?: string[]; probe: TailnetProbe; ttl?: number }) {}
+  private get probe(): TailnetProbe { return this.options.probe; }
   private get ttl(): number { return this.options.ttl ?? 60_000; }
   async current(): Promise<TailnetStatus | undefined> {
     if (Date.now() - this.checked >= this.ttl) {
       this.pending ??= this.probe.status()
-        .then(result => { this.status = parseTailnet(result); }, () => { this.status = undefined; })
+        .then(result => { this.observe(result); }, () => { this.observe(undefined); })
         .finally(() => { this.checked = Date.now(); this.pending = undefined; });
       await this.pending;
     }
     return this.status;
   }
-  /** Records where the tailnet listener is bound so pages can show the address for other devices. */
+  /** Refresh account/address and discard peer identities when this machine changes tailnets. */
+  observe(value: unknown): TailnetStatus | undefined {
+    const next = parseTailnet(value);
+    if (next?.owner !== this.status?.owner || next?.address !== this.status?.address) this.identities.clear();
+    this.status = next; this.checked = Date.now();
+    return next;
+  }
+  /** Publish a node snapshot and its entry-point readiness together. */
+  publish(value: unknown, listening: boolean): TailnetStatus | undefined {
+    const status = this.observe(value);
+    this.setListening(listening ? status?.address : undefined);
+    return status;
+  }
+  /** Records an active entry point so pages only advertise a ready address. */
   setListening(address: string | undefined): void { this.listening = address; }
-  url(): string | undefined { return this.listening ? `http://${this.listening}:${this.port}/` : undefined; }
+  url(): string | undefined { return this.listening ? `http://${this.listening}${this.port === 80 ? '' : `:${this.port}`}/` : undefined; }
   private async login(ip: string): Promise<string | undefined> {
     const cached = this.identities.get(ip);
     if (cached && cached.until > Date.now()) return cached.login;
     let login: string | undefined;
     try { login = parseWhois(await this.probe.whois(ip)); } catch { login = undefined; }
-    // Failed lookups are not cached, so a briefly unavailable CLI does not lock a device out.
+    // Failed lookups are not cached, so a briefly unavailable embedded node does not lock a device out.
     if (login) {
       this.identities.set(ip, { login, until: Date.now() + this.ttl });
       if (this.identities.size > 256) this.identities.delete(this.identities.keys().next().value!);
@@ -82,7 +79,7 @@ export class TailnetAccess {
     try { hostname = new URL(`http://${host}`).hostname.toLowerCase(); } catch { return 'Invalid Host header'; }
     // Browsers send the name they connected to, so other site names here indicate DNS rebinding.
     const status = await this.current();
-    if (!status?.names.includes(hostname)) return 'Use this computer\'s Tailscale address';
+    if (!status?.names.includes(hostname)) return 'Use the Nootify device\'s Tailscale address';
     const ip = remoteAddress?.replace(/^::ffff:/, '');
     if (!ip) return 'Unknown peer address';
     const allowed = this.options.users?.length ? this.options.users : status.owner ? [status.owner] : [];

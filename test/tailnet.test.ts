@@ -36,6 +36,17 @@ test('parses this node\'s names, listening address and owner', () => {
   assert.equal(parseTailnet({ ...status, BackendState: 'Stopped' }), undefined);
 });
 
+test('tagged peers cannot inherit their creator\'s same-account access', async () => {
+  let lookups = 0;
+  const access = new TailnetAccess(80, { probe: {
+    status: async () => status,
+    whois: async () => { lookups++; return { Node: { Tags: ['tag:shared-server'] }, UserProfile: { LoginName: 'owner@example.com' } }; },
+  } });
+  assert.match((await access.authorize('100.64.0.7', '100.64.0.9'))!, /identity/);
+  assert.match((await access.authorize('100.64.0.7', '100.64.0.9'))!, /identity/);
+  assert.equal(lookups, 2, 'rejected tagged identities never enter the owner cache');
+});
+
 test('a request needs this node\'s address as Host and an allowed peer identity from Tailscale', async () => {
   const counts = { whois: 0 };
   const access = new TailnetAccess(9417, { probe: probe({ '100.64.0.9': 'owner@example.com', '100.64.0.10': 'tagged-devices' }, counts) });

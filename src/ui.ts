@@ -9,7 +9,7 @@ import { HttpError, type ServiceModule } from './types.js';
 export interface PullsSource { snapshot(): PullSnapshot; refresh(): void; setChoice(repository: string, follow: boolean | null): Promise<RepositoryEntry> }
 export interface AgentsSource { list(): Promise<AgentPrompt[]>; set(agent: AgentId, enabled: boolean): Promise<AgentPrompt> }
 export interface ChannelSummary { name: 'feishu'; configured: boolean; recipient?: string; groups: number }
-export type SettingsSource = Pick<SettingsService, 'page' | 'github' | 'startGitHubLogin' | 'cancelGitHubLogin' | 'signOutGitHub' | 'saveLark' | 'clearLark' | 'setRecipient' | 'exportConfig' | 'previewImport' | 'importConfig' | 'reveal'>;
+export type SettingsSource = Pick<SettingsService, 'page' | 'github' | 'startGitHubLogin' | 'cancelGitHubLogin' | 'signOutGitHub' | 'saveLark' | 'clearLark' | 'setRecipient' | 'exportConfig' | 'previewImport' | 'importConfig' | 'reveal' | 'tailscale' | 'setTailscaleEnabled' | 'startTailscaleLogin' | 'cancelTailscaleLogin' | 'logoutTailscale'>;
 export interface UiContext {
   modules: ServiceModule[]; logs: EventLog; pulls?: PullsSource; tailnetUrl?: () => string | undefined;
   agents?: AgentsSource; channel?: () => ChannelSummary | undefined; settings?: SettingsSource;
@@ -51,6 +51,13 @@ async function settingsAction(request: IncomingMessage, path: string, settings: 
     if (body.action === 'cancel') return settings.cancelGitHubLogin();
     if (body.action === 'sign-out') { await settings.signOutGitHub(); return { accepted: true }; }
     throw new HttpError(400, 'Expected {"action": "start" | "cancel" | "sign-out"}');
+  }
+  if (path === '/ui/api/settings/tailscale') {
+    if (body.action === 'enable') { await settings.setTailscaleEnabled(body.enabled); return settings.tailscale(); }
+    if (body.action === 'login') return settings.startTailscaleLogin();
+    if (body.action === 'cancel') { await settings.cancelTailscaleLogin(); return { accepted: true }; }
+    if (body.action === 'logout') { await settings.logoutTailscale(); return { accepted: true }; }
+    throw new HttpError(400, 'Expected a Tailscale action: enable, login, cancel or logout');
   }
   if (path === '/ui/api/settings/lark') {
     if (body.clear === true) await settings.clearLark(); else await settings.saveLark(body.app_id, body.app_secret);
@@ -105,6 +112,15 @@ export async function serveUi(request: IncomingMessage, response: ServerResponse
   if (asset) {
     response.writeHead(200, { 'content-type': asset.type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'content-security-policy': policy });
     response.end(await readFile(asset.path));
+    return true;
+  }
+  if (path === '/ui/api/settings/tailscale') {
+    if (!context.settings) json(response, 404, { error: 'Settings are not enabled' });
+    else {
+      const tailscale = await context.settings.tailscale();
+      // An authorization URL can sign this Mac in; only the local UI may receive it.
+      json(response, 200, { ...tailscale, ...(context.via === 'tailnet' ? { login: { status: tailscale.login.status } } : {}), editable: context.via !== 'tailnet' });
+    }
     return true;
   }
   if (path === '/ui/api/settings' || path === '/ui/api/settings/github') {

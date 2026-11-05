@@ -26,7 +26,9 @@ test('the block is appended and removed again without touching the rest of the p
   const written = await readFile(f.files.claude, 'utf8');
   assert.ok(written.startsWith(`${original}\n${BEGIN}`)); assert.ok(written.endsWith(`${END}\n`));
   assert.match(written, /`\/opt\/nootify\/node \/opt\/nootify\/cli\.js thread-open --agent claude --session-name "<short task title>" --state-dir /);
-  assert.match(written, /Tailscale address \(`100\.64\.0\.7`\)/);
+  assert.match(written, /independent Tailscale device \(`http:\/\/100\.64\.0\.7\/`\)/);
+  assert.match(written, /does not expose this Mac's previews, files, or other ports/);
+  assert.ok(!written.includes("this Mac's Tailscale address"));
   assert.equal((await stat(f.files.claude)).mode & 0o777, 0o640, 'the file mode is kept');
   assert.equal((await f.agents.set('claude', true)).status, 'current', 'enabling again changes nothing');
   assert.equal((await f.agents.set('claude', false)).status, 'absent');

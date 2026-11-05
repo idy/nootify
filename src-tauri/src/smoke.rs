@@ -15,15 +15,37 @@ use tauri_plugin_updater::UpdaterExt;
 use crate::{
     is_fallback, is_service_ui, render_health, render_install, restore_window,
     service::{check_health, health_client, BundledService, LaunchAgent},
-    update::{tag, UpdateView},
+    update::{tag, Phase, UpdateView},
     NativeState, TrayItems, INSTALL_LABEL, MAIN_WINDOW, TRAY_ID,
 };
+
+/// A debug smoke run may inspect the worktree's loopback UI without replacing the installed service.
+fn preview_url() -> Option<tauri::Url> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
+    let url = tauri::Url::parse(&std::env::var("NOOTIFY_SMOKE_UI_URL").ok()?).ok()?;
+    (url.scheme() == "http"
+        && url.host_str() == Some("127.0.0.1")
+        && crate::no_credentials(&url)
+        && url.path() == "/"
+        && url.query().is_none()
+        && url.fragment().is_none())
+    .then_some(url)
+}
+
+pub fn is_preview(url: &tauri::Url) -> bool {
+    let mut document = url.clone();
+    document.set_fragment(None);
+    preview_url().is_some_and(|preview| document == preview)
+}
 
 struct Report {
     online: bool,
     plist_present: bool,
     bundled_node: Option<String>,
     updater_ready: bool,
+    titlebar_preview: bool,
 }
 
 pub fn run(app: AppHandle, items: TrayItems) {
@@ -45,6 +67,7 @@ pub fn run(app: AppHandle, items: TrayItems) {
                         "live_ui_restored": report.online,
                         "remote_ipc_denied": report.online,
                         "page_update_bridge": report.online,
+                        "titlebar_preview": report.titlebar_preview,
                         "launch_agent_plist_present": report.plist_present,
                         "service_install_enabled": !report.plist_present,
                         "bundled_node": report.bundled_node,
@@ -124,6 +147,7 @@ fn exercise_bundle(app: &AppHandle, items: &TrayItems) -> Result<Report, String>
         plist_present,
         bundled_node,
         updater_ready,
+        titlebar_preview: false,
     })
 }
 
@@ -215,7 +239,90 @@ fn exercise(app: &AppHandle, items: &TrayItems) -> Result<Report, String> {
         wait_for_live_ui(&window)?;
     }
     report.online = online;
+    if let Some(url) = preview_url() {
+        check_titlebar_preview(&window, url)?;
+        report.titlebar_preview = true;
+    }
     Ok(report)
+}
+
+/// Exercise the real worktree UI and native navigation bridge with update workers disabled.
+fn check_titlebar_preview(window: &WebviewWindow, url: tauri::Url) -> Result<(), String> {
+    window.navigate(url).map_err(|error| error.to_string())?;
+    wait_for("worktree titlebar loaded", || {
+        evaluate(window, "document.documentElement.hasAttribute('data-nootify-desktop') && !!document.querySelector('.titlebar #update-action') && document.querySelector('#connection')?.textContent === '实时更新'").unwrap_or(false)
+    })?;
+    check_ipc_denied(window)?;
+    let mut update = UpdateView {
+        phase: Phase::Available,
+        version: Some("0.0.0-smoke".into()),
+        ..UpdateView::idle(window.app_handle().package_info().version.to_string())
+    };
+    window
+        .eval(update.script())
+        .map_err(|error| error.to_string())?;
+    window
+        .eval("window.__nootifySmokeUpdateButton = document.querySelector('#update-action');")
+        .map_err(|error| error.to_string())?;
+    wait_for("update action is in the title row", || {
+        evaluate(window, "!document.querySelector('#update-action').hidden && document.querySelector('.titlebar').getBoundingClientRect().height === 52 && document.querySelector('#logs-view').getBoundingClientRect().top === 52").unwrap_or(false)
+    })?;
+    let before = window
+        .state::<NativeState>()
+        .page_requests
+        .load(Ordering::SeqCst);
+    window
+        .eval("document.querySelector('#update-action').click()")
+        .map_err(|error| error.to_string())?;
+    wait_for(
+        "titlebar update click reaches native code without navigating",
+        || {
+            window
+                .state::<NativeState>()
+                .page_requests
+                .load(Ordering::SeqCst)
+                > before
+                && evaluate(
+                    window,
+                    "!!document.querySelector('.titlebar #update-action')",
+                )
+                .unwrap_or(false)
+        },
+    )?;
+    update.phase = Phase::Downloading;
+    update.received = 42;
+    update.total = Some(100);
+    window
+        .eval(update.script())
+        .map_err(|error| error.to_string())?;
+    window
+        .set_size(tauri::LogicalSize::new(640.0, 420.0))
+        .map_err(|error| error.to_string())?;
+    wait_for(
+        "compact desktop titlebar keeps progress and content aligned",
+        || {
+            evaluate(window, "(() => { const header = document.querySelector('.titlebar').getBoundingClientRect(); const brand = document.querySelector('.brand').getBoundingClientRect(); const status = document.querySelector('#update-action'); return innerWidth === 640 && header.y === 0 && header.height === 52 && brand.x >= 90 && Math.abs(brand.y + brand.height / 2 - 26) < 1 && status === window.__nootifySmokeUpdateButton && status.tagName === 'BUTTON' && status.textContent.trim() === '下载中 42%' && status.getBoundingClientRect().height === 28 && status.getBoundingClientRect().width === 136 && !status.hidden && !document.querySelector('.titlebar progress') && document.documentElement.scrollWidth === innerWidth; })()").unwrap_or(false)
+        },
+    )?;
+    // Optional bounded pause lets an external native driver capture and drag this settled window.
+    if let Ok(milliseconds) = std::env::var("NOOTIFY_SMOKE_CAPTURE_DELAY_MS")
+        .unwrap_or_default()
+        .parse::<u64>()
+    {
+        thread::sleep(Duration::from_millis(milliseconds.min(5000)));
+    }
+    // Double-clicking empty title-row space zooms, while the update button above remained clickable.
+    window.eval("document.querySelector('.titlebar').dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, detail: 2 }))").map_err(|error| error.to_string())?;
+    wait_for("titlebar double-click zooms the native window", || {
+        window.is_maximized().unwrap_or(false)
+    })?;
+    window.unmaximize().map_err(|error| error.to_string())?;
+    window
+        .eval("document.querySelector('#update-action').click()")
+        .map_err(|error| error.to_string())?;
+    wait_for("titlebar status opens update details", || {
+        evaluate(window, "location.hash === '#/settings/about' && document.querySelector('#update-status').textContent.includes('42%')").unwrap_or(false)
+    })
 }
 
 fn wait_for_live_ui(window: &WebviewWindow) -> Result<(), String> {

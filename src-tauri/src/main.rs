@@ -90,8 +90,13 @@ fn main() {
                 update_script: Mutex::new(UpdateView::idle(current).script()),
                 page_requests,
             });
+            let window_actions = app.handle().clone();
             WebviewWindowBuilder::new(app, MAIN_WINDOW, WebviewUrl::App("index.html".into()))
                 .title("Nootify")
+                .title_bar_style(tauri::TitleBarStyle::Overlay)
+                .hidden_title(true)
+                .traffic_light_position(tauri::LogicalPosition::new(16.0, 28.0))
+                .initialization_script(include_str!("../../desktop/titlebar.js"))
                 .inner_size(1180.0, 760.0)
                 .min_inner_size(640.0, 420.0)
                 .center()
@@ -100,17 +105,35 @@ fn main() {
                 // WebKit asks this policy first even for target=_blank links, so GitHub must be
                 // handed to the default browser here; cancelling also keeps this window in place.
                 .on_navigation(move |url| {
-                    // The page's only way to reach native code; see update.rs.
+                    // Fixed titlebar requests keep dragging independent of webview IPC permissions.
+                    if let Some(action) = window_action(url) {
+                        if let Some(window) = window_actions.get_webview_window(MAIN_WINDOW) {
+                            match action {
+                                WindowAction::Drag => {
+                                    let _ = window.start_dragging();
+                                }
+                                WindowAction::Zoom => {
+                                    if window.is_maximized().unwrap_or(false) {
+                                        let _ = window.unmaximize();
+                                    } else {
+                                        let _ = window.maximize();
+                                    }
+                                }
+                            }
+                        }
+                        return false;
+                    }
+                    // Update requests are handled by the worker; see update.rs.
                     if let Some(request) = update::page_request(url) {
                         seen_requests.fetch_add(1, Ordering::SeqCst);
                         let _ = page_updates.try_send(request);
                         return false;
                     }
-                    if is_github_link(url) {
+                    if is_github_link(url) || is_tailscale_link(url) {
                         open_in_browser(url);
                         return false;
                     }
-                    navigation_allowed(url)
+                    navigation_allowed(url) || (smoke_test && smoke::is_preview(url))
                 })
                 .on_page_load(|window, payload| {
                     let state = window.state::<NativeState>();
@@ -128,7 +151,7 @@ fn main() {
                 })
                 // window.open() bypasses the policy above; it gets the same treatment, nothing else opens.
                 .on_new_window(|url, _| {
-                    if is_github_link(&url) {
+                    if is_github_link(&url) || is_tailscale_link(&url) {
                         open_in_browser(&url);
                     }
                     NewWindowResponse::Deny
@@ -452,6 +475,29 @@ fn is_fallback(url: &Url) -> bool {
         && matches!(url.path(), "" | "/" | "/index.html")
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum WindowAction {
+    Drag,
+    Zoom,
+}
+
+fn window_action(url: &Url) -> Option<WindowAction> {
+    if !no_credentials(url)
+        || url.scheme() != "nootify"
+        || url.host_str() != Some("window")
+        || url.port().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    match url.path() {
+        "/drag" => Some(WindowAction::Drag),
+        "/zoom" => Some(WindowAction::Zoom),
+        _ => None,
+    }
+}
+
 fn navigation_allowed(url: &Url) -> bool {
     is_service_ui(url) || is_fallback(url)
 }
@@ -461,6 +507,20 @@ fn is_github_link(url: &Url) -> bool {
         && url.scheme() == "https"
         && url.host_str() == Some("github.com")
         && url.port().is_none()
+}
+
+fn is_tailscale_link(url: &Url) -> bool {
+    no_credentials(url)
+        && url.scheme() == "https"
+        && url.port().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && match url.host_str() {
+            Some("login.tailscale.com") => url.path().strip_prefix("/a/").is_some_and(|token| {
+                !token.is_empty() && token.bytes().all(|byte| byte.is_ascii_alphanumeric())
+            }),
+            _ => false,
+        }
 }
 
 fn open_in_browser(url: &Url) {
@@ -517,6 +577,35 @@ mod tests {
     }
 
     #[test]
+    fn titlebar_requests_only_allow_fixed_window_actions() {
+        assert_eq!(
+            window_action(&Url::parse("nootify://window/drag").unwrap()),
+            Some(WindowAction::Drag)
+        );
+        assert_eq!(
+            window_action(&Url::parse("nootify://window/zoom").unwrap()),
+            Some(WindowAction::Zoom)
+        );
+        for blocked in [
+            "https://window/drag",
+            "nootify://update/drag",
+            "nootify://window/close",
+            "nootify://user@window/drag",
+            "nootify://window:9417/drag",
+            "nootify://window/drag?target=other",
+            "nootify://window/zoom#other",
+            "nootify://window/drag/",
+            "nootify://window/",
+        ] {
+            assert_eq!(
+                window_action(&Url::parse(blocked).unwrap()),
+                None,
+                "{blocked}"
+            );
+        }
+    }
+
+    #[test]
     fn only_plain_github_links_open_in_the_browser() {
         for allowed in [
             "https://github.com/idy/nootify/pull/1",
@@ -535,6 +624,24 @@ mod tests {
         ] {
             let accepted = Url::parse(blocked).is_ok_and(|url| is_github_link(&url));
             assert!(!accepted, "{blocked}");
+        }
+    }
+
+    #[test]
+    fn only_official_tailscale_authorization_links_open() {
+        for link in ["https://login.tailscale.com/a/abc123"] {
+            assert!(is_tailscale_link(&Url::parse(link).unwrap()), "{link}");
+        }
+        for link in [
+            "https://login.tailscale.com.evil.example/a/abc123",
+            "http://login.tailscale.com/a/abc123",
+            "https://user@login.tailscale.com/a/abc123",
+            "https://login.tailscale.com:8443/a/abc123",
+            "https://login.tailscale.com/a/abc123?redirect=elsewhere",
+            "https://tailscale.com/admin",
+            "https://login.tailscale.com/a/",
+        ] {
+            assert!(!is_tailscale_link(&Url::parse(link).unwrap()), "{link}");
         }
     }
 
@@ -565,7 +672,10 @@ mod tests {
             .unwrap()
             .contains("node scripts/stage-service.mjs"));
         let bundle = &config["bundle"];
-        assert_eq!(bundle["externalBin"], serde_json::json!(["binaries/node"]));
+        assert_eq!(
+            bundle["externalBin"],
+            serde_json::json!(["binaries/node", "binaries/nootify-tsnet"])
+        );
         assert_eq!(bundle["resources"]["resources/service/"], "service/");
         assert_eq!(bundle["targets"], serde_json::json!(["app", "dmg"]));
         assert_eq!(bundle["createUpdaterArtifacts"], true);

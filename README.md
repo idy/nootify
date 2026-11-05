@@ -2,7 +2,7 @@
 
 A general-purpose local **TypeScript service host**, managed as a per-user macOS LaunchAgent. Session messaging and Feishu are separate modules. Other TypeScript tools use the exported typed HTTP client; future services implement the same module interface. This is not a standalone Lark-only daemon.
 
-The HTTP listener binds to `127.0.0.1:9417`, plus this computer's Tailscale IPv4 address on the same port for the owner's other devices. Open either address for message-bridge logs, **encountered routing targets**, and the two GitHub pull-request queues. `/health` and the read-only `/ui/*` page data are available to permitted browsers; every `/v1/` control endpoint requires the per-user bearer token on both listeners. Host/origin checks prevent cross-site reads and DNS rebinding. The service routes input to existing Claude, Codex, or OpenCode clients rather than calling a model API directly.
+The HTTP listener binds to `127.0.0.1:9417`. Optional Tailscale access, enabled under **设置 · Tailscale**, exposes the Nootify node's Tailscale address on port 80 for the owner's other devices. Open either address for message-bridge logs, **encountered routing targets**, and the two GitHub pull-request queues. `/health` and the read-only `/ui/*` page data are available to permitted browsers; every `/v1/` control endpoint requires the per-user bearer token on both listeners. Host/origin checks prevent cross-site reads and DNS rebinding. The service routes input to existing Claude, Codex, or OpenCode clients rather than calling a model API directly.
 
 Routing lookup is lazy: only a message with a concrete adapter and session ID resolves that adapter's inbox or connects to its backend. The routing page lists at most 1,000 targets actually encountered during this process lifetime, including missing/archived/unavailable results. PR subscription discovery separately reads session identities, explicit PR links, repository anchors, branches, and timestamps.
 
@@ -44,17 +44,17 @@ npm run check
 
 ## Tauri desktop application and system tray
 
-The native **Nootify** app for Apple Silicon and macOS 13.5+ bundles the background service and its own Node.js runtime. Its native window, web UI, and offline page follow the system's light or dark appearance, including changes while the app is open. It provides a menu-bar tray with **打开**, **退出**, service controls, and update controls. PR rows open GitHub in the default browser. Closing the window hides it; quitting the desktop app leaves the independent daemon running. A single-instance guard restores the existing window.
+The native **Nootify** app for Apple Silicon and macOS 13.5+ bundles the background service, its own Node.js runtime, and an independent Tailscale client built with tsnet. Its native window, web UI, and offline page follow the system's light or dark appearance, including changes while the app is open. It provides a menu-bar tray with **打开**, **退出**, service controls, and update controls. PR rows open GitHub in the default browser. Closing the window hides it; quitting the desktop app leaves the independent daemon running. A single-instance guard restores the existing window.
 
 Download the DMG from [GitHub Releases](https://github.com/idy/nootify/releases/latest), drag Nootify to **Applications**, and open it. The first launch automatically installs and starts the background service; later launches connect to it or load its existing LaunchAgent if needed. A healthy service keeps its process and connection. The tray's start/restart/install controls are recovery actions, not setup steps.
 
 Automatic installation requires `~/Library/LaunchAgents/dev.idy.nootify.service.plist` to be absent and port 9417 to be free. It refuses installation from a read-only disk image. Keep the app in Applications: the job runs Node.js and `server.js` inside its bundle. An existing LaunchAgent is reused, and the tray never replaces its configuration.
 
-When `~/.claude.json` exists, the installer selects its `mcpServers.lark` credentials. A file without a Lark server leaves Feishu disabled and the PR pages available until credentials are saved under **设置 · 飞书**. Credentials stay in their original file. The web page receives no native Tauri IPC capabilities: the one exception to its isolation is the update bridge described under [Automatic updates](#automatic-updates-and-releases). Builds are ad-hoc signed and are not notarized; macOS may require allowing the first launch under System Settings > Privacy & Security.
+When `~/.claude.json` exists, the installer selects its `mcpServers.lark` credentials. A file without a Lark server leaves Feishu disabled and the PR pages available until credentials are saved under **设置 · 飞书**. Credentials stay in their original file. The web page receives no native Tauri IPC capabilities: fixed navigation requests support the title row and the update bridge described under [Automatic updates](#automatic-updates-and-releases). Builds are ad-hoc signed and are not notarized; macOS may require allowing the first launch under System Settings > Privacy & Security.
 
 ### Build the desktop app
 
-Requires stable Rust, Xcode command-line tools, and the npm dependencies above. The build helper finds Rust under `CARGO_HOME/bin` or `~/.cargo/bin`.
+Requires stable Rust, Go 1.27.3 or the version pinned in `native/tailscale/go.mod`, Xcode command-line tools, and the npm dependencies above. The build helper finds Rust under `CARGO_HOME/bin` or `~/.cargo/bin`.
 
 ```bash
 npm run desktop:dev
@@ -66,15 +66,17 @@ For a release build, supply `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVA
 npm run desktop:build
 ```
 
-Before bundling, the build compiles TypeScript and stages the service, `public/`, and production dependencies in `src-tauri/resources/service/`. It downloads a pinned official Node.js runtime, checks its SHA-256 against both the pinned value and the release's `SHASUMS256.txt`, and stages it as the `binaries/node` sidecar. `npm run desktop:stage` performs only staging. `cargo test` and `cargo clippy` work without staging; release builds require real staged resources. The Node runtime needs the JIT entitlement in `src-tauri/Entitlements.plist`.
+Before bundling, the build compiles TypeScript and stages the service, `public/`, and production dependencies in `src-tauri/resources/service/`. It downloads a pinned official Node.js runtime, checks its SHA-256 against both the pinned value and the release's `SHASUMS256.txt`, and stages it as the `binaries/node` sidecar. It also builds `native/tailscale` with the pinned Go dependencies as `binaries/nootify-tsnet`, checks the binary's version and system-library links, and includes dependency licenses in the service resources. `npm run desktop:stage` performs only staging. `cargo test` and `cargo clippy` work without staging; release builds require real staged resources. The Node runtime needs the JIT entitlement in `src-tauri/Entitlements.plist`.
 
 Outputs under `src-tauri/target/release/bundle/` are `macos/Nootify.app`, the Apple Silicon DMG in `dmg/`, and `macos/Nootify.app.tar.gz` with its updater signature. Set `CARGO_TARGET_DIR` to reuse another target directory when needed.
 
 ### Automatic updates and releases
 
-The app checks [the signed release manifest](https://github.com/idy/nootify/releases/latest/download/latest.json) about 30 seconds after launch, every six hours, and when **检查更新** is selected in the tray or under **设置 · 关于**. When a newer version exists, the tray offers **安装更新 vX.Y.Z** and every page shows a prompt with **立即更新** and **稍后**; nothing is downloaded until one of them is chosen. Installation verifies the update signature, replaces the app, restarts the background service if its LaunchAgent runs this app's Node.js, and relaunches the app. The page shows the downloaded size, percentage, and a progress bar, then the install and restart steps; errors appear there and in the tray's update status line.
+The app checks [the signed release manifest](https://github.com/idy/nootify/releases/latest/download/latest.json) about 30 seconds after launch, every six hours, and when **检查更新** is selected in the tray or the window's title row. When a newer version exists, the tray offers **安装更新 vX.Y.Z** and every page shows a compact **更新 vX.Y.Z** button in the title row; downloading starts only when installation is selected. Installation verifies the update signature, replaces the app, restarts the background service if its LaunchAgent runs this app's Node.js, and relaunches the app. One fixed-width title-row button stays in place throughout the update: **更新 vX.Y.Z** becomes **下载中 42%**, then **安装中…** and **重启中…**. There is no second line or separate progress bar. Unknown-size downloads show **下载中…**; checks, success, and retries use the same button, preserving its position and keyboard focus. Clicking the status opens **设置 · 关于** for full version, download size, and error details; errors also appear in the tray's update status line.
 
-The update worker runs in Rust. It pushes its state into the page as a `nootify-update` DOM event, replayed on every page load, and the page asks for a check or an install by navigating to `nootify://update/check` or `nootify://update/install`, which the window's navigation policy cancels. Those are the only two requests; the page still has no IPC. A plain browser receives no such event, so **设置 · 关于** shows only the service version there.
+For a debug native smoke run against an isolated worktree service, set `NOOTIFY_SMOKE_UI_URL` to its `http://127.0.0.1:<port>/` origin and run the debug binary with `--smoke-test`. The override is accepted only in debug smoke mode, where service and update workers are disabled; the check exercises title-row update clicks, progress, narrow-window layout, and double-click zoom. Build with a separate Tauri identifier when another desktop instance is running.
+
+The update worker runs in Rust. It pushes its state into the page as a `nootify-update` DOM event, replayed on every page load, and the page asks for a check or an install by navigating to `nootify://update/check` or `nootify://update/install`, which the window's navigation policy cancels. These are the only update requests; the page still has no IPC. A native initialization script also handles dragging and double-clicking empty title-row areas through the fixed `nootify://window/drag` and `nootify://window/zoom` requests, leaving buttons and links clickable. A plain browser receives neither the script nor update events, so it keeps its ordinary layout and **设置 · 关于** shows only the service version there.
 
 CI runs TypeScript tests, resource staging, rustfmt, clippy, and Rust tests on macOS. To publish a release, update `package.json` and `src-tauri/Cargo.toml` to the same version, commit to `main`, then push a matching `vX.Y.Z` tag. The release workflow rejects a tag that differs from `package.json`. It publishes the DMG, updater bundle, signature, and `latest.json` using the repository secrets `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. A manually dispatched release must select a version tag too.
 
@@ -212,20 +214,23 @@ Group creation needs the bot's chat-creation permission (`im:chat:create` or `im
 
 ## Web UI
 
-Open `http://127.0.0.1:9417`. The layout follows the system's light or dark appearance without reloading and has a navigation column grouped by **message bridge** (run logs, routing sessions, agents) and **GitHub** (pull requests to our repositories, pull requests we sent upstream, followed repositories), with **设置** and module and connection status at its foot. Logs and PR queues use bordered lists of two-line rows; subscriptions use a compact table with expandable source sessions. Segmented filters show counts; search and `/` focus the page's search field. On narrow screens the navigation becomes a scrolling top bar.
+Open `http://127.0.0.1:9417`. The layout follows the system's light or dark appearance without reloading and has a navigation column grouped by **message bridge** (run logs, routing sessions, agents) and **GitHub** (pull requests to our repositories, pull requests we sent upstream, followed repositories), with **设置** and module and connection status at its foot. The desktop window combines native window controls, the brand, page breadcrumbs, software updates, and refresh in one 52px title row. Logs and PR queues use bordered lists of two-line rows; subscriptions use a compact table with expandable source sessions. Segmented filters show counts; search and `/` focus the page's search field. Toolbars and settings reflow according to the available working width: narrow toolbars put filters above a shared search/action row, and field save actions remain next to their inputs. On narrow browser screens, primary navigation scrolls beside a fixed Settings entry, with settings pages in their own contextual row and the active destination kept visible. The desktop window keeps its sidebar and native title-row alignment.
+
+The operational UI uses local system fonts with a fixed role scale: 16px page headings, 14px primary content and field names, a 13px control/body baseline, and 12px metadata. Numeric counters and progress use tabular figures; code previews use the same local monospace family as IDs. Explanatory paragraphs have a constrained reading measure and more leading without changing the compact list line boxes.
 
 Log rows expand in place for full IDs, reasons, and message text; logs can be paused and the filtered set exported as NDJSON. The routing-session page displays only targets encountered by incoming messages or explicit sends, with their last lookup time and result. Refreshing it performs no client lookups. These are historical observations, not a live inventory.
 
-The page polls a read-only snapshot every two seconds and needs no control token. It accepts loopback hosts or this computer's Tailscale address, and same-origin requests only. The control API remains bearer-authenticated. Logs persist in the private `events.ndjson` file, capped at 1,000 entries; a first launch imports available JSON entries from the prior stdout log. Events explicitly distinguish `received`, `socket_written`, `ignored` with a reason, and failures. For accepted senders, message previews are limited to 240 characters; unknown fields and credentials are not logged. A successful socket write is not proof of model processing.
+The page polls a read-only snapshot every two seconds and needs no control token. It accepts loopback hosts or the Nootify node's Tailscale address, and same-origin requests only. The control API remains bearer-authenticated. Logs persist in the private `events.ndjson` file, capped at 1,000 entries; a first launch imports available JSON entries from the prior stdout log. Events explicitly distinguish `received`, `socket_written`, `ignored` with a reason, and failures. For accepted senders, message previews are limited to 240 characters; unknown fields and credentials are not logged. A successful socket write is not proof of model processing.
 
 ## Settings
 
-**设置** at the foot of the navigation opens four pages. Everything can be read over Tailscale, but changes are accepted only from this Mac: credentials and imports decide who can reach local sessions.
+**设置** at the foot of the navigation opens five pages. Everything can be read over Tailscale, but changes are accepted only from this Mac: credentials and imports decide who can reach local sessions.
 
 | Page | Purpose |
 | --- | --- |
 | GitHub | Signs Nootify in to GitHub with the device flow, and signs it out |
 | 飞书 | Feishu App ID, App Secret, and recipient |
+| Tailscale | Enroll Nootify as its own device, connect/disconnect, sign out, and copy its port-80 address |
 | 导入导出 | Export and import the configuration |
 | 关于 | App and service versions, update checks, and installation |
 
@@ -273,11 +278,15 @@ Configuration is re-read on each refresh, first found wins: `NOOTIFY_PULLS_CONFI
 
 ## Tailscale access
 
-When Tailscale is running, the service also listens on this Mac's Tailscale IPv4 address, for example `http://100.x.y.z:9417/`. It follows the address if Tailscale restarts and logs when the listener starts or fails. The sidebar shows the address on the local page. MagicDNS names work too, if MagicDNS is enabled for the tailnet.
+**设置 · Tailscale** enables an **independent Nootify device**, powered by the bundled official `tailscale.com/tsnet` library. No system Tailscale app, daemon, CLI, Serve configuration, administrator privileges, or host port-80 binding is required. The device is named `nootify` (Tailscale may assign a suffix to make the name unique). It has its own tailnet IP, MagicDNS name, account, and keys; an existing Tailscale installation on this Mac is untouched.
 
-Every request on that listener must use this computer's Tailscale name or address as `Host`, and come from a device whose Tailscale identity is allowed. Identity comes from `tailscale whois` on the connecting address, not from request headers. By default only the login that owns this Mac is allowed; tagged devices and other users are rejected. Set `NOOTIFY_TAILNET_USERS` to a comma-separated list of logins to change that. Page data and the background PR refresh are available; control APIs still require the bearer token.
+The node is **off by default**. Enable it or choose **启用并登录**, then follow the official browser authorization link. The link is visible only on the local settings page and opens only `https://login.tailscale.com/a/…`. Once authorized, Nootify appears as a separate device in the user's tailnet. Tailnet administrators may need to approve it. The embedded node listens on its own TCP port 80, so its address is `http://100.x.y.z/`, or its MagicDNS name, without a port suffix.
 
-The macOS app binary is used as the CLI with `TAILSCALE_BE_CLI=1`, because launchd jobs have no terminal. Set `TAILSCALE_BIN` for another installation. Tailscale Serve is not used: with MagicDNS disabled, Serve can only be reached by host name, not by IP.
+Turning the switch off takes only the Nootify node offline and closes active connections; it preserves enrollment for the next connection. **退出登录** logs out this device and disables it. Persistent keys are under the private `tailscale/` directory in Nootify's state directory, separate from system Tailscale. Neither keys nor the enabled setting are included in configuration exports/imports. The sidecar receives a restricted environment so ambient Tailscale auth keys, OAuth credentials, and control-server overrides cannot silently enroll it. It exclusively locks its persistent identity, reports safe startup causes through a private handshake, and exits on stdin EOF or service shutdown. Relative service state paths are resolved before launching it. An explicit login retry can renew an expired authorization link.
+
+The embedded node forwards accepted connections to a private loopback backend using a bounded PROXY v1 prefix derived from the actual peer socket. Peer identity is resolved through this embedded node's LocalAPI, never through HTTP headers or system Tailscale. Host/origin checks accept only the Nootify device's own names and addresses. By default only devices owned by the same login are allowed; tagged devices and other users are rejected. `NOOTIFY_TAILNET_USERS` can specify allowed logins. Settings and agent edits remain local-only; control APIs still require the bearer token. Nootify's node exposes only its own port 80, not host preview servers or files on other ports. Managed agent instructions explicitly require a separately verified sharing endpoint for those resources. HTTP header/body deadlines remain active across the proxy boundary, transient status failures receive bounded retries without immediately disconnecting a healthy node, and repeated identical failures do not displace message history.
+
+Source builds require the Go version pinned in `native/tailscale/go.mod`. `npm run tailscale:build` builds the sidecar without connecting or enrolling a device; desktop staging includes it and its dependency licenses. `NOOTIFY_TSNET_BIN` can point at a development/test helper, never a system Tailscale CLI.
 
 ## TypeScript client and module API
 
@@ -308,6 +317,8 @@ Read the bearer token from the private state file in your local application; nev
 | `GET /ui/api/settings`, `GET /ui/api/settings/github` | Settings page data and the GitHub account; neither carries a secret |
 | `POST /ui/api/settings/lark`, `POST /ui/api/settings/recipient` | Save `{"app_id", "app_secret"}`, clear with `{"clear": true}`, or set `{"open_id"}`; these and the actions below need the UI header and the loopback listener |
 | `POST /ui/api/settings/github/login` | `{"action": "start" \| "cancel" \| "sign-out"}` for the device login |
+| `GET /ui/api/settings/tailscale` | Connection, remote-access state and URL; login URLs are omitted over Tailscale |
+| `POST /ui/api/settings/tailscale` | `{"action": "enable", "enabled": true}` or `{"action": "login" \| "cancel" \| "logout"}` for the independent node; local UI only |
 | `POST /ui/api/settings/export`, `POST /ui/api/settings/reveal` | Write a configuration file and return its path; show it in Finder |
 | `POST /ui/api/settings/import` | Preview `{"document"}`, or apply it with `"apply": true` |
 | `GET /v1/agents`, `PUT /v1/agents/:agent` | The same for token-authenticated clients |
@@ -329,6 +340,10 @@ Read the bearer token from the private state file in your local application; nev
 | --- | --- |
 | `src/server.ts` | Loopback and Tailscale HTTP listeners, authentication, lifecycle |
 | `src/tailnet.ts` | Tailscale address discovery and peer identity checks |
+| `src/tailscale.ts` | Independent Nootify node settings, enrollment, logout and lifecycle |
+| `src/tsnet-client.ts` | Private bounded RPC to the bundled Tailscale sidecar |
+| `native/tailscale/` | Embedded tsnet client, userspace port 80 and socket-derived peer forwarding |
+| `src/tailnet-proxy.ts` | Private loopback backend and bounded PROXY v1 peer parsing |
 | `src/github.ts`, `src/github-api.ts`, `src/github-model.ts` | Background GraphQL queries with the saved token, classification, sorting, follow choices, private cache |
 | `src/conversations.ts` | Individual Claude, Codex and OpenCode sessions, repository anchors, and explicit PR associations |
 | `src/types.ts` | Public request/response and module contracts |
@@ -344,7 +359,8 @@ Read the bearer token from the private state file in your local application; nev
 | `src/agents.ts` | Marked Feishu section in each agent's global prompt file |
 | `src/settings.ts`, `src/github-auth.ts` | Settings pages' actions: Feishu credentials, configuration export and import, GitHub device login and sign-out |
 | `src-tauri/`, `desktop/`, `scripts/desktop.mjs` | Native window, tray, offline view, and desktop build launcher |
-| `scripts/stage-service.mjs` | Stage the compiled service, dependencies, and verified Node.js sidecar |
+| `scripts/stage-service.mjs` | Stage the service, dependencies, and both bundled runtimes |
+| `scripts/build-tsnet.mjs` | Build and verify the independent Tailscale sidecar and collect dependency licenses |
 | `src-tauri/src/update.rs` | GitHub Release checks and signature-verified updates from the tray and the page |
 | `.github/workflows/` | macOS checks and version-tag-driven DMG/updater publication |
 | `test/` | Disposable HTTP/socket/state and routing tests |

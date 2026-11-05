@@ -1,7 +1,8 @@
 import { timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server } from 'node:http';
-import { resolve } from 'node:path';
+import type { Socket } from 'node:net';
+import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { State } from './state.js';
@@ -15,6 +16,9 @@ import { serveUi } from './ui.js';
 import type { PullsSource } from './ui.js';
 import { PullRequestsService } from './github.js';
 import { TailnetAccess } from './tailnet.js';
+import { TailscaleService } from './tailscale.js';
+import { TsnetClient } from './tsnet-client.js';
+import { listenTailnetProxy } from './tailnet-proxy.js';
 import { AgentPrompts } from './agents.js';
 import { GitHubAuth } from './github-auth.js';
 import { SettingsService } from './settings.js';
@@ -36,6 +40,7 @@ async function readBody(request: IncomingMessage): Promise<unknown> {
 /** `via: 'tailnet'` marks the listener bound to this node's Tailscale address. */
 export interface HostOptions {
   pulls?: PullsSource; tailnet?: TailnetAccess; via?: 'loopback' | 'tailnet';
+  peerAddress?: (socket: Socket) => string | undefined;
   agents?: AgentsSource; channel?: () => ChannelSummary | undefined; settings?: SettingsSource;
 }
 const loopback = /^(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/;
@@ -55,7 +60,7 @@ export function createServiceHost(modules: ServiceModule[], token: string, logs?
       // Browsers cannot forge Host, which blocks DNS rebinding on both listeners.
       const host = (request.headers.host ?? '').toLowerCase();
       if (options.via === 'tailnet') {
-        const rejected = options.tailnet ? await options.tailnet.authorize(host, request.socket.remoteAddress) : 'Tailnet access is not configured';
+        const rejected = options.tailnet ? await options.tailnet.authorize(host, options.peerAddress ? options.peerAddress(request.socket) : request.socket.remoteAddress) : 'Tailnet access is not configured';
         if (rejected) throw new HttpError(403, rejected);
       } else if (!loopback.test(host)) throw new HttpError(403, 'Only loopback hosts are accepted');
       const isPageNavigation = request.method === 'GET' && request.url === '/' && request.headers['sec-fetch-dest'] === 'document';
@@ -101,55 +106,29 @@ export async function main(): Promise<void> {
     pullsOutcome = record.status;
     report({ source: 'pulls', ...record });
   }, undefined, undefined, () => state.settings.github_token);
-  const tailnet = new TailnetAccess(port, { users: process.env.NOOTIFY_TAILNET_USERS?.split(',').map(user => user.trim()).filter(Boolean) });
+  const tsnet = new TsnetClient(join(state.directory, 'tailscale'));
+  const tailnet = new TailnetAccess(80, { users: process.env.NOOTIFY_TAILNET_USERS?.split(',').map(user => user.trim()).filter(Boolean), probe: tsnet });
+  const peers = new WeakMap<Socket, string>();
+  const tailscale = new TailscaleService({ state, access: tailnet, client: tsnet, report, listen: () => listenTailnetProxy(tailnetServer, peers) });
   const agents = new AgentPrompts({ stateDir: state.directory, port, tailnetAddress: () => { const url = tailnet.url(); return url ? new URL(url).hostname : undefined; } }, report);
   const modules: ServiceModule[] = [sessions, lark, pulls, agents];
   const github = new GitHubAuth(state, report, () => pulls.refreshSoon());
-  const settings = new SettingsService({ state, lark, github, pulls, agents, mcpConfig: values['mcp-config'], source: resolved?.source, report });
+  const settings = new SettingsService({ state, lark, github, pulls, agents, tailscale, mcpConfig: values['mcp-config'], source: resolved?.source, report });
   const page = { pulls, tailnet, agents, channel: () => lark.channel(), settings };
+  const tailnetServer = createServiceHost(modules, state.token, logs, { ...page, via: 'tailnet', peerAddress: socket => peers.get(socket) });
   const server = createServiceHost(modules, state.token, logs, page);
   await listen(server, port, '127.0.0.1');
   report({ status: 'ready', service: 'nootify', port });
   for (const module of modules) await module.start?.();
 
-  // A second listener on this node's Tailscale IPv4 address serves the owner's other devices.
-  // It follows the address if Tailscale restarts, and logs only changes in outcome.
-  const tailnetServer = createServiceHost(modules, state.token, logs, { ...page, via: 'tailnet' });
-  let bound: string | undefined;
-  let lastNote: string | undefined;
-  let binding: Promise<void> | undefined;
-  const note = (record: Record<string, unknown>) => {
-    const key = JSON.stringify(record);
-    if (key !== lastNote) { lastNote = key; report({ source: 'host', ...record }); }
-  };
-  const unbind = async () => {
-    if (!bound) return;
-    tailnetServer.closeAllConnections();
-    await new Promise(resolveClose => tailnetServer.close(resolveClose));
-    bound = undefined; tailnet.setListening(undefined);
-  };
-  const bindTailnet = () => binding ??= (async () => {
-    const address = (await tailnet.current())?.address;
-    if (address === bound) return;
-    await unbind();
-    if (!address) { note({ status: 'tailnet_unavailable' }); return; }
-    try {
-      await listen(tailnetServer, port, address);
-      bound = address; tailnet.setListening(address);
-      note({ status: 'tailnet_listening', reason: tailnet.url() });
-    } catch (error) { note({ status: 'tailnet_failed', error: (error as Error).message }); }
-  })().finally(() => { binding = undefined; });
-  await bindTailnet();
-  const tailnetTimer = setInterval(() => { void bindTailnet(); }, 60_000);
-  tailnetTimer.unref();
+  // The embedded device owns tailnet port 80; its private backend preserves the original peer address.
+  await tailscale.start();
 
   let stopping = false;
   const stop = async () => {
     if (stopping) return;
     stopping = true;
-    clearInterval(tailnetTimer);
-    await binding;
-    await unbind();
+    await tailscale.stop();
     await settings.stop();
     for (const module of [...modules].reverse()) await module.stop?.();
     await logs.flush();

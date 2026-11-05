@@ -4,13 +4,14 @@ import type { ModuleStatus, PublicSession } from './types.js';
 import type { AgentPrompt } from './agents.js';
 import type { GitHubLogin } from './github-auth.js';
 import type { GitHubSettings, ImportSummary, SettingsPage } from './settings.js';
+import type { TailscalePage } from './tailscale.js';
 
 interface PullSummary { internal: number; upstream: number; followed: number; running: boolean; lastSuccessAt?: string; error?: string; signedOut?: boolean }
 interface Snapshot {
   time: string; modules: ModuleStatus[]; sessions: PublicSession[]; logs: LogEntry[];
   pulls?: PullSummary; access?: { tailnet_url?: string };
 }
-type View = 'logs' | 'sessions' | 'agents' | 'pulls-internal' | 'pulls-upstream' | 'repos' | 'settings-github' | 'settings-lark' | 'settings-backup' | 'settings-about';
+type View = 'logs' | 'sessions' | 'agents' | 'pulls-internal' | 'pulls-upstream' | 'repos' | 'settings-github' | 'settings-lark' | 'settings-tailscale' | 'settings-backup' | 'settings-about';
 interface AgentsPage { agents: AgentPrompt[]; editable: boolean; channel?: { name: string; configured: boolean; recipient?: string; groups: number } }
 interface Tone { label: string; tone: string }
 /** Pushed by the desktop shell as a `nootify-update` event; mirrors `UpdateView` in src-tauri/src/update.rs. A plain browser never receives it. */
@@ -28,6 +29,7 @@ const views: Record<View, { hash: string; group: string; title: string; section:
   repos: { hash: '#/repos', group: 'GitHub', title: 'PR 订阅', section: 'repos-view' },
   'settings-github': { hash: '#/settings/github', group: '设置', title: 'GitHub', section: 'settings-view' },
   'settings-lark': { hash: '#/settings/lark', group: '设置', title: '飞书', section: 'settings-view' },
+  'settings-tailscale': { hash: '#/settings/tailscale', group: '设置', title: 'Tailscale', section: 'settings-view' },
   'settings-backup': { hash: '#/settings/backup', group: '设置', title: '导入导出', section: 'settings-view' },
   'settings-about': { hash: '#/settings/about', group: '设置', title: '关于', section: 'settings-view' },
 };
@@ -111,9 +113,10 @@ const state = {
   pendingRepos: new Set<string>(), repoError: '', openRepoSources: new Set<string>(),
   agents: undefined as AgentsPage | undefined, agentsError: '', pendingAgents: new Set<string>(), openPreviews: new Set<string>(),
   settings: undefined as (SettingsPage & { editable: boolean }) | undefined, github: undefined as GitHubSettings | undefined, loadingGitHub: false,
+  tailscale: undefined as (TailscalePage & { editable: boolean }) | undefined, loadingTailscale: false, tailscaleError: '',
   settingsNote: undefined as { text: string; error: boolean } | undefined, pendingSettings: new Set<string>(),
   larkEdited: false, confirmClear: false, importing: undefined as { name: string; content: unknown; summary: ImportSummary } | undefined,
-  update: undefined as UpdateView | undefined, updateLater: '',
+  update: undefined as UpdateView | undefined,
   paused: false, loading: false, loadingPulls: false, connected: false,
   expanded: new Set<string>(),
   signatures: new Map<string, string>(),
@@ -565,10 +568,75 @@ async function loadGitHub(): Promise<void> {
   } catch (error) { state.settingsNote = { text: `无法读取 GitHub 状态：${(error as Error).message}`, error: true }; }
   finally { state.loadingGitHub = false; renderSettings(); }
 }
+const tailscaleErrors: Record<string, string> = {
+  embedded_client_missing: '内置 Tailscale 客户端不可用，请重新安装完整的 Nootify 应用。',
+  embedded_client_stopped: 'Nootify 节点已离线，正在自动重连。',
+  embedded_protocol_error: '内置客户端响应异常，请重新启动 Nootify。',
+  embedded_request_timeout: '连接超时，请检查网络后重试。',
+  embedded_request_failed: '无法完成操作，请检查网络后重试。',
+  state_locked: '这个 Nootify 节点正在被另一个进程使用，请关闭重复运行的 Nootify。',
+  state_unavailable: '无法读取 Nootify 节点的登录信息，请检查本机存储权限。',
+  listener_failed: '无法开启 Nootify 节点的访问端口，请重新连接。',
+  startup_failed: '内置 Tailscale 节点启动失败，请重新连接。',
+  client_unavailable: '无法连接内置 Tailscale 客户端，请重启 Nootify。',
+  status_failed: '暂时无法读取节点状态，正在重试。',
+  busy: '内置客户端忙碌，正在重试。',
+  timeout: '连接超时，请检查网络后重试。',
+};
+async function loadTailscale(): Promise<void> {
+  if (state.loadingTailscale) return;
+  state.loadingTailscale = true;
+  try {
+    const response = await fetch('/ui/api/settings/tailscale', { cache: 'no-store', signal: AbortSignal.timeout(12000) });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    state.tailscale = await response.json() as TailscalePage & { editable: boolean };
+    state.tailscaleError = '';
+  } catch (error) { state.tailscaleError = `无法读取 Tailscale 状态：${(error as Error).message}`; }
+  finally { state.loadingTailscale = false; renderSettings(); }
+}
+function renderTailscale(): void {
+  const data = state.tailscale;
+  const remote = data?.editable !== true;
+  const busy = state.pendingSettings.has('tailscale');
+  const active = loginActive(data?.login);
+  field('tailscale-enabled').checked = data?.enabled ?? false;
+  field('tailscale-enabled').disabled = remote || busy;
+  const connected = data?.status === 'connected';
+  const labels: Record<TailscalePage['status'], Tone> = {
+    disabled: { label: '已关闭', tone: 'muted' }, 'needs-login': { label: '待登录', tone: 'warn' }, starting: { label: '连接中', tone: 'warn' },
+    'needs-approval': { label: '等待批准', tone: 'warn' }, connected: { label: '已连接', tone: 'ok' }, unavailable: { label: '不可用', tone: 'warn' },
+  };
+  setTone('tailscale-state', data ? labels[data.status] : { label: '', tone: 'muted' });
+  setText('tailscale-status', !data ? '正在检查连接…' : connected ? [data.deviceName, data.account].filter(Boolean).join(' · ')
+    : data.status === 'needs-approval' ? '请在 Tailscale 管理后台批准 Nootify 这台设备。'
+    : data.status === 'unavailable' ? 'Nootify 内置节点暂时不可用。'
+    : data.status === 'disabled' ? '独立的 Tailscale 设备，不使用系统客户端。' : '登录后，Nootify 会作为独立设备加入你的网络。');
+  setText('tailscale-sharing', !data ? '正在读取设置…' : !data.enabled ? '节点已关闭；已有登录信息会保留。'
+    : data.error ? tailscaleErrors[data.error] ?? data.error
+    : data.sharing === 'ready' ? '已连接，通过 Nootify 节点的 80 端口访问。'
+    : connected ? '正在开启远程访问…' : '等待 Nootify 节点连接。');
+  $('tailscale-sharing').classList.toggle('tone-error', !!data?.error);
+  const login = $<HTMLButtonElement>('tailscale-login');
+  login.hidden = remote || !data || connected || data.login.status === 'starting' || data.status === 'needs-approval';
+  login.disabled = busy;
+  setText('tailscale-login', data?.login.status === 'waiting' ? '重新获取链接' : data?.enabled ? '登录 Tailscale' : '启用并登录');
+  const logout = $<HTMLButtonElement>('tailscale-logout');
+  logout.hidden = remote || !connected; logout.disabled = busy;
+  $('tailscale-flow').hidden = remote || !active;
+  setText('tailscale-flow-title', data?.login.status === 'waiting' ? '继续完成 Tailscale 登录' : '正在准备登录…');
+  $<HTMLButtonElement>('tailscale-cancel').disabled = busy;
+  const open = $<HTMLAnchorElement>('tailscale-open');
+  open.hidden = remote || !data?.login.url;
+  if (!remote && data?.login.url) open.href = data.login.url; else open.removeAttribute('href');
+  $('tailscale-address-row').hidden = !data?.url;
+  setText('tailscale-address', data?.url ?? '');
+  setText('tailscale-dns', data?.url && data.dnsName ? `MagicDNS：http://${data.dnsName}/` : '');
+}
 function loadSettingsView(): void {
   if (!isSettingsView(state.view)) return;
   void loadSettings();
   if (state.view === 'settings-github') void loadGitHub();
+  if (state.view === 'settings-tailscale') void loadTailscale();
 }
 /** Runs one page action: its buttons are disabled meanwhile, and the result replaces the page's note. */
 async function settingsRun(key: string, failure: string, action: () => Promise<string | void>): Promise<void> {
@@ -652,11 +720,13 @@ function renderSettings(): void {
   const remote = state.settings?.editable === false;
   const login = state.github?.login;
   const note = state.settingsNote ?? (state.view === 'settings-github' && login?.status === 'failed' ? { text: `GitHub 登录失败：${githubErrors[login.error ?? ''] ?? login.error}`, error: true }
+    : state.view === 'settings-tailscale' && state.tailscaleError ? { text: state.tailscaleError, error: true }
+    : state.view === 'settings-tailscale' && state.tailscale?.login.status === 'failed' ? { text: `Tailscale 登录失败：${tailscaleErrors[state.tailscale.login.error ?? ''] ?? '请重试。'}`, error: true }
     : remote ? { text: '通过 Tailscale 访问时只能查看；请在这台 Mac 上修改设置。', error: false } : undefined);
   const banner = $('settings-banner');
   banner.hidden = !note; banner.className = note && !note.error ? 'banner note' : 'banner';
   setText('settings-banner', note?.text ?? '');
-  renderGitHub(remote); renderLark(remote); renderBackup(remote);
+  renderGitHub(remote); renderLark(remote); renderTailscale(); renderBackup(remote);
 }
 
 // ---- Updates ----
@@ -678,31 +748,58 @@ function updateStatus(update: UpdateView): string {
   if (update.phase === 'current') return `已是最新版本${update.checked_at ? ` · ${ago(new Date(update.checked_at).toISOString())}检查` : ''}`;
   return '启动约 30 秒后自动检查';
 }
-function paintProgress(id: string, update: UpdateView): void {
-  const bar = $<HTMLProgressElement>(id);
-  bar.hidden = update.phase !== 'downloading';
-  if (update.phase !== 'downloading') return;
-  if (update.total) bar.value = Math.min(1, update.received / update.total); else bar.removeAttribute('value');
+function compactUpdateStatus(update: UpdateView): string {
+  if (update.phase === 'checking') return '检查中…';
+  if (update.phase === 'downloading') return update.total
+    ? `下载中 ${Math.min(100, Math.floor(update.received * 100 / update.total))}%`
+    : '下载中…';
+  if (update.phase === 'installing') return '安装中…';
+  if (update.phase === 'restarting') return '重启中…';
+  if (update.phase === 'available') return update.error ? '重试更新' : `更新 ${updateTag(update)}`;
+  if (update.phase === 'failed') return '重试检查';
+  if (update.phase === 'current') return '已是最新';
+  return '检查更新';
+}
+function updateAction(update: UpdateView): 'check' | 'install' | 'details' {
+  if (update.phase === 'available') return 'install';
+  if (['checking', 'downloading', 'installing', 'restarting'].includes(update.phase)) return 'details';
+  return 'check';
 }
 function renderUpdate(): void {
   const update = state.update;
   const available = update?.phase === 'available';
-  const working = !!update && ['downloading', 'installing', 'restarting'].includes(update.phase);
+  const working = !!update && updateAction(update) === 'details';
+  const failed = update?.phase === 'failed' || (available && !!update.error);
   for (const dot of document.querySelectorAll<HTMLElement>('.update-dot')) dot.hidden = !available;
-  const prompted = working || (available && state.updateLater !== update.version);
-  $('update-banner').hidden = !prompted || state.view === 'settings-about';
-  $('update-banner-install').hidden = !available; $('update-banner-later').hidden = !available;
-  if (update && prompted) { setText('update-banner-text', updateStatus(update)); paintProgress('update-banner-progress', update); }
+  $('titlebar-update').hidden = !update;
+  $('titlebar-update').classList.toggle('has-error', !!failed);
+  const button = $<HTMLButtonElement>('update-action');
+  button.classList.toggle('busy', working);
+  if (update) {
+    const action = updateAction(update);
+    const hint = action === 'install' ? `安装 ${updateTag(update)}，完成后自动重启` : action === 'details' ? '查看更新详情' : '检查软件更新';
+    setText('update-action-label', compactUpdateStatus(update));
+    button.title = `${updateStatus(update)}；${hint}`;
+    button.setAttribute('aria-label', button.title);
+    $('update-action-icon').setAttribute('d', working ? 'M13 8a5 5 0 1 1-5-5'
+      : update.phase === 'current' ? 'm3.5 8 3 3 6-6'
+      : failed ? 'M13.2 8A5.2 5.2 0 1 1 11.7 4.3M13.2 2.6v3.1h-3.1' : 'M8 13V3M4 7l4-4 4 4');
+  }
   const service = state.settings?.version;
   setText('about-version', [update ? `应用 ${update.current}` : '', service ? `后台服务 ${service}` : ''].filter(Boolean).join(' · ') || '—');
   setText('update-status', update ? updateStatus(update) : '在 Nootify 桌面应用里检查和安装更新');
-  const check = $<HTMLButtonElement>('update-check');
-  check.hidden = !update; check.disabled = working || update?.phase === 'checking';
-  $('update-install').hidden = !available;
-  if (update) { setText('update-install', `安装 ${updateTag(update)}`); paintProgress('update-progress', update); }
 }
 
 // ---- Chrome, loading and events ----
+function revealActiveNavigation(): void {
+  if (document.documentElement.hasAttribute('data-nootify-desktop') || !matchMedia('(max-width: 760px)').matches) return;
+  const active = document.querySelector<HTMLElement>('.sidebar .nav-item[aria-current="page"]');
+  const navigation = active?.closest<HTMLElement>('nav');
+  if (!active || !navigation) return;
+  const item = active.getBoundingClientRect();
+  const track = navigation.getBoundingClientRect();
+  navigation.scrollLeft += item.left - track.left - (navigation.clientWidth - item.width) / 2;
+}
 function renderChrome(): void {
   const meta = views[state.view];
   $('crumb-group').textContent = meta.group; $('crumb-page').textContent = meta.title;
@@ -779,7 +876,7 @@ async function loadPulls(): Promise<void> {
 async function refreshNow(): Promise<void> {
   if (state.view === 'agents') { await Promise.all([loadSnapshot(), loadAgents()]); return; }
   if (isSettingsView(state.view)) {
-    await Promise.all([loadSnapshot(), loadSettings(), ...(state.view === 'settings-github' ? [loadGitHub()] : [])]);
+    await Promise.all([loadSnapshot(), loadSettings(), ...(state.view === 'settings-github' ? [loadGitHub()] : []), ...(state.view === 'settings-tailscale' ? [loadTailscale()] : [])]);
     return;
   }
   if (!usesPulls(state.view)) { await loadSnapshot(); return; }
@@ -795,16 +892,38 @@ window.addEventListener('hashchange', () => {
   state.view = viewFromHash();
   state.settingsNote = undefined;
   renderAll();
+  requestAnimationFrame(revealActiveNavigation);
   if (usesPulls(state.view)) void loadPulls();
   if (state.view === 'agents') void loadAgents();
   loadSettingsView();
   $(views[state.view].section).scrollTop = 0;
 });
 window.addEventListener('nootify-update', event => { state.update = (event as CustomEvent<UpdateView>).detail; renderUpdate(); });
-$('update-banner-install').addEventListener('click', () => askNative('install'));
-$('update-install').addEventListener('click', () => askNative('install'));
-$('update-check').addEventListener('click', () => askNative('check'));
-$('update-banner-later').addEventListener('click', () => { state.updateLater = state.update?.version ?? ''; renderUpdate(); });
+$('update-action').addEventListener('click', () => {
+  if (!state.update) return;
+  const action = updateAction(state.update);
+  if (action === 'details') location.hash = views['settings-about'].hash;
+  else askNative(action);
+});
+type TailscaleAction = { action: 'enable'; enabled: boolean } | { action: 'login' | 'cancel' | 'logout' };
+function runTailscaleAction(body: TailscaleAction, failure: string): void {
+  void settingsRun('tailscale', failure, async () => {
+    await post('/ui/api/settings/tailscale', body);
+    await loadTailscale();
+  });
+}
+$('tailscale-enabled').addEventListener('change', () => {
+  runTailscaleAction({ action: 'enable', enabled: field('tailscale-enabled').checked }, '无法修改远程访问');
+});
+$('tailscale-login').addEventListener('click', () => runTailscaleAction({ action: 'login' }, '无法开始 Tailscale 登录'));
+$('tailscale-cancel').addEventListener('click', () => runTailscaleAction({ action: 'cancel' }, '无法取消登录'));
+$('tailscale-logout').addEventListener('click', () => runTailscaleAction({ action: 'logout' }, '无法退出 Nootify 节点'));
+$('tailscale-copy').addEventListener('click', () => {
+  const url = state.tailscale?.url; if (!url) return;
+  void (navigator.clipboard?.writeText(url) ?? Promise.reject(new Error('Clipboard is unavailable'))).then(() => {
+    setText('tailscale-copy', '已复制'); setTimeout(() => setText('tailscale-copy', '复制地址'), 2000);
+  }, () => { getSelection()?.selectAllChildren($('tailscale-address')); setText('tailscale-copy', '已选中，按 ⌘C'); });
+});
 $('github-login').addEventListener('click', () => {
   void settingsRun('github', '无法开始登录', async () => {
     state.github = { account: state.github?.account, login: await post<GitHubLogin>('/ui/api/settings/github/login', { action: 'start' }) };
@@ -913,9 +1032,11 @@ document.addEventListener('keydown', event => {
 });
 
 renderAll();
+requestAnimationFrame(revealActiveNavigation);
+window.addEventListener('resize', revealActiveNavigation);
 void loadSnapshot();
 void loadAgents();
 if (usesPulls(state.view)) void loadPulls();
 loadSettingsView();
-setInterval(() => { void loadSnapshot(); if (state.view === 'settings-github' && loginActive(state.github?.login)) void loadGitHub(); }, 2000);
+setInterval(() => { void loadSnapshot(); if (state.view === 'settings-github' && loginActive(state.github?.login)) void loadGitHub(); if (state.view === 'settings-tailscale') void loadTailscale(); }, 2000);
 setInterval(() => { if (usesPulls(state.view)) void loadPulls(); }, 10000);

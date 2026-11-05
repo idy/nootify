@@ -108,7 +108,8 @@ impl BundledService {
         let Some(bundled) = Self::locate(&exe) else {
             return Ok(None);
         };
-        for path in [&bundled.node, &bundled.cli] {
+        let tailscale = bundled.node.with_file_name("nootify-tsnet");
+        for path in [&bundled.node, &bundled.cli, &tailscale] {
             if !path.is_file() {
                 return Err(format!("This app bundle has no {}", path.display()));
             }

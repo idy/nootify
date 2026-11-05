@@ -12,6 +12,7 @@ import { resolveCredentials, verifyCredentials, type CredentialSource, type Cred
 import { isOpenId } from './lark-threads.js';
 import type { State } from './state.js';
 import { HttpError, type BackendConnection } from './types.js';
+import type { TailscaleService, TailscalePage, TailscaleLogin } from './tailscale.js';
 
 const FORMAT = 'nootify-config';
 const EXPORTS_KEPT = 10;
@@ -55,6 +56,7 @@ export interface PullPreferences {
 export interface AgentControl { list(): Promise<AgentPrompt[]>; set(agent: AgentId, enabled: boolean): Promise<AgentPrompt> }
 export interface SettingsOptions {
   state: State; lark: LarkControl; github: GitHubAuth; pulls: PullPreferences; agents: AgentControl;
+  tailscale?: TailscaleService;
   mcpConfig?: string; source?: CredentialSource; env?: NodeJS.ProcessEnv;
   verify?: (credentials: Credentials) => Promise<void>;
   reveal?: (path: string) => Promise<void>;
@@ -153,6 +155,23 @@ export class SettingsService {
   startGitHubLogin(): GitHubLogin { return this.options.github.start(); }
   cancelGitHubLogin(): GitHubLogin { return this.options.github.cancel(); }
   signOutGitHub(): Promise<void> { return this.options.github.signOut(); }
+  async tailscale(): Promise<TailscalePage> {
+    if (!this.options.tailscale) throw new HttpError(404, 'Tailscale settings are not enabled');
+    return this.options.tailscale.page();
+  }
+  async setTailscaleEnabled(enabled: unknown): Promise<void> {
+    if (!this.options.tailscale) throw new HttpError(404, 'Tailscale settings are not enabled');
+    await this.options.tailscale.setEnabled(enabled);
+  }
+  startTailscaleLogin(): Promise<TailscaleLogin> {
+    if (!this.options.tailscale) throw new HttpError(404, 'Tailscale settings are not enabled');
+    return this.options.tailscale.startLogin();
+  }
+  async cancelTailscaleLogin(): Promise<void> { await this.options.tailscale?.cancelLogin(); }
+  async logoutTailscale(): Promise<void> {
+    if (!this.options.tailscale) throw new HttpError(404, 'Tailscale settings are not enabled');
+    await this.options.tailscale.logout();
+  }
   async stop(): Promise<void> { await this.options.github.stop(); await this.writes.catch(() => {}); }
 
   /** Re-derives the active bot from its sources and moves the connection only if that changed it. */

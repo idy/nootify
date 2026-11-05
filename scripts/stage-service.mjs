@@ -2,11 +2,12 @@
 //   src-tauri/resources/service/                 -> Nootify.app/Contents/Resources/service/
 //     dist/src/*.js, public/, package.json, node_modules/ (production), node-LICENSE
 //   src-tauri/binaries/node-aarch64-apple-darwin -> Nootify.app/Contents/MacOS/node
+//   src-tauri/binaries/nootify-tsnet-aarch64-apple-darwin -> Contents/MacOS/nootify-tsnet
 // The runtime is the official Node.js build, checked against its release's SHASUMS256.txt
 // and a pinned hash. A local (e.g. Homebrew) node is never copied: it links foreign dylibs.
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { createReadStream, createWriteStream } from 'node:fs';
+import { createWriteStream } from 'node:fs';
 import { chmod, copyFile, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, sep } from 'node:path';
@@ -14,6 +15,8 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { buildTsnet } from './build-tsnet.mjs';
+import { sha256, verifyExecutable } from './bundle-utils.mjs';
 
 const run = promisify(execFile);
 
@@ -35,8 +38,8 @@ async function main() {
   if (process.platform !== 'darwin') throw new Error('Staging needs macOS (otool, lipo) for the darwin-arm64 runtime');
   const target = process.env.TAURI_ENV_TARGET_TRIPLE;
   if (target && target !== TARGET) throw new Error(`Nootify bundles Node.js for ${TARGET} only, not ${target}`);
-  const license = await stageNode();
-  const changed = await stageService(license);
+  const [license, tailscale] = await Promise.all([stageNode(), buildTsnet()]);
+  const changed = await stageService(license, tailscale);
   console.log(`stage-service: Node.js ${NODE_VERSION} sidecar ready; service ${changed ? 'staged' : 'unchanged'} in ${serviceDir}`);
 }
 
@@ -69,12 +72,7 @@ async function stageNode() {
     const binary = join(work, release, 'bin', 'node');
     const { stdout: archs } = await run('/usr/bin/lipo', ['-archs', binary]);
     if (archs.trim() !== 'arm64') throw new Error(`Node.js binary architectures are "${archs.trim()}", expected arm64`);
-    const { stdout: linked } = await run('/usr/bin/otool', ['-L', binary]);
-    const foreign = linked.split('\n').slice(1).map(line => line.trim().split(' (')[0]).filter(Boolean)
-      .filter(lib => !lib.startsWith('/usr/lib/') && !lib.startsWith('/System/Library/'));
-    if (foreign.length) throw new Error(`Node.js binary links non-system libraries: ${foreign.join(', ')}`);
-    const { stdout: version } = await run(binary, ['--version'], { env: {} });
-    if (version.trim() !== NODE_VERSION) throw new Error(`Extracted Node.js reports ${version.trim()}, expected ${NODE_VERSION}`);
+    await verifyExecutable(binary, NODE_VERSION);
     // Rewriting an identical binary would only make cargo rerun the build script and relink.
     if (!await exists(nodeBinary) || await sha256(nodeBinary) !== await sha256(binary)) {
       await mkdir(dirname(nodeBinary), { recursive: true });
@@ -88,7 +86,7 @@ async function stageNode() {
   }
 }
 
-async function stageService(nodeLicense) {
+async function stageService(nodeLicense, tailscale) {
   await mkdir(resourcesDir, { recursive: true });
   for (const entry of await readdir(resourcesDir)) {
     if (entry.startsWith('.service-')) await rm(join(resourcesDir, entry), { recursive: true, force: true });
@@ -108,6 +106,13 @@ async function stageService(nodeLicense) {
     const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
     await writeFile(join(staging, 'package.json'), `${JSON.stringify({ name: pkg.name, version: pkg.version, private: true, type: 'module' }, null, 2)}\n`);
     await writeFile(join(staging, 'node-LICENSE'), nodeLicense);
+    const licenses = join(staging, 'tailscale-licenses');
+    await mkdir(licenses, { recursive: true });
+    await writeFile(join(licenses, 'dependencies.txt'), tailscale.modules);
+    for (const license of tailscale.licenses) {
+      const path = join(licenses, license.path); await mkdir(dirname(path), { recursive: true });
+      await writeFile(path, license.content);
+    }
     await installProductionModules(join(staging, 'node_modules'));
 
     // mkdtemp creates the directory 0700. An identical tree stays untouched (chmod keeps mtimes)
@@ -164,12 +169,6 @@ async function copyInto(source, destination) {
 async function treeDigest(dir) {
   const hash = createHash('sha256');
   for (const file of await files(dir)) hash.update(`${file}\0${await sha256(join(dir, file))}\n`);
-  return hash.digest('hex');
-}
-
-async function sha256(path) {
-  const hash = createHash('sha256');
-  for await (const chunk of createReadStream(path)) hash.update(chunk);
   return hash.digest('hex');
 }
 

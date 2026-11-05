@@ -1,6 +1,6 @@
 {
   "name": "nootify",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "private": true,
   "type": "module",
   "description": "Routes Feishu replies to local coding-agent sessions and tracks pull requests, with a macOS tray app",
@@ -20,7 +20,8 @@
     "start": "node dist/src/server.js",
     "cli": "node dist/src/cli.js",
     "tauri": "tauri",
-    "desktop:dev": "node scripts/desktop.mjs dev",
+    "tailscale:build": "node scripts/build-tsnet.mjs",
+    "desktop:dev": "npm run tailscale:build && node scripts/desktop.mjs dev",
     "desktop:stage": "npm run build && node scripts/stage-service.mjs",
     "desktop:build": "node scripts/desktop.mjs build --bundles app,dmg"
   },

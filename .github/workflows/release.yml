@@ -29,6 +29,15 @@ jobs:
           node-version: 24
           cache: npm
 
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: native/tailscale/go.mod
+          cache-dependency-path: native/tailscale/go.sum
+
+      - name: Test embedded Tailscale client
+        working-directory: native/tailscale
+        run: go test ./...
+
       - name: Require a tag matching package.json
         env:
           REF_TYPE: ${{ github.ref_type }}
