@@ -10,7 +10,7 @@ use std::{
 
 use serde::Serialize;
 use tauri::{
-    menu::{Menu, MenuItem},
+    menu::{MenuItem, Submenu},
     AppHandle, Manager, Url, Wry,
 };
 use tauri_plugin_updater::{Update, UpdaterExt};
@@ -113,32 +113,43 @@ fn progress_step(received: u64, total: Option<u64>) -> u64 {
     }
 }
 
-/// The tray's update section: a status line, 检查更新, and 安装更新 vX.Y.Z, which is in the menu
-/// only while an update is available.
+/// Updates stay inside one native submenu. Its title advertises an available version or progress;
+/// 安装更新 is inserted only while a version is available. Full errors remain in Settings > About.
 #[derive(Clone)]
 pub struct UpdateMenu {
-    menu: Menu<Wry>,
+    pub menu: Submenu<Wry>,
     pub status: MenuItem<Wry>,
     pub check: MenuItem<Wry>,
     pub install: MenuItem<Wry>,
+    pub about: MenuItem<Wry>,
 }
 
 impl UpdateMenu {
     pub fn new(
-        menu: Menu<Wry>,
+        menu: Submenu<Wry>,
         status: MenuItem<Wry>,
         check: MenuItem<Wry>,
         install: MenuItem<Wry>,
+        about: MenuItem<Wry>,
     ) -> Self {
         Self {
             menu,
             status,
             check,
             install,
+            about,
         }
     }
 
     pub fn render(&self, status: &str, available: Option<&str>, busy: bool) {
+        let title = if busy {
+            menu_text(status)
+        } else if let Some(version) = available {
+            format!("更新 {}", tag(version))
+        } else {
+            "软件更新".to_string()
+        };
+        let _ = self.menu.set_text(title);
         let _ = self.status.set_text(menu_text(status));
         let _ = self.check.set_enabled(!busy);
         let _ = self.install.set_enabled(!busy);
@@ -254,7 +265,7 @@ impl Worker {
     }
 
     fn check(&mut self) {
-        self.show("更新：正在检查…", true);
+        self.show("检查更新中…", true);
         publish(&self.app, &self.view(Phase::Checking));
         let result = self
             .app
@@ -264,7 +275,7 @@ impl Worker {
             .and_then(|updater| tauri::async_runtime::block_on(updater.check()));
         match result {
             Ok(Some(update)) => {
-                let status = format!("更新：发现 {}", tag(&update.version));
+                let status = format!("可更新至 {}", tag(&update.version));
                 self.pending = Some(update);
                 self.checked_at = Some(now_ms());
                 self.show(&status, false);
@@ -273,12 +284,12 @@ impl Worker {
             Ok(None) => {
                 self.pending = None;
                 self.checked_at = Some(now_ms());
-                self.show(&format!("更新：已是最新 {}", tag(&self.current)), false);
+                self.show(&format!("已是最新 {}", tag(&self.current)), false);
                 publish(&self.app, &self.view(Phase::Current));
             }
             // A previously found update stays installable.
             Err(error) => {
-                self.show(&format!("检查更新失败：{error}"), false);
+                self.show("检查失败，请重试", false);
                 let phase = if self.pending.is_some() {
                     Phase::Available
                 } else {
@@ -298,10 +309,9 @@ impl Worker {
             return;
         };
         update.timeout = Some(DOWNLOAD_TIMEOUT);
-        let version = tag(&update.version);
         let menu = self.menu.clone();
         let show = |status: String| menu.render(&status, Some(&update.version), true);
-        show(format!("更新：正在下载 {version}…"));
+        show("下载中…".into());
         let app = &self.app;
         let mut progress = self.view(Phase::Downloading);
         let installing = self.view(Phase::Installing);
@@ -315,18 +325,18 @@ impl Worker {
                 if shown != Some(step) {
                     shown = Some(step);
                     if progress.total.is_some() {
-                        show(format!("更新：正在下载 {version} {step}%"));
+                        show(format!("下载中 {step}%"));
                     }
                     publish(app, &progress);
                 }
             },
             || {
-                show(format!("更新：正在安装 {version}…"));
+                show("安装中…".into());
                 publish(app, &installing);
             },
         ));
         if let Err(error) = result {
-            self.show(&format!("安装更新失败：{error}"), false);
+            self.show("安装失败，请重试", false);
             // Still pending: the page offers the same action again.
             let view = UpdateView {
                 error: Some(error.to_string()),
@@ -335,7 +345,7 @@ impl Worker {
             publish(&self.app, &view);
             return;
         }
-        self.show(&format!("更新：已安装 {version}，正在重启…"), true);
+        self.show("重启中…", true);
         publish(&self.app, &self.view(Phase::Restarting));
         // The bundle now holds the new service as well: restart the job if it runs this bundle's
         // Node.js. A failure only delays the new service code until the job next restarts.

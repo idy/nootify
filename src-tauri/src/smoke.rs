@@ -13,7 +13,7 @@ use tauri::{AppHandle, Manager, WebviewWindow};
 use tauri_plugin_updater::UpdaterExt;
 
 use crate::{
-    is_fallback, is_service_ui, render_health, render_install, restore_window,
+    is_fallback, is_service_ui, open_settings, render_health, render_install, restore_window,
     service::{check_health, health_client, BundledService, LaunchAgent},
     update::{tag, Phase, UpdateView},
     NativeState, TrayItems, INSTALL_LABEL, MAIN_WINDOW, TRAY_ID,
@@ -73,6 +73,8 @@ pub fn run(app: AppHandle, items: TrayItems) {
                         "bundled_node": report.bundled_node,
                         "updater_ready": report.updater_ready,
                         "update_menu_rendered": true,
+                        "tray_inline_update_progress": true,
+                        "tray_settings_navigation": report.online,
                         "daemon_control_invoked": false,
                         "service_install_invoked": false,
                         "update_install_invoked": false
@@ -136,12 +138,34 @@ fn exercise_bundle(app: &AppHandle, items: &TrayItems) -> Result<Report, String>
     if menu.install_shown() || !menu.check.is_enabled().unwrap_or(false) {
         return Err("Update items are not in their initial state".into());
     }
-    menu.render("更新：发现 v0.0.0-smoke", Some("0.0.0-smoke"), false);
-    wait_for("安装更新 appears for an available update", || {
-        menu.install_shown() && menu.install.text().ok().as_deref() == Some("安装更新 v0.0.0-smoke")
-    })?;
-    menu.render(&format!("更新：当前 {current}"), None, false);
-    wait_for("安装更新 is removed again", || !menu.install_shown())?;
+    menu.render("可更新至 v0.0.0-smoke", Some("0.0.0-smoke"), false);
+    wait_for(
+        "available update stays reachable inside the native submenu",
+        || {
+            menu.install_shown()
+                && menu.install.text().ok().as_deref() == Some("安装更新 v0.0.0-smoke")
+                && menu.menu.text().ok().as_deref() == Some("更新 v0.0.0-smoke")
+        },
+    )?;
+    menu.render("下载中 42%", Some("0.0.0-smoke"), true);
+    wait_for(
+        "tray shows inline progress and blocks duplicate update actions",
+        || {
+            menu.menu.text().ok().as_deref() == Some("下载中 42%")
+                && menu.install_shown()
+                && !menu.check.is_enabled().unwrap_or(true)
+                && !menu.install.is_enabled().unwrap_or(true)
+        },
+    )?;
+    menu.render(&format!("当前版本 {current}"), None, false);
+    wait_for(
+        "completed update restores the submenu without an install action",
+        || {
+            !menu.install_shown()
+                && menu.menu.text().ok().as_deref() == Some("软件更新")
+                && menu.check.is_enabled().unwrap_or(false)
+        },
+    )?;
     Ok(Report {
         online: false,
         plist_present,
@@ -218,6 +242,17 @@ fn exercise(app: &AppHandle, items: &TrayItems) -> Result<Report, String> {
         wait_for_live_ui(&window)?;
         check_ipc_denied(&window)?;
         check_update_bridge(&window)?;
+        open_settings(app, false);
+        wait_for(
+            "tray Settings shortcut opens the existing local settings page",
+            || {
+                evaluate(&window, "location.hash === '#/settings/github' && !!document.querySelector('#settings-view:not([hidden])')").unwrap_or(false)
+            },
+        )?;
+        open_settings(app, true);
+        wait_for("tray update details opens About", || {
+            evaluate(&window, "location.hash === '#/settings/about'").unwrap_or(false)
+        })?;
     }
 
     // Simulate an offline result through the production display path, not by
@@ -243,7 +278,63 @@ fn exercise(app: &AppHandle, items: &TrayItems) -> Result<Report, String> {
         check_titlebar_preview(&window, url)?;
         report.titlebar_preview = true;
     }
+    capture_tray(app, items)?;
     Ok(report)
+}
+
+/// An opt-in, debug-only pause for an external driver to inspect the actual macOS menu.
+/// Appearance applies to this test process only, without changing the user's system settings.
+fn capture_tray(app: &AppHandle, items: &TrayItems) -> Result<(), String> {
+    if !cfg!(debug_assertions) {
+        return Ok(());
+    }
+    let Ok(milliseconds) = std::env::var("NOOTIFY_SMOKE_TRAY_CAPTURE_MS")
+        .unwrap_or_default()
+        .parse::<u64>()
+    else {
+        return Ok(());
+    };
+    match std::env::var("NOOTIFY_SMOKE_TRAY_THEME").as_deref() {
+        Ok("light") => app.set_theme(Some(tauri::Theme::Light)),
+        Ok("dark") => app.set_theme(Some(tauri::Theme::Dark)),
+        _ => {}
+    }
+    if std::env::var("NOOTIFY_SMOKE_TRAY_PROGRESS").as_deref() == Ok("1") {
+        items.update.render("下载中 42%", Some("0.0.0-smoke"), true);
+    }
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+        window.hide().map_err(|error| error.to_string())?;
+    }
+    let rect = app
+        .tray_by_id(TRAY_ID)
+        .ok_or("Tray missing")?
+        .rect()
+        .map_err(|error| error.to_string())?
+        .ok_or("Tray rectangle missing")?;
+    let scale = app
+        .primary_monitor()
+        .map_err(|error| error.to_string())?
+        .ok_or("Primary monitor missing")?
+        .scale_factor();
+    let position = rect.position.to_logical::<f64>(scale);
+    let size = rect.size.to_logical::<f64>(scale);
+    let root = items
+        .menu
+        .items()
+        .map_err(|error| error.to_string())?
+        .iter()
+        .map(|item| item.id().as_ref().to_string())
+        .collect::<Vec<_>>();
+    println!(
+        "{}",
+        json!({
+            "capture": "tray-ready", "pid": std::process::id(),
+            "x": position.x, "y": position.y, "width": size.width, "height": size.height,
+            "root_items": root,
+        })
+    );
+    thread::sleep(Duration::from_millis(milliseconds.min(30000)));
+    Ok(())
 }
 
 /// Exercise the real worktree UI and native navigation bridge with update workers disabled.

@@ -21,7 +21,7 @@ use service::{
     SERVICE_URL,
 };
 use tauri::{
-    menu::{Menu, MenuItem, PredefinedMenuItem},
+    menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::TrayIconBuilder,
     webview::{NewWindowResponse, PageLoadEvent},
     AppHandle, Manager, RunEvent, Url, WebviewUrl, WebviewWindowBuilder, WindowEvent,
@@ -54,12 +54,14 @@ struct NativeState {
 
 #[derive(Clone)]
 struct TrayItems {
+    menu: Menu<tauri::Wry>,
     status: MenuItem<tauri::Wry>,
-    modules: MenuItem<tauri::Wry>,
+    modules: Submenu<tauri::Wry>,
     action: MenuItem<tauri::Wry>,
     start: MenuItem<tauri::Wry>,
     restart: MenuItem<tauri::Wry>,
     install: MenuItem<tauri::Wry>,
+    settings: MenuItem<tauri::Wry>,
     update: UpdateMenu,
 }
 
@@ -216,59 +218,99 @@ fn request_refresh(app: &AppHandle) {
     }
 }
 
+/// Menu shortcuts use the existing local page; they never grant the webview native permissions.
+fn open_settings(app: &AppHandle, about: bool) {
+    restore_window(app);
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+        let fragment = if about {
+            "#/settings/about"
+        } else {
+            "#/settings/github"
+        };
+        let _ = window.eval(format!("location.hash = '{}'", fragment));
+    }
+    request_refresh(app);
+}
+
 fn create_tray(app: &AppHandle) -> tauri::Result<TrayItems> {
-    let open = MenuItem::with_id(app, "open", "打开", true, None::<&str>)?;
-    let refresh = MenuItem::with_id(app, "refresh", "刷新服务状态", true, None::<&str>)?;
-    let update_status = MenuItem::with_id(
+    let open = MenuItem::with_id(app, "open", "打开 Nootify", true, None::<&str>)?;
+    let status = MenuItem::with_id(app, "status", "Nootify · 检查中…", false, None::<&str>)?;
+    let refresh = MenuItem::with_id(app, "refresh", "刷新状态", true, None::<&str>)?;
+    let modules = Submenu::with_id_and_items(
         app,
-        "update_status",
-        format!(
-            "更新：当前 {}",
-            update::tag(&app.package_info().version.to_string())
-        ),
-        false,
-        None::<&str>,
+        "modules",
+        "模块状态",
+        true,
+        &[&MenuItem::new(app, "正在检查…", false, None::<&str>)?],
     )?;
-    let check_update = MenuItem::with_id(app, update::CHECK_ID, "检查更新", true, None::<&str>)?;
-    // Inserted below 检查更新 only while an update is available (UpdateMenu::render).
-    let install_update =
-        MenuItem::with_id(app, update::INSTALL_ID, "安装更新", false, None::<&str>)?;
-    let status = MenuItem::with_id(app, "status", "服务：检查中…", false, None::<&str>)?;
-    let modules = MenuItem::with_id(app, "modules", "模块：—", false, None::<&str>)?;
-    let action = MenuItem::with_id(app, "action", "退出不会停止后台服务", false, None::<&str>)?;
-    let start = MenuItem::with_id(app, "start", "重试启动服务", false, None::<&str>)?;
-    let restart = MenuItem::with_id(app, "restart", "重启服务", false, None::<&str>)?;
+    let action = MenuItem::with_id(app, "action", "退出后服务仍会运行", false, None::<&str>)?;
+    let start = MenuItem::with_id(app, "start", "重试启动", false, None::<&str>)?;
+    let restart = MenuItem::with_id(app, "restart", "重新启动", false, None::<&str>)?;
     // Enabled by render_install only while no LaunchAgent plist exists.
     let install = MenuItem::with_id(app, "install_service", INSTALL_LABEL, false, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "退出", true, Some("CmdOrCtrl+Q"))?;
-    let menu = Menu::with_items(
+    let service = Submenu::with_id_and_items(
         app,
+        "service",
+        "后台服务",
+        true,
         &[
-            &open,
-            &PredefinedMenuItem::separator(app)?,
-            &status,
             &modules,
             &refresh,
             &PredefinedMenuItem::separator(app)?,
             &start,
             &restart,
             &install,
-            &action,
             &PredefinedMenuItem::separator(app)?,
-            &update_status,
-            &check_update,
+            &action,
+        ],
+    )?;
+    let update_status = MenuItem::with_id(
+        app,
+        "update_status",
+        format!(
+            "当前版本 {}",
+            update::tag(&app.package_info().version.to_string())
+        ),
+        false,
+        None::<&str>,
+    )?;
+    let check_update = MenuItem::with_id(app, update::CHECK_ID, "检查更新…", true, None::<&str>)?;
+    // Inserted below 检查更新 only while an update is available (UpdateMenu::render).
+    let install_update =
+        MenuItem::with_id(app, update::INSTALL_ID, "安装更新", false, None::<&str>)?;
+    let about = MenuItem::with_id(app, "about", "更新详情…", false, None::<&str>)?;
+    let updates = Submenu::with_id_and_items(
+        app,
+        "updates",
+        "软件更新",
+        true,
+        &[&update_status, &check_update, &about],
+    )?;
+    let settings = MenuItem::with_id(app, "settings", "设置…", false, Some("CmdOrCtrl+,"))?;
+    let quit = MenuItem::with_id(app, "quit", "退出 Nootify", true, Some("CmdOrCtrl+Q"))?;
+    let menu = Menu::with_items(
+        app,
+        &[
+            &open,
+            &PredefinedMenuItem::separator(app)?,
+            &status,
+            &service,
+            &updates,
+            &settings,
             &PredefinedMenuItem::separator(app)?,
             &quit,
         ],
     )?;
     let items = TrayItems {
+        menu: menu.clone(),
         status,
         modules,
         action,
         start,
         restart,
         install,
-        update: UpdateMenu::new(menu.clone(), update_status, check_update, install_update),
+        settings,
+        update: UpdateMenu::new(updates, update_status, check_update, install_update, about),
     };
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(tauri::image::Image::from_bytes(include_bytes!(
@@ -285,6 +327,8 @@ fn create_tray(app: &AppHandle) -> tauri::Result<TrayItems> {
                 request_refresh(app);
             }
             "refresh" => request_refresh(app),
+            "settings" => open_settings(app, false),
+            "about" => open_settings(app, true),
             id @ ("start" | "restart" | "install_service") => {
                 let state = app.state::<NativeState>();
                 if !state.action_pending.swap(true, Ordering::SeqCst) {
@@ -342,7 +386,7 @@ fn service_worker(
         run_action(&app, &items, "启动后台服务", || {
             if agent.plist_present() {
                 agent.request(JobAction::Start)?;
-                return Ok("后台服务正在启动".into());
+                return Ok("已请求启动后台服务".into());
             }
             match &bundled {
                 Ok(Some(bundled)) => agent.install(bundled)?,
@@ -407,9 +451,9 @@ fn render_install(app: &AppHandle, items: &TrayItems, plist_present: bool) {
 }
 
 fn render_health(app: &AppHandle, items: &TrayItems, health: &Result<Health, String>) {
-    let (status, detail) = match health {
+    let (status, detail, modules) = match health {
         Ok(health) => (
-            "服务：运行中",
+            "Nootify · 运行中",
             format!(
                 "模块：{}",
                 health
@@ -419,22 +463,70 @@ fn render_health(app: &AppHandle, items: &TrayItems, health: &Result<Health, Str
                     .collect::<Vec<_>>()
                     .join(" · ")
             ),
+            health
+                .modules
+                .iter()
+                .map(|module| {
+                    let name = match module.name.as_str() {
+                        "sessions" => "会话",
+                        "lark" => "飞书",
+                        "pulls" => "PR",
+                        "agents" => "Agents",
+                        name => name,
+                    };
+                    let status = match module.status.as_str() {
+                        "ready" => "就绪",
+                        "disabled" => "未启用",
+                        status => status,
+                    };
+                    menu_text(&format!("{name}：{status}"))
+                })
+                .collect::<Vec<_>>(),
         ),
-        Err(error) => ("服务：未连接", format!("原因：{error}")),
+        Err(error) => (
+            "Nootify · 未连接",
+            format!("原因：{error}"),
+            vec![menu_text(error)],
+        ),
     };
     let _ = items.status.set_text(status);
-    let _ = items.modules.set_text(menu_text(&detail));
+    render_modules(app, &items.modules, &modules);
     let busy = app
         .state::<NativeState>()
         .action_pending
         .load(Ordering::SeqCst);
     let _ = items.start.set_enabled(health.is_err() && !busy);
     let _ = items.restart.set_enabled(!busy);
+    let _ = items.settings.set_enabled(health.is_ok());
+    let _ = items.update.about.set_enabled(health.is_ok());
     if let Some(tray) = app.tray_by_id(TRAY_ID) {
-        let _ = tray.set_tooltip(Some(format!("Nootify {status}\n{}", menu_text(&detail))));
+        let _ = tray.set_tooltip(Some(format!("{status}\n{}", menu_text(&detail))));
     }
     if let Err(error) = set_service_view(app, health.is_ok()) {
         eprintln!("Cannot display service page: {error}");
+    }
+}
+
+/// Leave an open native submenu untouched when the three-second health poll has not changed it.
+fn render_modules(app: &AppHandle, menu: &Submenu<tauri::Wry>, labels: &[String]) {
+    let Ok(current) = menu.items() else { return };
+    let unchanged = current.len() == labels.len()
+        && current.iter().zip(labels).all(|(item, label)| {
+            item.as_menuitem()
+                .and_then(|item| item.text().ok())
+                .as_ref()
+                == Some(label)
+        });
+    if unchanged {
+        return;
+    }
+    for item in current {
+        let _ = menu.remove(&item);
+    }
+    for label in labels {
+        if let Ok(item) = MenuItem::new(app, label, false, None::<&str>) {
+            let _ = menu.append(&item);
+        }
     }
 }
 
