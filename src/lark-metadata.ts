@@ -1,9 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import * as sdk from '@larksuiteoapi/node-sdk';
+import type { Settings } from './state.js';
 import type { RemoteBinding } from './types.js';
 
 export interface Credentials { appId: string; appSecret: string }
+export type CredentialSource = 'environment' | 'settings' | 'mcp-config';
 export interface LarkApi {
   appId: string;
   request<T>(method: 'GET' | 'POST' | 'PATCH', path: string, body?: unknown): Promise<T>;
@@ -29,6 +31,25 @@ export async function loadCredentials(env: NodeJS.ProcessEnv, mcpConfig?: string
   const appSecret = server?.env?.LARK_APP_SECRET ?? argument('-s', '--app-secret');
   if (!appId || !appSecret) throw new Error('Selected MCP config has no supported lark application credentials');
   return { appId, appSecret };
+}
+/** Environment variables name this one process; a saved choice then beats the MCP file picked at install time. */
+export async function resolveCredentials(env: NodeJS.ProcessEnv, saved: Settings, mcpConfig?: string): Promise<{ credentials: Credentials; source: CredentialSource } | undefined> {
+  if (env.LARK_APP_ID || env.LARK_APP_SECRET) {
+    const credentials = await loadCredentials(env);
+    return credentials && { credentials, source: 'environment' };
+  }
+  if (saved.lark_app_id && saved.lark_app_secret) return { credentials: { appId: saved.lark_app_id, appSecret: saved.lark_app_secret }, source: 'settings' };
+  const credentials = await loadCredentials(env, mcpConfig);
+  return credentials && { credentials, source: 'mcp-config' };
+}
+/** Asks Feishu for a tenant token, so a mistyped ID or secret is refused before it replaces a working bot. */
+export async function verifyCredentials(credentials: Credentials): Promise<void> {
+  const response = await fetch('https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal', {
+    method: 'POST', headers: { 'content-type': 'application/json; charset=utf-8' },
+    body: JSON.stringify({ app_id: credentials.appId, app_secret: credentials.appSecret }), signal: AbortSignal.timeout(10_000),
+  });
+  const body = await response.json() as { code?: number; msg?: string };
+  if (body.code !== 0) throw new ApiError(body.code ?? response.status, body.msg);
 }
 export function createLarkApi(credentials: Credentials): LarkApi {
   const client = new sdk.Client({ ...credentials, domain: sdk.Domain.Feishu, appType: sdk.AppType.SelfBuild, logger: quietLogger });

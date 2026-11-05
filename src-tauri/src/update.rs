@@ -1,18 +1,24 @@
-//! Updates from GitHub Releases, driven from Rust and the tray only: the webview has no updater
-//! permissions. Checks and installs run on one worker thread, never on the main thread.
+//! Updates from GitHub Releases, driven from Rust: the webview has no updater permissions. Checks
+//! and installs run on one worker thread, never on the main thread. The tray and the page show the
+//! same state. The page receives it as a DOM event and asks for an action by navigating to
+//! `nootify://update/…`, which the window's policy cancels, so it never needs IPC.
 use std::{
     sync::mpsc::{Receiver, RecvTimeoutError},
     thread,
-    time::{Duration, SystemTime},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use serde::Serialize;
 use tauri::{
     menu::{Menu, MenuItem},
-    AppHandle, Wry,
+    AppHandle, Manager, Url, Wry,
 };
 use tauri_plugin_updater::{Update, UpdaterExt};
 
-use crate::service::{menu_text, BundledService, LaunchAgent};
+use crate::{
+    service::{menu_text, BundledService, LaunchAgent},
+    NativeState, MAIN_WINDOW,
+};
 
 pub const CHECK_ID: &str = "check_update";
 pub const INSTALL_ID: &str = "install_update";
@@ -23,9 +29,88 @@ const TICK: Duration = Duration::from_secs(60);
 const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
+#[derive(Debug, PartialEq, Eq)]
 pub enum UpdateRequest {
     Check,
     Install,
+}
+
+/// The two things the tray can already do are all a page may ask for.
+pub fn page_request(url: &Url) -> Option<UpdateRequest> {
+    if url.scheme() != "nootify" || url.host_str() != Some("update") {
+        return None;
+    }
+    match url.path() {
+        "/check" => Some(UpdateRequest::Check),
+        "/install" => Some(UpdateRequest::Install),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Phase {
+    Idle,
+    Checking,
+    Current,
+    Available,
+    Downloading,
+    Installing,
+    Restarting,
+    Failed,
+}
+
+/// What the page shows; mirrors `UpdateView` in src/ui-app.ts.
+#[derive(Clone, Debug, Serialize)]
+pub struct UpdateView {
+    pub phase: Phase,
+    pub current: String,
+    pub version: Option<String>,
+    pub received: u64,
+    pub total: Option<u64>,
+    pub error: Option<String>,
+    pub checked_at: Option<u64>,
+}
+
+impl UpdateView {
+    pub fn idle(current: String) -> Self {
+        Self {
+            phase: Phase::Idle,
+            current,
+            version: None,
+            received: 0,
+            total: None,
+            error: None,
+            checked_at: None,
+        }
+    }
+
+    /// An event rather than a call, so it is harmless in a document without a listener.
+    pub fn script(&self) -> String {
+        let detail = serde_json::to_string(self).expect("update state serializes");
+        format!("window.dispatchEvent(new CustomEvent('nootify-update', {{ detail: {detail} }}))")
+    }
+}
+
+/// Keeps the latest state for the next page load, and shows it in the current one.
+fn publish(app: &AppHandle, view: &UpdateView) {
+    let script = view.script();
+    *app.state::<NativeState>()
+        .update_script
+        .lock()
+        .expect("update state") = script.clone();
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+        let _ = window.eval(script);
+    }
+}
+
+/// One step per percent, or per MiB while the size is unknown, so a download is at most a few
+/// hundred page updates however small its chunks are.
+fn progress_step(received: u64, total: Option<u64>) -> u64 {
+    match total {
+        Some(total) => (received * 100 / total).min(100),
+        None => received >> 20,
+    }
 }
 
 /// The tray's update section: a status line, 检查更新, and 安装更新 vX.Y.Z, which is in the menu
@@ -109,6 +194,7 @@ pub fn spawn(
         bundled,
         current,
         pending: None,
+        checked_at: None,
     };
     thread::spawn(move || worker.run(requests));
 }
@@ -120,6 +206,7 @@ struct Worker {
     bundled: Option<BundledService>,
     current: String,
     pending: Option<Update>,
+    checked_at: Option<u64>,
 }
 
 impl Worker {
@@ -157,8 +244,18 @@ impl Worker {
         self.menu.render(status, available, busy);
     }
 
+    fn view(&self, phase: Phase) -> UpdateView {
+        UpdateView {
+            phase,
+            version: self.pending.as_ref().map(|update| update.version.clone()),
+            checked_at: self.checked_at,
+            ..UpdateView::idle(self.current.clone())
+        }
+    }
+
     fn check(&mut self) {
         self.show("更新：正在检查…", true);
+        publish(&self.app, &self.view(Phase::Checking));
         let result = self
             .app
             .updater_builder()
@@ -169,14 +266,30 @@ impl Worker {
             Ok(Some(update)) => {
                 let status = format!("更新：发现 {}", tag(&update.version));
                 self.pending = Some(update);
+                self.checked_at = Some(now_ms());
                 self.show(&status, false);
+                publish(&self.app, &self.view(Phase::Available));
             }
             Ok(None) => {
                 self.pending = None;
+                self.checked_at = Some(now_ms());
                 self.show(&format!("更新：已是最新 {}", tag(&self.current)), false);
+                publish(&self.app, &self.view(Phase::Current));
             }
             // A previously found update stays installable.
-            Err(error) => self.show(&format!("检查更新失败：{error}"), false),
+            Err(error) => {
+                self.show(&format!("检查更新失败：{error}"), false);
+                let phase = if self.pending.is_some() {
+                    Phase::Available
+                } else {
+                    Phase::Failed
+                };
+                let view = UpdateView {
+                    error: Some(error.to_string()),
+                    ..self.view(phase)
+                };
+                publish(&self.app, &view);
+            }
         }
     }
 
@@ -189,25 +302,41 @@ impl Worker {
         let menu = self.menu.clone();
         let show = |status: String| menu.render(&status, Some(&update.version), true);
         show(format!("更新：正在下载 {version}…"));
-        let (mut received, mut shown) = (0u64, None);
+        let app = &self.app;
+        let mut progress = self.view(Phase::Downloading);
+        let installing = self.view(Phase::Installing);
+        publish(app, &progress);
+        let mut shown = None;
         let result = tauri::async_runtime::block_on(update.download_and_install(
             |chunk, total| {
-                received += chunk as u64;
-                if let Some(total) = total.filter(|total| *total > 0) {
-                    let percent = (received * 100 / total).min(100);
-                    if shown != Some(percent) {
-                        shown = Some(percent);
-                        show(format!("更新：正在下载 {version} {percent}%"));
+                progress.received += chunk as u64;
+                progress.total = total.filter(|total| *total > 0);
+                let step = progress_step(progress.received, progress.total);
+                if shown != Some(step) {
+                    shown = Some(step);
+                    if progress.total.is_some() {
+                        show(format!("更新：正在下载 {version} {step}%"));
                     }
+                    publish(app, &progress);
                 }
             },
-            || show(format!("更新：正在安装 {version}…")),
+            || {
+                show(format!("更新：正在安装 {version}…"));
+                publish(app, &installing);
+            },
         ));
         if let Err(error) = result {
             self.show(&format!("安装更新失败：{error}"), false);
+            // Still pending: the page offers the same action again.
+            let view = UpdateView {
+                error: Some(error.to_string()),
+                ..self.view(Phase::Available)
+            };
+            publish(&self.app, &view);
             return;
         }
         self.show(&format!("更新：已安装 {version}，正在重启…"), true);
+        publish(&self.app, &self.view(Phase::Restarting));
         // The bundle now holds the new service as well: restart the job if it runs this bundle's
         // Node.js. A failure only delays the new service code until the job next restarts.
         if let Some(bundled) = &self.bundled {
@@ -226,9 +355,68 @@ fn until(now: SystemTime, then: SystemTime) -> Duration {
     then.duration_since(now).unwrap_or(Duration::ZERO)
 }
 
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as u64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pages_can_only_ask_for_a_check_or_an_install() {
+        let request = |url: &str| page_request(&Url::parse(url).unwrap());
+        assert_eq!(
+            request("nootify://update/check"),
+            Some(UpdateRequest::Check)
+        );
+        assert_eq!(
+            request("nootify://update/install"),
+            Some(UpdateRequest::Install)
+        );
+        for other in [
+            "nootify://update/",
+            "nootify://update/restart",
+            "nootify://other/check",
+            "https://update/check",
+            "http://127.0.0.1:9417/#/settings/about",
+        ] {
+            assert_eq!(request(other), None, "{other}");
+        }
+    }
+
+    #[test]
+    fn page_state_is_one_event_with_the_fields_the_page_reads() {
+        let view = UpdateView {
+            phase: Phase::Downloading,
+            version: Some("0.2.0".into()),
+            received: 5,
+            total: Some(10),
+            ..UpdateView::idle("0.1.1".into())
+        };
+        let script = view.script();
+        let detail = script
+            .strip_prefix("window.dispatchEvent(new CustomEvent('nootify-update', { detail: ")
+            .and_then(|rest| rest.strip_suffix(" }))"))
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(detail).unwrap();
+        assert_eq!(value["phase"], "downloading");
+        assert_eq!(value["current"], "0.1.1");
+        assert_eq!(value["version"], "0.2.0");
+        assert_eq!(
+            (value["received"].as_u64(), value["total"].as_u64()),
+            (Some(5), Some(10))
+        );
+    }
+
+    #[test]
+    fn progress_steps_stay_bounded() {
+        assert_eq!(progress_step(50, Some(200)), 25);
+        assert_eq!(progress_step(300, Some(200)), 100);
+        assert_eq!(progress_step(3 << 20, None), 3);
+    }
 
     #[test]
     fn versions_are_shown_with_one_v_prefix() {

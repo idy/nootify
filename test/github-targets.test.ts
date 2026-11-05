@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { collectPulls, GitHubCommands, parsePullConfig, PullCollectionError } from '../src/github-api.js';
+import { collectPulls, GitHubCommands, GitHubSignedOut, parsePullConfig, PullCollectionError } from '../src/github-api.js';
 import { key, type GitHubPull } from '../src/github-model.js';
 
 type Variables = Record<string, string | number | null>;
@@ -23,7 +23,7 @@ const pull = (number: number, repository = 'viewer/session', overrides: Partial<
 });
 const page = <T>(nodes: T[]) => ({ nodes, totalCount: nodes.length, pageInfo: { hasNextPage: false, endCursor: null } });
 
-/** In-memory GraphQL only: no GitHub CLI, local repositories, or agent histories. */
+/** In-memory GraphQL only: no network, local repositories, or agent histories. */
 class FakeCommands extends GitHubCommands {
   readonly calls: Call[] = [];
   active = 0;
@@ -259,14 +259,46 @@ test('abort prevents queued target queries and is never converted into a partial
   assert.deepEqual(untouched.calls, []);
 });
 
-test('GitHubCommands passes numeric PR variables with gh -F and still rejects mutations', async t => {
-  const commands = new GitHubCommands('/unused', new AbortController().signal);
-  t.mock.method(commands, 'findGh', async () => '/fake/gh');
-  const run = t.mock.method(commands as unknown as { run: (file: string, args: string[]) => Promise<string> }, 'run', async (_file: string, _args: string[]) => JSON.stringify({ data: {} }));
-  await commands.graphql('query PullTarget($owner: String!, $number: Int!, $cursor: String) { viewer { login } }', { owner: 'viewer', number: 42, cursor: null });
-  const [file, args] = run.mock.calls[0].arguments;
-  assert.equal(file, '/fake/gh');
-  assert.deepEqual(args.slice(-6), ['-f', 'owner=viewer', '-F', 'number=42', '-F', 'cursor=null']);
+test('GitHubCommands sends typed variables with its own token and still rejects mutations', async t => {
+  const request = t.mock.method(globalThis, 'fetch', async () => globalThis.Response.json({ data: { viewer: { login: 'viewer' } } }));
+  const commands = new GitHubCommands('/unused', new AbortController().signal, () => 'gho_test');
+  const query = 'query PullTarget($owner: String!, $number: Int!, $cursor: String) { viewer { login } }';
+  assert.deepEqual(await commands.graphql(query, { owner: 'viewer', number: 42, cursor: null }), { data: { viewer: { login: 'viewer' } } });
+  const [url, init] = request.mock.calls[0].arguments;
+  assert.equal(String(url), 'https://api.github.com/graphql');
+  assert.equal(new Headers(init?.headers).get('authorization'), 'Bearer gho_test');
+  assert.deepEqual(JSON.parse(String(init?.body)), { query, variables: { owner: 'viewer', number: 42, cursor: null } });
   await assert.rejects(commands.graphql('mutation Update { viewer { login } }'), /Only read-only/);
-  assert.equal(run.mock.calls.length, 1);
+  assert.equal(request.mock.calls.length, 1);
+});
+
+test('GitHub replies separate a lost sign-in from every other failure', async t => {
+  let reply: () => globalThis.Response | Promise<globalThis.Response> = () => globalThis.Response.json({ message: 'Bad credentials' }, { status: 401 });
+  const request = t.mock.method(globalThis, 'fetch', async () => reply());
+  const query = 'query Test { viewer { login } }';
+  const commands = new GitHubCommands('/unused', new AbortController().signal, () => 'gho_test');
+  await assert.rejects(new GitHubCommands('/unused', new AbortController().signal).graphql(query), GitHubSignedOut);
+  assert.equal(request.mock.calls.length, 0, 'no token means no request');
+  await assert.rejects(commands.graphql(query), GitHubSignedOut);
+
+  reply = () => globalThis.Response.json({ message: 'API rate limit exceeded' }, { status: 403 });
+  await assert.rejects(commands.graphql(query), /rate limit/);
+  reply = () => new globalThis.Response('<html>Bad gateway</html>', { status: 502 });
+  await assert.rejects(commands.graphql(query), /HTTP 502/);
+  reply = () => { throw new TypeError('fetch failed', { cause: new Error('getaddrinfo ENOTFOUND api.github.com') }); };
+  await assert.rejects(commands.graphql(query), /Cannot reach GitHub: getaddrinfo ENOTFOUND/);
+
+  const errors = [{ message: 'Could not resolve', path: ['p0'] }];
+  reply = () => globalThis.Response.json({ data: { p0: null }, errors });
+  await assert.rejects(commands.graphql(query), /Could not resolve/);
+  assert.deepEqual(await commands.graphql(query, {}, true), { data: { p0: null }, errors });
+
+  const controller = new AbortController(); const reason = new Error('Stopped refresh');
+  reply = () => { controller.abort(reason); throw new Error('aborted'); };
+  await assert.rejects(new GitHubCommands('/unused', controller.signal, () => 'gho_test').graphql(query), error => error === reason);
+});
+
+test('a lost sign-in ends collection as itself rather than as a failed source', async () => {
+  const commands = new FakeCommands({ onCall: () => { throw new GitHubSignedOut(); } });
+  await assert.rejects(targets(commands, ['viewer/session']), GitHubSignedOut);
 });

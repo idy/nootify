@@ -1,6 +1,5 @@
 import { execFile, type ChildProcess } from 'node:child_process';
-import { constants } from 'node:fs';
-import { access, readFile, stat } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import type { PullRequest } from './github.js';
@@ -92,19 +91,25 @@ export function safeError(error: unknown): string {
     .replace(/Bearer\s+[^\s"']+/gi, 'Bearer [redacted]').replace(/\s+/g, ' ').trim().slice(0, 700);
 }
 
-/** Own subprocesses so stop() can cancel network work and reap unresponsive children. */
+export const USER_AGENT = 'Nootify';
+const GRAPHQL_URL = 'https://api.github.com/graphql';
+const API_TIMEOUT = 30_000;
+/** No saved token, or GitHub refused it: signing in fixes this, unlike every other failure. */
+export class GitHubSignedOut extends Error {
+  constructor() { super('Not signed in to GitHub'); }
+}
+
+/** GitHub GraphQL with Nootify's own token, and local git remotes. Owns its subprocesses so stop() can reap unresponsive children. */
 export class GitHubCommands {
   private readonly children = new Set<ChildProcess>();
   private readonly closed = new Map<ChildProcess, Promise<void>>();
-  private gh?: string;
   private readonly remoteCache = new Map<string, Promise<{ name: string; repository: string }[]>>();
-  constructor(private readonly directory: string, private readonly signal: AbortSignal) {}
+  constructor(private readonly directory: string, private readonly signal: AbortSignal, private readonly token: () => string | undefined = () => undefined) {}
   private async run(file: string, args: string[], timeout = 30_000): Promise<string> {
     this.signal.throwIfAborted();
     return new Promise((accept, reject) => {
       const child = execFile(file, args, {
-        cwd: this.directory, encoding: 'utf8', timeout, maxBuffer: 16 * 1024 * 1024, signal: this.signal,
-        env: { ...process.env, GH_PROMPT_DISABLED: '1', GIT_TERMINAL_PROMPT: '0', GH_HOST: 'github.com' },
+        cwd: this.directory, encoding: 'utf8', timeout, maxBuffer: 16 * 1024 * 1024, signal: this.signal, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
       }, (error, stdout, stderr) => {
         if (error) { Object.assign(error, { stdout, stderr }); reject(error); }
         else accept(stdout);
@@ -113,46 +118,28 @@ export class GitHubCommands {
       this.closed.set(child, new Promise(done => child.once('close', () => { this.children.delete(child); this.closed.delete(child); done(); })));
     });
   }
-  async findGh(): Promise<string> {
-    if (this.gh) return this.gh;
-    const explicit = process.env.GH_BIN?.trim();
-    const paths = (process.env.PATH ?? '').split(':').filter(path => isAbsolute(path));
-    const candidates = explicit ? [resolve(expandHome(explicit))] : unique([
-      '/opt/homebrew/bin/gh', '/usr/local/bin/gh', '/usr/bin/gh', '/home/linuxbrew/.linuxbrew/bin/gh', ...paths.map(path => join(path, 'gh')),
-    ]);
-    const failures: string[] = [];
-    for (const path of candidates) {
-      this.signal.throwIfAborted();
-      try {
-        await access(path, constants.X_OK);
-        if (!(await stat(path)).isFile()) continue;
-        const version = await this.run(path, ['--version'], 5000);
-        if (!/^gh version \d/m.test(version)) throw new Error('Executable did not identify itself as GitHub CLI.');
-        this.gh = path; return path;
-      } catch (error) {
-        this.signal.throwIfAborted();
-        if (!isMissing(error)) failures.push(`${path}: ${safeError(error)}`);
-      }
-    }
-    throw new Error(`GitHub CLI is unavailable${explicit ? ` at GH_BIN=${explicit}` : '; checked Homebrew and standard executable paths'}. Install/authenticate gh or set an absolute GH_BIN.${failures.length ? ` ${failures.join('; ')}` : ''}`);
-  }
   async graphql(query: string, variables: Record<string, string | number | null> = {}, partial = false): Promise<{ data: Record<string, any>; errors?: { message: string; path?: (string | number)[] }[] }> {
     if (!/^\s*query\s/.test(query)) throw new Error('Only read-only GitHub queries are allowed.');
-    const args = ['api', 'graphql', '--hostname', 'github.com', '-f', `query=${query}`];
-    for (const [name, value] of Object.entries(variables)) args.push(value === null || typeof value === 'number' ? '-F' : '-f', `${name}=${value}`);
-    let output: string;
-    try { output = await this.run(await this.findGh(), args); }
-    catch (error) {
+    this.signal.throwIfAborted();
+    const token = this.token();
+    if (!token) throw new GitHubSignedOut();
+    let response: Response;
+    try {
+      response = await fetch(GRAPHQL_URL, { method: 'POST', redirect: 'error', body: JSON.stringify({ query, variables }),
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'user-agent': USER_AGENT },
+        signal: AbortSignal.any([this.signal, AbortSignal.timeout(API_TIMEOUT)]) });
+    } catch (error) {
       this.signal.throwIfAborted();
-      if (!partial || !(error as { stdout?: string }).stdout) throw error;
-      output = (error as { stdout: string }).stdout;
+      throw new Error(`Cannot reach GitHub: ${(error as { cause?: Error }).cause?.message ?? (error as Error).message}`);
     }
-    let response;
-    try { response = JSON.parse(output); } catch { throw new Error('GitHub CLI returned invalid JSON.'); }
-    if (!response?.data || response.errors?.length && !partial) {
-      throw new Error(response.errors?.map((error: { message: string }) => error.message).join('; ') || 'GitHub returned no query data.');
+    if (response.status === 401) throw new GitHubSignedOut();
+    let body;
+    try { body = await response.json() as { data?: Record<string, any>; errors?: { message: string; path?: (string | number)[] }[]; message?: string } | null; }
+    catch { this.signal.throwIfAborted(); throw new Error(`GitHub returned HTTP ${response.status} without JSON.`); }
+    if (!body?.data || body.errors?.length && !partial) {
+      throw new Error(body?.errors?.map(error => error.message).join('; ') || body?.message || `GitHub returned HTTP ${response.status} with no query data.`);
     }
-    return response;
+    return { data: body.data, ...(body.errors ? { errors: body.errors } : {}) };
   }
   /** Remotes are read at most once per directory per refresh; conversation and disk scans share them. */
   remotes(directory: string): Promise<{ name: string; repository: string }[]> {
@@ -250,7 +237,9 @@ export async function collectPulls(config: PullConfig, commands: GitHubCommands,
       if (!config.upstreamOwners.some(owner => key(owner) === key(org.login))) owners.set(key(org.login), org.login);
     }).then(incomplete => { incompleteInternal ||= incomplete; incompleteUpstream ||= incomplete; });
   } catch (error) {
-    signal.throwIfAborted(); throw new PullCollectionError(`Cannot establish GitHub viewer and internal organizations: ${safeError(error)}`, [...warnings]);
+    signal.throwIfAborted();
+    if (error instanceof GitHubSignedOut) throw error;
+    throw new PullCollectionError(`Cannot establish GitHub viewer and internal organizations: ${safeError(error)}`, [...warnings]);
   }
   owners.set(key(viewer), viewer);
   for (const login of config.ownedOwners) if (!owners.has(key(login))) owners.set(key(login), login);
@@ -329,8 +318,8 @@ export async function collectPulls(config: PullConfig, commands: GitHubCommands,
     const queue = classify(pr);
     if (queue) result[queue].push(normalizePull(pr, warn));
   }
-  warn(`Source coverage: gh account ${viewer}; internal owners: ${scope.ownedOwners.sort().join(', ')}; outgoing authors: ${scope.authors.join(', ')} plus owned/local forks.`);
-  warn('Only targeted github.com repositories and linked PRs visible to the authenticated gh account are covered; private repositories and organization SSO depend on its permissions.');
+  warn(`Source coverage: GitHub account ${viewer}; internal owners: ${scope.ownedOwners.sort().join(', ')}; outgoing authors: ${scope.authors.join(', ')} plus owned/local forks.`);
+  warn('Only targeted github.com repositories and linked PRs visible to the signed-in GitHub account are covered; private repositories and organization SSO depend on its permissions.');
   warn('Organization memberships count as internal unless listed in upstreamOwners; explicit ownedOwners takes precedence. Linked open PRs are followed regardless of author or fork.');
   result.internal.sort(comparePulls); result.upstream.sort(comparePulls); result.warnings = [...warnings].sort();
   return result;

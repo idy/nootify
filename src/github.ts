@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { HttpError, object, type Adapter, type RouteRequest, type RouteResponse, type ServiceModule } from './types.js';
-import { collectPulls, GitHubCommands, loadPullConfig, PullCollectionError, safeError, type PullCollection, type PullTargets } from './github-api.js';
+import { collectPulls, GitHubCommands, GitHubSignedOut, loadPullConfig, PullCollectionError, safeError, type PullCollection, type PullTargets } from './github-api.js';
 import { comparePulls, key, ownerOf, parseGitHubPull, parseGitHubRemote, type GitHubPullReference } from './github-model.js';
 import { conversationSessions, defaultSources, type ConversationAgent, type ConversationSources } from './conversations.js';
 
@@ -51,7 +51,8 @@ export interface PullSnapshot {
   upstream: PullRequest[];
   hidden: { internal: number; upstream: number };
   repositories: RepositoryEntry[];
-  refresh: { running: boolean; startedAt?: string; finishedAt?: string; lastSuccessAt?: string; error?: string };
+  /** `signedOut`: the last refresh stopped because nobody is signed in to GitHub, which is not a failure to retry. */
+  refresh: { running: boolean; startedAt?: string; finishedAt?: string; lastSuccessAt?: string; error?: string; signedOut?: boolean };
   warnings: string[];
 }
 interface Involvement { repository: string; sources: RepositorySession[] }
@@ -126,11 +127,13 @@ export class PullRequestsService implements ServiceModule {
   private stopped = false;
   private started = false;
   constructor(private readonly directory: string, private readonly report: (record: Record<string, unknown>) => void = () => {},
-    private readonly sources: ConversationSources = defaultSources(), private readonly collect: typeof collectPulls = collectPulls) {}
+    private readonly sources: ConversationSources = defaultSources(), private readonly collect: typeof collectPulls = collectPulls,
+    private readonly token: () => string | undefined = () => undefined) {}
 
   status(): string {
     if (this.stopped) return 'stopped';
     if (this.work) return 'refreshing';
+    if (this.current.refresh.signedOut) return 'signed_out';
     if (this.current.refresh.error) return this.current.refresh.lastSuccessAt ? 'stale' : 'error';
     return this.current.refresh.lastSuccessAt ? 'ready' : 'idle';
   }
@@ -199,11 +202,31 @@ export class PullRequestsService implements ServiceModule {
     const snapshot = { version: 1, choices: [...this.choices.values()] };
     const pending = this.choiceWrites.catch(() => {}).then(() => writePrivate(this.directory, 'repo-preferences.json', snapshot));
     this.choiceWrites = pending; await pending;
-    if (this.started && !this.stopped) {
-      if (this.work) this.refreshQueued = true; else this.refresh();
-    }
+    this.refreshSoon();
     return this.repositories().find(entry => key(entry.repository) === key(name))
       ?? { repository: name, followed: false, sources: [], sessions: 0, agents: [], allPulls: false, linkedPulls: 0, authored: 0, pulls: { internal: 0, upstream: 0 } };
+  }
+  /** What an exported configuration carries: the pulls configuration as written, and deliberate follow choices. */
+  async preferences(): Promise<{ config?: unknown; follow: { repository: string; follow: boolean }[] }> {
+    const { source } = await loadPullConfig(this.directory);
+    return { ...(source === 'defaults' ? {} : { config: JSON.parse(await readFile(source, 'utf8')) as unknown }), follow: [...this.choices.values()] };
+  }
+  /** `follow` replaces every saved choice. Both values are validated by the caller. */
+  async restore(preferences: { config?: unknown; follow?: { repository: string; follow: boolean }[] }): Promise<void> {
+    if (preferences.config !== undefined) await writePrivate(this.directory, 'pulls.config.json', preferences.config);
+    if (preferences.follow) {
+      this.choices.clear();
+      for (const choice of preferences.follow) this.choices.set(key(choice.repository), choice);
+      const snapshot = { version: 1, choices: [...this.choices.values()] };
+      const pending = this.choiceWrites.catch(() => {}).then(() => writePrivate(this.directory, 'repo-preferences.json', snapshot));
+      this.choiceWrites = pending; await pending;
+    }
+    this.refreshSoon();
+  }
+  /** Unlike refresh(), a change made during a running refresh gets a fresh query of its own. */
+  refreshSoon(): void {
+    if (!this.started || this.stopped) return;
+    if (this.work) this.refreshQueued = true; else this.refresh();
   }
   async start(): Promise<void> {
     if (this.started) return this.initializing;
@@ -250,6 +273,7 @@ export class PullRequestsService implements ServiceModule {
     const controller = new AbortController(); this.controller = controller;
     this.current.refresh = { ...this.current.refresh, running: true, startedAt: new Date().toISOString() };
     delete this.current.refresh.error;
+    delete this.current.refresh.signedOut;
     this.work = this.update(controller.signal).finally(() => {
       this.work = undefined; if (this.controller === controller) this.controller = undefined;
       if (this.refreshQueued && !this.stopped) { this.refreshQueued = false; this.refresh(); }
@@ -293,7 +317,7 @@ export class PullRequestsService implements ServiceModule {
     return { repositories: entries.filter(entry => entry.allPulls).map(entry => entry.repository), pulls: [...pulls.values()], localForks: this.current.localForks };
   }
   private async update(signal: AbortSignal): Promise<void> {
-    const commands = new GitHubCommands(this.directory, signal);
+    const commands = new GitHubCommands(this.directory, signal, this.token);
     try {
       const loaded = await loadPullConfig(this.directory);
       const discovered = await this.discover(commands, signal);
@@ -311,7 +335,13 @@ export class PullRequestsService implements ServiceModule {
       const visible = this.snapshot();
       this.emit({ source: 'pulls', status: 'refresh_completed', reason: `会话订阅：我们仓库 ${visible.internal.length} 个、上游 ${visible.upstream.length} 个；来源仓库 ${visible.repositories.length} 个` });
     } catch (error) {
-      this.current.refresh = { ...this.current.refresh, running: false, finishedAt: new Date().toISOString(), ...(signal.aborted ? {} : { error: safeError(error) }) };
+      const finishedAt = new Date().toISOString();
+      if (error instanceof GitHubSignedOut) {
+        const { error: _error, ...refresh } = this.current.refresh;
+        this.current.refresh = { ...refresh, running: false, finishedAt, signedOut: true };
+        return;
+      }
+      this.current.refresh = { ...this.current.refresh, running: false, finishedAt, signedOut: undefined, ...(signal.aborted ? {} : { error: safeError(error) }) };
       if (!signal.aborted) {
         this.current.warnings = [...new Set([...this.current.warnings, ...(error instanceof PullCollectionError ? error.warnings : []), 'Refresh failed; displaying the last good session-scoped PR snapshot.'])];
         this.emit({ source: 'pulls', status: 'refresh_failed', error: safeError(error) });

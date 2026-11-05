@@ -9,9 +9,9 @@ mod update;
 
 use std::{
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc::{self, Receiver, SyncSender},
-        Mutex,
+        Arc, Mutex,
     },
     time::Duration,
 };
@@ -26,7 +26,7 @@ use tauri::{
     webview::{NewWindowResponse, PageLoadEvent},
     AppHandle, Manager, RunEvent, Url, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
-use update::{UpdateMenu, UpdateRequest};
+use update::{UpdateMenu, UpdateRequest, UpdateView};
 
 const MAIN_WINDOW: &str = "main";
 const TRAY_ID: &str = "nootify";
@@ -46,6 +46,10 @@ struct NativeState {
     action_pending: AtomicBool,
     view_online: Mutex<bool>,
     loaded_url: Mutex<Option<Url>>,
+    /// The latest update state, replayed whenever the service page loads.
+    update_script: Mutex<String>,
+    /// Update requests seen from the page; the smoke test has no worker to receive them.
+    page_requests: Arc<AtomicUsize>,
 }
 
 #[derive(Clone)]
@@ -73,12 +77,18 @@ fn main() {
         .setup(move |app| {
             let (requests, receiver) = mpsc::sync_channel(4);
             let (updates, update_receiver) = mpsc::sync_channel(2);
+            let page_updates = updates.clone();
+            let page_requests = Arc::new(AtomicUsize::new(0));
+            let seen_requests = page_requests.clone();
+            let current = app.package_info().version.to_string();
             app.manage(NativeState {
                 requests,
                 updates,
                 action_pending: AtomicBool::new(false),
                 view_online: Mutex::new(false),
                 loaded_url: Mutex::new(None),
+                update_script: Mutex::new(UpdateView::idle(current).script()),
+                page_requests,
             });
             WebviewWindowBuilder::new(app, MAIN_WINDOW, WebviewUrl::App("index.html".into()))
                 .title("Nootify")
@@ -89,7 +99,13 @@ fn main() {
                 .theme(None)
                 // WebKit asks this policy first even for target=_blank links, so GitHub must be
                 // handed to the default browser here; cancelling also keeps this window in place.
-                .on_navigation(|url| {
+                .on_navigation(move |url| {
+                    // The page's only way to reach native code; see update.rs.
+                    if let Some(request) = update::page_request(url) {
+                        seen_requests.fetch_add(1, Ordering::SeqCst);
+                        let _ = page_updates.try_send(request);
+                        return false;
+                    }
                     if is_github_link(url) {
                         open_in_browser(url);
                         return false;
@@ -102,6 +118,13 @@ fn main() {
                         PageLoadEvent::Started => None,
                         PageLoadEvent::Finished => Some(payload.url().clone()),
                     };
+                    // A load starts the page with no update state, including when the service returns.
+                    if matches!(payload.event(), PageLoadEvent::Finished)
+                        && is_service_ui(payload.url())
+                    {
+                        let script = state.update_script.lock().expect("update state").clone();
+                        let _ = window.eval(script);
+                    }
                 })
                 // window.open() bypasses the policy above; it gets the same treatment, nothing else opens.
                 .on_new_window(|url, _| {

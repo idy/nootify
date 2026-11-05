@@ -9,6 +9,7 @@ import type { Adapter, LarkBinding, RemoteBinding, ThreadInfo, ThreadMessage } f
 const labels: Record<Adapter, string> = { 'claude-desktop': 'Claude', 'claude-code': 'Claude Code', codex: 'Codex', opencode: 'OpenCode' };
 const MAX_TEXT = 48_000;
 const MAX_CHAT_PAGES = 10;
+export const isOpenId = (value: unknown): value is string => typeof value === 'string' && /^ou_[A-Za-z0-9]+$/.test(value);
 export const shortSessionId = (id: string): string => id.replace(/^(local_|ses_)/, '').slice(0, 8);
 /** Same convention as groups the agents created themselves: `<task> · <client> · <first 8 ID characters>`. */
 export function threadName(sessionName: string, adapter: Adapter, sessionId: string): string {
@@ -31,7 +32,7 @@ export class LarkThreads {
     return senders.size === 1 ? { open_id: [...senders][0], source: 'bindings' } : undefined;
   }
   async setRecipient(openId: string): Promise<void> {
-    if (!/^ou_[A-Za-z0-9]+$/.test(openId)) throw new HttpError(400, 'Expected a Feishu open_id (ou_…)');
+    if (!isOpenId(openId)) throw new HttpError(400, 'Expected a Feishu open_id (ou_…)');
     this.state.settings.lark_recipient_open_id = openId;
     await this.state.save();
   }
