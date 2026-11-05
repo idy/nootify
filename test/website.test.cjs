@@ -144,7 +144,7 @@ test("header navigation and repository action have bilingual accessible labels",
   assert.equal(star.getAttribute("aria-label"), "Star Nootify on GitHub (opens in a new tab)");
   assert.equal(navigation.length, 3);
   page.language("zh");
-  assert.equal(star.getAttribute("aria-label"), "在 GitHub 为 Nootify 点星（在新标签页打开）");
+  assert.equal(star.getAttribute("aria-label"), "star — 在 GitHub 为 Nootify 点星（在新标签页打开）");
   assert.ok(navigation.every(node => node.getAttribute("aria-label") === "主导航"));
   page.language("en");
   assert.equal(star.getAttribute("aria-label"), "Star Nootify on GitHub (opens in a new tab)");
