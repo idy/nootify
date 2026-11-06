@@ -11,12 +11,14 @@ import { GitHubAuth } from '../src/github-auth.js';
 import { PullRequestsService } from '../src/github.js';
 import { ApiError, resolveCredentials, type Credentials, type LarkApi } from '../src/lark-metadata.js';
 import { LarkService } from '../src/lark.js';
+import { LarkThreads } from '../src/lark-threads.js';
 import { createServiceHost, type HostOptions } from '../src/server.js';
 import { SessionsService } from '../src/sessions.js';
 import { SettingsService, type AgentControl, type LarkControl } from '../src/settings.js';
 import { State } from '../src/state.js';
 import { DIRECTORY_FRESH_MS, LarkDirectoryCache } from '../src/lark-directory-cache.js';
 import type { TailnetAccess } from '../src/tailnet.js';
+import { failSettingsWriteBehindOlderSaves } from './state-failures.js';
 
 const appId = 'cli_0123456789abcdef';
 async function temporary(t: TestContext): Promise<string> {
@@ -391,7 +393,7 @@ test('an export keeps its secrets in a private file and keeps only the newest te
   assert.equal((await stat(dirname(path))).mode & 0o777, 0o700);
   const file = JSON.parse(await readFile(path, 'utf8'));
   assert.deepEqual([file.format, file.version], ['nootify-config', 1]);
-  assert.deepEqual(file.lark, { app_id: appId, app_secret: 'export-secret', recipient_open_id: 'ou_owner' });
+  assert.deepEqual(file.lark, { app_id: appId, app_secret: 'export-secret', recipient_open_id: 'ou_owner', connection_type: 'bot' });
   assert.equal(file.backends.opencode.password, 'backend-secret');
   assert.deepEqual(file.agents, ['codex']);
   assert.ok(!JSON.stringify({ path, summary }).includes('secret'));
@@ -422,7 +424,7 @@ test('an exported file restores another installation, after a preview that chang
   assert.deepEqual(target.configured, [{ appId, appSecret: 'export-secret' }]);
   assert.deepEqual(target.enabled, ['codex']);
   const reopened = await State.open(target.dir);
-  assert.deepEqual(reopened.settings, { lark_recipient_open_id: 'ou_owner', lark_app_id: appId, lark_app_secret: 'export-secret' });
+  assert.deepEqual(reopened.settings, { lark_recipient_open_id: 'ou_owner', lark_app_id: appId, lark_app_secret: 'export-secret', lark_connection_type: 'bot' });
   assert.equal(reopened.backends.get('opencode')?.password, 'backend-secret');
   assert.deepEqual(JSON.parse(await readFile(join(target.dir, 'pulls.config.json'), 'utf8')), { ownedOwners: ['acme'] });
   assert.equal((await stat(join(target.dir, 'pulls.config.json'))).mode & 0o777, 0o600);
@@ -471,7 +473,7 @@ test('an import touches only what its file names and reports what it could not a
   await settings.saveLark(appId, 'saved-secret');
   state.backends.set('codex', { url: 'ws://127.0.0.1:4500' });
   const summary = await settings.importConfig({ format: 'nootify-config', version: 1, lark: { recipient_open_id: 'ou_new' }, agents: ['codex'] });
-  assert.deepEqual(state.settings, { lark_app_id: appId, lark_app_secret: 'saved-secret', lark_recipient_open_id: 'ou_new' });
+  assert.deepEqual(state.settings, { lark_app_id: appId, lark_app_secret: 'saved-secret', lark_recipient_open_id: 'ou_new', lark_connection_type: 'bot' });
   assert.equal(state.backends.size, 1);
   assert.equal(configured.length, 1, 'the bot is not reconnected');
   assert.deepEqual(summary.warnings, ['codex: unbalanced markers']);
@@ -483,6 +485,73 @@ test('environment credentials stay in use after an import, and the import says s
   assert.deepEqual(configured, [{ appId: 'cli_env', appSecret: 'env-secret' }]);
   assert.match(summary.warnings[0], /stay in use/);
 });
+
+test('importing a different app keeps the recipient when environment credentials keep the current app active', async t => {
+  const env = { LARK_APP_ID: appId, LARK_APP_SECRET: 'env-secret' };
+  const { dir, state, lark, settings, configured } = await harness(t, { env });
+  lark.credentials = { appId, appSecret: 'env-secret' };
+  state.settings.lark_recipient_open_id = 'ou_owner'; await state.save();
+  const importedId = 'cli_fedcba9876543210';
+  const origin = await serve(t, await EventLog.open(dir), { settings });
+  const response = await action(origin, '/ui/api/settings/import', { apply: true,
+    document: { format: 'nootify-config', version: 1, lark: { app_id: importedId, app_secret: 'file-secret' } } });
+  assert.equal(response.status, 200);
+  assert.match((await response.json() as { warnings: string[] }).warnings[0]!, /stay in use/);
+  const page = await settings.page();
+  assert.equal(page.lark.app_id, appId); assert.equal(page.lark.recipient, 'ou_owner');
+  assert.equal(state.settings.lark_app_id, importedId, 'save the requested credentials without overriding the environment');
+  assert.equal((await State.open(dir)).settings.lark_recipient_open_id, 'ou_owner');
+  assert.equal(configured.length, 0, 'the effective app does not change or reconnect');
+  const threads = new LarkThreads(state, { appId, async request() { throw new Error('No API expected'); } });
+  assert.deepEqual(threads.recipient(), { open_id: 'ou_owner', source: 'setting' });
+});
+
+test('an import that actually changes the active app clears the previous app recipient', async t => {
+  const { dir, state, lark, settings } = await harness(t);
+  lark.credentials = { appId, appSecret: 'old-secret' };
+  state.settings.lark_recipient_open_id = 'ou_oldAppUser';
+  state.bindings.set('oc_oldApp', { chat_id: 'oc_oldApp', session_id: 'session-old', sender_open_id: 'ou_oldAppUser' });
+  const importedId = 'cli_fedcba9876543210';
+  await settings.importConfig({ format: 'nootify-config', version: 1, lark: { app_id: importedId, app_secret: 'file-secret' } });
+  assert.equal(lark.credentials?.appId, importedId);
+  assert.equal(state.settings.lark_recipient_open_id, undefined);
+  assert.equal((await State.open(dir)).settings.lark_recipient_open_id, undefined);
+  assert.equal(state.bindings.get('oc_oldApp')?.app_id, appId);
+  const threads = new LarkThreads(state, { appId: importedId, async request() { throw new Error('No API expected'); } });
+  assert.equal(threads.recipient(), undefined, 'another app cannot inherit the old group recipient');
+});
+
+for (const operation of ['replace', 'clear', 'import', 'recipient', 'channel'] as const) {
+  test(`failed local settings ${operation} rolls back before another save can persist it`, async t => {
+    const { dir, state, lark, settings, configured } = await harness(t);
+    const credentials = { appId, appSecret: 'old-secret' }; lark.credentials = credentials;
+    const saved = { lark_app_id: appId, lark_app_secret: 'old-secret', lark_recipient_open_id: 'ou_original', lark_connection_type: 'bot' as const };
+    Object.assign(state.settings, saved);
+    const binding = { chat_id: 'oc_original', session_id: 'original-session', sender_open_id: 'ou_original' };
+    state.bindings.set(binding.chat_id, binding);
+    const backend = { url: 'ws://127.0.0.1:4500' }; state.backends.set('codex', backend);
+    await state.save();
+    const candidate = 'cli_fedcba9876543210';
+    const change = () => operation === 'replace' ? settings.saveLark(candidate, 'rejected-secret', 'personal-app')
+      : operation === 'clear' ? settings.clearLark()
+      : operation === 'recipient' ? settings.setRecipient('ou_rejected', appId)
+      : operation === 'channel' ? settings.setNotificationChannel('feishu')
+      : settings.importConfig({ format: 'nootify-config', version: 1, notification_channel: 'feishu',
+        lark: { app_id: candidate, app_secret: 'rejected-secret', recipient_open_id: 'ou_rejected', connection_type: 'personal-app' },
+        backends: { codex: { url: 'ws://127.0.0.1:4501', token: 'rejected-backend-secret' } } });
+    await failSettingsWriteBehindOlderSaves(t, state, change);
+    assert.deepEqual(state.settings, saved); assert.deepEqual((await State.open(dir)).settings, saved);
+    assert.strictEqual(lark.credentials, credentials); assert.equal(configured.length, 0);
+    assert.strictEqual(state.bindings.get(binding.chat_id), binding);
+    assert.equal(state.bindings.get(binding.chat_id)?.app_id, undefined);
+    assert.strictEqual(state.backends.get('codex'), backend);
+    await state.save();
+    const reopened = await State.open(dir);
+    assert.deepEqual(reopened.settings, saved); assert.deepEqual(reopened.bindings.get(binding.chat_id), binding);
+    assert.deepEqual(reopened.backends.get('codex'), backend);
+    assert.ok(!(await readFile(join(dir, 'state.json'), 'utf8')).includes('rejected-'));
+  });
+}
 
 test('settings pages never carry secrets, and only this Mac can change anything', async t => {
   const { dir, state, settings, configured } = await harness(t);

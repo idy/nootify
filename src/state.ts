@@ -6,9 +6,12 @@ import type { Adapter, BackendConnection, LarkBinding, LarkDelivery, PublicSessi
 import { HttpError } from './types.js';
 import { isNotificationChannel, validChatConfig, type ChatBinding, type ChatDelivery, type NotificationChannel, type SlackConfig, type TelegramConfig } from './chat-transport.js';
 
+export type LarkConnectionType = 'bot' | 'personal-app';
+export const isLarkConnectionType = (value: unknown): value is LarkConnectionType => value === 'bot' || value === 'personal-app';
+
 /** Owner choices that are not tied to one session or binding. */
 export interface Settings {
-  lark_recipient_open_id?: string; lark_app_id?: string; lark_app_secret?: string; github_token?: string; tailscale_enabled?: boolean;
+  lark_recipient_open_id?: string; lark_app_id?: string; lark_app_secret?: string; lark_connection_type?: LarkConnectionType; github_token?: string; tailscale_enabled?: boolean;
   notification_channel?: NotificationChannel; slack?: SlackConfig; telegram?: TelegramConfig;
 }
 interface StoredState { version: 1; sessions: SessionRecord[]; lark_bindings: LarkBinding[]; backends?: [Adapter, BackendConnection][]; lark_deliveries?: LarkDelivery[]; chat_bindings?: ChatBinding[]; chat_deliveries?: ChatDelivery[]; inbox_messages?: StoredInboxMessage[]; settings?: Settings }
@@ -53,6 +56,7 @@ export class State {
       if (validChatConfig('slack', data.settings?.slack)) state.settings.slack = data.settings.slack;
       if (validChatConfig('telegram', data.settings?.telegram)) state.settings.telegram = data.settings.telegram;
       if (typeof data.settings?.tailscale_enabled === 'boolean') state.settings.tailscale_enabled = data.settings.tailscale_enabled;
+      if (isLarkConnectionType(data.settings?.lark_connection_type)) state.settings.lark_connection_type = data.settings.lark_connection_type;
       for (const field of ['lark_recipient_open_id', 'lark_app_id', 'lark_app_secret', 'github_token'] as const) {
         const value = data.settings?.[field];
         if (typeof value === 'string') state.settings[field] = value;

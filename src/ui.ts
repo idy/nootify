@@ -10,7 +10,7 @@ import { LarkPermissionRequiredError } from './lark-permissions.js';
 export interface PullsSource { snapshot(): PullSnapshot; refresh(): void; setChoice(repository: string, follow: boolean | null): Promise<RepositoryEntry> }
 export interface AgentsSource { list(): Promise<AgentPrompt[]>; set(agent: AgentId, enabled: boolean): Promise<AgentPrompt> }
 export interface ChannelSummary { name: 'feishu' | 'slack' | 'telegram'; configured: boolean; recipient?: string; groups: number }
-export type SettingsSource = Pick<SettingsService, 'page' | 'github' | 'startGitHubLogin' | 'cancelGitHubLogin' | 'signOutGitHub' | 'saveLark' | 'clearLark' | 'larkSecret' | 'larkRecipients' | 'setRecipient' | 'exportConfig' | 'previewImport' | 'importConfig' | 'reveal' | 'tailscale' | 'setTailscaleEnabled' | 'startTailscaleLogin' | 'cancelTailscaleLogin' | 'logoutTailscale' | 'saveChat' | 'clearChat' | 'chatSecret' | 'chatDirectory' | 'setNotificationChannel'>;
+export type SettingsSource = Pick<SettingsService, 'page' | 'github' | 'startGitHubLogin' | 'cancelGitHubLogin' | 'signOutGitHub' | 'saveLark' | 'clearLark' | 'larkSecret' | 'larkRegistration' | 'startLarkRegistration' | 'cancelLarkRegistration' | 'larkSetup' | 'larkRecipients' | 'setRecipient' | 'exportConfig' | 'previewImport' | 'importConfig' | 'reveal' | 'tailscale' | 'setTailscaleEnabled' | 'startTailscaleLogin' | 'cancelTailscaleLogin' | 'logoutTailscale' | 'saveChat' | 'clearChat' | 'chatSecret' | 'chatDirectory' | 'setNotificationChannel'>;
 export interface UiContext {
   modules: ServiceModule[]; logs: EventLog; pulls?: PullsSource; tailnetUrl?: () => string | undefined;
   agents?: AgentsSource; channel?: () => ChannelSummary | undefined; settings?: SettingsSource;
@@ -76,6 +76,13 @@ async function settingsAction(request: IncomingMessage, path: string, settings: 
     const channel = chatAction[1] as 'slack' | 'telegram';
     return chatAction[2] === 'secret' ? settings.chatSecret(channel, body.field) : settings.chatDirectory(channel, body);
   }
+  if (path === '/ui/api/settings/lark/registration') {
+    if (body.action === 'status') return settings.larkRegistration();
+    if (body.action === 'start') return settings.startLarkRegistration();
+    if (body.action === 'cancel') return settings.cancelLarkRegistration();
+    throw new HttpError(400, 'Expected a Feishu registration action: start, status or cancel');
+  }
+  if (path === '/ui/api/settings/lark/permissions') return settings.larkSetup(body.app_id);
   if (path === '/ui/api/settings/github/login') {
     if (body.action === 'start') return settings.startGitHubLogin();
     if (body.action === 'cancel') return settings.cancelGitHubLogin();
@@ -96,7 +103,7 @@ async function settingsAction(request: IncomingMessage, path: string, settings: 
   }
   if (path === '/ui/api/settings/channel') { await settings.setNotificationChannel(body.channel); return { accepted: true }; }
   if (path === '/ui/api/settings/lark') {
-    if (body.clear === true) await settings.clearLark(); else await settings.saveLark(body.app_id, body.app_secret);
+    if (body.clear === true) await settings.clearLark(); else await settings.saveLark(body.app_id, body.app_secret, body.connection_type);
     return { accepted: true };
   }
   if (path === '/ui/api/settings/recipient') { await settings.setRecipient(body.open_id, body.app_id); return { accepted: true }; }
