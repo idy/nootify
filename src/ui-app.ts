@@ -49,6 +49,7 @@ function translatedLabels() {
     slack_ready: t('Slack 连接已建立'), slack_failed: t('Slack 连接失败'), telegram_ready: t('Telegram 连接已建立'), telegram_failed: t('Telegram 连接失败'),
     notification_channel_changed: t('默认通知渠道已更新'), slack_configured: t('Slack 配置已更新'), telegram_configured: t('Telegram 配置已更新'),
     received: t('服务收到消息'), socket_written: t('已写入客户端，等待会话回执'), input_accepted: t('客户端已接受输入，等待会话回执'),
+    inbox_queued: t('已存入收件箱，等待会话主动检查'),
     session_acknowledged: t('会话已确认收到'), replied: t('回复已发回原消息'), reply_failed: t('发送回复失败'),
     delivery_failed: t('消息转发失败'), ignored: t('已跳过此消息'), queue_full: t('消息队列已满'), registered: t('本机会话已注册'),
     bound: t('已保存会话绑定'), stopped: t('监听已停止'), connecting: t('正在连接消息服务'), pin_failed: t('绑定消息置顶失败'),
@@ -76,12 +77,12 @@ function translatedLabels() {
   const outcomeTabs: [string, string][] = [['all', t('全部')], ['forwarded', t('待回执')], ['acknowledged', t('已确认')], ['replied', t('已回复')], ['ignored', t('已忽略')], ['error', t('异常')]];
   const pullTabs: [string, string][] = [['all', t('全部')], ['attention', t('需跟进')], ['draft', t('草稿')]];
   const repoTabs: [string, string][] = [['all', t('全部')], ['followed', t('已关注')], ['muted', t('未关注')]];
-  const agentNames: Record<string, string> = { claude: 'Claude', codex: 'Codex', opencode: 'OpenCode' };
+  const agentNames: Record<string, string> = { claude: 'Claude', codex: 'Codex', opencode: 'OpenCode', trae: 'Trae', workbuddy: 'WorkBuddy' };
   const promptStates: Record<string, Tone> = {
     current: { label: t('已注入'), tone: 'ok' }, outdated: { label: t('需要更新'), tone: 'warn' }, absent: { label: t('未注入'), tone: 'muted' },
     missing: { label: t('未配置'), tone: 'muted' }, conflict: { label: t('标记不完整'), tone: 'error' }, error: { label: t('无法读取'), tone: 'error' },
   };
-  const adapters: Record<string, string> = { 'claude-desktop': 'Claude Desktop', 'claude-code': 'Claude Code', codex: 'Codex', opencode: 'OpenCode' };
+  const adapters: Record<string, string> = { 'claude-desktop': 'Claude Desktop', 'claude-code': 'Claude Code', codex: 'Codex', opencode: 'OpenCode', trae: 'Trae', workbuddy: 'WorkBuddy' };
   const availability: Record<string, Tone> = {
     active: { label: t('可投递'), tone: 'ok' }, archived: { label: t('已归档'), tone: 'muted' }, offline: { label: t('未运行'), tone: 'warn' },
     unknown: { label: t('未确认'), tone: 'warn' }, missing: { label: t('本机不存在'), tone: 'muted' },
@@ -236,7 +237,7 @@ function category(entry: LogEntry): string {
   if (entry.status === 'received') return 'received';
   if (entry.status === 'session_acknowledged') return 'acknowledged';
   if (entry.status === 'replied' || entry.status === 'thread_message') return 'replied';
-  if (entry.status === 'socket_written' || entry.status === 'input_accepted') return 'forwarded';
+  if (entry.status === 'socket_written' || entry.status === 'input_accepted' || entry.status === 'inbox_queued') return 'forwarded';
   if (entry.error || entry.status.includes('failed') || entry.status === 'queue_full') return 'error';
   return 'system';
 }
@@ -585,8 +586,9 @@ function renderAgents(): void {
     box.disabled = remote || state.pendingChannel || state.pendingAgents.has(agent.agent) || ['conflict', 'error'].includes(agent.status);
     box.setAttribute('aria-label', t('向 {p0} 写入{p1}通知说明', { p0: agent.name, p1: name }));
     box.addEventListener('change', () => { void setAgent(agent, box.checked); });
-    row.append(box, rowMain(agent.name, `${home(agent.file)} · ${agentDetail(agent)}`), sideBlock(promptStates[agent.status] ?? promptStates.error));
+    row.append(box, rowMain(agent.name, `${(agent.files ?? [agent.file]).map(home).join(' · ')} · ${agentDetail(agent)}`), sideBlock(promptStates[agent.status] ?? promptStates.error));
     const extra = node('div', undefined, 'agent-extra');
+    if (agent.agent === 'trae' || agent.agent === 'workbuddy') extra.append(node('p', t('回复需由会话主动检查'), 'hint'));
     if (agent.status === 'outdated' && !remote) {
       const update = node('button', t('更新为当前内容'), 'text-button'); update.type = 'button';
       update.disabled = state.pendingChannel || state.pendingAgents.has(agent.agent);

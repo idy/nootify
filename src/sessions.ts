@@ -3,12 +3,14 @@ export { checkSocket } from './inbox.js';
 import { createConnection } from 'node:net';
 import { hostname } from 'node:os';
 import type { State } from './state.js';
-import { HttpError, identifier, object, text, isAdapter, SessionUnavailable } from './types.js';
+import { HttpError, identifier, object, text, isAdapter, isPolledAdapter, SessionUnavailable } from './types.js';
+import { acknowledgeInbox, queueSessionMessage, sessionInbox } from './polled-sessions.js';
+import type { ForwardingOptions } from './forwarded-messages.js';
 export { SessionUnavailable } from './types.js';
 import { ExternalSessions } from './external-sessions.js';
 import type { ExternalResolver, SessionTarget } from './external-sessions.js';
 import { localEndpoint } from './codex-rpc.js';
-import type { Adapter, BackendConnection, DeliveryResult, PublicSession, RouteRequest, RouteResponse, ServiceModule, SessionRecord } from './types.js';
+import type { Adapter, BackendConnection, DeliveryResult, InboxOrigin, PublicSession, RouteRequest, RouteResponse, ServiceModule, SessionRecord } from './types.js';
 import { LocalSessions } from './local-sessions.js';
 import type { SessionCatalog } from './local-sessions.js';
 import { writeWindowsInbox } from './native-transport.js';
@@ -43,13 +45,13 @@ export class SessionsService implements ServiceModule {
   private readonly observed = new Map<string, PublicSession>();
   constructor(readonly state: State, readonly catalog: SessionCatalog = new LocalSessions(),
     private readonly report: (record: Record<string, unknown>) => void = () => {},
-    private readonly external: ExternalResolver = new ExternalSessions(state)) {}
+    private readonly external: ExternalResolver = new ExternalSessions(state), private readonly forwarding: ForwardingOptions = {}) {}
   status(): string { return 'ready'; }
   sessionName(id: string, adapter: Adapter): string {
     return this.observed.get(`${adapter}:${id}`)?.session_name ?? this.state.sessions.get(id)?.session_name ?? id;
   }
   async stop(): Promise<void> { this.external.close(); }
-  async send(id: string, content: string, adapter?: Adapter): Promise<DeliveryResult> {
+  async send(id: string, content: string, adapter?: Adapter, origin?: InboxOrigin): Promise<DeliveryResult> {
     const saved = this.state.sessions.get(id);
     const kind = adapter ?? saved?.adapter ?? (id.startsWith('local_') ? 'claude-desktop' : 'claude-code');
     const key = `${kind}:${id}`;
@@ -57,7 +59,12 @@ export class SessionsService implements ServiceModule {
       session_name: this.observed.get(key)?.session_name ?? id, availability: 'unknown', last_seen: new Date().toISOString() };
     try {
       let target: SessionTarget | undefined;
-      if (kind === 'codex' || kind === 'opencode') target = await this.external.resolve(id, kind);
+      if (isPolledAdapter(kind)) {
+        if (saved?.adapter === kind && saved.host_id === hostname()) target = {
+          info: { session_id: id, host_id: saved.host_id, adapter: kind, session_name: saved.session_name, availability: 'unknown' },
+          send: content => queueSessionMessage(this.state, kind, id, origin?.text ?? content, origin?.source),
+        };
+      } else if (kind === 'codex' || kind === 'opencode') target = await this.external.resolve(id, kind);
       else {
         const session = await this.catalog.inspect(id, kind);
         if (session) target = { info: session, send: async text => {
@@ -103,6 +110,14 @@ export class SessionsService implements ServiceModule {
       this.state.backends.set(adapter, connection); await this.state.save();
       return { body: { adapter, configured: true } };
     }
+    const inbox = /^\/v1\/sessions\/([^/]+)\/inbox(?:\/([^/]+)\/ack)?$/.exec(request.path);
+    if (inbox && request.method === 'POST') {
+      const id = identifier(decodeURIComponent(inbox[1]), 'session_id');
+      const adapter = object(request.body).adapter;
+      if (!isPolledAdapter(adapter)) throw new HttpError(400, 'Inbox polling is supported for trae and workbuddy');
+      return { body: inbox[2] ? await acknowledgeInbox(this.state, adapter, id, identifier(decodeURIComponent(inbox[2]), 'message_id'))
+        : sessionInbox(this.state, adapter, id, this.forwarding) };
+    }
     const match = /^\/v1\/sessions\/([^/]+)(\/messages)?$/.exec(request.path);
     if (!match) return;
     const id = identifier(decodeURIComponent(match[1]), 'session_id');
@@ -120,8 +135,20 @@ export class SessionsService implements ServiceModule {
       ...(body.socket_token !== undefined ? { socket_token: text(body.socket_token, 'socket_token') } : {}),
     };
     if (record.adapter === 'claude-code' || record.adapter === 'claude-desktop') await checkSocket(text(record.socket_path, 'socket_path'));
-    this.state.sessions.set(id, record);
-    await this.state.save();
+    let existing: SessionRecord | undefined; let applied = false;
+    await this.state.save({
+      apply: () => {
+        existing = this.state.sessions.get(id);
+        if (existing && existing.adapter !== record.adapter && (isPolledAdapter(existing.adapter) || isPolledAdapter(record.adapter))) {
+          throw new HttpError(409, 'This session ID belongs to another adapter');
+        }
+        this.state.sessions.set(id, record); applied = true;
+      },
+      rollback: () => {
+        if (!applied) return;
+        if (existing) this.state.sessions.set(id, existing); else this.state.sessions.delete(id);
+      },
+    });
     this.report({ source: 'sessions', status: 'registered', session_id: id, session_name: record.session_name });
     const { socket_path: _path, socket_token: _token, ...publicSession } = record;
     return { body: publicSession };

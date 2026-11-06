@@ -4,13 +4,13 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defaultStateDir } from './state.js';
-import { HttpError, object } from './types.js';
+import { HttpError, isPolledAdapter, object } from './types.js';
 import type { Adapter, RouteRequest, RouteResponse, ServiceModule } from './types.js';
 import type { NotificationChannel } from './chat-transport.js';
 import { shellCommand, shellQuote } from './shell.js';
 
-export type AgentId = 'claude' | 'codex' | 'opencode';
-export const AGENT_IDS: AgentId[] = ['claude', 'codex', 'opencode'];
+export type AgentId = 'claude' | 'codex' | 'opencode' | 'trae' | 'workbuddy';
+export const AGENT_IDS: AgentId[] = ['claude', 'codex', 'opencode', 'trae', 'workbuddy'];
 export const isAgent = (value: unknown): value is AgentId => typeof value === 'string' && (AGENT_IDS as string[]).includes(value);
 /**
  * `missing`: the agent's configuration directory does not exist. `absent`: no Nootify block.
@@ -18,10 +18,10 @@ export const isAgent = (value: unknown): value is AgentId => typeof value === 's
  * `error`: the file could not be read. Neither of the last two is ever edited.
  */
 export type PromptStatus = 'missing' | 'absent' | 'current' | 'outdated' | 'conflict' | 'error';
-export interface AgentPrompt { agent: AgentId; name: string; file: string; status: PromptStatus; injected: boolean; block: string; error?: string }
+export interface AgentPrompt { agent: AgentId; name: string; file: string; files?: string[]; status: PromptStatus; injected: boolean; block: string; error?: string }
 export const BEGIN = '<!-- nootify:begin -->';
 export const END = '<!-- nootify:end -->';
-const names: Record<AgentId, string> = { claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode' };
+const names: Record<AgentId, string> = { claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', trae: 'Trae', workbuddy: 'WorkBuddy' };
 const MAX_PROMPT_FILE = 1024 * 1024;
 const BACKUPS_PER_AGENT = 10;
 
@@ -30,7 +30,16 @@ export function promptFiles(env: NodeJS.ProcessEnv = process.env): Record<AgentI
     claude: join(env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'CLAUDE.md'),
     codex: join(env.CODEX_HOME ?? join(homedir(), '.codex'), 'AGENTS.md'),
     opencode: join(env.XDG_CONFIG_HOME ?? join(homedir(), '.config'), 'opencode', 'AGENTS.md'),
+    trae: env.NOOTIFY_TRAE_RULES_FILE ?? join(homedir(), '.trae', 'user_rules', 'nootify.md'),
+    workbuddy: env.NOOTIFY_WORKBUDDY_RULES_FILE ?? join(homedir(), '.codebuddy', 'CODEBUDDY.md'),
   };
+}
+
+/** Manage both editions so enabling before installation cannot select the wrong Trae directory. */
+export function promptTargets(env: NodeJS.ProcessEnv = process.env): Record<AgentId, string[]> {
+  const files = promptFiles(env);
+  return Object.fromEntries(AGENT_IDS.map(agent => [agent, agent === 'trae' && !env.NOOTIFY_TRAE_RULES_FILE
+    ? [files.trae, join(homedir(), '.trae-cn', 'user_rules', 'nootify.md')] : [files[agent]]])) as Record<AgentId, string[]>;
 }
 
 /** Agents run the CLI from their own shells; this resolves the calling session from the variables each client sets. */
@@ -40,7 +49,7 @@ export function agentSession(agent: AgentId, env: NodeJS.ProcessEnv = process.en
     return { adapter: 'claude-code', session_id: env.CLAUDE_CODE_SESSION_ID || undefined };
   }
   if (agent === 'codex') return { adapter: 'codex', session_id: env.CODEX_THREAD_ID || undefined };
-  return { adapter: 'opencode' };
+  return { adapter: agent };
 }
 
 const quote = (value: string): string => shellQuote(value, process.platform, true);
@@ -51,8 +60,9 @@ export function promptBlock(agent: AgentId, options: PromptOptions): string {
   const base = shellCommand(options.command ?? [process.execPath, fileURLToPath(new URL('./cli.js', import.meta.url))], process.platform, true);
   const extra = `${options.stateDir !== defaultStateDir() ? ` --state-dir ${quote(options.stateDir)}` : ''}${options.port !== 9417 ? ` --port ${options.port}` : ''}`;
   const channel = options.notificationChannel?.() ?? 'feishu';
+  const polled = isPolledAdapter(agent);
   const identity = (agent === 'opencode' ? '--agent opencode --session-id <this ses_… session ID>' : `--agent ${agent}`) + (channel === 'feishu' ? '' : ` --channel ${channel}`);
-  const run = (command: string, args: string): string => `\`${base} ${command} ${identity} ${args}${extra}\``;
+  const run = (command: string, args = ''): string => `\`${base} ${command} ${identity}${polled && command !== 'thread-open' ? ' --session-id "<returned session_id>"' : ''}${args ? ` ${args}` : ''}${extra}\``;
   const address = options.tailnetAddress?.();
   return [
     BEGIN,
@@ -64,12 +74,19 @@ export function promptBlock(agent: AgentId, options: PromptOptions): string {
     channel === 'feishu' ? "- For work longer than a quick answer, open this conversation's group first. Later calls reuse it; Nootify keeps the session's routing token in the group announcement:"
       : "- For work longer than a quick answer, open this conversation's thread first. Later calls reuse its local session binding:",
     `  ${run('thread-open', '--session-name "<short task title>"')}`,
+    ...(polled ? ['- Run thread-open once per conversation. Keep the returned session_id in this conversation and replace "<returned session_id>" in all subsequent commands with it. Reuse it with --session-id when retrying thread-open; do not reuse another conversation\'s ID or derive it from a project directory.'] : []),
     "- Post progress, blockers and results as you go, in the user's language. Each message is prefixed with the session name:",
     `  ${run('thread-send', '--text "<message>"')}`,
     '  Use `--text-file -` to send multi-line text from standard input.',
     `- Nootify's independent Tailscale device${address ? ` (\`http://${address}/\`)` : ''} exposes only Nootify on port 80. It does not expose this ${process.platform === 'darwin' ? 'Mac' : 'computer'}'s previews, files, or other ports. Share other local pages or files only through a separately configured and verified reachable address; never substitute the Nootify device IP for a host address.`,
-    channel === 'feishu' ? '- Messages from the user in that group arrive here marked 【来自飞书用户的消息】 with `lark-ack` and `lark-reply` commands; answer them when convenient.'
-      : `- Messages arrive here marked 【来自${channel === 'slack' ? 'Slack' : 'Telegram'}用户的消息】 with \`chat-ack\` and \`chat-reply\` commands. Answer when convenient; the reply goes to the original thread or topic.`,
+    ...(polled ? [
+      '- At work milestones, before asking the user a question, and before finishing, check this conversation\'s inbox:',
+      `  ${run('thread-receive')}`,
+      '- Read each returned message.text as user input. Follow its original-channel receipt and reply commands, then acknowledge that inbox item using its returned message.id:',
+      `  ${run('thread-ack', '--message-id "<returned message.id>"')}`,
+      '- Inbox reads are repeatable until acknowledged. Polling cannot wake an idle or closed conversation; do not busy-poll or claim that queued messages have already been read.',
+    ] : [channel === 'feishu' ? '- Messages from the user in that group arrive here marked 【来自飞书用户的消息】 with `lark-ack` and `lark-reply` commands; answer them when convenient.'
+      : `- Messages arrive here marked 【来自${channel === 'slack' ? 'Slack' : 'Telegram'}用户的消息】 with \`chat-ack\` and \`chat-reply\` commands. Answer when convenient; the reply goes to the original thread or topic.`]),
     "- Nootify maintains this block; change it on Nootify's Agents page instead of editing it here.",
     END,
   ].join('\n');
@@ -104,10 +121,16 @@ export function withoutBlock(content: string): string {
 export class AgentPrompts implements ServiceModule {
   readonly name = 'agents';
   private writes: Promise<unknown> = Promise.resolve();
-  private readonly files: Record<AgentId, string>;
-  constructor(private readonly options: PromptOptions & { files?: Partial<Record<AgentId, string>> },
+  private readonly files: Record<AgentId, string[]>;
+  constructor(private readonly options: PromptOptions & { files?: Partial<Record<AgentId, string | string[]>> },
     private readonly report: (record: Record<string, unknown>) => void = () => {}) {
-    this.files = { ...promptFiles(), ...options.files };
+    const defaults = promptTargets();
+    this.files = Object.fromEntries(AGENT_IDS.map(agent => {
+      const paths = options.files?.[agent] ?? defaults[agent];
+      const files = typeof paths === 'string' ? [paths] : [...new Set(paths)];
+      if (!files.length) throw new Error(`No prompt file configured for ${names[agent]}`);
+      return [agent, files];
+    })) as Record<AgentId, string[]>;
   }
   status(): string { return 'ready'; }
   /** Prompt files may be symlinks into a dotfiles checkout; edits go to the target and keep the link. */
@@ -127,7 +150,16 @@ export class AgentPrompts implements ServiceModule {
     } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
   }
   async inspect(agent: AgentId): Promise<AgentPrompt> {
-    const file = this.files[agent];
+    const files = this.files[agent];
+    const entries = await Promise.all(files.map(file => this.inspectFile(agent, file)));
+    const failure = entries.find(entry => entry.status === 'conflict' || entry.status === 'error');
+    const injected = entries.some(entry => entry.injected);
+    const status = failure?.status ?? (entries.every(entry => entry.status === 'current') ? 'current'
+      : injected ? 'outdated' : entries.every(entry => entry.status === 'missing') ? 'missing' : 'absent');
+    return { ...entries[0], ...(files.length > 1 ? { files } : {}), status, injected,
+      ...(failure?.error ? { error: `${failure.file}: ${failure.error}` } : {}) };
+  }
+  private async inspectFile(agent: AgentId, file: string): Promise<AgentPrompt> {
     const block = promptBlock(agent, this.options);
     const entry: AgentPrompt = { agent, name: names[agent], file, status: 'absent', injected: false, block };
     try {
@@ -147,26 +179,35 @@ export class AgentPrompts implements ServiceModule {
     return operation;
   }
   private async apply(agent: AgentId, enabled: boolean): Promise<AgentPrompt> {
-    const current = await this.inspect(agent);
-    if (current.status === 'missing') {
-      if (!enabled) return current;
-      await mkdir(dirname(current.file), { recursive: true, mode: 0o700 });
-    }
-    if (current.status === 'conflict') throw new HttpError(409, 'The prompt file has unbalanced Nootify markers; fix them by hand first');
-    if (current.status === 'error') throw new HttpError(409, `Cannot read ${current.file}: ${current.error}`);
-    const path = await this.target(current.file);
-    if (enabled) {
+    const entries = await Promise.all(this.files[agent].map(file => this.inspectFile(agent, file)));
+    // Check every target before editing any of them, including shared targets across editions.
+    for (const current of entries) {
+      if (current.status === 'conflict') throw new HttpError(409, `The prompt file ${current.file} has unbalanced Nootify markers; fix them by hand first`);
+      if (current.status === 'error') throw new HttpError(409, `Cannot read ${current.file}: ${current.error}`);
+      if (!enabled) continue;
+      const path = await this.target(current.file);
       for (const other of AGENT_IDS.filter(id => id !== agent)) {
-        const otherPath = await realpath(this.files[other]).catch(error => {
-          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
-          throw error;
-        });
-        if (otherPath === path) throw new HttpError(409, `${names[agent]} and ${names[other]} share the same prompt file; separate their files before adding agent-specific instructions`);
+        for (const file of this.files[other]) {
+          const otherPath = await realpath(file).catch(error => {
+            if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+            throw error;
+          });
+          if (otherPath === path) throw new HttpError(409, `${names[agent]} and ${names[other]} share the same prompt file; separate their files before adding agent-specific instructions`);
+        }
       }
     }
+    for (const current of entries) await this.applyFile(agent, current, enabled);
+    return this.inspect(agent);
+  }
+  private async applyFile(agent: AgentId, current: AgentPrompt, enabled: boolean): Promise<void> {
+    if (current.status === 'missing') {
+      if (!enabled) return;
+      await mkdir(dirname(current.file), { recursive: true, mode: 0o700 });
+    }
+    const path = await this.target(current.file);
     const before = await this.read(path);
-    const after = enabled ? withBlock(before ?? '', current.block) : withoutBlock(before ?? '');
-    if (after === (before ?? '') && (before !== undefined || !enabled)) return this.inspect(agent);
+    const after = enabled ? (agent === 'trae' && before === undefined ? '---\nalwaysApply: true\n---\n\n' : '') + withBlock(before ?? '', current.block) : withoutBlock(before ?? '');
+    if (after === (before ?? '') && (before !== undefined || !enabled)) return;
     if (before !== undefined) await this.backup(agent, before);
     if (!after && before !== undefined) await rm(path);
     else {
@@ -179,7 +220,6 @@ export class AgentPrompts implements ServiceModule {
       } finally { await rm(temporary, { force: true }); }
     }
     this.report({ source: 'agents', status: enabled ? 'prompt_injected' : 'prompt_removed', reason: `${names[agent]}: ${current.file}` });
-    return this.inspect(agent);
   }
   private async backup(agent: AgentId, content: string): Promise<void> {
     const directory = join(this.options.stateDir, 'agent-backups');

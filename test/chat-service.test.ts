@@ -15,6 +15,7 @@ import { createServiceHost } from '../src/server.js';
 import { SettingsService } from '../src/settings.js';
 import { State } from '../src/state.js';
 import { SessionUnavailable, type Adapter } from '../src/types.js';
+import { failSettingsWriteBehindOlderSaves } from './state-failures.js';
 
 const slackConfig: SlackConfig = { bot_token: 'xoxb-secret', app_token: 'xapp-secret', channel_id: 'C123', user_id: 'U123' };
 const telegramConfig: TelegramConfig = { bot_token: '123:secret', chat_id: '-100123', user_id: '123' };
@@ -78,6 +79,26 @@ test('verification failures keep the working connection and never expose credent
   assert.equal(f.slack.status(), 'ready');
   await assert.rejects(f.slack.configure({ ...slackConfig, user_id: '' }), /Invalid Slack/);
 });
+
+for (const channel of ['slack', 'telegram'] as const) {
+  for (const operation of ['replace', 'clear'] as const) {
+    test(`failed ${channel} credential ${operation} cannot leak into an older queued save`, async t => {
+      const f = await fixture(t);
+      const service = channel === 'slack' ? f.slack : f.telegram;
+      const saved = channel === 'slack' ? slackConfig : telegramConfig;
+      await service.configure(saved);
+      const candidate = operation === 'clear' ? undefined : channel === 'slack'
+        ? { ...slackConfig, bot_token: 'xoxb-rejected', user_id: 'U456' } : { ...telegramConfig, bot_token: '456:rejected', user_id: '456' };
+      await failSettingsWriteBehindOlderSaves(t, f.state, () => service.configure(candidate));
+      assert.deepEqual(f.state.settings[channel], saved);
+      assert.deepEqual((await State.open(f.directory)).settings[channel], saved);
+      if (operation === 'replace') {
+        const attempted = channel === 'slack' ? f.slackTransports.at(-1)! : f.telegramTransports.at(-1)!;
+        assert.equal(attempted.stopped, true, 'an uncommitted replacement transport is retired');
+      }
+    });
+  }
+}
 
 test('a saved configuration retries a failed initial connection and stops retrying when cleared', async t => {
   const f = await fixture(t);

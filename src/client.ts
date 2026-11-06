@@ -5,6 +5,9 @@ export type { NotificationChannel, ChatChannel } from './chat-transport.js';
 export type { Adapter, BackendConnection, BindingRequest, DeliveryResult, Health, LarkBinding, LarkReceipt, LarkReply, ModuleStatus, PublicSession, SessionRegistration, ThreadInfo, ThreadMessage, ThreadRequest } from './types.js';
 export type { AgentId, AgentPrompt } from './agents.js';
 
+import type { SessionInbox, PolledAdapter } from './types.js';
+export type { SessionInbox, InboxMessage, PolledAdapter } from './types.js';
+
 export class NootifyClient {
   private readonly baseUrl: string;
   constructor(private readonly options: { baseUrl?: string; token: string }) {
@@ -44,6 +47,12 @@ export class NootifyClient {
   openThread(request: ThreadRequest): Promise<ThreadInfo> { return this.request('POST', '/v1/threads', request); }
   sendThread(sessionId: string, text: string, adapter?: Adapter, channel?: NotificationChannel): Promise<ThreadMessage> {
     return this.request('POST', `/v1/threads/${encodeURIComponent(sessionId)}/messages`, { text, adapter, channel });
+  }
+  receiveThread(sessionId: string, adapter: PolledAdapter): Promise<SessionInbox> {
+    return this.request('POST', `/v1/sessions/${encodeURIComponent(sessionId)}/inbox`, { adapter });
+  }
+  acknowledgeThread(sessionId: string, adapter: PolledAdapter, messageId: string): Promise<{ status: 'inbox_acknowledged'; message_id: string }> {
+    return this.request('POST', `/v1/sessions/${encodeURIComponent(sessionId)}/inbox/${encodeURIComponent(messageId)}/ack`, { adapter });
   }
   larkRecipient(): Promise<{ open_id?: string; source?: string }> { return this.request('GET', '/v1/lark/recipient'); }
   setLarkRecipient(openId: string): Promise<{ open_id?: string; source?: string }> { return this.request('PUT', '/v1/lark/recipient', { open_id: openId }); }

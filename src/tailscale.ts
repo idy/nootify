@@ -113,10 +113,14 @@ export class TailscaleService {
     this.pageState = { enabled: false, status: 'disabled', deviceName: 'nootify', sharing: 'off', login: { status: 'idle' } };
   }
   private async persist(enabled: boolean): Promise<void> {
-    const previous = this.options.state.settings.tailscale_enabled;
-    this.options.state.settings.tailscale_enabled = enabled;
-    try { await this.options.state.save(); }
-    catch (error) { this.options.state.settings.tailscale_enabled = previous; throw error; }
+    let previous: boolean | undefined;
+    await this.options.state.save({
+      apply: () => { previous = this.options.state.settings.tailscale_enabled; this.options.state.settings.tailscale_enabled = enabled; },
+      rollback: () => {
+        if (previous === undefined) delete this.options.state.settings.tailscale_enabled;
+        else this.options.state.settings.tailscale_enabled = previous;
+      },
+    });
     this.pageState.enabled = enabled;
   }
   async setEnabled(enabled: unknown): Promise<void> {

@@ -4,11 +4,12 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { assertMode } from './platform-fixtures.js';
 import { test, type TestContext } from 'node:test';
-import { AgentPrompts, BEGIN, END, agentSession, promptBlock, withBlock, withoutBlock } from '../src/agents.js';
+import { AGENT_IDS, AgentPrompts, BEGIN, END, agentSession, isAgent, promptBlock, promptFiles, promptTargets, withBlock, withoutBlock } from '../src/agents.js';
 
 async function fixture(t: TestContext) {
   const root = await mkdtemp(join(tmpdir(), 'nootify-agents-')); t.after(() => rm(root, { recursive: true, force: true }));
-  const files = { claude: join(root, 'claude', 'CLAUDE.md'), codex: join(root, 'codex', 'AGENTS.md'), opencode: join(root, 'missing', 'opencode', 'AGENTS.md') };
+  const files = { claude: join(root, 'claude', 'CLAUDE.md'), codex: join(root, 'codex', 'AGENTS.md'), opencode: join(root, 'missing', 'opencode', 'AGENTS.md'),
+    trae: join(root, 'missing', 'trae', 'user_rules', 'nootify.md'), workbuddy: join(root, 'missing', 'codebuddy', 'CODEBUDDY.md') };
   await mkdir(join(root, 'claude')); await mkdir(join(root, 'codex'));
   const state = join(root, 'state');
   const reports: Record<string, unknown>[] = [];
@@ -41,7 +42,7 @@ test('the block is appended and removed again without touching the rest of the p
   await assertMode(join(f.state, 'agent-backups', backups[0]), 0o600);
   assert.deepEqual(f.reports.map(record => record.status), ['prompt_injected', 'prompt_removed']);
   const list = await f.agents.list();
-  assert.deepEqual(list.map(agent => [agent.agent, agent.status]), [['claude', 'absent'], ['codex', 'absent'], ['opencode', 'missing']]);
+  assert.deepEqual(list.map(agent => [agent.agent, agent.status]), [['claude', 'absent'], ['codex', 'absent'], ['opencode', 'missing'], ['trae', 'missing'], ['workbuddy', 'missing']]);
 });
 
 test('outdated blocks are refreshed in place and unbalanced markers are never edited', async t => {
@@ -128,4 +129,82 @@ test('sessions come from each client\'s variables; commands quote paths and name
   assert.equal(withBlock('', marked), `${marked}\n`);
   assert.equal(withoutBlock(`a\n\n${marked}\nb\n`), 'a\nb\n');
   assert.throws(() => withBlock(`${END}\n${BEGIN}`, marked), /unbalanced/);
+});
+
+for (const agent of ['trae', 'workbuddy'] as const) {
+  test(`${agent} instructions preserve existing rules, support every channel, and require explicit conversation IDs after opening`, async t => {
+    const f = await fixture(t);
+    assert.ok(AGENT_IDS.includes(agent)); assert.ok(isAgent(agent));
+    assert.deepEqual(agentSession(agent, { CLAUDE_CODE_HOST_SESSION_ID: 'unrelated', CODEX_THREAD_ID: 'unrelated' }), { adapter: agent });
+    await f.agents.set(agent, true);
+    if (agent === 'trae') assert.match(await readFile(f.files[agent], 'utf8'), /^---\nalwaysApply: true\n---\n/);
+    await f.agents.set(agent, false);
+    const original = '---\nalwaysApply: true\n---\n\n# My instructions\nKeep this.\n';
+    await writeFile(f.files[agent], original);
+    await f.agents.handle({ method: 'PUT', path: `/v1/agents/${agent}`, body: { enabled: true } });
+    assert.equal((await f.agents.inspect(agent)).status, 'current');
+    const written = await readFile(f.files[agent], 'utf8'); assert.ok(written.startsWith(original));
+    assert.match(written, new RegExp(`thread-open --agent ${agent} --session-name`));
+    assert.match(written, new RegExp(`thread-send --agent ${agent} --session-id "<returned session_id>"`));
+    assert.match(written, new RegExp(`thread-receive --agent ${agent} --session-id`));
+    assert.match(written, /thread-ack.*--message-id "<returned message.id>"/);
+    assert.match(written, /cannot wake an idle or closed conversation/);
+    for (const channel of ['slack', 'telegram'] as const) {
+      const block = promptBlock(agent, { stateDir: f.state, port: 9417, notificationChannel: () => channel });
+      assert.match(block, new RegExp(`thread-send --agent ${agent} --channel ${channel} --session-id`));
+      assert.match(block, /original-channel receipt and reply commands/);
+    }
+    await f.agents.set(agent, false);
+    assert.equal(await readFile(f.files[agent], 'utf8'), original);
+  });
+}
+
+test('Nootify-specific rule file overrides select explicit Trae and WorkBuddy targets', () => {
+  const files = promptFiles({ NOOTIFY_TRAE_RULES_FILE: '/custom/trae/nootify.md', NOOTIFY_WORKBUDDY_RULES_FILE: '/custom/codebuddy/CODEBUDDY.md' });
+  assert.equal(files.trae, '/custom/trae/nootify.md'); assert.equal(files.workbuddy, '/custom/codebuddy/CODEBUDDY.md');
+  assert.deepEqual(promptTargets({ NOOTIFY_TRAE_RULES_FILE: '/custom/trae/nootify.md' }).trae, ['/custom/trae/nootify.md']);
+  const defaults = promptTargets({}).trae;
+  assert.equal(defaults.length, 2);
+  assert.match(defaults[0], /\/\.trae\/user_rules\/nootify\.md$/);
+  assert.match(defaults[1], /\/\.trae-cn\/user_rules\/nootify\.md$/);
+});
+
+test('Trae enables both editions before installation and refreshes/removes both without restarting the service', async t => {
+  const f = await fixture(t);
+  const files = [join(f.root, 'trae', 'user_rules', 'nootify.md'), join(f.root, 'trae-cn', 'user_rules', 'nootify.md')];
+  const agents = new AgentPrompts({ stateDir: f.state, port: 9417, files: { ...f.files, trae: files } });
+  assert.equal((await agents.inspect('trae')).status, 'missing');
+  const enabled = await agents.set('trae', true);
+  assert.equal(enabled.status, 'current'); assert.deepEqual(enabled.files, files);
+  for (const file of files) assert.match(await readFile(file, 'utf8'), /alwaysApply: true[\s\S]*thread-open --agent trae/);
+  const ownRule = join(f.root, 'trae-cn', 'user_rules', 'mine.md');
+  await writeFile(ownRule, 'China edition user instructions\n');
+  await writeFile(files[1], 'China edition existing rules\n');
+  const partial = await agents.inspect('trae');
+  assert.equal(partial.status, 'outdated'); assert.equal(partial.injected, true);
+  await agents.set('trae', true);
+  assert.equal((await agents.inspect('trae')).status, 'current');
+  assert.match(await readFile(files[1], 'utf8'), /^China edition existing rules\n/);
+  await agents.set('trae', false);
+  for (const file of files) assert.ok(!(await readFile(file, 'utf8')).includes(BEGIN));
+  assert.equal(await readFile(files[1], 'utf8'), 'China edition existing rules\n');
+  assert.equal(await readFile(ownRule, 'utf8'), 'China edition user instructions\n');
+});
+
+test('Trae checks all edition targets for conflicting markers and shared files before editing either', async t => {
+  const f = await fixture(t);
+  const international = join(f.root, 'claude', 'trae.md'); const cn = join(f.root, 'claude', 'trae-cn.md');
+  const agents = new AgentPrompts({ stateDir: f.state, port: 9417, files: { ...f.files, trae: [international, cn] } });
+  await writeFile(international, 'International rules\n');
+  await writeFile(cn, `${BEGIN}\nbroken markers\n`);
+  assert.equal((await agents.inspect('trae')).status, 'conflict');
+  await assert.rejects(agents.set('trae', true), /unbalanced/);
+  assert.equal(await readFile(international, 'utf8'), 'International rules\n');
+  await writeFile(f.files.codex, 'Codex rules\n');
+  if (process.platform !== 'win32') { await rm(cn); await symlink(f.files.codex, cn); }
+  const shared = process.platform === 'win32'
+    ? new AgentPrompts({ stateDir: f.state, port: 9417, files: { ...f.files, trae: [international, f.files.codex] } }) : agents;
+  await assert.rejects(shared.set('trae', true), /share the same prompt file/);
+  assert.equal(await readFile(international, 'utf8'), 'International rules\n');
+  assert.equal(await readFile(f.files.codex, 'utf8'), 'Codex rules\n');
 });
