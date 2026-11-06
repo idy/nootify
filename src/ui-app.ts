@@ -160,10 +160,10 @@ const state = {
   agents: undefined as AgentsPage | undefined, agentsError: '' as TranslatedText, pendingAgents: new Set<string>(), openPreviews: new Set<string>(), channelEdited: false, pendingChannel: false,
   settings: undefined as (SettingsPage & { editable: boolean }) | undefined, github: undefined as GitHubSettings | undefined, loadingGitHub: false,
   tailscale: undefined as (TailscalePage & { editable: boolean }) | undefined, loadingTailscale: false, tailscaleError: '' as TranslatedText,
-  settingsNote: undefined as { text: TranslatedText; error: boolean } | undefined, pendingSettings: new Set<string>(),
+  settingsNote: undefined as { text: TranslatedText; error: boolean; source?: 'settings-read' } | undefined, pendingSettings: new Set<string>(),
   larkConnectionType: undefined as LarkConnectionType | undefined,
   larkRegistration: undefined as LarkRegistrationPage | undefined, loadingLarkRegistration: false, larkManual: false,
-  larkSetup: undefined as LarkSetup | undefined, loadingLarkSetup: false,
+  larkSetup: undefined as LarkSetup | undefined, loadingLarkSetup: false, larkReconcilePending: false,
   larkEdited: false, confirmClear: false, chatEdited: { slack: false, telegram: false }, confirmChatClear: { slack: false, telegram: false }, importing: undefined as { name: string; content: unknown; summary: ImportSummary } | undefined,
   recipientDirectory: undefined as LarkRecipientsPage | undefined, recipientPicker: false, loadingRecipients: false, recipientError: undefined as number | undefined,
   recipientRequest: undefined as AbortController | undefined, recipientLoadedAt: 0, recipientDraft: '', recipientActive: '',
@@ -644,7 +644,8 @@ function fillChat(channel: ChatChannel): void {
   room.value = page?.chat_id ?? '';
   field(`${channel}-user-id`).value = page?.user_id ?? '';
 }
-async function loadSettings(): Promise<void> {
+async function loadSettings(): Promise<boolean> {
+  let loaded = false;
   try {
     const response = await fetch('/ui/api/settings', { cache: 'no-store', signal: AbortSignal.timeout(8000) });
     if (!response.ok) throw new Error(response.status === 404 ? t('设置模块未启用') : `HTTP ${response.status}`);
@@ -653,12 +654,15 @@ async function loadSettings(): Promise<void> {
     if (state.recipientDirectory && state.recipientDirectory.app_id !== state.settings.lark.app_id) invalidateRecipientDirectory();
     if (!state.larkEdited) fillLark();
     for (const channel of chatChannels) if (!state.chatEdited[channel]) fillChat(channel);
-  } catch (error) { state.settingsNote = { text: () => t('无法读取设置：{p0}', { p0: (error as Error).message }), error: true }; }
+    loaded = true;
+    if (state.settingsNote?.source === 'settings-read') state.settingsNote = undefined;
+  } catch (error) { state.settingsNote = { text: () => t('无法读取设置：{p0}', { p0: (error as Error).message }), error: true, source: 'settings-read' }; }
   renderSettings();
   if (state.view === 'settings-lark' && state.settings?.editable === true) {
     if (!state.larkRegistration) void loadLarkRegistration();
     if (state.settings.lark.configured && state.larkSetup?.app_id !== state.settings.lark.app_id) void loadLarkSetup();
   }
+  return loaded;
 }
 async function loadGitHub(): Promise<void> {
   if (state.loadingGitHub) return;
@@ -776,12 +780,24 @@ async function loadLarkRegistration(): Promise<void> {
     if (state.larkRegistration !== previousFlow) return; // A type switch or cancellation supersedes this response.
     state.larkRegistration = next;
     if (['starting', 'waiting', 'connecting'].includes(next.status)) state.larkConnectionType = 'personal-app';
+    const wasActive = ['starting', 'waiting', 'connecting'].includes(previous ?? '');
     if (next.status === 'complete') {
-      if (['starting', 'waiting', 'connecting'].includes(previous ?? '') || !state.larkSetup || state.larkSetup.app_id !== next.app_id) state.larkSetup = next.setup;
-      if (previous !== 'complete' || next.app_id !== state.settings.lark.app_id) {
-        state.larkConnectionType = 'personal-app';
-        state.larkEdited = false;
-        await Promise.all([loadSettings(), loadSnapshot()]);
+      if (wasActive || !state.larkSetup || state.larkSetup.app_id !== next.app_id) state.larkSetup = next.setup;
+      if (previous !== 'complete' || next.app_id !== state.settings.lark.app_id) state.larkReconcilePending = true;
+    } else if (wasActive && (next.status === 'idle' || next.status === 'failed')) {
+      // Registration is transient: after a service restart, only saved settings can tell us whether it committed.
+      state.larkReconcilePending = true;
+    }
+    if (state.larkReconcilePending) {
+      const before = state.settings.lark;
+      state.larkEdited = false; renderSettings();
+      if (await loadSettings()) {
+        const current = state.settings!.lark;
+        if (next.status === 'complete' || current.app_id !== before.app_id || current.connection_type !== before.connection_type) {
+          state.larkConnectionType = current.connection_type ?? 'bot';
+        }
+        state.larkReconcilePending = false;
+        await loadSnapshot();
       }
     }
   } catch (error) { state.settingsNote = { text: () => t('{p0}：{p1}', { p0: t('无法读取扫码配置状态'), p1: (error as Error).message }), error: true }; }
@@ -811,7 +827,7 @@ function renderLarkRegistration(remote: boolean): void {
   const flow = state.larkRegistration; const active = larkRegistrationActive();
   const personal = selectedLarkType() === 'personal-app';
   const setup = flow?.app_id && state.larkSetup?.app_id === flow.app_id ? state.larkSetup : flow?.setup;
-  const busy = state.pendingSettings.has('lark-registration');
+  const busy = state.pendingSettings.has('lark-registration') || state.larkReconcilePending;
   const disabled = remote || !state.settings || state.settings.lark.source === 'environment';
   for (const [id, type] of [['lark-type-bot', 'bot'], ['lark-type-personal', 'personal-app']] as const) {
     $(id).setAttribute('aria-pressed', String(selectedLarkType() === type));
@@ -871,7 +887,7 @@ function renderLarkSetup(remote: boolean): void {
   setText('lark-setup-description', state.loadingLarkSetup ? t('正在检查应用权限…') : !setup ? t('权限检查尚未完成')
     : setup.status === 'ready' ? t('会话群公告和群消息所需权限已开通。') : setup.status === 'unavailable' ? t('无法读取权限列表，请在飞书后台核对所需权限。')
     : t('还需开通群权限，才能按会话收发消息。'));
-  $<HTMLButtonElement>('lark-setup-retry').disabled = remote || state.loadingLarkSetup || larkRegistrationActive();
+  $<HTMLButtonElement>('lark-setup-retry').disabled = remote || state.loadingLarkSetup || larkRegistrationActive() || state.larkReconcilePending;
   $('lark-setup-help').hidden = !setup || setup.status === 'ready';
   renderLarkQr('lark-setup-qr', remote ? undefined : setup?.permission?.qr, t('飞书权限配置二维码'));
   $('lark-setup-help').classList.toggle('without-qr', !setup?.permission?.qr);
@@ -891,7 +907,7 @@ function renderLark(remote: boolean): void {
   const environment = lark?.source === 'environment';
   const hasSecret = lark?.configured && field('lark-app-id').value.trim() === lark.app_id;
   field('lark-app-secret').placeholder = hasSecret ? '••••••••••••••••' : '';
-  const busy = !lark || state.pendingSettings.has('lark') || state.pendingSettings.has('lark-secret') || larkRegistrationActive();
+  const busy = !lark || state.pendingSettings.has('lark') || state.pendingSettings.has('lark-secret') || larkRegistrationActive() || state.larkReconcilePending;
   field('lark-app-id').disabled = remote || environment || busy;
   field('lark-app-secret').disabled = remote || busy;
   field('lark-app-secret').readOnly = environment;
@@ -899,9 +915,9 @@ function renderLark(remote: boolean): void {
   showLarkSecret(field('lark-app-secret').type === 'text');
   setText('lark-secret-hint', remote ? t('App Secret 只能在这台 Mac 上查看。') : hasSecret ? t('已配置 App Secret，留空则保留；点击眼睛可查看。') : t('保存前会先向飞书验证；点击眼睛可查看输入的密钥。'));
   $('lark-recipient-group').hidden = !lark?.configured;
-  field('lark-recipient').disabled = remote || !lark?.configured || state.pendingSettings.has('recipient');
+  field('lark-recipient').disabled = remote || !lark?.configured || state.pendingSettings.has('recipient') || state.larkReconcilePending;
   $<HTMLButtonElement>('lark-save').disabled = remote || environment || busy;
-  $<HTMLButtonElement>('recipient-save').disabled = remote || state.pendingSettings.has('recipient');
+  $<HTMLButtonElement>('recipient-save').disabled = remote || state.pendingSettings.has('recipient') || state.larkReconcilePending;
   const clear = $<HTMLButtonElement>('lark-clear');
   clear.hidden = remote || !lark?.saved; clear.disabled = busy;
   setText('lark-clear', state.confirmClear ? t('再点一次确认清除') : t('清除保存的凭据'));
@@ -930,7 +946,7 @@ function renderRecipientRows(users: LarkRecipientsPage['users']): void {
   });
 }
 function renderRecipientPicker(remote: boolean): void {
-  const ready = !!state.settings?.lark.configured && field('lark-app-id').value.trim() === state.settings.lark.app_id;
+  const ready = !!state.settings?.lark.configured && !state.larkReconcilePending && field('lark-app-id').value.trim() === state.settings.lark.app_id;
   const saving = state.pendingSettings.has('recipient');
   const choose = $<HTMLButtonElement>('recipient-choose');
   choose.disabled = remote || !ready || saving || state.pendingSettings.has('lark');
@@ -1443,9 +1459,8 @@ async function cancelLarkQr(): Promise<boolean> {
   if (!completed) return false;
   state.larkConnectionType = 'personal-app'; state.larkEdited = false;
   state.larkSetup = completed.setup; invalidateRecipientDirectory();
-  const previousSettings = state.settings;
-  await Promise.all([loadSettings(), loadSnapshot()]);
-  if (state.settings === previousSettings || state.settings?.lark.app_id !== completed.app_id || state.settings?.lark.connection_type !== 'personal-app') {
+  const [loaded] = await Promise.all([loadSettings(), loadSnapshot()]);
+  if (!loaded || state.settings?.lark.app_id !== completed.app_id || state.settings?.lark.connection_type !== 'personal-app') {
     throw new Error(t('应用已保存，请刷新设置查看当前连接。'));
   }
   state.larkRegistration = { status: 'idle' };
@@ -1743,7 +1758,7 @@ loadSettingsView();
 setInterval(() => {
   void loadSnapshot();
   if (state.view === 'settings-github' && loginActive(state.github?.login)) void loadGitHub();
-  if (state.view === 'settings-lark' && (larkRegistrationActive() || !state.larkRegistration)) void loadLarkRegistration();
+  if (state.view === 'settings-lark' && (larkRegistrationActive() || state.larkReconcilePending || !state.larkRegistration)) void loadLarkRegistration();
   if (state.view === 'settings-tailscale') void loadTailscale();
 }, 2000);
 setInterval(() => { if (usesPulls(state.view)) void loadPulls(); }, 10000);
