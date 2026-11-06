@@ -12,7 +12,7 @@ import { ChatService } from './chat-service.js';
 import { createSlackTransport } from './slack.js';
 import { createTelegramTransport } from './telegram.js';
 import { resolveCredentials } from './lark-metadata.js';
-import { HttpError } from './types.js';
+import { HttpError, RetryableDeliveryError, UnconfirmedDeliveryError } from './types.js';
 import type { ServiceModule } from './types.js';
 import { EventLog } from './events.js';
 import { serveUi } from './ui.js';
@@ -53,8 +53,8 @@ function listen(server: Server, port: number, host: string): Promise<void> {
     server.listen(port, host, () => { server.off('error', reject); resolveListen(); });
   });
 }
-export function createServiceHost(modules: ServiceModule[], token: string, logs?: EventLog, options: HostOptions = {}): Server {
-  return createServer(async (request, response) => {
+export function createServiceHost(modules: ServiceModule[], token: string, logs?: EventLog, options: HostOptions = {}, server: Server = createServer()): Server {
+  server.on('request', async (request, response) => {
     const send = (status: number, body: unknown) => {
       response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
       response.end(JSON.stringify(body));
@@ -86,9 +86,11 @@ export function createServiceHost(modules: ServiceModule[], token: string, logs?
       }
       throw new HttpError(404, 'No such service endpoint');
     } catch (error) {
-      send(error instanceof HttpError ? error.status : 500, { error: (error as Error).message });
+      const status = error instanceof HttpError ? error.status : error instanceof UnconfirmedDeliveryError ? 409 : error instanceof RetryableDeliveryError ? 503 : 500;
+      send(status, { error: (error as Error).message });
     }
   });
+  return server;
 }
 export async function main(): Promise<void> {
   const { values } = parseArgs({ options: {
@@ -96,58 +98,73 @@ export async function main(): Promise<void> {
   } });
   const port = Number(values.port);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid port');
-  const state = await State.open(values['state-dir']);
-  const logs = await EventLog.open(state.directory);
-  const report = (record: Record<string, unknown>) => { logs.report(record); };
-  const sessions = new SessionsService(state, undefined, report, undefined, { port });
-  const resolved = await resolveCredentials(process.env, state.settings, values['mcp-config']);
-  const lark = new LarkService(state, sessions, resolved?.credentials, report, undefined, port);
-  const slack = new ChatService('slack', state, sessions, createSlackTransport, report, port);
-  const telegram = new ChatService('telegram', state, sessions, createTelegramTransport, report, port);
-  // Routine five-minute refreshes would push Feishu events out of the bounded log; record outcome changes only.
-  let pullsOutcome: unknown;
-  const pulls = new PullRequestsService(state.directory, record => {
-    if (record.status === pullsOutcome) return;
-    pullsOutcome = record.status;
-    report({ source: 'pulls', ...record });
-  }, undefined, undefined, () => state.settings.github_token);
-  const tsnet = new TsnetClient(join(state.directory, 'tailscale'));
-  const tailnet = new TailnetAccess(80, { users: process.env.NOOTIFY_TAILNET_USERS?.split(',').map(user => user.trim()).filter(Boolean), probe: tsnet });
-  const peers = new WeakMap<Socket, string>();
-  const tailscale = new TailscaleService({ state, access: tailnet, client: tsnet, report, listen: () => listenTailnetProxy(tailnetServer, peers) });
-  const agents = new AgentPrompts({ stateDir: state.directory, port, notificationChannel: () => state.settings.notification_channel ?? 'feishu', tailnetAddress: () => { const url = tailnet.url(); return url ? new URL(url).hostname : undefined; } }, report);
-  const modules: ServiceModule[] = [sessions, slack, telegram, lark, pulls, agents];
-  const github = new GitHubAuth(state, report, () => pulls.refreshSoon());
-  const settings = new SettingsService({ state, lark, slack, telegram, github, pulls, agents, tailscale, mcpConfig: values['mcp-config'], source: resolved?.source, report });
-  const channel = (): ChannelSummary => {
-    const selected = state.settings.notification_channel ?? 'feishu';
-    if (selected === 'feishu') return lark.channel();
-    const status = (selected === 'slack' ? slack : telegram).page();
-    return { name: selected, configured: status.configured, recipient: status.user_id, groups: status.threads };
+  // Reserve the service before State.open can establish SQLite as the authority over legacy JSON.
+  const starting = (_request: IncomingMessage, response: import('node:http').ServerResponse) => {
+    response.writeHead(503, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', connection: 'close' });
+    response.end(JSON.stringify({ service: 'nootify', status: 'starting' }));
   };
-  const page = { pulls, tailnet, agents, channel, settings };
-  const tailnetServer = createServiceHost(modules, state.token, logs, { ...page, via: 'tailnet', peerAddress: socket => peers.get(socket) });
-  const server = createServiceHost(modules, state.token, logs, page);
+  const server = createServer(starting);
   await listen(server, port, '127.0.0.1');
-  report({ status: 'ready', service: 'nootify', port });
-  for (const module of modules) await module.start?.();
-
-  // The embedded device owns tailnet port 80; its private backend preserves the original peer address.
-  await tailscale.start();
-
-  let stopping = false;
-  const stop = async () => {
-    if (stopping) return;
-    stopping = true;
-    await tailscale.stop();
-    await settings.stop();
-    for (const module of [...modules].reverse()) await module.stop?.();
-    await logs.flush();
+  const closeServer = async () => {
     server.closeAllConnections();
-    server.close();
+    await new Promise<void>(resolveClose => server.close(() => resolveClose()));
   };
-  process.once('SIGTERM', () => { void stop(); });
-  process.once('SIGINT', () => { void stop(); });
+  let shutdown = closeServer;
+  try {
+    const state = await State.open(values['state-dir']);
+    const logs = await EventLog.open(state.directory);
+    const report = (record: Record<string, unknown>) => { logs.report(record); };
+    const sessions = new SessionsService(state, undefined, report, undefined, { port });
+    const resolved = await resolveCredentials(process.env, state.settings, values['mcp-config']);
+    const lark = new LarkService(state, sessions, resolved?.credentials, report, undefined, port);
+    const slack = new ChatService('slack', state, sessions, createSlackTransport, report, port);
+    const telegram = new ChatService('telegram', state, sessions, createTelegramTransport, report, port);
+    // Routine five-minute refreshes would push Feishu events out of the bounded log; record outcome changes only.
+    let pullsOutcome: unknown;
+    const pulls = new PullRequestsService(state.directory, record => {
+      if (record.status === pullsOutcome) return;
+      pullsOutcome = record.status;
+      report({ source: 'pulls', ...record });
+    }, undefined, undefined, () => state.settings.github_token);
+    const tsnet = new TsnetClient(join(state.directory, 'tailscale'));
+    const tailnet = new TailnetAccess(80, { users: process.env.NOOTIFY_TAILNET_USERS?.split(',').map(user => user.trim()).filter(Boolean), probe: tsnet });
+    const peers = new WeakMap<Socket, string>();
+    const tailscale = new TailscaleService({ state, access: tailnet, client: tsnet, report, listen: () => listenTailnetProxy(tailnetServer, peers) });
+    const agents = new AgentPrompts({ stateDir: state.directory, port, notificationChannel: () => state.settings.notification_channel ?? 'feishu', tailnetAddress: () => { const url = tailnet.url(); return url ? new URL(url).hostname : undefined; } }, report);
+    const modules: ServiceModule[] = [sessions, slack, telegram, lark, pulls, agents];
+    const github = new GitHubAuth(state, report, () => pulls.refreshSoon());
+    const settings = new SettingsService({ state, lark, slack, telegram, github, pulls, agents, tailscale, mcpConfig: values['mcp-config'], source: resolved?.source, report });
+    const channel = (): ChannelSummary => {
+      const selected = state.settings.notification_channel ?? 'feishu';
+      if (selected === 'feishu') return lark.channel();
+      const status = (selected === 'slack' ? slack : telegram).page();
+      return { name: selected, configured: status.configured, recipient: status.user_id, groups: status.threads };
+    };
+    const page = { pulls, tailnet, agents, channel, settings };
+    const tailnetServer = createServiceHost(modules, state.token, logs, { ...page, via: 'tailnet', peerAddress: socket => peers.get(socket) });
+    server.off('request', starting);
+    createServiceHost(modules, state.token, logs, page, server);
+    let stopping = false;
+    const stop = async () => {
+      if (stopping) return;
+      stopping = true;
+      await tailscale.stop();
+      await settings.stop();
+      for (const module of [...modules].reverse()) await module.stop?.();
+      await logs.flush();
+      await closeServer();
+    };
+    shutdown = stop;
+    report({ status: 'ready', service: 'nootify', port });
+    for (const module of modules) await module.start?.();
+    // The embedded device owns tailnet port 80; its private backend preserves the original peer address.
+    await tailscale.start();
+    process.once('SIGTERM', () => { void stop(); });
+    process.once('SIGINT', () => { void stop(); });
+  } catch (error) {
+    await shutdown().catch(() => {});
+    throw error;
+  }
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   main().catch(error => { console.error(JSON.stringify({ status: 'failed', error: (error as Error).message })); process.exitCode = 1; });

@@ -45,12 +45,13 @@ function translatedLabels() {
     'settings-about': { hash: '#/settings/about', group: t('设置'), title: t('关于'), section: 'settings-view' },
   };
   const descriptions: Record<string, string> = {
-    ready: t('服务已启动'), lark_ready: t('飞书长连接已建立'), lark_failed: t('飞书连接失败'),
+    ready: t('服务已启动'), lark_ready: t('飞书消息接收已启动'), lark_failed: t('飞书连接失败'), lark_discovery_failed: t('飞书群聊发现失败'),
     slack_ready: t('Slack 连接已建立'), slack_failed: t('Slack 连接失败'), telegram_ready: t('Telegram 连接已建立'), telegram_failed: t('Telegram 连接失败'),
     notification_channel_changed: t('默认通知渠道已更新'), slack_configured: t('Slack 配置已更新'), telegram_configured: t('Telegram 配置已更新'),
     received: t('服务收到消息'), socket_written: t('已写入客户端，等待会话回执'), input_accepted: t('客户端已接受输入，等待会话回执'),
     inbox_queued: t('已存入收件箱，等待会话主动检查'),
     session_acknowledged: t('会话已确认收到'), replied: t('回复已发回原消息'), reply_failed: t('发送回复失败'),
+    delivery_unconfirmed: t('投递结果未知，未自动重发'), state_write_failed: t('状态保存失败'),
     delivery_failed: t('消息转发失败'), ignored: t('已跳过此消息'), queue_full: t('消息队列已满'), registered: t('本机会话已注册'),
     bound: t('已保存会话绑定'), stopped: t('监听已停止'), connecting: t('正在连接消息服务'), pin_failed: t('绑定消息置顶失败'),
     reconnecting: t('消息服务正在重连'), reconnected: t('消息服务已重新连接'), refresh_completed: t('GitHub PR 已刷新'), refresh_failed: t('GitHub PR 刷新失败'),
@@ -64,7 +65,7 @@ function translatedLabels() {
     archive_unknown: t('无法确认归档状态'), backend_unavailable: t('客户端接口未配置或不可用'), session_busy: t('当前轮次已变化，本次未投递'),
     missing_announcement: t('群公告没有会话声明'), ambiguous_announcement: t('群公告有多个会话声明'), unsupported_adapter: t('尚未支持该客户端'),
     sender_not_allowed: t('发送者不在允许名单'), duplicate: t('重复消息'), unsupported_message: t('暂不处理此消息类型'),
-    host_mismatch: t('会话位于另一台机器'), invalid_content: t('消息内容无效'), delivery_failed: t('投递失败'),
+    host_mismatch: t('会话位于另一台机器'), invalid_content: t('消息内容无效'), delivery_failed: t('投递失败'), input_rejected: t('客户端拒绝此输入'),
   };
   const sourceNames: Record<string, string> = { host: t('服务'), sessions: t('会话'), lark: t('飞书'), slack: 'Slack', telegram: 'Telegram', pulls: 'GitHub', agents: 'Agents' };
   const channelNames: Record<NotificationChannel, string> = { feishu: t('飞书'), slack: 'Slack', telegram: 'Telegram' };
@@ -233,6 +234,7 @@ function source(entry: LogEntry): string {
     : entry.status.startsWith('lark') || entry.chat_id ? 'lark' : entry.session_id ? 'sessions' : 'host');
 }
 function category(entry: LogEntry): string {
+  if (entry.status === 'delivery_unconfirmed' || entry.reason === 'input_rejected') return 'error';
   if (entry.status === 'ignored') return 'ignored';
   if (entry.status === 'received') return 'received';
   if (entry.status === 'session_acknowledged') return 'acknowledged';

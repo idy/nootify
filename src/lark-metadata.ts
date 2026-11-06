@@ -8,7 +8,38 @@ export interface Credentials { appId: string; appSecret: string }
 export type CredentialSource = 'environment' | 'settings' | 'mcp-config';
 export interface LarkApi {
   appId: string;
+  /** Last provider Date header extrapolated with monotonic elapsed time, when available. */
+  serverTime?(): number | undefined;
   request<T>(method: 'GET' | 'POST' | 'PATCH', path: string, body?: unknown, signal?: AbortSignal): Promise<T>;
+}
+const REQUEST_TIMEOUT_MS = 10_000;
+/** Bound the whole operation as well as forwarding cancellation to the underlying HTTP transport. */
+export async function requestLark<T>(api: LarkApi, method: 'GET' | 'POST' | 'PATCH', path: string, body?: unknown,
+  signal?: AbortSignal, timeoutMs = REQUEST_TIMEOUT_MS): Promise<T> {
+  const deadline = signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs);
+  deadline.throwIfAborted();
+  let abort!: () => void;
+  const cancelled = new Promise<never>((_resolve, reject) => {
+    abort = () => reject(deadline.reason);
+    deadline.addEventListener('abort', abort, { once: true });
+  });
+  try {
+    const pending = Promise.resolve().then(() => { deadline.throwIfAborted(); return api.request<T>(method, path, body, deadline); });
+    const result = await Promise.race([pending, cancelled]);
+    deadline.throwIfAborted();
+    return result;
+  } finally { deadline.removeEventListener('abort', abort); }
+}
+export function boundedLarkApi(delegate: LarkApi, timeoutMs = REQUEST_TIMEOUT_MS): LarkApi {
+  return { appId: delegate.appId, ...(delegate.serverTime ? { serverTime: () => delegate.serverTime!() } : {}),
+    request: <T>(method: 'GET' | 'POST' | 'PATCH', path: string, body?: unknown, signal?: AbortSignal) =>
+      requestLark<T>(delegate, method, path, body, signal, timeoutMs) };
+}
+/** Capture activation in the provider's clock if the host is materially skewed. */
+export function larkActivationTime(api: LarkApi, localStart: number, elapsed: number): number {
+  const provider = api.serverTime?.();
+  const providerStart = provider === undefined ? undefined : provider - elapsed;
+  return providerStart !== undefined && Math.abs(providerStart - localStart) > REQUEST_TIMEOUT_MS ? Math.floor(providerStart) : localStart;
 }
 export const quietLogger = { debug() {}, info() {}, warn() {}, error() {}, trace() {} };
 export interface LarkPermission { url?: string; scopes: string[] }
@@ -76,9 +107,28 @@ export async function verifyCredentials(credentials: Credentials): Promise<void>
   const body = await response.json() as { code?: number; msg?: string };
   if (body.code !== 0) throw new ApiError(body.code ?? response.status, body.msg);
 }
-export function createLarkApi(credentials: Credentials): LarkApi {
-  const client = new sdk.Client({ ...credentials, domain: sdk.Domain.Feishu, appType: sdk.AppType.SelfBuild, logger: quietLogger });
-  return { appId: credentials.appId, async request<T>(method: 'GET' | 'POST' | 'PATCH', url: string, data?: unknown, signal?: AbortSignal): Promise<T> {
+export function createLarkApi(credentials: Credentials, timeoutMs = REQUEST_TIMEOUT_MS): LarkApi {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2_147_483_647) throw new Error('Invalid Feishu request timeout');
+  // A separate Axios instance bounds SDK token acquisition too, without changing global SDK defaults.
+  const http = sdk.defaultHttpInstance.create({ timeout: timeoutMs, headers: { 'User-Agent': 'Nootify' } });
+  let clock: { epoch: number; at: number } | undefined;
+  http.interceptors.request.use(config => {
+    const deadline = AbortSignal.timeout(timeoutMs);
+    config.signal = config.signal ? AbortSignal.any([config.signal as AbortSignal, deadline]) : deadline;
+    return config;
+  }, undefined, { synchronous: true });
+  http.interceptors.response.use(response => {
+    const epoch = Date.parse(String(response.headers.date ?? ''));
+    if (Number.isFinite(epoch)) clock = { epoch, at: performance.now() };
+    // Match the SDK's response-body contract, including its optional header-return mode.
+    return (response.config as { $return_headers?: boolean }).$return_headers ? { data: response.data, headers: response.headers } : response.data;
+  });
+  const client = new sdk.Client({ ...credentials, domain: sdk.Domain.Feishu, appType: sdk.AppType.SelfBuild, logger: quietLogger,
+    // The response interceptor establishes the SDK's unwrapped-body transport contract.
+    httpInstance: http as unknown as sdk.HttpInstance });
+  return boundedLarkApi({ appId: credentials.appId,
+    serverTime: () => clock && clock.epoch + Math.max(0, performance.now() - clock.at),
+    async request<T>(method: 'GET' | 'POST' | 'PATCH', url: string, data?: unknown, signal?: AbortSignal): Promise<T> {
     let response: { code: number; msg?: string; data: T };
     try { response = await client.request({ method, url, data, signal }); }
     catch (error) {
@@ -88,7 +138,7 @@ export function createLarkApi(credentials: Credentials): LarkApi {
     }
     if (response.code !== 0) throw new ApiError(response.code, response.msg, permissionDetails(response, credentials.appId));
     return response.data;
-  } };
+  } }, timeoutMs);
 }
 export function bindingToken(binding: Pick<RemoteBinding, 'host_id' | 'adapter' | 'session_id'>): string {
   for (const value of [binding.host_id, binding.adapter, binding.session_id]) {
@@ -146,23 +196,25 @@ export function parseAnnouncement(content: unknown): AnnouncementRoute {
   return [...routes.values()][0];
 }
 interface Announcement { kind: 'doc' | 'docx'; revision: string | number; content: unknown; path: string }
-export async function readAnnouncement(api: LarkApi, chatId: string): Promise<Announcement> {
+export async function readAnnouncement(api: LarkApi, chatId: string, signal = AbortSignal.timeout(REQUEST_TIMEOUT_MS)): Promise<Announcement> {
   const path = `/open-apis/im/v1/chats/${encodeURIComponent(chatId)}/announcement`;
   try {
-    const data = await api.request<{ revision: string; content: unknown }>('GET', path);
+    const data = await requestLark<{ revision: string; content: unknown }>(api, 'GET', path, undefined, signal);
     return { kind: 'doc', revision: data.revision, content: data.content, path };
   } catch (error) { if (!(error instanceof ApiError) || error.code !== 232097) throw error; }
   const docxPath = `/open-apis/docx/v1/chats/${encodeURIComponent(chatId)}/announcement`;
-  const metadata = await api.request<{ revision_id: number }>('GET', docxPath);
+  const metadata = await requestLark<{ revision_id: number }>(api, 'GET', docxPath, undefined, signal);
   const blocks: unknown[] = [];
+  const tokens = new Set<string>();
   let pageToken: string | undefined;
   do {
     const query = new URLSearchParams({ page_size: '500', revision_id: String(metadata.revision_id) });
     if (pageToken) query.set('page_token', pageToken);
-    const page = await api.request<{ items?: unknown[]; has_more?: boolean; page_token?: string }>('GET', `${docxPath}/blocks?${query}`);
+    const page = await requestLark<{ items?: unknown[]; has_more?: boolean; page_token?: string }>(api, 'GET', `${docxPath}/blocks?${query}`, undefined, signal);
     blocks.push(...(page.items ?? []));
-    if (page.has_more && !page.page_token) throw new Error('Missing announcement page token');
+    if (page.has_more && (!page.page_token || tokens.has(page.page_token))) throw new Error('Invalid announcement page token');
     pageToken = page.has_more ? page.page_token : undefined;
+    if (pageToken) tokens.add(pageToken);
   } while (pageToken);
   return { kind: 'docx', revision: metadata.revision_id, content: blocks, path: docxPath };
 }

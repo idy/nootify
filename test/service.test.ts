@@ -122,7 +122,7 @@ test('private state persists registrations across restarts and omits credentials
   assert.equal(reopened.token, state.token);
   assert.ok(!JSON.stringify(reopened.publicSessions()).includes('private-test-token'));
   assert.ok(!JSON.stringify(reopened.publicSessions()).includes('socket_path'));
-  assert.equal((await stat(join(dir, 'state.json'))).mode & 0o777, 0o600);
+  assert.equal((await stat(join(dir, 'state.sqlite'))).mode & 0o777, 0o600);
   assert.equal((await stat(join(dir, 'auth-token'))).mode & 0o777, 0o600);
 });
 
@@ -141,8 +141,8 @@ test('Feishu replies use the registry, verify metadata and suppress duplicate ID
   state.bindings.set(binding.chat_id, { chat_id: binding.chat_id, session_id: binding.session_id, sender_open_id: binding.sender_open_id, registration_message_id: 'om_binding' });
   const reports: Record<string, unknown>[] = [];
   const lark = new LarkService(state, new SessionsService(state, catalogFor(state)), undefined, r => reports.push(r), announcementApi());
-  assert.equal(lark.enqueue(event('om_live', 'hello from Feishu')), true);
-  assert.equal(lark.enqueue(event('om_live', 'duplicate')), false);
+  assert.equal(await lark.enqueue(event('om_live', 'hello from Feishu')), true);
+  assert.equal(await lark.enqueue(event('om_live', 'duplicate')), true, 'an already handled ID is a terminal completion');
   await lark.drain();
   assert.match(target.messages.join(''), /hello from Feishu/); assert.ok(reports.some(report => report.status === 'socket_written'));
   assert.ok(reports.some(report => report.reason === 'duplicate'));

@@ -73,7 +73,12 @@ test('disabled installations start no client, inspect no host account, and prese
 test('disabling closes active connections but preserves enrollment for reconnect', async t => {
   const { service, client, access } = await harness(t); client.reply = running;
   await service.start(); await service.setEnabled(true);
-  const target = client.starts[0].target; const socket = await connected(target); const closed = once(socket, 'close');
+  const target = client.starts[0].target; const socket = await connected(target);
+  // Disabling may destroy the TCP connection before the server accepts it; either FIN or RESET closes it.
+  const closed = new Promise<void>((resolve, reject) => {
+    socket.once('error', error => { if ((error as NodeJS.ErrnoException).code !== 'ECONNRESET') reject(error); });
+    socket.once('close', () => resolve());
+  });
   await service.setEnabled(false); await closed; await assertClosed(target);
   assert.equal(access.url(), undefined); assert.equal(client.online, false); assert.equal(client.logouts, 0);
   client.starts[0].exited(); assert.equal((await service.page()).status, 'disabled');

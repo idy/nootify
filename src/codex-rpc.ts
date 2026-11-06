@@ -1,5 +1,5 @@
 import WebSocket from 'ws';
-import { SessionUnavailable } from './types.js';
+import { HttpError, SessionUnavailable, RetryableDeliveryError, UnconfirmedDeliveryError } from './types.js';
 import type { BackendConnection } from './types.js';
 
 export function localEndpoint(connection: BackendConnection, protocols: string[]): URL {
@@ -36,8 +36,10 @@ export class CodexRpc {
         if (message.id === undefined) return;
         const request = this.pending.get(message.id); if (!request) return;
         this.pending.delete(message.id); clearTimeout(request.timer);
-        if (message.error) request.reject(new Error(`Codex RPC ${message.error.code ?? 'error'}: ${message.error.message ?? 'request failed'}`));
-        else request.resolve(message.result);
+        if (message.error) {
+          const detail = `Codex RPC ${message.error.code ?? 'error'}: ${message.error.message ?? 'request failed'}`;
+          request.reject([-32600, -32601, -32602].includes(message.error.code ?? 0) ? new HttpError(400, detail) : new Error(detail));
+        } else request.resolve(message.result);
       });
       socket.on('error', () => { if (this.socket === socket) this.fail(new SessionUnavailable('backend_unavailable')); });
       socket.on('close', () => { if (this.socket === socket) this.fail(new SessionUnavailable('backend_unavailable')); });
@@ -45,19 +47,38 @@ export class CodexRpc {
       await this.call('initialize', { clientInfo: { name: 'nootify', title: 'Nootify', version: '0.1.0' } });
       socket.send(JSON.stringify({ method: 'initialized', params: {} }));
     })();
-    try { await this.opening; } catch (error) { this.close(); throw error; }
+    const opening = this.opening;
+    try { await opening; } catch (error) { if (this.opening === opening) this.close(); throw error; }
   }
   async call<T>(method: string, params: unknown): Promise<T> {
     const socket = this.socket;
-    if (!socket || socket.readyState !== WebSocket.OPEN) throw new SessionUnavailable('backend_unavailable');
+    if (!socket || socket.readyState !== WebSocket.OPEN) throw new RetryableDeliveryError('backend_unavailable');
     const id = this.nextId++;
-    return new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`Codex ${method} timed out; delivery is unconfirmed`)); }, this.timeout);
-      this.pending.set(id, { resolve: value => resolve(value as T), reject, timer });
-      socket.send(JSON.stringify({ id, method, params }), error => {
-        if (error) { clearTimeout(timer); this.pending.delete(id); reject(new SessionUnavailable('backend_unavailable')); }
+    let frame: string;
+    try { frame = JSON.stringify({ id, method, params }); }
+    catch { throw new HttpError(400, 'Codex request could not be serialized'); }
+    const mutation = method === 'turn/start' || method === 'turn/steer';
+    let submitted = false;
+    try {
+      return await new Promise<T>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          this.pending.delete(id);
+          reject(new RetryableDeliveryError(`Codex ${method} timed out`));
+        }, this.timeout);
+        this.pending.set(id, { resolve: value => resolve(value as T), reject, timer });
+        const failed = (error: Error) => { clearTimeout(timer); this.pending.delete(id); reject(error); };
+        submitted = true;
+        try {
+          socket.send(frame, error => { if (error) failed(error); });
+        } catch (error) { failed(error as Error); }
       });
-    });
+    } catch (error) {
+      // A response timeout or disconnect cannot prove that a submitted turn had no effect.
+      if (mutation && submitted && !(error instanceof HttpError && error.status >= 400 && error.status < 500)) {
+        throw new UnconfirmedDeliveryError(`${(error as Error).message}; delivery is unconfirmed`);
+      }
+      throw error;
+    }
   }
   close(): void { const socket = this.socket; this.fail(new SessionUnavailable('backend_unavailable')); socket?.terminate(); }
 }

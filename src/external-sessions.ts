@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { createOpencodeClient } from '@opencode-ai/sdk/v2';
 import type { Session as OpenCodeSession } from '@opencode-ai/sdk/v2';
 import { CodexRpc, localEndpoint } from './codex-rpc.js';
-import { SessionUnavailable } from './types.js';
+import { HttpError, SessionUnavailable, RetryableDeliveryError, UnconfirmedDeliveryError } from './types.js';
 import type { Adapter, BackendConnection, DeliveryResult, PublicSession } from './types.js';
 import type { State } from './state.js';
 
@@ -77,9 +77,17 @@ export class ExternalSessions implements ExternalResolver {
     const headers: Record<string, string> = {};
     if (connection.password) headers.Authorization = `Basic ${Buffer.from(`${connection.username ?? 'opencode'}:${connection.password}`).toString('base64')}`;
     const client = createOpencodeClient({ baseUrl: url.href, headers,
-      fetch: async request => {
-        try { return await fetch(request, { signal: AbortSignal.timeout(8000), redirect: 'error' }); }
-        catch { throw new SessionUnavailable('backend_unavailable'); }
+      fetch: async (request, init) => {
+        const original = request instanceof Request ? request : undefined;
+        const method = (init?.method ?? original?.method ?? 'GET').toUpperCase();
+        const upstream = init?.signal ?? original?.signal;
+        const deadline = AbortSignal.timeout(8000);
+        const signal = upstream ? AbortSignal.any([upstream, deadline]) : deadline;
+        try { return await fetch(request, { ...init, signal, redirect: 'error' }); }
+        catch {
+          if (['GET', 'HEAD'].includes(method)) throw new RetryableDeliveryError('OpenCode backend is unavailable');
+          throw new UnconfirmedDeliveryError('OpenCode input response was not received; delivery is unconfirmed');
+        }
       },
     });
     const result = await client.session.get({ sessionID: id, directory: connection.directory });
@@ -91,7 +99,13 @@ export class ExternalSessions implements ExternalResolver {
     return { info, send: async content => {
       if (session.time.archived !== undefined) throw new SessionUnavailable('session_archived');
       const sent = await client.session.promptAsync({ sessionID: id, directory: connection.directory ?? session.directory, parts: [{ type: 'text', text: content }] });
-      if (sent.error || sent.response.status !== 204) throw new Error(`OpenCode input failed (HTTP ${sent.response.status})`);
+      if (sent.error || sent.response.status !== 204) {
+        const status = sent.response.status;
+        const message = `OpenCode input failed (HTTP ${status})`;
+        if ([400, 404, 405, 413, 415, 422].includes(status)) throw new HttpError(status, message);
+        if (status >= 400 && status < 500) throw new RetryableDeliveryError(message);
+        throw new UnconfirmedDeliveryError(`${message}; delivery is unconfirmed`);
+      }
       return { status: 'input_accepted' };
     } };
   }

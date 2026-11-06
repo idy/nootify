@@ -151,7 +151,7 @@
           <div class="recipient-dialog-foot"><button type="button" id="recipient-manual" class="text-button" data-i18n="手动填写 ID">手动填写 ID</button><span id="recipient-selected-name"></span><button type="button" id="recipient-cancel" class="dialog-secondary" data-i18n="取消">取消</button><button type="button" id="recipient-confirm" class="dialog-primary" data-i18n="确认选择">确认选择</button><button type="button" id="recipient-permission-retry" class="dialog-primary" data-i18n="授权后重试" hidden>授权后重试</button></div>
         </dialog>
       </div>
-      <p class="hint" data-i18n="App ID 和 App Secret 在飞书开放平台应用的「凭证与基础信息」页。优先级：环境变量、这里保存的凭据、MCP 配置文件。保存后机器人会用新凭据重新连接；密钥保存在状态目录的 state.json（权限 0600）。">App ID 和 App Secret 在飞书开放平台应用的「凭证与基础信息」页。优先级：环境变量、这里保存的凭据、MCP 配置文件。保存后机器人会用新凭据重新连接；密钥保存在状态目录的 state.json（权限 0600）。</p>
+      <p class="hint" data-i18n="App ID 和 App Secret 在飞书开放平台应用的「凭证与基础信息」页。优先级：环境变量、这里保存的凭据、MCP 配置文件。保存后机器人会用新凭据重新连接；密钥保存在状态目录的 state.sqlite（权限 0600）。">App ID 和 App Secret 在飞书开放平台应用的「凭证与基础信息」页。优先级：环境变量、这里保存的凭据、MCP 配置文件。保存后机器人会用新凭据重新连接；密钥保存在状态目录的 state.sqlite（权限 0600）。</p>
     </div>
     <div data-panel="settings-slack" hidden>
       <div class="group">
@@ -171,7 +171,7 @@
         <div class="setting"><div class="setting-main"><div class="setting-sub" data-i18n="保存前会向 Slack 验证配置；令牌默认掩码显示，点击眼睛可查看。">保存前会向 Slack 验证配置；令牌默认掩码显示，点击眼睛可查看。</div></div><div class="setting-actions"><button type="button" id="slack-clear" class="text-button" hidden data-i18n="清除 Slack 配置">清除 Slack 配置</button><button type="button" id="slack-save" class="text-button primary" disabled data-i18n="验证并保存">验证并保存</button></div></div>
       </div>
       <p class="hint" data-i18n="每个会话在指定频道里使用一个独立线程。先把机器人邀请到频道，启用 Socket Mode；App-Level Token 需要 connections:write。事件订阅启用 message.channels 和 message.groups；Bot Token 需要 chat:write、channels:read、groups:read、users:read；接收公开频道或私有频道的消息事件还需相应的 channels:history 或 groups:history。">每个会话在指定频道里使用一个独立线程。先把机器人邀请到频道，启用 Socket Mode；App-Level Token 需要 connections:write。事件订阅启用 message.channels 和 message.groups；Bot Token 需要 chat:write、channels:read、groups:read、users:read；接收公开频道或私有频道的消息事件还需相应的 channels:history 或 groups:history。</p>
-      <p class="hint" data-i18n="保存后机器人会重新连接。令牌保存在状态目录的 state.json（权限 0600）；已保存时留空则不修改。到 Agents 页面选择默认通知渠道。">保存后机器人会重新连接。令牌保存在状态目录的 state.json（权限 0600）；已保存时留空则不修改。到 Agents 页面选择默认通知渠道。</p>
+      <p class="hint" data-i18n="保存后机器人会重新连接。令牌保存在状态目录的 state.sqlite（权限 0600）；已保存时留空则不修改。到 Agents 页面选择默认通知渠道。">保存后机器人会重新连接。令牌保存在状态目录的 state.sqlite（权限 0600）；已保存时留空则不修改。到 Agents 页面选择默认通知渠道。</p>
     </div>
     <div data-panel="settings-telegram" hidden>
       <div class="group">
@@ -190,7 +190,7 @@
         <div class="setting"><div class="setting-main"><div class="setting-sub" data-i18n="保存前会向 Telegram 验证配置；令牌默认掩码显示，点击眼睛可查看。">保存前会向 Telegram 验证配置；令牌默认掩码显示，点击眼睛可查看。</div></div><div class="setting-actions"><button type="button" id="telegram-clear" class="text-button" hidden data-i18n="清除 Telegram 配置">清除 Telegram 配置</button><button type="button" id="telegram-save" class="text-button primary" disabled data-i18n="验证并保存">验证并保存</button></div></div>
       </div>
       <p class="hint" data-i18n="每个会话在指定超级群中使用一个独立话题。先创建启用话题的超级群，把机器人设为管理员并允许管理话题；只有上面填写的数字用户 ID 可以把回复发送回本机会话。">每个会话在指定超级群中使用一个独立话题。先创建启用话题的超级群，把机器人设为管理员并允许管理话题；只有上面填写的数字用户 ID 可以把回复发送回本机会话。</p>
-      <p class="hint" data-i18n="保存后机器人会重新连接。令牌保存在状态目录的 state.json（权限 0600）；已保存时留空则不修改。到 Agents 页面选择默认通知渠道。">保存后机器人会重新连接。令牌保存在状态目录的 state.json（权限 0600）；已保存时留空则不修改。到 Agents 页面选择默认通知渠道。</p>
+      <p class="hint" data-i18n="保存后机器人会重新连接。令牌保存在状态目录的 state.sqlite（权限 0600）；已保存时留空则不修改。到 Agents 页面选择默认通知渠道。">保存后机器人会重新连接。令牌保存在状态目录的 state.sqlite（权限 0600）；已保存时留空则不修改。到 Agents 页面选择默认通知渠道。</p>
     </div>
     <div data-panel="settings-tailscale" hidden>
       <div class="group">

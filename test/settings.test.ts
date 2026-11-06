@@ -102,7 +102,7 @@ test('a device login shows the code, keeps the token private and refreshes after
   assert.deepEqual(auth.login(), { status: 'idle' });
   assert.deepEqual(await auth.account(), { signedIn: true, login: 'octo' });
   assert.equal((await State.open(dir)).settings.github_token, github.token);
-  assert.equal((await stat(join(dir, 'state.json'))).mode & 0o777, 0o600);
+  assert.equal((await stat(join(dir, 'state.sqlite'))).mode & 0o777, 0o600);
   assert.deepEqual(reports.map(record => record.status), ['github_login']);
   assert.ok(!JSON.stringify(reports).includes(github.token));
 });
@@ -205,7 +205,7 @@ test('Feishu credentials are verified before they replace the running bot', asyn
   assert.equal(configured.length, 2, 'an explicit save retains the secret and reconnects even unchanged credentials');
   await assert.rejects(settings.saveLark('cli_fedcba9876543210', ''), /App Secret/, 'another app never inherits this secret');
   assert.equal((await State.open(dir)).settings.lark_app_secret, 'right-secret');
-  assert.equal((await stat(join(dir, 'state.json'))).mode & 0o777, 0o600);
+  assert.equal((await stat(join(dir, 'state.sqlite'))).mode & 0o777, 0o600);
 });
 
 test('Feishu requires both credentials before Settings can report a connection', async t => {
