@@ -17,6 +17,10 @@ $descriptionPrefix = 'Nootify per-user service v1: '
 $powerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 
 function Full-Path([string]$Value) {
+    # Rust canonical paths can carry a Win32 namespace prefix; NSIS uses DOS/UNC paths.
+    # Compare the same filesystem path consistently across desktop and installer calls.
+    if ($Value.StartsWith('\\?\UNC\', [StringComparison]::OrdinalIgnoreCase)) { $Value = '\\' + $Value.Substring(8) }
+    elseif ($Value.StartsWith('\\?\', [StringComparison]::Ordinal)) { $Value = $Value.Substring(4) }
     if ($Value -notmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\]+\\[^\\]+)' -or $Value -match '["\x00-\x1f]') { throw 'Service paths must be absolute Windows paths without control characters or quotes' }
     return [IO.Path]::GetFullPath($Value)
 }

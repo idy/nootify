@@ -16,6 +16,9 @@ Assert ($errors.Count -eq 0) ($errors | Out-String)
 foreach ($statement in $ast.EndBlock.Statements) {
     if ($statement -is [Management.Automation.Language.FunctionDefinitionAst]) { . ([scriptblock]::Create($statement.Extent.Text)) }
 }
+Assert (Same-Path '\\?\C:\Nootify Test\node.exe' 'C:\Nootify Test\node.exe') 'Canonical namespace and DOS paths must identify the same installation'
+Assert (Same-Path '\\?\UNC\server\share\node.exe' '\\server\share\node.exe') 'Canonical namespace and UNC paths must identify the same installation'
+Assert (!(Same-Path '\\?\C:\Nootify Test\node.exe' 'C:\Other\node.exe')) 'Namespace normalization must not broaden ownership to another installation'
 $ownerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $taskName = "Nootify.Service.$ownerSid"
 $descriptionPrefix = 'Nootify per-user service v1: '

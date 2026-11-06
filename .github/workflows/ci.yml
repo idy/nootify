@@ -87,3 +87,47 @@ jobs:
       # installer hooks, ICO, sidecar layout and platform config are validated.
       - name: Build desktop bundle without updater signing
         run: npm run desktop:build -- --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --config src-tauri/tauri.ci.conf.json --no-sign --ci
+
+      - name: Preserve current Windows installer
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $null = New-Item -ItemType Directory -Force .cache/windows-current-installer
+          Copy-Item "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/Nootify_${version}_x64-setup.exe" .cache/windows-current-installer/
+
+      # Same sources, older package version: exercise a real cross-version /UPDATE
+      # without depending on an existing Windows release or any signing secret.
+      - name: Build baseline Windows installer fixture
+        if: runner.os == 'Windows'
+        run: npm run desktop:build -- --target ${{ matrix.target }} --bundles nsis --config src-tauri/tauri.install-baseline.conf.json --no-sign --ci
+
+      - name: Test Windows installation, upgrade and uninstall
+        if: runner.os == 'Windows'
+        timeout-minutes: 12
+        shell: powershell
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $bundles = 'src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis'
+          .\scripts\windows-install-smoke.ps1 `
+            -Installer (Join-Path '.cache/windows-current-installer' "Nootify_${version}_x64-setup.exe") `
+            -BaselineInstaller (Join-Path $bundles 'Nootify_0.0.0_x64-setup.exe') `
+            -Version $version
+
+      - name: Upload Windows installation diagnostics
+        if: runner.os == 'Windows' && always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-installation-diagnostics
+          path: .cache/windows-install-smoke/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload unsigned Windows installer
+        if: runner.os == 'Windows' && always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nootify-windows-x64-installer
+          path: .cache/windows-current-installer/*.exe
+          if-no-files-found: ignore
+          retention-days: 7
