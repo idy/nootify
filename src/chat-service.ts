@@ -92,8 +92,11 @@ export class ChatService<C extends ChatChannel> implements ServiceModule {
   configure(value: unknown): Promise<void> {
     return this.serialized(async () => {
       const saved = this.state.settings[this.channel];
+      const rollback = () => { if (saved) Object.assign(this.state.settings, { [this.channel]: saved }); else delete this.state.settings[this.channel]; };
       if (value === undefined) {
-        await this.detach(); delete this.state.settings[this.channel]; await this.state.save(); this.outcome('disabled'); return;
+        await this.detach();
+        await this.state.save({ apply: () => { delete this.state.settings[this.channel]; }, rollback });
+        this.outcome('disabled'); return;
       }
       const input = object(value);
       const candidate = { ...input };
@@ -107,9 +110,8 @@ export class ChatService<C extends ChatChannel> implements ServiceModule {
       await this.detach();
       const config = this.channel === 'slack' ? { bot_token: candidate.bot_token, app_token: (candidate as ChatConfigs['slack']).app_token, channel_id: (candidate as ChatConfigs['slack']).channel_id, user_id: candidate.user_id }
         : { bot_token: candidate.bot_token, chat_id: (candidate as ChatConfigs['telegram']).chat_id, user_id: candidate.user_id };
-      Object.assign(this.state.settings, { [this.channel]: config });
-      try { await this.state.save(); }
-      catch (error) { Object.assign(this.state.settings, { [this.channel]: saved }); await next.stop(); throw error; }
+      try { await this.state.save({ apply: () => { Object.assign(this.state.settings, { [this.channel]: config }); }, rollback }); }
+      catch (error) { await next.stop(); throw error; }
       this.outcome('connecting');
       try { await this.attach(next); } catch { this.outcome('failed'); this.scheduleReconnect(); throw new HttpError(502, `${providerName(this.channel)} connection failed; settings were saved and will retry`); }
     });
