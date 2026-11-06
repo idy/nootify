@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import type { State } from './state.js';
 import type { SessionsService } from './sessions.js';
+import { registerPolledSession } from './polled-sessions.js';
 import { HttpError, SessionUnavailable, identifier, isAdapter, object, text, type Adapter, type RouteRequest, type RouteResponse, type ServiceModule, type ThreadInfo, type ThreadMessage } from './types.js';
 import { ChatTransportError, isNotificationChannel, validChatConfig, type ChatBinding, type ChatChannel, type ChatConfigs, type ChatDelivery, type ChatFactory, type ChatMessage, type ChatSettingsPage, type ChatDirectory, type ChatTransport } from './chat-transport.js';
 
@@ -145,6 +146,7 @@ export class ChatService<C extends ChatChannel> implements ServiceModule {
     const transport = this.connection();
     const name = title.trim();
     if (!name || name.length > 200) throw new HttpError(400, 'Session name must be 1 to 200 characters');
+    await registerPolledSession(this.state, adapter, session, name);
     let binding = this.binding(adapter, session, transport);
     const created = !binding;
     if (!binding) {
@@ -190,7 +192,7 @@ export class ChatService<C extends ChatChannel> implements ServiceModule {
         this.report({ source: this.channel, status: delivery.transport_status, reason: error instanceof SessionUnavailable ? error.reason : 'delivery_failed', message_id: delivery.id, session_id: delivery.session_id });
       }
       await this.state.save();
-      if (delivery.transport_status === 'socket_written' || delivery.transport_status === 'input_accepted') this.report({ source: this.channel, status: delivery.transport_status, message_id: delivery.id, chat_id: delivery.chat_id, session_id: delivery.session_id });
+      if (delivery.transport_status === 'socket_written' || delivery.transport_status === 'input_accepted' || delivery.transport_status === 'inbox_queued') this.report({ source: this.channel, status: delivery.transport_status, message_id: delivery.id, chat_id: delivery.chat_id, session_id: delivery.session_id });
     }).finally(() => { this.queued--; });
     this.pending = work.catch(() => { this.report({ source: this.channel, status: 'delivery_failed', reason: 'state_write_failed' }); });
     return this.pending;

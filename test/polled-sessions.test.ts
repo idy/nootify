@@ -1,0 +1,171 @@
+import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { once } from 'node:events';
+import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { hostname, tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { AddressInfo } from 'node:net';
+import { test, type TestContext } from 'node:test';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
+import { NootifyClient } from '../src/client.js';
+import { ChatService } from '../src/chat-service.js';
+import type { ChatLocation, ChatMessage, ChatTransport } from '../src/chat-transport.js';
+import { LarkService } from '../src/lark.js';
+import type { LarkApi } from '../src/lark-metadata.js';
+import { registerPolledSession } from '../src/polled-sessions.js';
+import { createServiceHost } from '../src/server.js';
+import { SessionsService } from '../src/sessions.js';
+import { State } from '../src/state.js';
+import type { PolledAdapter, SessionInbox, ThreadInfo } from '../src/types.js';
+
+const execute = promisify(execFile);
+async function fixture(t: TestContext) {
+  const directory = await mkdtemp(join(tmpdir(), 'nootify-polled-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const state = await State.open(directory);
+  const sessions = new SessionsService(state, { inspect: async () => { throw new Error('Must not resolve a polled client through Claude'); } }, () => {},
+    { resolve: async () => { throw new Error('Must not query a native backend'); }, close() {} });
+  const server = createServiceHost([sessions], state.token);
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const port = (server.address() as AddressInfo).port;
+  const client = new NootifyClient({ baseUrl: `http://127.0.0.1:${port}`, token: state.token });
+  return { directory, state, sessions, server, client, port };
+}
+
+for (const adapter of ['trae', 'workbuddy'] as const) {
+  test(`${adapter}: private inbox survives restart, is session-scoped, and retains input until explicit acknowledgment`, async t => {
+    const f = await fixture(t);
+    await registerPolledSession(f.state, adapter, 'conversation-one', 'First task');
+    await registerPolledSession(f.state, adapter, 'conversation-two', 'Second task');
+    const other = adapter === 'trae' ? 'workbuddy' : 'trae';
+    await assert.rejects(f.client.sendMessage('conversation-one', 'Wrong adapter', other), /session_not_local/);
+    await assert.rejects(f.client.sendMessage('missing', 'Unknown', adapter), /session_not_local/);
+    assert.deepEqual(await f.client.sendMessage('conversation-one', 'User input', adapter), { status: 'inbox_queued' });
+    const pending = await f.client.receiveThread('conversation-one', adapter);
+    assert.equal(pending.messages.length, 1);
+    assert.match(pending.messages[0].text, /\[Nootify: First task\]\nUser input/);
+    assert.deepEqual(await f.client.receiveThread('conversation-one', adapter), pending, 'reading does not consume the message');
+    assert.deepEqual((await f.client.receiveThread('conversation-two', adapter)).messages, []);
+    await assert.rejects(f.client.receiveThread('conversation-one', other), /session_not_local/);
+    const id = pending.messages[0].id;
+    await assert.rejects(f.client.acknowledgeThread('conversation-two', adapter, id), /No inbox message/);
+    assert.equal((await State.open(f.directory)).inboxMessages.get(id)?.text, pending.messages[0].text);
+    assert.equal((await stat(join(f.directory, 'state.json'))).mode & 0o777, 0o600);
+    await f.client.acknowledgeThread('conversation-one', adapter, id);
+    await f.client.acknowledgeThread('conversation-one', adapter, id);
+    assert.deepEqual((await f.client.receiveThread('conversation-one', adapter)).messages, []);
+    assert.equal((await State.open(f.directory)).inboxMessages.size, 0);
+    await assert.rejects(f.client.registerSession('conversation-one', { adapter: other, session_name: 'Must not overwrite' }), /another adapter/);
+    assert.ok(!(JSON.stringify(await f.client.listSessions())).includes('User input'), 'public session history omits inbox text');
+    assert.equal(f.state.session('conversation-one').host_id, hostname());
+    assert.equal((await fetch(`http://127.0.0.1:${f.port}/v1/sessions/conversation-one/inbox`, { method: 'POST', body: JSON.stringify({ adapter }) })).status, 401);
+  });
+}
+
+test('inboxes enforce message and queue limits without dropping older input', async t => {
+  const f = await fixture(t); await registerPolledSession(f.state, 'trae', 'bounded', 'Task');
+  await assert.rejects(f.sessions.send('bounded', 'x'.repeat(64000), 'trae'), /64,000 bytes/);
+  for (let index = 0; index < 100; index++) await f.sessions.send('bounded', `message-${index}`, 'trae');
+  await assert.rejects(f.sessions.send('bounded', 'overflow', 'trae'), /inbox is full/);
+  const batch = await f.client.receiveThread('bounded', 'trae'); assert.equal(batch.messages.length, 20);
+  assert.match(batch.messages[0].text, /message-0$/); assert.match(batch.messages.at(-1)!.text, /message-19$/);
+  for (const message of batch.messages) await f.client.acknowledgeThread('bounded', 'trae', message.id);
+  assert.match((await f.client.receiveThread('bounded', 'trae')).messages[0].text, /message-20$/);
+});
+
+class FakeTransport implements ChatTransport {
+  readonly identity = 'fixture-bot'; readonly account = 'Test bot';
+  receive: (message: ChatMessage) => Promise<void> = async () => {};
+  opened = 0;
+  sent: { text: string; reply?: string }[] = [];
+  async start(receive: (message: ChatMessage) => Promise<void>, status: (status: 'ready') => void) { this.receive = receive; status('ready'); }
+  async stop() {}
+  async openThread(): Promise<ChatLocation> { return { chat_id: 'fixture-room', thread_id: String(++this.opened) }; }
+  async send(_location: ChatLocation, text: string, reply?: string) { this.sent.push({ text, reply }); return { message_id: `sent-${this.sent.length}` }; }
+}
+
+for (const channel of ['slack', 'telegram'] as const) {
+  test(`${channel}: progress and replies reach the polled conversation through the existing transport`, async t => {
+    const f = await fixture(t); const transport = new FakeTransport();
+    const service = new ChatService(channel, f.state, f.sessions, async () => transport);
+    t.after(() => service.stop());
+    await service.configure(channel === 'slack' ? { bot_token: 'xoxb-fixture', app_token: 'xapp-fixture', channel_id: 'C123', user_id: 'U123' }
+      : { bot_token: '123:fixture', chat_id: '-100123', user_id: '123' });
+    for (const adapter of ['trae', 'workbuddy'] as const) {
+      const id = `${channel}-${adapter}`;
+      const thread = await service.open(adapter, id, `${adapter} task`);
+      await service.send(id, 'Progress', adapter);
+      const incoming: ChatMessage = { chat_id: thread.chat_id, thread_id: thread.thread_id!, message_id: `${adapter}-message`,
+        sender_id: channel === 'slack' ? 'U123' : '123', text: 'Continue here' };
+      await transport.receive({ ...incoming, sender_id: 'untrusted' });
+      assert.equal((await f.client.receiveThread(id, adapter)).messages.length, 0);
+      await transport.receive(incoming); await transport.receive(incoming);
+      const messages = (await f.client.receiveThread(id, adapter)).messages;
+      assert.equal(messages.length, 1); assert.match(messages[0].text, /Continue here/); assert.match(messages[0].text, /chat-reply/);
+      const delivery = [...f.state.chatDeliveries.values()].find(delivery => delivery.session_id === id)!;
+      assert.equal(delivery.transport_status, 'inbox_queued');
+      await service.acknowledge(delivery.id); await service.reply(delivery.id, 'Done');
+      assert.equal(transport.sent.at(-1)?.reply, incoming.message_id);
+      await f.client.acknowledgeThread(id, adapter, messages[0].id);
+    }
+  });
+}
+
+test('Feishu announcements route replies into the exact registered Trae and WorkBuddy inbox', async t => {
+  const f = await fixture(t); f.state.settings.lark_recipient_open_id = 'ou_owner';
+  const announcements = new Map<string, string>(); let next = 0;
+  const api: LarkApi = { appId: 'cli_fixture', async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+    const announcement = /\/chats\/([^/]+)\/announcement$/.exec(path);
+    if (announcement) {
+      if (method === 'GET') return { revision: '1', content: announcements.get(announcement[1]) ?? '' } as T;
+      const request = body as { requests: string[] };
+      const operation = JSON.parse(request.requests[0]);
+      announcements.set(announcement[1], JSON.parse(operation.insertBlocksRequest.payload).blocks[0].paragraph.elements[0].textRun.text);
+      return {} as T;
+    }
+    if (path.startsWith('/open-apis/im/v1/chats?')) return (method === 'GET' ? { items: [], has_more: false } : { chat_id: `oc_${++next}` }) as T;
+    if (path.startsWith('/open-apis/im/v1/messages?')) return { message_id: `om_${++next}` } as T;
+    throw new Error(`Unexpected ${method} ${path}`);
+  } };
+  const lark = new LarkService(f.state, f.sessions, undefined, () => {}, api);
+  for (const adapter of ['trae', 'workbuddy'] as const) {
+    const opened = await lark.handle({ method: 'POST', path: '/v1/threads', body: { adapter, session_id: adapter, session_name: `${adapter} task` } });
+    const thread = opened!.body as ThreadInfo;
+    assert.ok(announcements.get(thread.chat_id)?.includes(`:${adapter}:${adapter}`));
+    await lark.handle({ method: 'POST', path: `/v1/threads/${adapter}/messages`, body: { adapter, text: 'Progress' } });
+    lark.enqueue({ sender: { sender_type: 'user', sender_id: { open_id: 'ou_owner' } }, message: { chat_id: thread.chat_id, message_id: `om_${adapter}`,
+      message_type: 'text', content: JSON.stringify({ text: `Reply for ${adapter}` }) } });
+    await lark.drain();
+    const inbox = await f.client.receiveThread(adapter, adapter);
+    assert.equal(inbox.messages.length, 1); assert.match(inbox.messages[0].text, new RegExp(`Reply for ${adapter}`));
+    assert.match(inbox.messages[0].text, /lark-ack/); assert.match(inbox.messages[0].text, /lark-reply/);
+    assert.equal(f.state.deliveries.get(`om_${adapter}`)?.transport_status, 'inbox_queued');
+  }
+});
+
+test('CLI allocates distinct conversation IDs and requires them on receive, send and acknowledgment', async t => {
+  const f = await fixture(t); const cli = fileURLToPath(new URL('../src/cli.js', import.meta.url));
+  const threads = { name: 'fixture-threads', status: () => 'ready', async handle(request: { method: string; path: string; body: unknown }) {
+    if (request.path !== '/v1/threads') return;
+    const body = request.body as { adapter: PolledAdapter; session_id: string; session_name: string };
+    await registerPolledSession(f.state, body.adapter, body.session_id, body.session_name);
+    return { body: { ...body, channel: 'feishu', chat_id: 'oc_fixture', created: true } };
+  } };
+  const server = createServiceHost([f.sessions, threads], f.state.token); server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const args = ['--state-dir', f.directory, '--port', String((server.address() as AddressInfo).port)];
+  const run = async (command: string, ...flags: string[]) => JSON.parse((await execute(process.execPath, [cli, command, ...args, ...flags])).stdout);
+  for (const adapter of ['trae', 'workbuddy'] as const) {
+    const first = await run('thread-open', '--agent', adapter, '--session-name', 'Task') as ThreadInfo;
+    const second = await run('thread-open', '--agent', adapter, '--session-name', 'Task') as ThreadInfo;
+    assert.notEqual(first.session_id, second.session_id);
+    for (const command of ['thread-send', 'thread-receive', 'thread-ack']) await assert.rejects(run(command, '--agent', adapter), /session-id returned by thread-open/);
+    await f.sessions.send(first.session_id, 'CLI inbox input', adapter);
+    const inbox = await run('thread-receive', '--agent', adapter, '--session-id', first.session_id) as SessionInbox;
+    assert.equal(inbox.messages.length, 1);
+    await run('thread-ack', '--agent', adapter, '--session-id', first.session_id, '--message-id', inbox.messages[0].id);
+    assert.equal((await f.client.receiveThread(first.session_id, adapter)).messages.length, 0);
+  }
+});

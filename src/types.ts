@@ -1,7 +1,9 @@
 import type { NotificationChannel } from './chat-transport.js';
 
-export type Adapter = 'claude-code' | 'claude-desktop' | 'codex' | 'opencode';
-export const isAdapter = (value: unknown): value is Adapter => typeof value === 'string' && ['claude-code', 'claude-desktop', 'codex', 'opencode'].includes(value);
+export type PolledAdapter = 'trae' | 'workbuddy';
+export const isPolledAdapter = (value: unknown): value is PolledAdapter => value === 'trae' || value === 'workbuddy';
+export type Adapter = 'claude-code' | 'claude-desktop' | 'codex' | 'opencode' | PolledAdapter;
+export const isAdapter = (value: unknown): value is Adapter => typeof value === 'string' && ['claude-code', 'claude-desktop', 'codex', 'opencode', 'trae', 'workbuddy'].includes(value);
 export interface BackendConnection {
   url: string;
   token?: string;
@@ -40,7 +42,10 @@ export interface RemoteBinding extends LarkBinding {
   session_name: string;
   socket_path?: string;
 }
-export interface DeliveryResult { status: 'socket_written' | 'input_accepted' }
+export interface DeliveryResult { status: 'socket_written' | 'input_accepted' | 'inbox_queued' }
+export interface InboxMessage { id: string; text: string; created_at: string }
+export interface StoredInboxMessage extends InboxMessage { session_id: string; adapter: PolledAdapter }
+export interface SessionInbox { session_id: string; adapter: PolledAdapter; messages: InboxMessage[] }
 export interface LarkDelivery {
   message_id: string;
   chat_id: string;
@@ -50,7 +55,7 @@ export interface LarkDelivery {
   session_name: string;
   adapter: Adapter;
   created_at: string;
-  transport_status: 'pending' | 'socket_written' | 'input_accepted' | 'ignored' | 'delivery_failed';
+  transport_status: 'pending' | DeliveryResult['status'] | 'ignored' | 'delivery_failed';
   acknowledged_at?: string;
   replies: { digest: string; message_id: string; time: string }[];
 }

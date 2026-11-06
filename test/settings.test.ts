@@ -72,7 +72,7 @@ async function harness(t: TestContext, options: { env?: NodeJS.ProcessEnv; mcpCo
   const revealed: string[] = []; const reports: Record<string, unknown>[] = [];
   const settings = new SettingsService({ state, lark, pulls, agents, github: new GitHubAuth(state, () => {}, () => {}, 'client-1'), env: options.env ?? {}, mcpConfig: options.mcpConfig,
     verify: options.verify ?? (async () => {}), reveal: async path => { revealed.push(path); }, report: record => reports.push(record) });
-  return { dir, state, lark, pulls, settings, configured, enabled, revealed, reports };
+  return { dir, state, lark, pulls, agents, settings, configured, enabled, revealed, reports };
 }
 async function serve(t: TestContext, logs: EventLog, options: HostOptions): Promise<string> {
   const server = createServiceHost([], 'test-token', logs, options);
@@ -396,6 +396,17 @@ test('an exported file restores another installation, after a preview that chang
   assert.equal((await stat(join(target.dir, 'pulls.config.json'))).mode & 0o777, 0o600);
   assert.deepEqual(await target.pulls.preferences(), { config: { ownedOwners: ['acme'] }, follow: [{ repository: 'acme/widgets', follow: true }] });
   assert.equal((await stat(join(target.dir, 'repo-preferences.json'))).mode & 0o777, 0o600);
+});
+
+test('Trae and WorkBuddy agent choices survive configuration export and import', async t => {
+  const source = await harness(t);
+  source.agents.list = async () => [{ agent: 'trae', injected: true }, { agent: 'workbuddy', injected: true }] as AgentPrompt[];
+  const document = JSON.parse(await readFile((await source.settings.exportConfig()).path, 'utf8'));
+  assert.deepEqual(document.agents, ['trae', 'workbuddy']);
+  const target = await harness(t);
+  assert.deepEqual((await target.settings.previewImport(document)).agents, ['trae', 'workbuddy']);
+  await target.settings.importConfig(document);
+  assert.deepEqual(target.enabled, ['trae', 'workbuddy']);
 });
 
 test('a file that fails validation changes nothing, even with a valid section first', async t => {

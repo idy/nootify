@@ -2,7 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import type { Adapter, BackendConnection, LarkBinding, LarkDelivery, PublicSession, SessionRecord } from './types.js';
+import type { Adapter, BackendConnection, LarkBinding, LarkDelivery, PublicSession, SessionRecord, StoredInboxMessage } from './types.js';
 import { HttpError } from './types.js';
 import { isNotificationChannel, validChatConfig, type ChatBinding, type ChatDelivery, type NotificationChannel, type SlackConfig, type TelegramConfig } from './chat-transport.js';
 
@@ -11,7 +11,7 @@ export interface Settings {
   lark_recipient_open_id?: string; lark_app_id?: string; lark_app_secret?: string; github_token?: string; tailscale_enabled?: boolean;
   notification_channel?: NotificationChannel; slack?: SlackConfig; telegram?: TelegramConfig;
 }
-interface StoredState { version: 1; sessions: SessionRecord[]; lark_bindings: LarkBinding[]; backends?: [Adapter, BackendConnection][]; lark_deliveries?: LarkDelivery[]; chat_bindings?: ChatBinding[]; chat_deliveries?: ChatDelivery[]; settings?: Settings }
+interface StoredState { version: 1; sessions: SessionRecord[]; lark_bindings: LarkBinding[]; backends?: [Adapter, BackendConnection][]; lark_deliveries?: LarkDelivery[]; chat_bindings?: ChatBinding[]; chat_deliveries?: ChatDelivery[]; inbox_messages?: StoredInboxMessage[]; settings?: Settings }
 export const defaultStateDir = () => join(homedir(), '.local/state/nootify');
 export class State {
   readonly sessions = new Map<string, SessionRecord>();
@@ -20,6 +20,7 @@ export class State {
   readonly deliveries = new Map<string, LarkDelivery>();
   readonly chatBindings = new Map<string, ChatBinding>();
   readonly chatDeliveries = new Map<string, ChatDelivery>();
+  readonly inboxMessages = new Map<string, StoredInboxMessage>();
   readonly settings: Settings = {};
   private writes: Promise<void> = Promise.resolve();
   private constructor(readonly directory: string, readonly token: string) {}
@@ -41,6 +42,7 @@ export class State {
       for (const delivery of data.lark_deliveries ?? []) state.deliveries.set(delivery.message_id, delivery);
       for (const binding of data.chat_bindings ?? []) state.chatBindings.set(binding.id, binding);
       for (const delivery of data.chat_deliveries ?? []) state.chatDeliveries.set(delivery.id, delivery);
+      for (const message of data.inbox_messages ?? []) state.inboxMessages.set(message.id, message);
       if (isNotificationChannel(data.settings?.notification_channel)) state.settings.notification_channel = data.settings.notification_channel;
       if (validChatConfig('slack', data.settings?.slack)) state.settings.slack = data.settings.slack;
       if (validChatConfig('telegram', data.settings?.telegram)) state.settings.telegram = data.settings.telegram;
@@ -61,7 +63,7 @@ export class State {
     return [...this.sessions.values()].map(({ session_id, host_id, adapter, session_name }) => ({ session_id, host_id, adapter, session_name }));
   }
   async save(): Promise<void> {
-    const snapshot = JSON.stringify({ version: 1, sessions: [...this.sessions.values()], lark_bindings: [...this.bindings.values()], backends: [...this.backends.entries()], lark_deliveries: [...this.deliveries.values()], chat_bindings: [...this.chatBindings.values()], chat_deliveries: [...this.chatDeliveries.values()], settings: this.settings }, null, 2) + '\n';
+    const snapshot = JSON.stringify({ version: 1, sessions: [...this.sessions.values()], lark_bindings: [...this.bindings.values()], backends: [...this.backends.entries()], lark_deliveries: [...this.deliveries.values()], chat_bindings: [...this.chatBindings.values()], chat_deliveries: [...this.chatDeliveries.values()], inbox_messages: [...this.inboxMessages.values()], settings: this.settings }, null, 2) + '\n';
     const pending = this.writes.catch(() => {}).then(async () => {
       const temp = join(this.directory, `.state-${randomUUID()}.tmp`);
       await writeFile(temp, snapshot, { flag: 'wx', mode: 0o600 });
