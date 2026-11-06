@@ -6,6 +6,12 @@ export function recipientDisplayName(user: { name: string; nickname?: string }):
   if (name.startsWith(`${nickname}（`) || name.startsWith(`${nickname} (`) || name.startsWith(`${nickname}(`)) return name;
   return `${nickname}（${name}）`;
 }
+/** Keep cached identities/order while applying newer streamed fields. */
+export function mergeRecipients<T extends { open_id: string }>(cached: readonly T[], incoming: readonly T[]): T[] {
+  const users = new Map(cached.map(user => [user.open_id, user]));
+  for (const user of incoming) { const previous = users.get(user.open_id); users.set(user.open_id, previous ? { ...previous, ...user } : user); }
+  return [...users.values()];
+}
 /** Feishu profile images use its image CDN; reject arbitrary external and local addresses. */
 export function larkAvatarURL(value: unknown): string | undefined {
   if (typeof value !== 'string' || !value || value.length > 4096 || value !== value.trim()) return;

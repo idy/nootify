@@ -1,5 +1,7 @@
 /** Chinese source messages are the catalog keys, following the gettext convention. */
 export const english = {
+  '正在后台更新，缓存名单可直接选择。': 'Updating in the background. Cached contacts are ready to choose.',
+  '本地缓存 · {p0} 位联系人': 'Local cache · Contacts: {p0}',
   '当前接收人': 'Current recipient',
   '已选择 {p0}': 'Selected: {p0}',
   '选择飞书接收人': 'Choose a Feishu recipient',
