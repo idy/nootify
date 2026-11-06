@@ -134,7 +134,7 @@ function Start-TestApp {
     return $process
 }
 function Assert-Installation([string]$ExpectedVersion) {
-    foreach ($path in @($app, $node, $cli, $server, $uninstaller, (Join-Path $installDir 'nootify-tsnet.exe'), (Join-Path $installDir 'service\windows\service-runner.cs'))) {
+    foreach ($path in @($app, $node, $cli, $server, $uninstaller, (Join-Path $installDir 'nootify-tsnet.exe'), (Join-Path $installDir 'service\windows\service-runner.cs'), (Join-Path $installDir 'service\windows\inbox-auth.ps1'), (Join-Path $installDir 'service\windows\inbox-auth.cs'))) {
         if (!(Test-Path -LiteralPath $path -PathType Leaf)) { throw "Installed payload is missing $path" }
     }
     if ([Diagnostics.FileVersionInfo]::GetVersionInfo($app).ProductVersion -cne $ExpectedVersion) {

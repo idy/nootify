@@ -22,7 +22,7 @@ import { assertMode, inboxPath } from './platform-fixtures.js';
 
 function catalogFor(state: State): SessionCatalog {
   return {
-    async inspect(id) { const session = state.sessions.get(id); return session && { ...session, availability: 'active' as const }; },
+    async inspect(id) { const session = state.sessions.get(id); return session && { ...session, availability: 'active' as const, runtime_pid: process.pid }; },
   };
 }
 
@@ -129,7 +129,7 @@ test('private state persists registrations across restarts and omits credentials
 
 test('inbox frames carry the real registered token without asserting a permission mode', async t => {
   const dir = await temporary(t); const target = await inbox(t, dir);
-  assert.deepEqual(await writeInbox(target.path, 'marker', 'test-token'), { status: 'socket_written' });
+  assert.deepEqual(await writeInbox(target.path, 'marker', 'test-token', 5000, process.pid), { status: 'socket_written' });
   const frames = target.messages.join('').trim().split('\n').map(line => JSON.parse(line) as Record<string, unknown>);
   assert.deepEqual(frames[0], { type: 'auth', token: 'test-token' });
   assert.deepEqual(frames[1], { type: 'user', message: { role: 'user', content: 'marker' } });
@@ -175,7 +175,10 @@ test('HTTP host protects APIs, serves health, supports unrelated modules and typ
   assert.deepEqual(await client.listSessions(), []);
   assert.equal((await client.sendMessage(binding.session_id, 'typed client marker')).status, 'socket_written');
   assert.equal((await client.listSessions())[0].session_id, binding.session_id);
-  assert.ok(!JSON.stringify(await client.listSessions()).includes('private-test-token'));
+  const observed = JSON.stringify(await client.listSessions());
+  for (const privateField of ['private-test-token', 'socket_path', 'socket_token', 'runtime_pid']) assert.ok(!observed.includes(privateField));
+  const persisted = await readFile(join(dir, 'state.json'), 'utf8');
+  assert.ok(!persisted.includes('runtime_pid'), 'runtime PIDs are transient delivery metadata');
   assert.match(target.messages.join(''), /typed client marker/);
   assert.deepEqual(await (await fetch(baseUrl + '/v1/example', { headers: { authorization: `Bearer ${state.token}` } })).json(), { value: 42 });
 });

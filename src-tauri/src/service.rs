@@ -29,6 +29,7 @@ use serde::Deserialize;
 pub const SERVICE_URL: &str = "http://127.0.0.1:9417/";
 #[cfg(target_os = "macos")]
 const SERVICE_ADDR: ([u8; 4], u16) = ([127, 0, 0, 1], 9417);
+#[cfg(target_os = "macos")]
 pub const LABEL: &str = "dev.idy.nootify.service";
 const HEALTH_LIMIT: u64 = 64 * 1024;
 /// The installer itself waits up to about 21 s for the new job's health check.
@@ -383,6 +384,7 @@ fn port_in_use(address: SocketAddr) -> bool {
     TcpStream::connect_timeout(&address, Duration::from_millis(500)).is_ok()
 }
 
+#[cfg(target_os = "macos")]
 fn same_file(a: &Path, b: &Path) -> bool {
     match (fs::canonicalize(a), fs::canonicalize(b)) {
         (Ok(a), Ok(b)) => a == b,

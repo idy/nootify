@@ -6,7 +6,8 @@ import { desktopSessionRoots } from './runtime-paths.js';
 import { checkSocket } from './inbox.js';
 
 export type Availability = 'active' | 'archived' | 'offline' | 'unknown';
-export interface LocalSession extends PublicSession { availability: Availability; socket_path?: string }
+/** Internal delivery metadata; observed/public sessions are built from an explicit public field list. */
+export interface LocalSession extends PublicSession { availability: Availability; socket_path?: string; runtime_pid?: number }
 export interface SessionCatalog {
   inspect(id: string, adapter: Adapter): Promise<LocalSession | undefined>;
 }
@@ -47,7 +48,7 @@ export class LocalSessions implements SessionCatalog {
       try {
         const record = await json(join(dir, entry.name)) as RuntimeRecord;
         if (adapter === 'claude-desktop' ? record.hostSessionId !== id : record.sessionId !== id || Boolean(record.hostSessionId)) continue;
-        if (!Number.isInteger(record.pid) || Number(record.pid) <= 0) continue;
+        if (!Number.isSafeInteger(record.pid) || Number(record.pid) <= 0 || Number(record.pid) > 0xffffffff) continue;
         process.kill(record.pid!, 0);
         if (typeof record.messagingSocketPath !== 'string') continue;
         await checkSocket(record.messagingSocketPath);
@@ -79,7 +80,10 @@ export class LocalSessions implements SessionCatalog {
       session_name: metadata?.title ?? runtime?.name ?? id,
       availability: adapter === 'claude-desktop' && (corrupt || typeof metadata?.isArchived !== 'boolean') ? 'unknown' :
         metadata?.isArchived ? 'archived' : runtime ? 'active' : 'offline' };
-    if (result.availability === 'active') result.socket_path = runtime?.messagingSocketPath;
+    if (result.availability === 'active') {
+      result.socket_path = runtime?.messagingSocketPath;
+      result.runtime_pid = runtime?.pid;
+    }
     return result;
   }
   async inspect(id: string, adapter: Adapter): Promise<LocalSession | undefined> {

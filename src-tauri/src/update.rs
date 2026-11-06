@@ -278,10 +278,14 @@ pub fn spawn(
     bundled: Option<BundledService>,
 ) {
     let current = app.package_info().version.to_string();
+    #[cfg(target_os = "windows")]
+    let _ = (agent, bundled); // NSIS owns service replacement and relaunch on Windows.
     let worker = Worker {
         app,
         menu,
+        #[cfg(target_os = "macos")]
         agent,
+        #[cfg(target_os = "macos")]
         bundled,
         current,
         pending: None,
@@ -293,7 +297,9 @@ pub fn spawn(
 struct Worker {
     app: AppHandle,
     menu: UpdateMenu,
+    #[cfg(target_os = "macos")]
     agent: BackgroundService,
+    #[cfg(target_os = "macos")]
     bundled: Option<BundledService>,
     current: String,
     pending: Option<Update>,
@@ -427,17 +433,26 @@ impl Worker {
         }
         self.show(Status::Restarting, true);
         publish(&self.app, &self.view(Phase::Restarting));
-        // The bundle now holds the new service as well: restart the job if it runs this bundle's
-        // Node.js. A failure only delays the new service code until the job next restarts.
-        if let Some(bundled) = &self.bundled {
-            if let Err(error) = self.agent.restart_if_runs(&bundled.node) {
-                eprintln!(
-                    "Cannot restart {} after the update: {error}",
-                    crate::service::LABEL
-                );
-            }
+        #[cfg(target_os = "windows")]
+        {
+            // tauri-plugin-updater 2.14 exits after launching NSIS with /UPDATE /R.
+            // If a future plugin returns, still exit: only NSIS may relaunch the installed
+            // executable and its task. current_exe() may name an old, renamed binary.
+            self.app.exit(0);
         }
-        self.app.restart();
+        #[cfg(target_os = "macos")]
+        {
+            // macOS replaces the app in place, so restart its owned daemon before relaunch.
+            if let Some(bundled) = &self.bundled {
+                if let Err(error) = self.agent.restart_if_runs(&bundled.node) {
+                    eprintln!(
+                        "Cannot restart {} after the update: {error}",
+                        crate::service::LABEL
+                    );
+                }
+            }
+            self.app.restart();
+        }
     }
 }
 

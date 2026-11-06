@@ -1,14 +1,12 @@
 //! The installed per-user Scheduled Task owns the daemon, independently of this window.
 use std::{
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::Command,
     sync::Mutex,
     time::{Duration, Instant},
 };
 
-use super::{
-    installer_error, run_with_timeout, same_file, BundledService, CommandOutput, JobAction,
-};
+use super::{installer_error, run_with_timeout, BundledService, CommandOutput, JobAction};
 
 // The CLI allows 60 s for serialization plus stop/start health waits, capped at 150 s.
 const MANAGEMENT_TIMEOUT: Duration = Duration::from_secs(155);
@@ -68,15 +66,6 @@ impl BackgroundService {
         // The CLI checks the live port, exact task ownership, and registration atomically
         // with the authoritative scheduler state; no cached status authorizes a change.
         self.run(bundled, "service-install", true).map(|_| ())
-    }
-
-    pub fn restart_if_runs(&self, node: &Path) -> Result<bool, String> {
-        let bundled = self.bundle()?;
-        if !same_file(&bundled.node, node) || !self.installed() {
-            return Ok(false);
-        }
-        self.request(JobAction::Restart)?;
-        Ok(true)
     }
 
     fn bundle(&self) -> Result<BundledService, String> {
@@ -139,6 +128,7 @@ impl BackgroundService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn installed_runtime_and_resources_share_the_install_directory() {

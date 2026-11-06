@@ -25,7 +25,14 @@ fn main() {
             || !staged(Path::new(&tsnet))
             || !Path::new(SERVICE).join("dist/src/server.js").is_file()
             || (target.contains("windows")
-                && !Path::new(SERVICE).join("windows/service.ps1").is_file())
+                && [
+                    "service.ps1",
+                    "service-runner.cs",
+                    "inbox-auth.ps1",
+                    "inbox-auth.cs",
+                ]
+                .iter()
+                .any(|name| !Path::new(SERVICE).join("windows").join(name).is_file()))
         {
             println!("cargo::error=Release builds require Node.js, the embedded Tailscale client and the service: run npm run desktop:stage first");
             return;

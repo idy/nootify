@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -15,7 +15,8 @@ import { checkSocket, isNamedPipe } from '../src/inbox.js';
 import { LocalSessions } from '../src/local-sessions.js';
 import { desktopSessionRoots, isAbsolutePath, serviceStateDir } from '../src/runtime-paths.js';
 import { SERVICE_ACTIONS, serviceEnvironment, windowsPowerShell, windowsServiceArgs, windowsServiceScript } from '../src/service.js';
-import { writeInbox } from '../src/sessions.js';
+import { SessionsService, writeInbox } from '../src/sessions.js';
+import { State } from '../src/state.js';
 import { shellCommand, shellQuote } from '../src/shell.js';
 import { embeddedBinaryCandidates, embeddedEnvironment } from '../src/tsnet-client.js';
 
@@ -51,7 +52,7 @@ test('session metadata accepts absolute drive and UNC paths without accepting dr
 
 test('Windows endpoints require local named pipes, while Unix endpoints still require a real socket', async t => {
   for (const path of ['\\\\.\\pipe\\claude-inbox-123', '\\\\?\\pipe\\claude-inbox-123']) { assert.ok(isNamedPipe(path)); await checkSocket(path, 'win32'); }
-  for (const path of ['\\\\remote\\pipe\\inbox', '\\\\localhost\\pipe\\inbox', 'C:\\temp\\inbox.sock', '/tmp/inbox.sock', '\\\\.\\pipe\\', '\\\\.\\pipe\\inbox\nother']) await assert.rejects(checkSocket(path, 'win32'), /local Windows named pipe/);
+  for (const path of ['\\\\remote\\pipe\\inbox', '\\\\localhost\\pipe\\inbox', 'C:\\temp\\inbox.sock', '/tmp/inbox.sock', '\\\\.\\pipe\\', '\\\\.\\pipe\\inbox\nother', '\\\\.\\pipe\\inbox\n']) await assert.rejects(checkSocket(path, 'win32'), /local Windows named pipe/);
   const directory = await mkdtemp(join(tmpdir(), 'nootify-win-inbox-')); t.after(() => rm(directory, { recursive: true, force: true }));
   const file = join(directory, 'regular-file'); await writeFile(file, '');
   await assert.rejects(checkSocket(file, 'darwin'), /not a socket/);
@@ -62,7 +63,8 @@ test('Windows runtime discovery reads a live named-pipe record without filesyste
   const pipe = '\\\\.\\pipe\\claude-nootify-runtime-test';
   await writeFile(join(registryDir, `${process.pid}.json`), JSON.stringify({ pid: process.pid, sessionId: 'win-session', messagingSocketPath: pipe }));
   t.mock.property(process, 'platform', 'win32');
-  assert.equal((await new LocalSessions({ registryDir }).inspect('win-session', 'claude-code'))?.socket_path, pipe);
+  const session = await new LocalSessions({ registryDir }).inspect('win-session', 'claude-code');
+  assert.equal(session?.socket_path, pipe); assert.equal(session?.runtime_pid, process.pid);
 });
 
 test('lifecycle commands dispatch before the first auth token exists', async t => {
@@ -108,13 +110,54 @@ test('generated commands quote Windows paths for PowerShell, and retain POSIX qu
   assert.equal(shellQuote("/O'Brien/state", 'linux'), `'/O'"'"'Brien/state'`);
 });
 
-test('Windows named pipes deliver the same authenticated frames as Unix inboxes', { skip: process.platform !== 'win32' }, async t => {
+test('Windows named pipes deliver authenticated Unicode frames after checking the connected server', { skip: process.platform !== 'win32', timeout: 30_000 }, async t => {
   const pipe = `\\\\.\\pipe\\nootify-test-${randomUUID()}`;
-  let frames = '';
-  const server = createServer(socket => { socket.on('data', data => { frames += data.toString(); }); socket.on('end', () => socket.end()); });
+  let frames = ''; let delivered!: () => void;
+  const received = new Promise<void>(resolve => { delivered = resolve; });
+  const server = createServer(socket => {
+    socket.setEncoding('utf8'); socket.on('data', data => { frames += data; });
+    socket.on('end', () => { socket.end(); delivered(); });
+  });
   server.listen(pipe); await once(server, 'listening'); t.after(() => server.close());
-  assert.deepEqual(await writeInbox(pipe, 'Windows message', 'pipe-token'), { status: 'socket_written' });
-  assert.deepEqual(frames.trim().split('\n').map(line => JSON.parse(line)), [{ type: 'auth', token: 'pipe-token' }, { type: 'user', message: { role: 'user', content: 'Windows message' } }]);
+  assert.deepEqual(await writeInbox(pipe, 'Windows 你好 🌍', 'pipe-token', 5000, process.pid), { status: 'socket_written' });
+  await received;
+  assert.deepEqual(frames.trim().split('\n').map(line => JSON.parse(line)), [{ type: 'auth', token: 'pipe-token' }, { type: 'user', message: { role: 'user', content: 'Windows 你好 🌍' } }]);
+});
+
+test('Windows rejects a claimed pipe with zero token/message bytes even when the stale runtime PID is live', { skip: process.platform !== 'win32', timeout: 30_000 }, async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'nootify-pipe-peer-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  // This live process represents an unrelated occupant of the stale record's PID. No account changes.
+  const unrelated = spawn(process.execPath, ['-e', 'process.stdin.resume();'], { windowsHide: true, stdio: ['pipe', 'ignore', 'ignore'] });
+  await once(unrelated, 'spawn'); t.after(() => { unrelated.stdin.end(); unrelated.kill(); });
+  process.kill(unrelated.pid!, 0);
+  const pipe = `\\\\.\\pipe\\nootify-claimed-${randomUUID()}`;
+  let bytes = 0; let connections = 0; let disconnected!: () => void;
+  const closed = new Promise<void>(resolve => { disconnected = resolve; });
+  const server = createServer(socket => {
+    connections++; socket.on('data', data => { bytes += data.length; }); socket.on('error', () => {});
+    socket.on('end', () => socket.end()); socket.on('close', () => disconnected());
+  });
+  server.listen(pipe); await once(server, 'listening'); t.after(() => server.close());
+  const registryDir = join(directory, 'registry'); await mkdir(registryDir);
+  await writeFile(join(registryDir, `${unrelated.pid}.json`), JSON.stringify({ pid: unrelated.pid, sessionId: 'claimed', messagingSocketPath: pipe }));
+  const catalog = new LocalSessions({ registryDir });
+  assert.equal((await catalog.inspect('claimed', 'claude-code'))?.availability, 'active', 'kill(pid, 0) cannot authenticate a pipe');
+  const state = await State.open(join(directory, 'private'));
+  state.sessions.set('claimed', { session_id: 'claimed', adapter: 'claude-code', host_id: 'local', session_name: 'Claimed', socket_path: pipe, socket_token: 'must-not-leak-token' });
+  const sessions = new SessionsService(state, catalog);
+  await assert.rejects(sessions.send('claimed', 'must-not-leak-message', 'claude-code'), /Windows inbox authentication or write failed/);
+  await closed;
+  assert.equal(connections, 1, 'verification and write must share one connection'); assert.equal(bytes, 0);
+  const observed = JSON.stringify((await sessions.handle({ method: 'GET', path: '/v1/sessions', body: undefined }))?.body);
+  assert.ok(observed.includes('delivery_failed'));
+  for (const privateField of ['runtime_pid', 'socket_path', 'socket_token', 'must-not-leak']) assert.ok(!observed.includes(privateField));
+});
+
+test('Windows native peer policy rejects foreign SIDs including reused expected PIDs', { skip: process.platform !== 'win32' }, async () => {
+  const { stdout } = await exec(windowsPowerShell(), ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
+    fileURLToPath(new URL('../../windows/inbox-auth.test.ps1', import.meta.url))], { windowsHide: true, timeout: 30_000 });
+  assert.match(stdout, /Windows inbox peer policy tests passed/);
 });
 
 test('PowerShell ownership, task configuration, idempotence and nested job tests', { skip: process.platform !== 'win32' }, async () => {

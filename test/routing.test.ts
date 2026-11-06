@@ -38,10 +38,12 @@ test('Desktop discovery reads actual archive state every time and rejects stale 
   const registryPath = join(registry, `${process.pid}.json`);
   await writeFile(registryPath, JSON.stringify(runtime));
   const catalog = new LocalSessions({ desktopRoots: [root], registryDir: registry });
-  assert.equal((await catalog.inspect(id, 'claude-desktop'))?.availability, 'active');
+  const active = await catalog.inspect(id, 'claude-desktop');
+  assert.equal(active?.availability, 'active'); assert.equal(active?.runtime_pid, process.pid);
   await writeFile(path, JSON.stringify({ ...metadata, isArchived: true }));
   assert.equal((await catalog.inspect(id, 'claude-desktop'))?.availability, 'archived');
   assert.equal((await catalog.inspect(id, 'claude-desktop'))?.socket_path, undefined);
+  assert.equal((await catalog.inspect(id, 'claude-desktop'))?.runtime_pid, undefined);
   await writeFile(path, JSON.stringify(metadata));
   await writeFile(registryPath, JSON.stringify({ ...runtime, messagingSocketPath: join(dir, 'missing.sock') }));
   assert.equal((await catalog.inspect(id, 'claude-desktop'))?.availability, 'offline');
@@ -62,7 +64,7 @@ test('announcement routing needs no manual group mapping and logs archive, local
   const state = await State.open(dir);
   // Only establishes the allowed user; incoming events use an entirely different chat.
   state.bindings.set('oc_registration', { chat_id: 'oc_registration', session_id: 'local_old', sender_open_id: 'ou_allowed' });
-  let local: LocalSession | undefined = { session_id: id, host_id: hostname(), adapter: 'claude-desktop', session_name: 'Discovered', availability: 'active', socket_path: socket };
+  let local: LocalSession | undefined = { session_id: id, host_id: hostname(), adapter: 'claude-desktop', session_name: 'Discovered', availability: 'active', socket_path: socket, runtime_pid: process.pid };
   const catalog: SessionCatalog = { async inspect(target) { return target === local?.session_id ? local : undefined; } };
   let announcement = marker;
   const api: LarkApi = { appId: 'cli_test', async request<T>(_method: string, path: string): Promise<T> {

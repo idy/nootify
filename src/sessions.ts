@@ -11,21 +11,22 @@ import { localEndpoint } from './codex-rpc.js';
 import type { Adapter, BackendConnection, DeliveryResult, PublicSession, RouteRequest, RouteResponse, ServiceModule, SessionRecord } from './types.js';
 import { LocalSessions } from './local-sessions.js';
 import type { SessionCatalog } from './local-sessions.js';
+import { writeWindowsInbox } from './native-transport.js';
 
-export async function writeInbox(path: string, content: string, token?: string, timeout = 5000): Promise<DeliveryResult> {
+export async function writeInbox(path: string, content: string, token?: string, timeout = 5000, expectedPid?: number): Promise<DeliveryResult> {
   await checkSocket(path);
+  const frames: unknown[] = [];
+  if (token) frames.push({ type: 'auth', token });
+  frames.push({ type: 'user', message: { role: 'user', content } });
+  const payload = frames.map(frame => JSON.stringify(frame)).join('\n') + '\n';
+  if (process.platform === 'win32') return writeWindowsInbox({ path, expectedPid, frames: payload, timeout });
   return new Promise((resolve, reject) => {
     const socket = createConnection({ path });
     let finished = false;
     socket.setTimeout(timeout);
     socket.once('error', reject);
     socket.once('timeout', () => socket.destroy(new Error('Inbox socket write timed out')));
-    socket.once('connect', () => {
-      const frames: unknown[] = [];
-      if (token) frames.push({ type: 'auth', token });
-      frames.push({ type: 'user', message: { role: 'user', content } });
-      socket.end(frames.map(frame => JSON.stringify(frame)).join('\n') + '\n');
-    });
+    socket.once('connect', () => { socket.end(payload); });
     socket.once('finish', () => { finished = true; });
     socket.once('end', () => {
       socket.setTimeout(0);
@@ -63,7 +64,7 @@ export class SessionsService implements ServiceModule {
           if (session.availability !== 'active' || !session.socket_path) {
             throw new SessionUnavailable(session.availability === 'archived' ? 'session_archived' : session.availability === 'unknown' ? 'archive_unknown' : 'session_offline');
           }
-          return writeInbox(session.socket_path, text, saved?.socket_path === session.socket_path ? saved.socket_token : undefined);
+          return writeInbox(session.socket_path, text, saved?.socket_path === session.socket_path ? saved.socket_token : undefined, 5000, session.runtime_pid);
         } };
       }
       if (!target) throw new SessionUnavailable('session_not_local');
