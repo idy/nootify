@@ -68,7 +68,7 @@ For a release build, supply `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVA
 npm run desktop:build
 ```
 
-Before bundling, the build compiles TypeScript and stages the service, `public/`, and production dependencies in `src-tauri/resources/service/`. It downloads a pinned official Node.js runtime, checks its SHA-256 against both the pinned value and the release's `SHASUMS256.txt`, and stages it as the `binaries/node` sidecar. It also builds `native/tailscale` with the pinned Go dependencies as `binaries/nootify-tsnet`, checks the binary's version and system-library links, and includes dependency licenses in the service resources. `npm run desktop:stage` performs only staging. `cargo test` and `cargo clippy` work without staging; release builds require real staged resources. The Node runtime needs the JIT entitlement in `src-tauri/Entitlements.plist`.
+Before bundling, the build compiles TypeScript and stages the service, `public/`, and production dependencies in `src-tauri/resources/service/`. It downloads a pinned official Node.js runtime, checks its SHA-256 against both the pinned value and the release's `SHASUMS256.txt`, and stages it as the `binaries/node` sidecar. It also builds `native/tailscale` with the pinned Go dependencies as `binaries/nootify-tsnet`, checks the binary's version and system-library links, and includes dependency licenses in the service resources. Staging also writes `third-party-notices.txt` with the licenses of the Rust crates and production npm packages the app ships, so it needs `cargo` for `cargo metadata` (see [License](#license)). `npm run desktop:stage` performs only staging. `cargo test` and `cargo clippy` work without staging; release builds require real staged resources. The Node runtime needs the JIT entitlement in `src-tauri/Entitlements.plist`.
 
 Outputs under `src-tauri/target/release/bundle/` are `macos/Nootify.app`, the Apple Silicon DMG in `dmg/`, and `macos/Nootify.app.tar.gz` with its updater signature on macOS; Windows produces an NSIS `*-x64-setup.exe` installer in `nsis/`, with an updater signature. Explicit `--target` builds add the target triple below `target/`. Set `CARGO_TARGET_DIR` to reuse another target directory when needed.
 
@@ -418,9 +418,18 @@ Read the bearer token from the private state file in your local application; nev
 | `src/settings.ts`, `src/github-auth.ts` | Settings pages' actions: Feishu credentials, configuration export and import, GitHub device login and sign-out |
 | `src-tauri/`, `desktop/`, `scripts/desktop.mjs` | Native window, tray, offline view, and desktop build launcher |
 | `scripts/stage-service.mjs` | Stage the service, dependencies, and both bundled runtimes |
+| `scripts/third-party-notices.mjs`, `scripts/spdx-licenses/` | Collect Rust crate and npm package license texts into the staged `third-party-notices.txt` |
 | `scripts/build-tsnet.mjs` | Build and verify the independent Tailscale sidecar and collect dependency licenses |
 | `src-tauri/src/update.rs` | GitHub Release checks and signature-verified updates from the tray and the page |
 | `.github/workflows/` | macOS/Windows checks and version-tag-driven DMG/NSIS/updater publication |
 | `test/` | Disposable HTTP/socket/state and routing tests |
 
 Official references: [Feishu Node SDK](https://github.com/larksuite/node-sdk), [message receive event](https://open.feishu.cn/document/server-docs/im-v1/message/events/receive), [Slack Socket Mode](https://docs.slack.dev/apis/events-api/using-socket-mode/), [Telegram Bot API](https://core.telegram.org/bots/api), and [Claude Code inbox sockets](https://code.claude.com/docs/en/cross-session-messaging#the-sessions-inbox-socket).
+
+## License
+
+Nootify is available under the [MIT License](LICENSE). Third-party components keep their own licenses. The website's fonts and Phosphor icon font ship with their license files in `site/shared/`. For the desktop app, `scripts/stage-service.mjs` places these in the service resources (`Nootify.app/Contents/Resources/service/` on macOS, or `service/` beside `Nootify.exe` on Windows):
+
+- `third-party-notices.txt`, written by `scripts/third-party-notices.mjs`: the license texts of every Rust crate Cargo builds for the app, as listed by `cargo metadata` for the release target, and of every production npm package in `node_modules/`. Each entry reproduces the license files that come with the crate or package. Where none do, it reproduces the declared license from `scripts/spdx-licenses/`, verbatim copies of [SPDX License List](https://github.com/spdx/license-list-data) texts; staging fails if a needed text is missing there.
+- `node-LICENSE`: the Node.js runtime's license.
+- `tailscale-licenses/`: the licenses of the Go modules in the embedded Tailscale client.

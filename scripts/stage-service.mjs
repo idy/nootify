@@ -1,6 +1,8 @@
 // Stage service resources and target-suffixed Node.js/tsnet sidecars for Tauri.
 // macOS: Contents/Resources/service/ and Contents/MacOS/{node,nootify-tsnet}.
 // Windows: service/ and {node.exe,nootify-tsnet.exe} beside installed Nootify.exe.
+// Service resources include production modules, Node/Tailscale licenses, and
+// third-party-notices.txt for the target's Rust crates and npm packages.
 // Official Node archives are checked against both the pinned SHA-256 and SHASUMS256.txt.
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -15,6 +17,7 @@ import { promisify } from 'node:util';
 import { buildTsnet } from './build-tsnet.mjs';
 import { sha256, verifyExecutable, runNpm } from './bundle-utils.mjs';
 import { buildTarget, NODE_VERSION, nodeArchive, sidecarName, verifyNodeShasums } from './build-targets.mjs';
+import { thirdPartyNotices } from './third-party-notices.mjs';
 
 const run = promisify(execFile);
 
@@ -109,6 +112,7 @@ async function stageService(nodeLicense, tailscale) {
       await writeFile(path, license.content);
     }
     await installProductionModules(join(staging, 'node_modules'));
+    await writeFile(join(staging, 'third-party-notices.txt'), await thirdPartyNotices(target.triple, join(staging, 'node_modules')));
 
     // mkdtemp creates the directory 0700. An identical tree stays untouched (chmod keeps mtimes)
     // so cargo does not rerun the build script and relink.
