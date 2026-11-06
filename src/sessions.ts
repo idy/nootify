@@ -131,10 +131,6 @@ export class SessionsService implements ServiceModule {
     }
     if (request.method !== 'PUT' || match[2]) return;
     if (!isAdapter(body.adapter)) throw new HttpError(400, 'Unsupported session adapter');
-    const existing = this.state.sessions.get(id);
-    if (existing && existing.adapter !== body.adapter && (isPolledAdapter(existing.adapter) || isPolledAdapter(body.adapter))) {
-      throw new HttpError(409, 'This session ID belongs to another adapter');
-    }
     const record: SessionRecord = {
       session_id: id, host_id: hostname(), adapter: body.adapter,
       session_name: text(body.session_name, 'session_name'),
@@ -142,8 +138,20 @@ export class SessionsService implements ServiceModule {
       ...(body.socket_token !== undefined ? { socket_token: text(body.socket_token, 'socket_token') } : {}),
     };
     if (record.adapter === 'claude-code' || record.adapter === 'claude-desktop') await checkSocket(text(record.socket_path, 'socket_path'));
-    this.state.sessions.set(id, record);
-    await this.state.save();
+    let existing: SessionRecord | undefined; let applied = false;
+    await this.state.save({
+      apply: () => {
+        existing = this.state.sessions.get(id);
+        if (existing && existing.adapter !== record.adapter && (isPolledAdapter(existing.adapter) || isPolledAdapter(record.adapter))) {
+          throw new HttpError(409, 'This session ID belongs to another adapter');
+        }
+        this.state.sessions.set(id, record); applied = true;
+      },
+      rollback: () => {
+        if (!applied) return;
+        if (existing) this.state.sessions.set(id, existing); else this.state.sessions.delete(id);
+      },
+    });
     this.report({ source: 'sessions', status: 'registered', session_id: id, session_name: record.session_name });
     const { socket_path: _path, socket_token: _token, ...publicSession } = record;
     return { body: publicSession };

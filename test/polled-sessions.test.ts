@@ -4,7 +4,7 @@ import { once } from 'node:events';
 import fs, { mkdtemp, rm, stat } from 'node:fs/promises';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { AddressInfo } from 'node:net';
+import { createServer as createSocketServer, type AddressInfo } from 'node:net';
 import { test, type TestContext } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -63,6 +63,25 @@ for (const adapter of ['trae', 'workbuddy'] as const) {
     assert.ok(!(JSON.stringify(await f.client.listSessions())).includes('User input'), 'public session history omits inbox text');
     assert.equal(f.state.session('conversation-one').host_id, hostname());
     assert.equal((await fetch(`http://127.0.0.1:${f.port}/v1/sessions/conversation-one/inbox`, { method: 'POST', body: JSON.stringify({ adapter }) })).status, 401);
+  });
+}
+
+for (const adapter of ['trae', 'workbuddy'] as const) {
+  test(`${adapter}: registration cannot be overwritten by a concurrent Claude socket validation`, async t => {
+    const f = await fixture(t); const id = 'registration-race';
+    const socket_path = join(f.directory, 'inbox.sock');
+    const socket = createSocketServer(connection => connection.end());
+    socket.listen(socket_path); await once(socket, 'listening'); t.after(() => socket.close());
+    // handle() reaches its async socket validation before the polled registration is queued.
+    const request = f.sessions.handle({ method: 'PUT', path: `/v1/sessions/${id}`,
+      body: { adapter: 'claude-code', session_name: 'Native registration', socket_path } });
+    const refused = assert.rejects(request, /another adapter/);
+    await registerPolledSession(f.state, adapter, id, 'Polled task');
+    await refused;
+    assert.equal(f.state.session(id).adapter, adapter);
+    assert.equal((await State.open(f.directory)).session(id).adapter, adapter);
+    await f.sessions.send(id, 'Input still reaches the polled conversation', adapter);
+    assert.match((await f.client.receiveThread(id, adapter)).messages[0].text, /still reaches the polled conversation/);
   });
 }
 
