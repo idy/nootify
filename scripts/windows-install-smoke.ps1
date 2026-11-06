@@ -84,7 +84,12 @@ function Test-Health {
 }
 function Test-PortFree {
     $listener = New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback, 9417)
-    try { $listener.ExclusiveAddressUse = $true; $listener.Start(); return $true }
+    try {
+        $listener.ExclusiveAddressUse = $false
+        $listener.Server.SetSocketOption([Net.Sockets.SocketOptionLevel]::Socket, [Net.Sockets.SocketOptionName]::ReuseAddress, $false)
+        $listener.Start()
+        return $true
+    }
     catch { return $false }
     finally { $listener.Stop() }
 }
@@ -227,11 +232,20 @@ try {
         if ([IO.File]::ReadAllText((Join-Path $stateDir 'install-smoke-marker')) -cne $marker -or
             (Get-FileHash -LiteralPath (Join-Path $stateDir 'auth-token') -Algorithm SHA256).Hash -cne $tokenHash) { throw 'Upgrade did not preserve private state' }
     }
-    Test-Step 'Installed CLI can restart the actual task' {
+    Test-Step 'Installed CLI restarts immediately with an accepted keep-alive connection' {
         $previous = Get-ServiceProcess
-        $null = Invoke-Service 'restart'
-        if (!$previous.WaitForExit(10000) -or !(Test-Health) -or (Get-ServiceProcess).Id -eq $previous.Id) { throw 'Service restart did not replace the daemon cleanly' }
-        Assert-RunningTask
+        $browser = [Net.Sockets.TcpClient]::new('127.0.0.1', 9417)
+        try {
+            $stream = $browser.GetStream(); $stream.ReadTimeout = 5000
+            $request = [Text.Encoding]::ASCII.GetBytes("GET /health HTTP/1.1`r`nHost: 127.0.0.1:9417`r`nConnection: keep-alive`r`n`r`n")
+            $stream.Write($request, 0, $request.Length)
+            $buffer = New-Object byte[] 4096
+            if ($stream.Read($buffer, 0, $buffer.Length) -eq 0) { throw 'The service did not accept the keep-alive request' }
+            # Leave the client open while Stop closes the daemon's accepted socket.
+            $null = Invoke-Service 'restart'
+            if (!$previous.WaitForExit(10000) -or !(Test-Health) -or (Get-ServiceProcess).Id -eq $previous.Id) { throw 'Service restart did not replace the daemon cleanly' }
+            Assert-RunningTask
+        } finally { $browser.Dispose() }
     }
     Test-Step 'Silent uninstall removes the real task and listener but keeps data' {
         Uninstall-TestApp 'uninstall-current'

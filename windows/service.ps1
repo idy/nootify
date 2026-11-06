@@ -64,7 +64,13 @@ function Assert-Owned($Task) {
 }
 function Assert-PortFree {
     $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $Port)
-    try { $listener.ExclusiveAddressUse = $true; $listener.Start() }
+    try {
+        # Match bundled Node/libuv: exclusive binds reject harmless TIME_WAIT sockets,
+        # while SO_REUSEADDR on Windows can steal another application's live port.
+        $listener.ExclusiveAddressUse = $false
+        $listener.Server.SetSocketOption([Net.Sockets.SocketOptionLevel]::Socket, [Net.Sockets.SocketOptionName]::ReuseAddress, $false)
+        $listener.Start()
+    }
     catch { throw "Port $Port is already occupied; stop the existing service before installing or starting Nootify" }
     finally { $listener.Stop() }
 }

@@ -73,6 +73,40 @@ $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
 $listener.Start(); $Port = $listener.LocalEndpoint.Port
 try { Must-Fail { Assert-PortFree } 'An occupied port must reject initial installation' } finally { $listener.Stop() }
 Assert-PortFree
+
+# An accepted connection actively closed by the server leaves its local port in
+# TIME_WAIT. Match a real Node listener (neither exclusive nor reuse enabled).
+$listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+$listener.ExclusiveAddressUse = $false
+$listener.Server.SetSocketOption([Net.Sockets.SocketOptionLevel]::Socket, [Net.Sockets.SocketOptionName]::ReuseAddress, $false)
+$listener.Start(); $Port = $listener.LocalEndpoint.Port
+$client = [Net.Sockets.TcpClient]::new()
+$accepted = $null
+try {
+    Must-Fail { Assert-PortFree } 'A live Node-style listener must not be stolen'
+    $client.Connect([Net.IPAddress]::Loopback, $Port)
+    $remotePort = $client.Client.LocalEndPoint.Port
+    $accepted = $listener.AcceptTcpClient()
+    $accepted.Close(); $accepted = $null # Server sends FIN first.
+    $client.GetStream().ReadTimeout = 3000
+    Assert ($client.GetStream().ReadByte() -eq -1) 'The client must observe the server FIN'
+    $client.Close(); $listener.Stop()
+    $until = [DateTime]::UtcNow.AddSeconds(3)
+    do {
+        $timeWait = @([Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpConnections() | Where-Object {
+            $_.LocalEndPoint.Port -eq $Port -and $_.RemoteEndPoint.Port -eq $remotePort -and $_.State -eq [Net.NetworkInformation.TcpState]::TimeWait
+        })
+        if ($timeWait.Count) { break }
+        Start-Sleep -Milliseconds 10
+    } while ([DateTime]::UtcNow -lt $until)
+    Assert ($timeWait.Count -gt 0) 'The accepted-connection fixture must retain server-side TIME_WAIT'
+    Assert-PortFree # No waiting for TCP state to expire.
+    & $NodePath -e "const server=require('node:net').createServer();server.once('error',()=>{process.exitCode=1});server.listen({host:'127.0.0.1',port:Number(process.argv[1])},()=>server.close());" $Port
+    Assert ($LASTEXITCODE -eq 0) 'Bundled Node must be able to bind immediately after the probe'
+} finally {
+    if ($accepted) { $accepted.Dispose() }
+    $client.Dispose(); $listener.Stop()
+}
 $Port = $record.port
 
 # Capture a task definition against a fake scheduler instead of registering anything.
