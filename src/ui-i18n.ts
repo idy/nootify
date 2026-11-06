@@ -2,6 +2,7 @@
 export const english = {
   '完成': 'Done',
   '飞书连接': 'Feishu connection',
+  '该群属于另一个飞书应用': 'This group belongs to another Feishu app',
   '飞书个人 App': 'Feishu personal app',
   '接入类型': 'Connection type',
   '使用已有机器人的 App ID 和 App Secret，沿用原有消息流程。': 'Use your existing bot’s App ID and App Secret with the original messaging workflow.',

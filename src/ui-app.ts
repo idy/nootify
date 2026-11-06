@@ -66,7 +66,7 @@ function translatedLabels() {
     session_not_local: t('本机不存在该会话'), session_archived: t('会话已归档'), session_offline: t('本机会话未运行'),
     archive_unknown: t('无法确认归档状态'), backend_unavailable: t('客户端接口未配置或不可用'), session_busy: t('当前轮次已变化，本次未投递'),
     missing_announcement: t('群公告没有会话声明'), ambiguous_announcement: t('群公告有多个会话声明'), unsupported_adapter: t('尚未支持该客户端'),
-    sender_not_allowed: t('发送者不在允许名单'), duplicate: t('重复消息'), unsupported_message: t('暂不处理此消息类型'),
+    app_mismatch: t('该群属于另一个飞书应用'), sender_not_allowed: t('发送者不在允许名单'), duplicate: t('重复消息'), unsupported_message: t('暂不处理此消息类型'),
     host_mismatch: t('会话位于另一台机器'), invalid_content: t('消息内容无效'), delivery_failed: t('投递失败'),
   };
   const sourceNames: Record<string, string> = { host: t('服务'), sessions: t('会话'), lark: t('飞书'), slack: 'Slack', telegram: 'Telegram', pulls: 'GitHub', agents: 'Agents' };

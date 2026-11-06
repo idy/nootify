@@ -93,6 +93,8 @@ export class LarkThreads {
       const data = await this.api.request<{ items?: { chat_id?: string; name?: string }[]; has_more?: boolean; page_token?: string }>('GET', `/open-apis/im/v1/chats?${query}`);
       for (const chat of data.items ?? []) {
         if (!chat.chat_id || !chat.name?.toLowerCase().includes(needle)) continue;
+        const owner = this.state.bindings.get(chat.chat_id)?.app_id;
+        if (owner && owner !== this.api.appId) continue;
         // An unavailable announcement cannot establish that this is another session's group.
         // Let the read failure abort lookup rather than creating a duplicate on a transient error.
         const announcement = await readAnnouncement(this.api, chat.chat_id);

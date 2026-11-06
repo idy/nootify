@@ -135,8 +135,12 @@ export class LarkService implements ServiceModule {
     const message_id = event.message.message_id;
     const context = { source: 'lark', chat_id, message_id };
     const sender = event.sender.sender_id?.open_id;
+    const binding = this.state.bindings.get(chat_id);
+    if (binding?.app_id && binding.app_id !== this.api.appId) {
+      this.report({ ...context, status: 'ignored', reason: 'app_mismatch' }); return false;
+    }
     const bindings = [...this.state.bindings.values()].filter(binding => !binding.app_id || binding.app_id === this.api!.appId);
-    const boundSender = bindings.find(binding => binding.chat_id === chat_id)?.sender_open_id;
+    const boundSender = binding?.sender_open_id;
     const allowed = new Set(bindings.map(binding => binding.sender_open_id));
     for (const id of (process.env.LARK_ALLOWED_OPEN_IDS ?? '').split(',').filter(Boolean)) allowed.add(id.trim());
     if (!sender || (boundSender ? sender !== boundSender : !allowed.has(sender))) {
