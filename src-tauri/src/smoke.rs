@@ -13,10 +13,12 @@ use tauri::{AppHandle, Manager, WebviewWindow};
 use tauri_plugin_updater::UpdaterExt;
 
 use crate::{
-    is_fallback, is_service_ui, open_settings, render_health, render_install, restore_window,
+    is_fallback, is_service_ui,
+    language::{Locale, Preference, Text},
+    language_view, open_settings, render_health, render_install, restore_window,
     service::{check_health, health_client, BundledService, LaunchAgent},
-    update::{tag, Phase, UpdateView},
-    NativeState, TrayItems, INSTALL_LABEL, MAIN_WINDOW, TRAY_ID,
+    update::{Phase, Status, UpdateView},
+    NativeState, TrayItems, MAIN_WINDOW, TRAY_ID,
 };
 
 /// A debug smoke run may inspect the worktree's loopback UI without replacing the installed service.
@@ -63,6 +65,8 @@ pub fn run(app: AppHandle, items: TrayItems) {
                         "single_instance_restores_window": true,
                         "bundled_fallback": true,
                         "fallback_ipc_denied": true,
+                        "language_bridge_and_reload": true,
+                        "language_smoke_persistence_isolated": true,
                         "daemon_healthy": report.online,
                         "live_ui_restored": report.online,
                         "remote_ipc_denied": report.online,
@@ -105,11 +109,12 @@ fn exercise_bundle(app: &AppHandle, items: &TrayItems) -> Result<Report, String>
     // Only stats the plist path; nothing under ~/Library/LaunchAgents is written or loaded.
     let plist_present = LaunchAgent::new(home).plist_present();
     render_install(app, items, plist_present);
+    let locale = language_view(app).locale;
     wait_for(
-        "安装后台服务 is enabled exactly when no plist exists",
+        "Install Background Service is enabled exactly when no plist exists",
         || {
             items.install.is_enabled().ok() == Some(!plist_present)
-                && items.install.text().ok().as_deref() == Some(INSTALL_LABEL)
+                && items.install.text().ok().as_deref() == Some(locale.text(Text::InstallService))
         },
     )?;
 
@@ -134,35 +139,48 @@ fn exercise_bundle(app: &AppHandle, items: &TrayItems) -> Result<Report, String>
     // Render an available update through the production path; the update worker that could
     // install it is not running, and no Update exists to install.
     let menu = &items.update;
-    let current = tag(&app.package_info().version.to_string());
+    let current = app.package_info().version.to_string();
+    let install_title = locale.format(Text::InstallVersion, &[("version", "v0.0.0-smoke")]);
+    let update_title = locale.format(Text::UpdateVersion, &[("version", "v0.0.0-smoke")]);
+    let progress_title = Status::Downloading(Some(42)).text(locale);
     if menu.install_shown() || !menu.check.is_enabled().unwrap_or(false) {
         return Err("Update items are not in their initial state".into());
     }
-    menu.render("可更新至 v0.0.0-smoke", Some("0.0.0-smoke"), false);
+    menu.render(
+        app,
+        Status::Available("0.0.0-smoke".into()),
+        Some("0.0.0-smoke"),
+        false,
+    );
     wait_for(
         "available update stays reachable inside the native submenu",
         || {
             menu.install_shown()
-                && menu.install.text().ok().as_deref() == Some("安装更新 v0.0.0-smoke")
-                && menu.menu.text().ok().as_deref() == Some("更新 v0.0.0-smoke")
+                && menu.install.text().ok().as_deref() == Some(install_title.as_str())
+                && menu.menu.text().ok().as_deref() == Some(update_title.as_str())
         },
     )?;
-    menu.render("下载中 42%", Some("0.0.0-smoke"), true);
+    menu.render(
+        app,
+        Status::Downloading(Some(42)),
+        Some("0.0.0-smoke"),
+        true,
+    );
     wait_for(
         "tray shows inline progress and blocks duplicate update actions",
         || {
-            menu.menu.text().ok().as_deref() == Some("下载中 42%")
+            menu.menu.text().ok().as_deref() == Some(progress_title.as_str())
                 && menu.install_shown()
                 && !menu.check.is_enabled().unwrap_or(true)
                 && !menu.install.is_enabled().unwrap_or(true)
         },
     )?;
-    menu.render(&format!("当前版本 {current}"), None, false);
+    menu.render(app, Status::Version(current), None, false);
     wait_for(
         "completed update restores the submenu without an install action",
         || {
             !menu.install_shown()
-                && menu.menu.text().ok().as_deref() == Some("软件更新")
+                && menu.menu.text().ok().as_deref() == Some(locale.text(Text::SoftwareUpdates))
                 && menu.check.is_enabled().unwrap_or(false)
         },
     )?;
@@ -235,7 +253,12 @@ fn exercise(app: &AppHandle, items: &TrayItems) -> Result<Report, String> {
         window.is_visible().unwrap_or(false) && window.is_focused().unwrap_or(false)
     })?;
 
-    let health = check_health(&health_client().map_err(|error| error.to_string())?);
+    // A worktree preview smoke must not query or display the installed daemon's UI.
+    let health = if preview_url().is_some() {
+        Err("Isolated worktree preview".into())
+    } else {
+        check_health(&health_client().map_err(|error| error.to_string())?)
+    };
     let online = health.is_ok();
     if online {
         render_health(app, items, &health);
@@ -246,7 +269,7 @@ fn exercise(app: &AppHandle, items: &TrayItems) -> Result<Report, String> {
         wait_for(
             "tray Settings shortcut opens the existing local settings page",
             || {
-                evaluate(&window, "location.hash === '#/settings/github' && !!document.querySelector('#settings-view:not([hidden])')").unwrap_or(false)
+                evaluate(&window, "location.hash === '#/settings/general' && !!document.querySelector('#settings-view:not([hidden])')").unwrap_or(false)
             },
         )?;
         open_settings(app, true);
@@ -266,9 +289,10 @@ fn exercise(app: &AppHandle, items: &TrayItems) -> Result<Report, String> {
             .unwrap()
             .as_ref()
             .is_some_and(is_fallback);
-        loaded && evaluate(&window, "document.querySelector('h1')?.textContent === '正在等待本机服务' && document.querySelector('.mark')?.naturalWidth > 0").unwrap_or(false)
+        loaded && evaluate(&window, "document.querySelector('h1')?.textContent === (document.documentElement.lang === 'zh-CN' ? '正在等待本机服务' : 'Waiting for the local service') && document.querySelector('.mark')?.naturalWidth > 0").unwrap_or(false)
     })?;
     check_ipc_denied(&window)?;
+    check_language_bridge(&window, items)?;
     render_health(app, items, &health);
     if online {
         wait_for_live_ui(&window)?;
@@ -300,7 +324,12 @@ fn capture_tray(app: &AppHandle, items: &TrayItems) -> Result<(), String> {
         _ => {}
     }
     if std::env::var("NOOTIFY_SMOKE_TRAY_PROGRESS").as_deref() == Ok("1") {
-        items.update.render("下载中 42%", Some("0.0.0-smoke"), true);
+        items.update.render(
+            app,
+            Status::Downloading(Some(42)),
+            Some("0.0.0-smoke"),
+            true,
+        );
     }
     if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
         window.hide().map_err(|error| error.to_string())?;
@@ -341,7 +370,7 @@ fn capture_tray(app: &AppHandle, items: &TrayItems) -> Result<(), String> {
 fn check_titlebar_preview(window: &WebviewWindow, url: tauri::Url) -> Result<(), String> {
     window.navigate(url).map_err(|error| error.to_string())?;
     wait_for("worktree titlebar loaded", || {
-        evaluate(window, "document.documentElement.hasAttribute('data-nootify-desktop') && !!document.querySelector('.titlebar #update-action') && document.querySelector('#connection')?.textContent === '实时更新'").unwrap_or(false)
+        evaluate(window, "document.documentElement.hasAttribute('data-nootify-desktop') && !!document.querySelector('.titlebar #update-action') && ['Live', '实时更新'].includes(document.querySelector('#connection')?.textContent)").unwrap_or(false)
     })?;
     check_ipc_denied(window)?;
     let mut update = UpdateView {
@@ -392,7 +421,7 @@ fn check_titlebar_preview(window: &WebviewWindow, url: tauri::Url) -> Result<(),
     wait_for(
         "compact desktop titlebar keeps progress and content aligned",
         || {
-            evaluate(window, "(() => { const header = document.querySelector('.titlebar').getBoundingClientRect(); const brand = document.querySelector('.brand').getBoundingClientRect(); const status = document.querySelector('#update-action'); return innerWidth === 640 && header.y === 0 && header.height === 52 && brand.x >= 90 && Math.abs(brand.y + brand.height / 2 - 26) < 1 && status === window.__nootifySmokeUpdateButton && status.tagName === 'BUTTON' && status.textContent.trim() === '下载中 42%' && status.getBoundingClientRect().height === 28 && status.getBoundingClientRect().width === 136 && !status.hidden && !document.querySelector('.titlebar progress') && document.documentElement.scrollWidth === innerWidth; })()").unwrap_or(false)
+            evaluate(window, "(() => { const header = document.querySelector('.titlebar').getBoundingClientRect(); const brand = document.querySelector('.brand').getBoundingClientRect(); const status = document.querySelector('#update-action'); return innerWidth === 640 && header.y === 0 && header.height === 52 && brand.x >= 90 && Math.abs(brand.y + brand.height / 2 - 26) < 1 && status === window.__nootifySmokeUpdateButton && status.tagName === 'BUTTON' && ['Downloading 42%', '下载中 42%'].includes(status.textContent.trim()) && status.getBoundingClientRect().height === 28 && status.getBoundingClientRect().width === (document.documentElement.lang === 'en' ? 164 : 136) && !status.hidden && !document.querySelector('.titlebar progress') && document.documentElement.scrollWidth === innerWidth; })()").unwrap_or(false)
         },
     )?;
     // Optional bounded pause lets an external native driver capture and drag this settled window.
@@ -426,11 +455,15 @@ fn wait_for_live_ui(window: &WebviewWindow) -> Result<(), String> {
             .as_ref()
             .is_some_and(is_service_ui);
         // Also checks, in WebKit itself, that log rows share one height and sidebar footer lines one gap.
-        loaded && evaluate(window, "(() => { const one = values => new Set(values.map(Math.round)).size === 1; const rows = [...document.querySelectorAll('#logs-table .row')].map(row => row.getBoundingClientRect().height); const lines = [...document.querySelectorAll('.sidebar-foot .status-line')].filter(line => line.offsetParent).map(line => line.getBoundingClientRect()); const gaps = lines.slice(1).map((line, index) => line.top - lines[index].bottom); return rows.length > 1 && one(rows) && gaps.length > 1 && one(gaps) && document.querySelector('#connection')?.textContent === '实时更新' && document.querySelector('#error')?.hidden === true; })()").unwrap_or(false)
+        loaded && evaluate(window, "(() => { const one = values => new Set(values.map(Math.round)).size === 1; const rows = [...document.querySelectorAll('#logs-table .row')].map(row => row.getBoundingClientRect().height); const lines = [...document.querySelectorAll('.sidebar-foot .status-line')].filter(line => line.offsetParent).map(line => line.getBoundingClientRect()); const gaps = lines.slice(1).map((line, index) => line.top - lines[index].bottom); return rows.length > 1 && one(rows) && gaps.length > 1 && one(gaps) && ['Live', '实时更新'].includes(document.querySelector('#connection')?.textContent) && document.querySelector('#error')?.hidden === true; })()").unwrap_or(false)
     })
 }
 
 fn evaluate(window: &WebviewWindow, expression: &str) -> Result<bool, String> {
+    evaluate_value(window, expression).map(|value| value == "true")
+}
+
+fn evaluate_value(window: &WebviewWindow, expression: &str) -> Result<String, String> {
     let (sender, receiver) = mpsc::sync_channel(1);
     window
         .eval_with_callback(expression, move |result| {
@@ -440,7 +473,74 @@ fn evaluate(window: &WebviewWindow, expression: &str) -> Result<bool, String> {
     let result = receiver
         .recv_timeout(Duration::from_secs(2))
         .map_err(|error| error.to_string())?;
-    Ok(result == "true")
+    Ok(result)
+}
+
+/// Exercises the real navigation policy, immediate native relabeling, the CSP-locked fallback,
+/// and document-start state after reload. Smoke preferences are intentionally never persisted.
+fn check_language_bridge(window: &WebviewWindow, items: &TrayItems) -> Result<(), String> {
+    let app = window.app_handle();
+    let original = language_view(app).preference;
+    window.eval("window.addEventListener('nootify-language', event => { window.__nootifySmokeLanguage = JSON.stringify(event.detail); })").map_err(|error| error.to_string())?;
+    for (path, preference, locale) in [
+        ("en", Preference::English, Locale::English),
+        (
+            "system",
+            Preference::System,
+            crate::language::system_locale(),
+        ),
+        ("zh-CN", Preference::Chinese, Locale::Chinese),
+    ] {
+        let expected =
+            serde_json::to_string(&crate::language::LanguageView::new(preference, locale)).unwrap();
+        window
+            .eval(format!("location.href = 'nootify://language/{path}'"))
+            .map_err(|error| error.to_string())?;
+        wait_for(
+            "language request updates the page and tray without navigating",
+            || {
+                language_view(app).preference == preference
+                && items.open.text().ok().as_deref() == Some(locale.text(Text::Open))
+                && evaluate(window, &format!("window.__nootifySmokeLanguage === {} && document.documentElement.lang === {}", json!(expected), json!(if locale == Locale::Chinese { "zh-CN" } else { "en" }))).unwrap_or(false)
+            },
+        )?;
+    }
+    // A probe after the production initialization scripts observes state before page JS or replay.
+    window.with_webview(|platform| {
+        use objc2::{MainThreadMarker, MainThreadOnly};
+        use objc2_foundation::NSString;
+        use objc2_web_kit::{WKUserContentController, WKUserScript, WKUserScriptInjectionTime};
+        let mtm = MainThreadMarker::new().expect("main thread");
+        // SAFETY: Tauri supplies Wry's live controller on the owning main thread.
+        unsafe {
+            let controller = &*platform.controller().cast::<WKUserContentController>();
+            let script = WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
+                WKUserScript::alloc(mtm),
+                &NSString::from_str("window.__nootifySmokeDocumentLanguage = JSON.stringify(window.__NOOTIFY_LANGUAGE__); window.__nootifySmokeCsp = []; document.addEventListener('securitypolicyviolation', event => { window.__nootifySmokeCsp.push({directive:event.effectiveDirective,uri:event.blockedURI}); });"),
+                WKUserScriptInjectionTime::AtDocumentStart,
+                true,
+            );
+            controller.addUserScript(&script);
+        }
+    }).map_err(|error| error.to_string())?;
+    window
+        .eval("location.reload()")
+        .map_err(|error| error.to_string())?;
+    wait_for(
+        "reloaded document starts in the saved native language",
+        || {
+            evaluate(window, "window.__nootifySmokeDocumentLanguage === JSON.stringify({preference:'zh-CN',locale:'zh-CN'}) && document.documentElement.lang === 'zh-CN' && document.querySelector('h1')?.textContent === '正在等待本机服务'").unwrap_or(false)
+        },
+    ).map_err(|error| format!("{error}: {}", evaluate_value(window, "JSON.stringify({initial:window.__nootifySmokeDocumentLanguage,current:window.__NOOTIFY_LANGUAGE__,lang:document.documentElement.lang,heading:document.querySelector('h1')?.textContent,url:location.href})").unwrap_or_default()))?;
+    if !evaluate(window, "window.__nootifySmokeCsp?.length === 0")? {
+        return Err(format!(
+            "Fallback CSP violations: {}",
+            evaluate_value(window, "JSON.stringify(window.__nootifySmokeCsp)")?
+        ));
+    }
+    check_ipc_denied(window)?;
+    crate::change_language(app, original);
+    Ok(())
 }
 
 /// In WebKit itself: pushed state reaches a listener under the page's CSP, and an update request

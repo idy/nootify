@@ -65,7 +65,7 @@
 * { box-sizing: border-box; }
 html, body { height: 100%; }
 body { margin: 0; background: var(--bg); color: var(--text); }
-button, input { font: inherit; color: inherit; }
+button, input, select { font: inherit; color: inherit; }
 button { margin: 0; padding: 0; border: 0; background: none; cursor: pointer; }
 a { color: inherit; text-decoration: none; }
 :focus { outline: none; }
@@ -260,6 +260,8 @@ label.row:hover { background: var(--hover); }
 .setting-sub.tone-error { color: var(--red); }
 .setting-actions { display: flex; flex: none; align-items: center; gap: 2px; }
 .setting-field { flex: 0 1 320px; min-width: 0; height: 30px; padding: 0 10px; border: 1px solid var(--line-soft); border-radius: 8px; outline: none; background: var(--field); }
+.setting-language select { flex: 0 1 auto; width: auto; max-width: 100%; min-width: 160px; padding-inline-end: 28px; cursor: pointer; }
+.setting-language select:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
 .setting-field::placeholder { color: var(--faint); }
 .setting-field:disabled { color: var(--faint); cursor: default; }
 .secret-field { position: relative; flex: 0 1 320px; min-width: 0; }
@@ -280,6 +282,7 @@ label.row:hover { background: var(--hover); }
 /* Software updates stay in the title row, without moving the working content. */
 .titlebar-update { display: flex; flex: none; align-items: center; font-size: var(--type-meta); }
 .update-action { justify-content: center; gap: 6px; width: 136px; height: 28px; border: 1px solid color-mix(in srgb, var(--blue) 25%, transparent); border-radius: 14px; background: color-mix(in srgb, var(--blue) 12%, var(--bg)); color: var(--blue); font-variant-numeric: tabular-nums; }
+:root:lang(en) .update-action { width: 164px; }
 .update-action:hover { background: color-mix(in srgb, var(--blue) 20%, var(--bg)); }
 .update-action:active { background: color-mix(in srgb, var(--blue) 26%, var(--bg)); }
 .update-action svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
@@ -367,7 +370,5 @@ label.row:hover { background: var(--hover); }
   .repo-row .repo-name-cell { grid-column: 2 / -1; }
   .repo-row .repo-active-cell { grid-column: 4 / -1; grid-row: 3; }
   .repo-row .repo-scope-cell { grid-column: 2 / 4; grid-row: 3; text-align: left; }
-  .repo-linked-cell::before { content: "关联 "; }
-  .repo-open-cell::before { content: "Open "; }
   .repo-details > td { padding-left: 44px; }
 }

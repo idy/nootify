@@ -82,10 +82,10 @@ pub enum JobAction {
 }
 
 impl JobAction {
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> crate::language::Text {
         match self {
-            Self::Start => "启动服务",
-            Self::Restart => "重启服务",
+            Self::Start => crate::language::Text::StartService,
+            Self::Restart => crate::language::Text::RestartService,
         }
     }
 }
@@ -176,7 +176,9 @@ impl LaunchAgent {
             return Err("127.0.0.1:9417 is occupied by another process; the existing service was left running".into());
         }
         if !loaded && !self.plist.is_file() {
-            return Err("LaunchAgent is not installed; use 安装后台服务 first".into());
+            return Err(
+                "LaunchAgent is not installed; install the background service first".into(),
+            );
         }
         self.launchctl(operation_args(action, loaded, self.uid, &self.plist))
     }

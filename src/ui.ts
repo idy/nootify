@@ -22,6 +22,7 @@ const assets = new Map([
   ['/', { path: new URL('../../public/index.html', import.meta.url), type: 'text/html; charset=utf-8' }],
   ['/ui/styles.css', { path: new URL('../../public/styles.css', import.meta.url), type: 'text/css; charset=utf-8' }],
   ['/ui/app.js', { path: new URL('./ui-app.js', import.meta.url), type: 'text/javascript; charset=utf-8' }],
+  ['/ui/ui-i18n.js', { path: new URL('./ui-i18n.js', import.meta.url), type: 'text/javascript; charset=utf-8' }],
 ]);
 function json(response: ServerResponse, status: number, body: unknown): void {
   response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
