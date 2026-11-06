@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, rm, stat } from 'node:fs/promises';
+import fs, { mkdtemp, rm, stat } from 'node:fs/promises';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
@@ -18,20 +18,22 @@ import { createServiceHost } from '../src/server.js';
 import { SessionsService } from '../src/sessions.js';
 import { State } from '../src/state.js';
 import type { PolledAdapter, SessionInbox, ThreadInfo } from '../src/types.js';
+import { sessionInbox } from '../src/polled-sessions.js';
 
 const execute = promisify(execFile);
 async function fixture(t: TestContext) {
   const directory = await mkdtemp(join(tmpdir(), 'nootify-polled-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const state = await State.open(directory);
+  const forwarding: { port: number; command?: string[] } = { port: 0 };
   const sessions = new SessionsService(state, { inspect: async () => { throw new Error('Must not resolve a polled client through Claude'); } }, () => {},
-    { resolve: async () => { throw new Error('Must not query a native backend'); }, close() {} });
+    { resolve: async () => { throw new Error('Must not query a native backend'); }, close() {} }, forwarding);
   const server = createServiceHost([sessions], state.token);
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   t.after(() => { server.closeAllConnections(); server.close(); });
-  const port = (server.address() as AddressInfo).port;
+  const port = (server.address() as AddressInfo).port; forwarding.port = port;
   const client = new NootifyClient({ baseUrl: `http://127.0.0.1:${port}`, token: state.token });
-  return { directory, state, sessions, server, client, port };
+  return { directory, state, sessions, server, client, port, forwarding };
 }
 
 for (const adapter of ['trae', 'workbuddy'] as const) {
@@ -75,6 +77,33 @@ test('inboxes enforce message and queue limits without dropping older input', as
   assert.match((await f.client.receiveThread('bounded', 'trae')).messages[0].text, /message-20$/);
 });
 
+test('a failed inbox acknowledgment is rolled back before an overlapping save takes its snapshot', async t => {
+  const f = await fixture(t);
+  await registerPolledSession(f.state, 'trae', 'atomic-ack', 'Task');
+  await f.sessions.send('atomic-ack', 'Keep this input', 'trae');
+  const message = (await f.client.receiveThread('atomic-ack', 'trae')).messages[0];
+  let entered!: () => void; let release!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const rename = fs.rename; let fail = true;
+  t.mock.method(fs, 'rename', async (from: Parameters<typeof rename>[0], to: Parameters<typeof rename>[1]) => {
+    if (fail && String(to) === join(f.directory, 'state.json')) {
+      fail = false; entered(); await gate; throw new Error('Injected state rename failure');
+    }
+    return rename(from, to);
+  });
+  const acknowledgment = f.client.acknowledgeThread('atomic-ack', 'trae', message.id);
+  await started;
+  f.state.settings.notification_channel = 'slack';
+  const overlapping = f.state.save();
+  const failed = assert.rejects(acknowledgment, /Injected state rename failure/);
+  release(); await failed; await overlapping;
+  assert.ok(f.state.inboxMessages.has(message.id));
+  const restored = await State.open(f.directory);
+  assert.ok(restored.inboxMessages.has(message.id), 'a failed ACK must retain input after restart');
+  assert.equal(restored.settings.notification_channel, 'slack');
+});
+
 class FakeTransport implements ChatTransport {
   readonly identity = 'fixture-bot'; readonly account = 'Test bot';
   receive: (message: ChatMessage) => Promise<void> = async () => {};
@@ -110,6 +139,50 @@ for (const channel of ['slack', 'telegram'] as const) {
       assert.equal(transport.sent.at(-1)?.reply, incoming.message_id);
       await f.client.acknowledgeThread(id, adapter, messages[0].id);
     }
+  });
+
+  test(`${channel}: unread source contexts survive ledger eviction and restart, with commands regenerated for the current installation`, async t => {
+    const f = await fixture(t); f.forwarding.command = ['/Old Nootify/node', '/Old Nootify/cli.js'];
+    const transport = new FakeTransport();
+    const original = new ChatService(channel, f.state, f.sessions, async () => transport, () => {}, 9999);
+    await original.configure(channel === 'slack' ? { bot_token: 'xoxb-fixture', app_token: 'xapp-fixture', channel_id: 'C123', user_id: 'U123' }
+      : { bot_token: '123:fixture', chat_id: '-100123', user_id: '123' });
+    const thread = await original.open('trae', 'retained-source', 'Retained task');
+    const incoming: ChatMessage = { chat_id: thread.chat_id, thread_id: thread.thread_id!, message_id: 'original-provider-id',
+      sender_id: channel === 'slack' ? 'U123' : '123', text: 'Original unread user text' };
+    await transport.receive(incoming);
+    const delivery = [...f.state.chatDeliveries.values()][0];
+    for (let index = 0; index < 1999; index++) {
+      const id = `newer-${index}`;
+      f.state.chatDeliveries.set(id, { ...delivery, id, message_id: id, transport_status: 'input_accepted', replies: [] });
+    }
+    await transport.receive({ ...incoming, message_id: 'trigger-eviction', text: 'A later message' });
+    assert.equal(f.state.chatDeliveries.has(delivery.id), false, 'the bounded main ledger evicted the original entry');
+    await original.stop();
+    const state = await State.open(f.directory); const nextTransport = new FakeTransport();
+    const runtime = { port: 0, command: [process.execPath, fileURLToPath(new URL('../src/cli.js', import.meta.url))] };
+    const sessions = new SessionsService(state, undefined, () => {}, undefined, runtime);
+    const service = new ChatService(channel, state, sessions, async () => nextTransport);
+    await service.start(); t.after(async () => { await service.stop(); await sessions.stop(); });
+    const server = createServiceHost([sessions, service], state.token); server.listen(0, '127.0.0.1'); await once(server, 'listening');
+    t.after(() => { server.closeAllConnections(); server.close(); }); runtime.port = (server.address() as AddressInfo).port;
+    const client = new NootifyClient({ baseUrl: `http://127.0.0.1:${runtime.port}`, token: state.token });
+    await nextTransport.receive(incoming);
+    const pending = await client.receiveThread('retained-source', 'trae');
+    assert.equal(pending.messages.length, 2, 'the original provider message is still deduplicated');
+    const message = pending.messages.find(message => message.text.includes('Original unread user text'))!;
+    assert.match(message.text, new RegExp(`--port ${runtime.port} `));
+    assert.ok(!message.text.includes('/Old Nootify/')); assert.ok(!message.text.includes('--port 9999 '));
+    assert.ok(message.text.includes(runtime.command[1]));
+    assert.match(message.text, new RegExp(`--message-id '${delivery.id}'`));
+    assert.ok(!JSON.stringify(pending).includes('xoxb-fixture'));
+    await client.acknowledgeChat(delivery.id);
+    await client.replyChat(delivery.id, 'Reply to retained source');
+    await client.replyChat(delivery.id, 'Reply to retained source');
+    assert.equal(nextTransport.sent.length, 1); assert.equal(nextTransport.sent[0].reply, incoming.message_id);
+    assert.equal((await State.open(f.directory)).chatDelivery(delivery.id)?.replies.length, 1);
+    await client.acknowledgeThread('retained-source', 'trae', message.id);
+    assert.equal(state.chatDelivery(delivery.id), undefined, 'consumption releases the retained context');
   });
 
   test(`${channel}: reopening after a hostname change restores retained inbox messages without creating another thread`, async t => {
@@ -200,6 +273,54 @@ test('Feishu announcements route replies into the exact registered Trae and Work
     assert.match(inbox.messages[0].text, /lark-ack/); assert.match(inbox.messages[0].text, /lark-reply/);
     assert.equal(f.state.deliveries.get(`om_${adapter}`)?.transport_status, 'inbox_queued');
   }
+});
+
+test('Feishu unread replies retain their source across eviction/restart and use current callback commands', async t => {
+  const f = await fixture(t); f.state.settings.lark_recipient_open_id = 'ou_owner';
+  f.forwarding.command = ['/Old Nootify/node', '/Old Nootify/cli.js'];
+  const remote = fakeFeishu(); let chat = ''; let replies = 0;
+  const api: LarkApi = { appId: remote.api.appId, async request<T>(method: 'GET' | 'POST' | 'PATCH', path: string, body?: unknown): Promise<T> {
+    if (method === 'POST' && /^\/open-apis\/im\/v1\/messages\/[^/]+\/reply$/.test(path)) {
+      replies++; return { message_id: 'om_reply', chat_id: chat } as T;
+    }
+    return remote.api.request<T>(method, path, body);
+  } };
+  const original = new LarkService(f.state, f.sessions, undefined, () => {}, api, 9999);
+  const opened = await original.handle({ method: 'POST', path: '/v1/threads', body: { adapter: 'workbuddy', session_id: 'retained-lark', session_name: 'Retained task' } });
+  chat = (opened!.body as ThreadInfo).chat_id;
+  const incoming = { sender: { sender_type: 'user', sender_id: { open_id: 'ou_owner' } }, message: { chat_id: chat, message_id: 'om_retained',
+    message_type: 'text', content: JSON.stringify({ text: 'Original unread Feishu text' }) } };
+  original.enqueue(incoming); await original.drain();
+  const delivery = f.state.deliveries.get('om_retained')!;
+  for (let index = 0; index < 1999; index++) {
+    const id = `om_newer_${index}`;
+    f.state.deliveries.set(id, { ...delivery, message_id: id, transport_status: 'input_accepted', replies: [] });
+  }
+  original.enqueue({ ...incoming, message: { ...incoming.message, message_id: 'om_trigger', content: JSON.stringify({ text: 'Later Feishu text' }) } });
+  await original.drain();
+  assert.equal(f.state.deliveries.has('om_retained'), false);
+  const state = await State.open(f.directory);
+  const runtime = { port: 0, command: [process.execPath, fileURLToPath(new URL('../src/cli.js', import.meta.url))] };
+  const sessions = new SessionsService(state, undefined, () => {}, undefined, runtime);
+  const lark = new LarkService(state, sessions, undefined, () => {}, api);
+  const server = createServiceHost([sessions, lark], state.token); server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(() => { server.closeAllConnections(); server.close(); }); runtime.port = (server.address() as AddressInfo).port;
+  const client = new NootifyClient({ baseUrl: `http://127.0.0.1:${runtime.port}`, token: state.token });
+  assert.equal(lark.enqueue(incoming), false, 'retained source context still deduplicates provider retries');
+  const pending = await client.receiveThread('retained-lark', 'workbuddy');
+  assert.equal(pending.messages.length, 2);
+  const message = pending.messages.find(message => message.text.includes('Original unread Feishu text'))!;
+  assert.match(message.text, new RegExp(`--port ${runtime.port} `)); assert.ok(!message.text.includes('/Old Nootify/'));
+  const relocated = sessionInbox(state, 'workbuddy', 'retained-lark', { port: 9517, command: ['/New Nootify/node', '/New Nootify/cli.js'] });
+  assert.ok(relocated.messages[0].text.includes("'/New Nootify/node' '/New Nootify/cli.js' lark-ack"));
+  assert.match(relocated.messages[0].text, /--port 9517 /);
+  await client.acknowledgeLark('om_retained');
+  await client.replyLark('om_retained', 'Reply to retained Feishu source');
+  await client.replyLark('om_retained', 'Reply to retained Feishu source');
+  assert.equal(replies, 1);
+  assert.equal((await State.open(f.directory)).larkDelivery('om_retained')?.replies.length, 1);
+  await client.acknowledgeThread('retained-lark', 'workbuddy', message.id);
+  assert.equal(state.larkDelivery('om_retained'), undefined);
 });
 
 test('manually bound Feishu groups register Trae and WorkBuddy inboxes without thread-open', async t => {

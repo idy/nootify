@@ -1,40 +1,16 @@
 import { createHash } from 'node:crypto';
-import { fileURLToPath } from 'node:url';
+export { forwardedLarkMessage } from './forwarded-messages.js';
 import type { LarkApi } from './lark-metadata.js';
 import type { State } from './state.js';
 import { HttpError } from './types.js';
 import type { LarkDelivery, LarkReceipt, LarkReply } from './types.js';
 
-const shellQuote = (value: string): string => `'${value.replace(/'/g, `'"'"'`)}'`;
-export function forwardedLarkMessage(delivery: LarkDelivery, content: string, stateDir: string, port = 9417): string {
-  const command = [process.execPath, fileURLToPath(new URL('./cli.js', import.meta.url))].map(shellQuote).join(' ');
-  const context = `--state-dir ${shellQuote(stateDir)} --port ${port} --message-id ${shellQuote(delivery.message_id)}`;
-  return [
-    '【来自飞书用户的消息】',
-    '这条消息由 Nootify 从飞书转发给你。请在方便时回复原飞书消息；如果正在处理其他工作，可以稍后回复。',
-    `发送者 open_id：${delivery.sender_open_id}`,
-    `原群 chat_id：${delivery.chat_id}`,
-    `原消息 message_id：${delivery.message_id}`,
-    `目标会话：${delivery.session_id}`,
-    '',
-    '用户原文：',
-    content,
-    '',
-    '回复指引：',
-    '1. 看到后先执行下面的回执命令。它只确认你已收到，不会向飞书发送回复：',
-    `${command} lark-ack ${context}`,
-    '2. 方便时通过下面的命令回复，回复会由机器人发回原飞书消息。将占位文字替换成你的回复，不要只在当前终端输出：',
-    `${command} lark-reply ${context} --text '这里填写你的回复'`,
-    '多行回复也可用 --text-file <本地文件>；--text-file - 可从标准输入读取。',
-    '如果无法执行回执或回复命令，请在当前会话说明原因；不要声称已经回复飞书。',
-  ].join('\n');
-}
 export class LarkReplies {
   private readonly pending = new Map<string, Promise<LarkReply>>();
   constructor(private readonly state: State, private readonly api: LarkApi,
     private readonly report: (record: Record<string, unknown>) => void) {}
   private delivery(id: string): LarkDelivery {
-    const delivery = this.state.deliveries.get(id);
+    const delivery = this.state.larkDelivery(id);
     if (!delivery) throw new HttpError(404, 'No forwarded Feishu message with this ID');
     if (delivery.transport_status === 'ignored') throw new HttpError(409, 'This message was not forwarded');
     return delivery;

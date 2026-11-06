@@ -4,11 +4,12 @@ import { hostname } from 'node:os';
 import type { State } from './state.js';
 import { HttpError, identifier, object, text, isAdapter, isPolledAdapter, SessionUnavailable } from './types.js';
 import { acknowledgeInbox, queueSessionMessage, sessionInbox } from './polled-sessions.js';
+import type { ForwardingOptions } from './forwarded-messages.js';
 export { SessionUnavailable } from './types.js';
 import { ExternalSessions } from './external-sessions.js';
 import type { ExternalResolver, SessionTarget } from './external-sessions.js';
 import { localEndpoint } from './codex-rpc.js';
-import type { Adapter, BackendConnection, DeliveryResult, PublicSession, RouteRequest, RouteResponse, ServiceModule, SessionRecord } from './types.js';
+import type { Adapter, BackendConnection, DeliveryResult, InboxOrigin, PublicSession, RouteRequest, RouteResponse, ServiceModule, SessionRecord } from './types.js';
 import { LocalSessions } from './local-sessions.js';
 import type { SessionCatalog } from './local-sessions.js';
 
@@ -47,13 +48,13 @@ export class SessionsService implements ServiceModule {
   private readonly observed = new Map<string, PublicSession>();
   constructor(readonly state: State, readonly catalog: SessionCatalog = new LocalSessions(),
     private readonly report: (record: Record<string, unknown>) => void = () => {},
-    private readonly external: ExternalResolver = new ExternalSessions(state)) {}
+    private readonly external: ExternalResolver = new ExternalSessions(state), private readonly forwarding: ForwardingOptions = {}) {}
   status(): string { return 'ready'; }
   sessionName(id: string, adapter: Adapter): string {
     return this.observed.get(`${adapter}:${id}`)?.session_name ?? this.state.sessions.get(id)?.session_name ?? id;
   }
   async stop(): Promise<void> { this.external.close(); }
-  async send(id: string, content: string, adapter?: Adapter): Promise<DeliveryResult> {
+  async send(id: string, content: string, adapter?: Adapter, origin?: InboxOrigin): Promise<DeliveryResult> {
     const saved = this.state.sessions.get(id);
     const kind = adapter ?? saved?.adapter ?? (id.startsWith('local_') ? 'claude-desktop' : 'claude-code');
     const key = `${kind}:${id}`;
@@ -64,7 +65,7 @@ export class SessionsService implements ServiceModule {
       if (isPolledAdapter(kind)) {
         if (saved?.adapter === kind && saved.host_id === hostname()) target = {
           info: { session_id: id, host_id: saved.host_id, adapter: kind, session_name: saved.session_name, availability: 'unknown' },
-          send: content => queueSessionMessage(this.state, kind, id, content),
+          send: content => queueSessionMessage(this.state, kind, id, origin?.text ?? content, origin?.source),
         };
       } else if (kind === 'codex' || kind === 'opencode') target = await this.external.resolve(id, kind);
       else {
@@ -118,7 +119,7 @@ export class SessionsService implements ServiceModule {
       const adapter = object(request.body).adapter;
       if (!isPolledAdapter(adapter)) throw new HttpError(400, 'Inbox polling is supported for trae and workbuddy');
       return { body: inbox[2] ? await acknowledgeInbox(this.state, adapter, id, identifier(decodeURIComponent(inbox[2]), 'message_id'))
-        : sessionInbox(this.state, adapter, id) };
+        : sessionInbox(this.state, adapter, id, this.forwarding) };
     }
     const match = /^\/v1\/sessions\/([^/]+)(\/messages)?$/.exec(request.path);
     if (!match) return;

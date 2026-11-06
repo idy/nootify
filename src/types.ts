@@ -1,4 +1,4 @@
-import type { NotificationChannel } from './chat-transport.js';
+import type { ChatDelivery, NotificationChannel } from './chat-transport.js';
 
 export type PolledAdapter = 'trae' | 'workbuddy';
 export const isPolledAdapter = (value: unknown): value is PolledAdapter => value === 'trae' || value === 'workbuddy';
@@ -44,7 +44,9 @@ export interface RemoteBinding extends LarkBinding {
 }
 export interface DeliveryResult { status: 'socket_written' | 'input_accepted' | 'inbox_queued' }
 export interface InboxMessage { id: string; text: string; created_at: string }
-export interface StoredInboxMessage extends InboxMessage { session_id: string; adapter: PolledAdapter }
+export type InboxSource = { channel: 'feishu'; delivery: LarkDelivery } | { channel: 'slack' | 'telegram'; delivery: ChatDelivery };
+export interface InboxOrigin { text: string; source: InboxSource }
+export interface StoredInboxMessage extends InboxMessage { session_id: string; adapter: PolledAdapter; source?: InboxSource }
 export interface SessionInbox { session_id: string; adapter: PolledAdapter; messages: InboxMessage[] }
 export interface LarkDelivery {
   message_id: string;

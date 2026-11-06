@@ -135,7 +135,7 @@ export class LarkService implements ServiceModule {
     if (!sender || (boundSender ? sender !== boundSender : !allowed.has(sender))) {
       this.report({ ...context, status: 'ignored', reason: 'sender_not_allowed' }); return false;
     }
-    if (this.seen.has(message_id) || this.state.deliveries.has(message_id)) { this.report({ ...context, status: 'ignored', reason: 'duplicate' }); return false; }
+    if (this.seen.has(message_id) || this.state.larkDelivery(message_id)) { this.report({ ...context, status: 'ignored', reason: 'duplicate' }); return false; }
     const selected = selectMessage(event, { chat_id, sender_open_id: sender, session_id: '' });
     if (!selected) {
       this.report({ ...context, status: 'ignored', reason: event.message.message_type !== 'text' ? 'unsupported_message' : 'invalid_content' }); return false;
@@ -160,7 +160,8 @@ export class LarkService implements ServiceModule {
         if (this.state.deliveries.size > 2000) this.state.deliveries.delete(this.state.deliveries.keys().next().value!);
         await this.state.save();
         const result = await this.sessions.send(route.session_id,
-          forwardedLarkMessage(delivery, selected.text, this.state.directory, this.port), route.adapter);
+          forwardedLarkMessage(delivery, selected.text, this.state.directory, this.port), route.adapter,
+          { text: selected.text, source: { channel: 'feishu', delivery } });
         delivery.transport_status = result.status;
         delivery.session_name = this.sessions.sessionName(session_id, route.adapter);
         await this.state.save();
