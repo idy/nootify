@@ -472,8 +472,10 @@ export class SettingsService {
       }
       if (file.notification_channel) state.settings.notification_channel = file.notification_channel;
       if (file.lark?.app_id) {
-        this.scopeLarkBindings(file.lark.app_id);
-        if (file.lark.app_id !== this.options.lark.credentials?.appId) delete state.settings.lark_recipient_open_id;
+        const effective = await resolveCredentials(this.env, { ...state.settings, lark_app_id: file.lark.app_id, lark_app_secret: file.lark.app_secret }, this.options.mcpConfig);
+        const nextAppId = effective?.credentials.appId;
+        this.scopeLarkBindings(nextAppId);
+        if (nextAppId !== this.options.lark.credentials?.appId) delete state.settings.lark_recipient_open_id;
         state.settings.lark_app_id = file.lark.app_id; state.settings.lark_app_secret = file.lark.app_secret;
         state.settings.lark_connection_type = file.lark.connection_type ?? 'bot';
       }

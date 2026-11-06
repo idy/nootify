@@ -11,6 +11,7 @@ import { GitHubAuth } from '../src/github-auth.js';
 import { PullRequestsService } from '../src/github.js';
 import { ApiError, resolveCredentials, type Credentials, type LarkApi } from '../src/lark-metadata.js';
 import { LarkService } from '../src/lark.js';
+import { LarkThreads } from '../src/lark-threads.js';
 import { createServiceHost, type HostOptions } from '../src/server.js';
 import { SessionsService } from '../src/sessions.js';
 import { SettingsService, type AgentControl, type LarkControl } from '../src/settings.js';
@@ -482,6 +483,41 @@ test('environment credentials stay in use after an import, and the import says s
   const summary = await settings.importConfig({ format: 'nootify-config', version: 1, lark: { app_id: appId, app_secret: 'file-secret' } });
   assert.deepEqual(configured, [{ appId: 'cli_env', appSecret: 'env-secret' }]);
   assert.match(summary.warnings[0], /stay in use/);
+});
+
+test('importing a different app keeps the recipient when environment credentials keep the current app active', async t => {
+  const env = { LARK_APP_ID: appId, LARK_APP_SECRET: 'env-secret' };
+  const { dir, state, lark, settings, configured } = await harness(t, { env });
+  lark.credentials = { appId, appSecret: 'env-secret' };
+  state.settings.lark_recipient_open_id = 'ou_owner'; await state.save();
+  const importedId = 'cli_fedcba9876543210';
+  const origin = await serve(t, await EventLog.open(dir), { settings });
+  const response = await action(origin, '/ui/api/settings/import', { apply: true,
+    document: { format: 'nootify-config', version: 1, lark: { app_id: importedId, app_secret: 'file-secret' } } });
+  assert.equal(response.status, 200);
+  assert.match((await response.json() as { warnings: string[] }).warnings[0]!, /stay in use/);
+  const page = await settings.page();
+  assert.equal(page.lark.app_id, appId); assert.equal(page.lark.recipient, 'ou_owner');
+  assert.equal(state.settings.lark_app_id, importedId, 'save the requested credentials without overriding the environment');
+  assert.equal((await State.open(dir)).settings.lark_recipient_open_id, 'ou_owner');
+  assert.equal(configured.length, 0, 'the effective app does not change or reconnect');
+  const threads = new LarkThreads(state, { appId, async request() { throw new Error('No API expected'); } });
+  assert.deepEqual(threads.recipient(), { open_id: 'ou_owner', source: 'setting' });
+});
+
+test('an import that actually changes the active app clears the previous app recipient', async t => {
+  const { dir, state, lark, settings } = await harness(t);
+  lark.credentials = { appId, appSecret: 'old-secret' };
+  state.settings.lark_recipient_open_id = 'ou_oldAppUser';
+  state.bindings.set('oc_oldApp', { chat_id: 'oc_oldApp', session_id: 'session-old', sender_open_id: 'ou_oldAppUser' });
+  const importedId = 'cli_fedcba9876543210';
+  await settings.importConfig({ format: 'nootify-config', version: 1, lark: { app_id: importedId, app_secret: 'file-secret' } });
+  assert.equal(lark.credentials?.appId, importedId);
+  assert.equal(state.settings.lark_recipient_open_id, undefined);
+  assert.equal((await State.open(dir)).settings.lark_recipient_open_id, undefined);
+  assert.equal(state.bindings.get('oc_oldApp')?.app_id, appId);
+  const threads = new LarkThreads(state, { appId: importedId, async request() { throw new Error('No API expected'); } });
+  assert.equal(threads.recipient(), undefined, 'another app cannot inherit the old group recipient');
 });
 
 test('settings pages never carry secrets, and only this Mac can change anything', async t => {
