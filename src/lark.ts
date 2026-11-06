@@ -48,7 +48,7 @@ export class LarkService implements ServiceModule {
   }
   private use(credentials?: Credentials, api?: LarkApi): void {
     this.credentials = credentials;
-    this.api = api ?? (credentials ? createLarkApi(credentials) : undefined);
+    this.api = api ?? (credentials?.appId.trim() && credentials.appSecret.trim() ? createLarkApi(credentials) : undefined);
     this.replies = this.api ? new LarkReplies(this.state, this.api, this.report) : undefined;
     this.threads = this.api ? new LarkThreads(this.state, this.api, this.report) : undefined;
   }
@@ -82,6 +82,11 @@ export class LarkService implements ServiceModule {
   start(): Promise<void> { return this.serialized(() => this.connect()); }
   private async connect(): Promise<void> {
     if (!this.credentials || this.ws) return;
+    if (!this.credentials.appId.trim() || !this.credentials.appSecret.trim()) {
+      this.connection = 'failed';
+      this.report({ status: 'lark_failed', error: 'Feishu App ID and App Secret are both required' });
+      return;
+    }
     const generation = ++this.socketGeneration;
     const current = () => generation === this.socketGeneration;
     this.connection = 'connecting';

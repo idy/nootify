@@ -587,6 +587,7 @@ function fillLark(): void {
   const lark = state.settings?.lark;
   field('lark-app-id').value = lark?.app_id ?? '';
   field('lark-app-secret').value = '';
+  showLarkSecret(false);
   field('lark-recipient').value = lark?.recipient ?? '';
 }
 function clearChatTokens(channel: ChatChannel): void {
@@ -729,13 +730,19 @@ function renderGitHub(remote: boolean): void {
 }
 function renderLark(remote: boolean): void {
   const lark = state.settings?.lark;
-  const status = state.snapshot.modules.find(module => module.name === 'lark')?.status ?? lark?.status ?? 'disabled';
-  setTone('lark-state', status === 'ready' ? { label: '已连接', tone: 'ok' } : moduleStates[status] ?? { label: status, tone: 'muted' });
-  setText('lark-status', !lark ? '' : lark.app_id ? `${lark.app_id} · 来自${credentialSources[lark.source ?? 'settings']}${lark.recipient ? '' : ' · 还没有接收人'}` : '还没有配置应用凭据');
+  const status = !lark?.configured ? 'disabled' : state.snapshot.modules.find(module => module.name === 'lark')?.status ?? lark.status;
+  setTone('lark-state', !lark ? { label: '读取中', tone: 'muted' } : !lark.configured ? { label: '未配置', tone: 'muted' }
+    : status === 'ready' ? { label: '已连接', tone: 'ok' } : moduleStates[status] ?? { label: status, tone: 'muted' });
+  setText('lark-status', !lark ? '正在读取设置…' : lark.configured ? `${lark.app_id} · 来自${credentialSources[lark.source ?? 'settings']}${lark.recipient ? '' : ' · 还没有接收人'}` : '请填写完整的 App ID 和 App Secret');
   const environment = lark?.source === 'environment';
-  field('lark-app-secret').placeholder = lark?.saved ? '已保存，留空则不修改' : '';
-  const busy = state.pendingSettings.has('lark');
-  for (const id of ['lark-app-id', 'lark-app-secret']) field(id).disabled = remote || environment || busy;
+  const hasSecret = lark?.configured && field('lark-app-id').value.trim() === lark.app_id;
+  field('lark-app-secret').placeholder = hasSecret ? '••••••••••••••••' : '';
+  const busy = !lark || state.pendingSettings.has('lark') || state.pendingSettings.has('lark-secret');
+  field('lark-app-id').disabled = remote || environment || busy;
+  field('lark-app-secret').disabled = remote || busy;
+  field('lark-app-secret').readOnly = environment;
+  $<HTMLButtonElement>('lark-secret-toggle').disabled = remote || busy;
+  setText('lark-secret-hint', remote ? 'App Secret 只能在这台 Mac 上查看。' : hasSecret ? '已配置 App Secret，留空则保留；点击眼睛可查看。' : '保存前会先向飞书验证；点击眼睛可查看输入的密钥。');
   field('lark-recipient').disabled = remote || state.pendingSettings.has('recipient');
   $<HTMLButtonElement>('lark-save').disabled = remote || environment || busy;
   $<HTMLButtonElement>('recipient-save').disabled = remote || state.pendingSettings.has('recipient');
@@ -966,6 +973,7 @@ async function refreshNow(): Promise<void> {
 
 window.addEventListener('hashchange', () => {
   state.view = viewFromHash();
+  if (state.view !== 'settings-lark') showLarkSecret(false);
   state.settingsNote = undefined;
   state.confirmChatClear.slack = false; state.confirmChatClear.telegram = false;
   renderAll();
@@ -1021,7 +1029,30 @@ $('github-copy').addEventListener('click', () => {
     setTimeout(() => setText('github-copy', '复制'), 2000);
   }, () => { getSelection()?.selectAllChildren($('github-code')); setText('github-copy', '已选中，按 ⌘C'); });
 });
+function showLarkSecret(visible: boolean): void {
+  field('lark-app-secret').type = visible ? 'text' : 'password';
+  const toggle = $('lark-secret-toggle');
+  const label = visible ? '隐藏 App Secret' : '显示 App Secret';
+  toggle.setAttribute('aria-label', label); toggle.title = label;
+  toggle.setAttribute('aria-pressed', String(visible));
+  $('lark-secret-slash').toggleAttribute('hidden', !visible);
+}
+$('lark-secret-toggle').addEventListener('click', () => {
+  if (state.settings?.editable !== true || state.pendingSettings.has('lark') || state.pendingSettings.has('lark-secret')) return;
+  const input = field('lark-app-secret');
+  if (input.type === 'text') { showLarkSecret(false); return; }
+  const appId = field('lark-app-id').value.trim();
+  if (input.value || !state.settings.lark.configured || appId !== state.settings.lark.app_id) { showLarkSecret(true); return; }
+  void settingsRun('lark-secret', '无法查看 App Secret', async () => {
+    const secret = await post<{ app_id?: string; app_secret?: string }>('/ui/api/settings/lark/secret');
+    if (state.view !== 'settings-lark' || field('lark-app-id').value.trim() !== appId || input.value) return;
+    if (secret.app_id !== appId || !secret.app_secret) throw new Error('应用凭据已变更，请刷新后重试');
+    input.value = secret.app_secret;
+    showLarkSecret(true);
+  });
+});
 function saveLark(): void {
+  if (state.settings?.editable !== true || state.pendingSettings.has('lark') || state.pendingSettings.has('lark-secret')) return;
   void settingsRun('lark', '无法保存飞书凭据', async () => {
     await post('/ui/api/settings/lark', { app_id: field('lark-app-id').value.trim(), app_secret: field('lark-app-secret').value });
     state.larkEdited = false;
@@ -1039,7 +1070,7 @@ function saveRecipient(): void {
 $('lark-save').addEventListener('click', saveLark);
 $('recipient-save').addEventListener('click', saveRecipient);
 for (const id of ['lark-app-id', 'lark-app-secret', 'lark-recipient']) {
-  field(id).addEventListener('input', () => { state.larkEdited = true; });
+  field(id).addEventListener('input', () => { state.larkEdited = true; renderLark(state.settings?.editable === false); });
   field(id).addEventListener('keydown', event => { if (event.key === 'Enter') { if (id === 'lark-recipient') saveRecipient(); else saveLark(); } });
 }
 $('lark-clear').addEventListener('click', () => {

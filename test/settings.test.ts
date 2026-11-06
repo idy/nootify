@@ -207,6 +207,30 @@ test('Feishu credentials are verified before they replace the running bot', asyn
   assert.equal((await stat(join(dir, 'state.json'))).mode & 0o777, 0o600);
 });
 
+test('Feishu requires both credentials before Settings can report a connection', async t => {
+  const { lark, settings } = await harness(t);
+  lark.status = () => 'ready';
+  for (const credentials of [undefined, { appId, appSecret: '' }, { appId, appSecret: '   ' }, { appId: '', appSecret: 'secret' }]) {
+    lark.credentials = credentials;
+    const page = await settings.page();
+    assert.equal(page.lark.configured, false);
+    assert.equal(page.lark.status, 'disabled');
+    assert.deepEqual(settings.larkSecret(), {});
+  }
+  lark.credentials = { appId, appSecret: 'configured-secret' };
+  assert.deepEqual([(await settings.page()).lark.configured, (await settings.page()).lark.status], [true, 'ready']);
+  assert.ok(!JSON.stringify(await settings.page()).includes('configured-secret'));
+});
+
+test('a masked MCP secret can be retained for its application when saving', async t => {
+  const { lark, settings, configured } = await harness(t);
+  lark.credentials = { appId, appSecret: 'mcp-secret' };
+  await settings.saveLark(appId, '');
+  assert.equal(configured.length, 0, 'retaining the active bot does not reconnect it');
+  assert.equal((await settings.page()).lark.saved, true);
+  await assert.rejects(settings.saveLark('cli_fedcba9876543210', ''), /App Secret/);
+});
+
 test('credentials set for this process cannot be overridden from the page', async t => {
   const { settings, configured } = await harness(t, { env: { LARK_APP_ID: appId, LARK_APP_SECRET: 'env-secret' } });
   await assert.rejects(settings.saveLark(appId, 'other-secret'), /take precedence/);
@@ -347,6 +371,19 @@ test('settings pages never carry secrets, and only this Mac can change anything'
 
   assert.equal((await action(local, '/ui/api/settings/lark', save)).status, 200);
   assert.equal(configured.length, 1);
+  const revealPath = '/ui/api/settings/lark/secret';
+  assert.equal((await action(local, revealPath, undefined, {})).status, 403, 'revealing needs the UI header');
+  assert.equal((await action(remote, revealPath)).status, 403, 'remote browsers cannot reveal secrets');
+  assert.equal((await action(local, revealPath, undefined, { 'x-nootify-ui': '1', origin: 'http://attacker.test' })).status, 403);
+  assert.equal((await action(local, revealPath, undefined, { 'x-nootify-ui': '1', 'sec-fetch-site': 'cross-site' })).status, 403);
+  assert.notEqual((await fetch(local + revealPath)).status, 200, 'GET cannot reveal a secret');
+  const revealed = await action(local, revealPath);
+  assert.equal(revealed.status, 200);
+  assert.equal(revealed.headers.get('cache-control'), 'no-store');
+  assert.deepEqual(await revealed.json(), save);
+  for (const origin of [local, remote]) {
+    for (const path of ['/ui/api/settings', '/ui/api/snapshot']) assert.ok(!(await (await fetch(origin + path)).text()).includes(save.app_secret));
+  }
   assert.equal((await action(local, '/ui/api/settings/recipient', { open_id: 'ou_owner' })).status, 200);
   assert.equal(((await (await action(local, '/ui/api/settings/recipient', { open_id: 'bad' })).json()) as { error: string }).error, 'Expected a Feishu open_id (ou_…)');
 

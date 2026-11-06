@@ -24,12 +24,12 @@ const packageFile = new URL('../../package.json', import.meta.url);
 const isAppId = (value: unknown): value is string => typeof value === 'string' && /^cli_[0-9a-fA-F]{16}$/.test(value);
 const isObject = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 
-/** Everything Settings shows; secrets are write-only and never appear here. */
+/** Public Settings data; secrets are retrieved separately by an explicit local-only action. */
 export interface SettingsPage {
   version: string;
   exports_dir: string;
   last_export?: string;
-  lark: { status: string; source?: CredentialSource; app_id?: string; saved: boolean; recipient?: string; groups: number };
+  lark: { status: string; configured: boolean; source?: CredentialSource; app_id?: string; saved: boolean; recipient?: string; groups: number };
   notification_channel: NotificationChannel; slack: ChatSettingsPage; telegram: ChatSettingsPage;
 }
 export interface GitHubSettings { account?: GitHubAccount; login: GitHubLogin }
@@ -163,8 +163,9 @@ export class SettingsService {
     const { lark, state } = this.options;
     const { version } = JSON.parse(await readFile(packageFile, 'utf8')) as { version: string };
     const channel = lark.channel();
+    const configured = Boolean(lark.credentials?.appId.trim() && lark.credentials?.appSecret.trim());
     return { version, exports_dir: this.exportsDir, ...(this.lastExport ? { last_export: this.lastExport } : {}),
-      lark: { status: lark.status(), source: this.source, app_id: lark.credentials?.appId, saved: Boolean(state.settings.lark_app_id),
+      lark: { status: configured ? lark.status() : 'disabled', configured, source: this.source, app_id: lark.credentials?.appId, saved: Boolean(state.settings.lark_app_id && state.settings.lark_app_secret),
         recipient: channel.recipient ?? state.settings.lark_recipient_open_id, groups: channel.groups },
       notification_channel: state.settings.notification_channel ?? 'feishu',
       slack: this.chatPage('slack'), telegram: this.chatPage('telegram') };
@@ -227,13 +228,21 @@ export class SettingsService {
     await lark.configure(resolved?.credentials);
     this.report({ source: 'lark', status: 'lark_configured', reason: resolved ? resolved.credentials.appId : undefined });
   }
+  /** Used only by the eye button's same-origin, loopback-only POST action. */
+  larkSecret(): { app_id?: string; app_secret?: string } {
+    const credentials = this.options.lark.credentials;
+    if (!credentials?.appId.trim() || !credentials.appSecret.trim()) return {};
+    return { app_id: credentials.appId, app_secret: credentials.appSecret };
+  }
   saveLark(appId: unknown, appSecret: unknown): Promise<void> {
     return this.serialized(async () => {
       if (this.env.LARK_APP_ID || this.env.LARK_APP_SECRET) throw new HttpError(409, 'LARK_APP_ID and LARK_APP_SECRET are set for this process and take precedence');
-      const { state } = this.options;
+      const { state, lark } = this.options;
       if (!isAppId(appId)) throw new HttpError(400, 'Expected a Feishu App ID (cli_ and 16 hexadecimal digits)');
-      // A blank secret keeps the saved one, so changing nothing else does not mean retyping it.
-      const secret = appSecret === '' || appSecret === undefined ? (appId === state.settings.lark_app_id ? state.settings.lark_app_secret : undefined) : appSecret;
+      // A masked secret retains the active application's value, including credentials from the MCP file.
+      const retained = appId === lark.credentials?.appId ? lark.credentials.appSecret
+        : appId === state.settings.lark_app_id ? state.settings.lark_app_secret : undefined;
+      const secret = appSecret === '' || appSecret === undefined ? retained : appSecret;
       if (typeof secret !== 'string' || !secret.trim()) throw new HttpError(400, 'Enter the App Secret');
       const credentials = { appId, appSecret: secret.trim() };
       try { await (this.options.verify ?? verifyCredentials)(credentials); }

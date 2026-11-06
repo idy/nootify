@@ -49,6 +49,29 @@ async function fixture(t: TestContext, api?: LarkApi) {
   return { lark, state, sessions, sockets, reports };
 }
 
+test('missing Feishu credentials never start a socket or report ready', async t => {
+  const { lark, sockets, reports } = await fixture(t);
+  for (const credentials of [{ ...firstBot, appSecret: '' }, { ...firstBot, appSecret: '   ' }, { ...firstBot, appId: '' }]) {
+    await lark.configure(credentials);
+    assert.equal(lark.status(), 'failed');
+    assert.equal(sockets.length, 0);
+  }
+  assert.ok(reports.every(record => record.status === 'lark_failed'));
+  await lark.configure(undefined);
+  await lark.start();
+  assert.equal(lark.status(), 'disabled');
+  assert.equal(sockets.length, 0);
+});
+
+test('Feishu stays connecting until the SDK confirms the handshake', async t => {
+  const { lark, sockets, reports } = await fixture(t);
+  const starting = lark.start(); await nextTurn();
+  assert.equal(lark.status(), 'connecting');
+  assert.equal(reports.length, 0);
+  sockets[0].ready(); await starting;
+  assert.equal(lark.status(), 'ready');
+});
+
 test('a retired Feishu client cannot change the current connection or dispatch messages', async t => {
   const { lark, sockets, reports } = await fixture(t);
   const enqueue = t.mock.method(lark, 'enqueue', () => true);

@@ -262,6 +262,11 @@ label.row:hover { background: var(--hover); }
 .setting-field { flex: 0 1 320px; min-width: 0; height: 30px; padding: 0 10px; border: 1px solid var(--line-soft); border-radius: 8px; outline: none; background: var(--field); }
 .setting-field::placeholder { color: var(--faint); }
 .setting-field:disabled { color: var(--faint); cursor: default; }
+.secret-field { position: relative; flex: 0 1 320px; min-width: 0; }
+.secret-field .setting-field { width: 100%; padding-right: 36px; }
+.secret-field .icon-button { position: absolute; top: 1px; right: 2px; }
+.secret-field .icon-button:disabled { color: var(--faint); cursor: default; }
+.secret-field .icon-button:disabled:hover { background: none; }
 .setting-list { margin: 6px 0 0; padding-left: 16px; color: var(--muted); font-size: var(--type-meta); line-height: 1.7; overflow-wrap: anywhere; }
 .device-code { flex: none; font-size: 18px; letter-spacing: 1px; user-select: all; cursor: text; }
 .selectable { user-select: all; cursor: text; }
@@ -330,7 +335,7 @@ label.row:hover { background: var(--hover); }
   .setting-field-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; }
   .setting-field-row .setting-main { grid-column: 1 / -1; }
   .setting-field-row .setting-field { width: 100%; }
-  .setting-field-row > .setting-field:last-child { grid-column: 1 / -1; }
+  .setting-field-row > .setting-field:last-child, .setting-field-row > .secret-field { grid-column: 1 / -1; }
   .setting-with-switch { flex-wrap: nowrap; }
   .setting-with-switch .setting-main { flex: 1; }
   .setting-field { flex: 1 1 200px; }

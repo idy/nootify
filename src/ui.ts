@@ -9,11 +9,11 @@ import { HttpError, type ServiceModule } from './types.js';
 export interface PullsSource { snapshot(): PullSnapshot; refresh(): void; setChoice(repository: string, follow: boolean | null): Promise<RepositoryEntry> }
 export interface AgentsSource { list(): Promise<AgentPrompt[]>; set(agent: AgentId, enabled: boolean): Promise<AgentPrompt> }
 export interface ChannelSummary { name: 'feishu' | 'slack' | 'telegram'; configured: boolean; recipient?: string; groups: number }
-export type SettingsSource = Pick<SettingsService, 'page' | 'github' | 'startGitHubLogin' | 'cancelGitHubLogin' | 'signOutGitHub' | 'saveLark' | 'clearLark' | 'setRecipient' | 'exportConfig' | 'previewImport' | 'importConfig' | 'reveal' | 'tailscale' | 'setTailscaleEnabled' | 'startTailscaleLogin' | 'cancelTailscaleLogin' | 'logoutTailscale' | 'saveChat' | 'clearChat' | 'setNotificationChannel'>;
+export type SettingsSource = Pick<SettingsService, 'page' | 'github' | 'startGitHubLogin' | 'cancelGitHubLogin' | 'signOutGitHub' | 'saveLark' | 'clearLark' | 'larkSecret' | 'setRecipient' | 'exportConfig' | 'previewImport' | 'importConfig' | 'reveal' | 'tailscale' | 'setTailscaleEnabled' | 'startTailscaleLogin' | 'cancelTailscaleLogin' | 'logoutTailscale' | 'saveChat' | 'clearChat' | 'setNotificationChannel'>;
 export interface UiContext {
   modules: ServiceModule[]; logs: EventLog; pulls?: PullsSource; tailnetUrl?: () => string | undefined;
   agents?: AgentsSource; channel?: () => ChannelSummary | undefined; settings?: SettingsSource;
-  /** Requests on the Tailscale listener can read everything but cannot change agent prompts or settings. */
+  /** Tailscale can read public page data, but cannot retrieve secrets or change prompts/settings. */
   via?: 'loopback' | 'tailnet';
 }
 
@@ -43,6 +43,7 @@ async function smallJson(request: IncomingMessage, limit = 4096): Promise<Record
 /** Matches the limit on the pulls configuration file an import may restore. */
 const IMPORT_LIMIT = 1024 * 1024;
 async function settingsAction(request: IncomingMessage, path: string, settings: SettingsSource): Promise<unknown> {
+  if (path === '/ui/api/settings/lark/secret') { request.resume(); return settings.larkSecret(); }
   if (path === '/ui/api/settings/export') { request.resume(); return settings.exportConfig(); }
   if (path === '/ui/api/settings/reveal') { request.resume(); await settings.reveal(); return { accepted: true }; }
   const body = await smallJson(request, path === '/ui/api/settings/import' ? IMPORT_LIMIT : undefined);

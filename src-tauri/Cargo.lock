@@ -2188,7 +2188,7 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "nootify"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "libc",
  "reqwest 0.12.28",
