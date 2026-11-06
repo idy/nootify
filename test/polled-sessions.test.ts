@@ -113,8 +113,7 @@ for (const channel of ['slack', 'telegram'] as const) {
   });
 }
 
-test('Feishu announcements route replies into the exact registered Trae and WorkBuddy inbox', async t => {
-  const f = await fixture(t); f.state.settings.lark_recipient_open_id = 'ou_owner';
+function fakeFeishu() {
   const announcements = new Map<string, string>(); let next = 0;
   const api: LarkApi = { appId: 'cli_fixture', async request<T>(method: string, path: string, body?: unknown): Promise<T> {
     const announcement = /\/chats\/([^/]+)\/announcement$/.exec(path);
@@ -129,6 +128,12 @@ test('Feishu announcements route replies into the exact registered Trae and Work
     if (path.startsWith('/open-apis/im/v1/messages?')) return { message_id: `om_${++next}` } as T;
     throw new Error(`Unexpected ${method} ${path}`);
   } };
+  return { api, announcements };
+}
+
+test('Feishu announcements route replies into the exact registered Trae and WorkBuddy inbox', async t => {
+  const f = await fixture(t); f.state.settings.lark_recipient_open_id = 'ou_owner';
+  const { api, announcements } = fakeFeishu();
   const lark = new LarkService(f.state, f.sessions, undefined, () => {}, api);
   for (const adapter of ['trae', 'workbuddy'] as const) {
     const opened = await lark.handle({ method: 'POST', path: '/v1/threads', body: { adapter, session_id: adapter, session_name: `${adapter} task` } });
@@ -143,6 +148,28 @@ test('Feishu announcements route replies into the exact registered Trae and Work
     assert.match(inbox.messages[0].text, /lark-ack/); assert.match(inbox.messages[0].text, /lark-reply/);
     assert.equal(f.state.deliveries.get(`om_${adapter}`)?.transport_status, 'inbox_queued');
   }
+});
+
+test('manually bound Feishu groups register Trae and WorkBuddy inboxes without thread-open', async t => {
+  const f = await fixture(t); const { api, announcements } = fakeFeishu();
+  const lark = new LarkService(f.state, f.sessions, undefined, () => {}, api);
+  for (const adapter of ['trae', 'workbuddy'] as const) {
+    const id = `manual-${adapter}`; const chat_id = `oc_${adapter}`;
+    await lark.handle({ method: 'PUT', path: `/v1/lark/bindings/${chat_id}`,
+      body: { adapter, session_id: id, session_name: `${adapter} task`, sender_open_id: 'ou_owner' } });
+    assert.equal((await State.open(f.directory)).session(id).adapter, adapter);
+    assert.match(announcements.get(chat_id)!, new RegExp(`:${adapter}:${id}`));
+    lark.enqueue({ sender: { sender_type: 'user', sender_id: { open_id: 'ou_owner' } }, message: { chat_id, message_id: `om_manual_${adapter}`,
+      message_type: 'text', content: JSON.stringify({ text: `Reply for manually bound ${adapter}` }) } });
+    await lark.drain();
+    const inbox = await f.client.receiveThread(id, adapter);
+    assert.equal(inbox.messages.length, 1);
+    assert.match(inbox.messages[0].text, new RegExp(`Reply for manually bound ${adapter}`));
+    assert.equal(f.state.deliveries.get(`om_manual_${adapter}`)?.transport_status, 'inbox_queued');
+  }
+  await assert.rejects(lark.handle({ method: 'PUT', path: '/v1/lark/bindings/oc_conflict',
+    body: { adapter: 'workbuddy', session_id: 'manual-trae', sender_open_id: 'ou_owner' } }), /another adapter/);
+  assert.equal(announcements.get('oc_conflict'), undefined, 'conflicting IDs fail before modifying the group');
 });
 
 test('CLI allocates distinct conversation IDs and requires them on receive, send and acknowledgment', async t => {

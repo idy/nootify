@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
 import { chmod, lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -18,7 +17,7 @@ export const isAgent = (value: unknown): value is AgentId => typeof value === 's
  * `error`: the file could not be read. Neither of the last two is ever edited.
  */
 export type PromptStatus = 'missing' | 'absent' | 'current' | 'outdated' | 'conflict' | 'error';
-export interface AgentPrompt { agent: AgentId; name: string; file: string; status: PromptStatus; injected: boolean; block: string; error?: string }
+export interface AgentPrompt { agent: AgentId; name: string; file: string; files?: string[]; status: PromptStatus; injected: boolean; block: string; error?: string }
 export const BEGIN = '<!-- nootify:begin -->';
 export const END = '<!-- nootify:end -->';
 const names: Record<AgentId, string> = { claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', trae: 'Trae', workbuddy: 'WorkBuddy' };
@@ -26,14 +25,20 @@ const MAX_PROMPT_FILE = 1024 * 1024;
 const BACKUPS_PER_AGENT = 10;
 
 export function promptFiles(env: NodeJS.ProcessEnv = process.env): Record<AgentId, string> {
-  const trae = join(homedir(), '.trae'); const traeCn = join(homedir(), '.trae-cn');
   return {
     claude: join(env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'CLAUDE.md'),
     codex: join(env.CODEX_HOME ?? join(homedir(), '.codex'), 'AGENTS.md'),
     opencode: join(env.XDG_CONFIG_HOME ?? join(homedir(), '.config'), 'opencode', 'AGENTS.md'),
-    trae: env.NOOTIFY_TRAE_RULES_FILE ?? join(!existsSync(trae) && existsSync(traeCn) ? traeCn : trae, 'user_rules', 'nootify.md'),
+    trae: env.NOOTIFY_TRAE_RULES_FILE ?? join(homedir(), '.trae', 'user_rules', 'nootify.md'),
     workbuddy: env.NOOTIFY_WORKBUDDY_RULES_FILE ?? join(homedir(), '.codebuddy', 'CODEBUDDY.md'),
   };
+}
+
+/** Manage both editions so enabling before installation cannot select the wrong Trae directory. */
+export function promptTargets(env: NodeJS.ProcessEnv = process.env): Record<AgentId, string[]> {
+  const files = promptFiles(env);
+  return Object.fromEntries(AGENT_IDS.map(agent => [agent, agent === 'trae' && !env.NOOTIFY_TRAE_RULES_FILE
+    ? [files.trae, join(homedir(), '.trae-cn', 'user_rules', 'nootify.md')] : [files[agent]]])) as Record<AgentId, string[]>;
 }
 
 /** Agents run the CLI from their own shells; this resolves the calling session from the variables each client sets. */
@@ -116,10 +121,16 @@ export function withoutBlock(content: string): string {
 export class AgentPrompts implements ServiceModule {
   readonly name = 'agents';
   private writes: Promise<unknown> = Promise.resolve();
-  private readonly files: Record<AgentId, string>;
-  constructor(private readonly options: PromptOptions & { files?: Partial<Record<AgentId, string>> },
+  private readonly files: Record<AgentId, string[]>;
+  constructor(private readonly options: PromptOptions & { files?: Partial<Record<AgentId, string | string[]>> },
     private readonly report: (record: Record<string, unknown>) => void = () => {}) {
-    this.files = { ...promptFiles(), ...options.files };
+    const defaults = promptTargets();
+    this.files = Object.fromEntries(AGENT_IDS.map(agent => {
+      const paths = options.files?.[agent] ?? defaults[agent];
+      const files = typeof paths === 'string' ? [paths] : [...new Set(paths)];
+      if (!files.length) throw new Error(`No prompt file configured for ${names[agent]}`);
+      return [agent, files];
+    })) as Record<AgentId, string[]>;
   }
   status(): string { return 'ready'; }
   /** Prompt files may be symlinks into a dotfiles checkout; edits go to the target and keep the link. */
@@ -139,7 +150,16 @@ export class AgentPrompts implements ServiceModule {
     } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
   }
   async inspect(agent: AgentId): Promise<AgentPrompt> {
-    const file = this.files[agent];
+    const files = this.files[agent];
+    const entries = await Promise.all(files.map(file => this.inspectFile(agent, file)));
+    const failure = entries.find(entry => entry.status === 'conflict' || entry.status === 'error');
+    const injected = entries.some(entry => entry.injected);
+    const status = failure?.status ?? (entries.every(entry => entry.status === 'current') ? 'current'
+      : injected ? 'outdated' : entries.every(entry => entry.status === 'missing') ? 'missing' : 'absent');
+    return { ...entries[0], ...(files.length > 1 ? { files } : {}), status, injected,
+      ...(failure?.error ? { error: `${failure.file}: ${failure.error}` } : {}) };
+  }
+  private async inspectFile(agent: AgentId, file: string): Promise<AgentPrompt> {
     const block = promptBlock(agent, this.options);
     const entry: AgentPrompt = { agent, name: names[agent], file, status: 'absent', injected: false, block };
     try {
@@ -159,26 +179,35 @@ export class AgentPrompts implements ServiceModule {
     return operation;
   }
   private async apply(agent: AgentId, enabled: boolean): Promise<AgentPrompt> {
-    const current = await this.inspect(agent);
-    if (current.status === 'missing') {
-      if (!enabled) return current;
-      await mkdir(dirname(current.file), { recursive: true, mode: 0o700 });
-    }
-    if (current.status === 'conflict') throw new HttpError(409, 'The prompt file has unbalanced Nootify markers; fix them by hand first');
-    if (current.status === 'error') throw new HttpError(409, `Cannot read ${current.file}: ${current.error}`);
-    const path = await this.target(current.file);
-    if (enabled) {
+    const entries = await Promise.all(this.files[agent].map(file => this.inspectFile(agent, file)));
+    // Check every target before editing any of them, including shared targets across editions.
+    for (const current of entries) {
+      if (current.status === 'conflict') throw new HttpError(409, `The prompt file ${current.file} has unbalanced Nootify markers; fix them by hand first`);
+      if (current.status === 'error') throw new HttpError(409, `Cannot read ${current.file}: ${current.error}`);
+      if (!enabled) continue;
+      const path = await this.target(current.file);
       for (const other of AGENT_IDS.filter(id => id !== agent)) {
-        const otherPath = await realpath(this.files[other]).catch(error => {
-          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
-          throw error;
-        });
-        if (otherPath === path) throw new HttpError(409, `${names[agent]} and ${names[other]} share the same prompt file; separate their files before adding agent-specific instructions`);
+        for (const file of this.files[other]) {
+          const otherPath = await realpath(file).catch(error => {
+            if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+            throw error;
+          });
+          if (otherPath === path) throw new HttpError(409, `${names[agent]} and ${names[other]} share the same prompt file; separate their files before adding agent-specific instructions`);
+        }
       }
     }
+    for (const current of entries) await this.applyFile(agent, current, enabled);
+    return this.inspect(agent);
+  }
+  private async applyFile(agent: AgentId, current: AgentPrompt, enabled: boolean): Promise<void> {
+    if (current.status === 'missing') {
+      if (!enabled) return;
+      await mkdir(dirname(current.file), { recursive: true, mode: 0o700 });
+    }
+    const path = await this.target(current.file);
     const before = await this.read(path);
     const after = enabled ? (agent === 'trae' && before === undefined ? '---\nalwaysApply: true\n---\n\n' : '') + withBlock(before ?? '', current.block) : withoutBlock(before ?? '');
-    if (after === (before ?? '') && (before !== undefined || !enabled)) return this.inspect(agent);
+    if (after === (before ?? '') && (before !== undefined || !enabled)) return;
     if (before !== undefined) await this.backup(agent, before);
     if (!after && before !== undefined) await rm(path);
     else {
@@ -191,7 +220,6 @@ export class AgentPrompts implements ServiceModule {
       } finally { await rm(temporary, { force: true }); }
     }
     this.report({ source: 'agents', status: enabled ? 'prompt_injected' : 'prompt_removed', reason: `${names[agent]}: ${current.file}` });
-    return this.inspect(agent);
   }
   private async backup(agent: AgentId, content: string): Promise<void> {
     const directory = join(this.options.stateDir, 'agent-backups');

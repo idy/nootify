@@ -585,7 +585,7 @@ function renderAgents(): void {
     box.disabled = remote || state.pendingChannel || state.pendingAgents.has(agent.agent) || ['conflict', 'error'].includes(agent.status);
     box.setAttribute('aria-label', t('向 {p0} 写入{p1}通知说明', { p0: agent.name, p1: name }));
     box.addEventListener('change', () => { void setAgent(agent, box.checked); });
-    row.append(box, rowMain(agent.name, `${home(agent.file)} · ${agentDetail(agent)}`), sideBlock(promptStates[agent.status] ?? promptStates.error));
+    row.append(box, rowMain(agent.name, `${(agent.files ?? [agent.file]).map(home).join(' · ')} · ${agentDetail(agent)}`), sideBlock(promptStates[agent.status] ?? promptStates.error));
     const extra = node('div', undefined, 'agent-extra');
     if (agent.agent === 'trae' || agent.agent === 'workbuddy') extra.append(node('p', t('回复需由会话主动检查'), 'hint'));
     if (agent.status === 'outdated' && !remote) {

@@ -3,7 +3,7 @@ import { lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
-import { AGENT_IDS, AgentPrompts, BEGIN, END, agentSession, isAgent, promptBlock, promptFiles, withBlock, withoutBlock } from '../src/agents.js';
+import { AGENT_IDS, AgentPrompts, BEGIN, END, agentSession, isAgent, promptBlock, promptFiles, promptTargets, withBlock, withoutBlock } from '../src/agents.js';
 
 async function fixture(t: TestContext) {
   const root = await mkdtemp(join(tmpdir(), 'nootify-agents-')); t.after(() => rm(root, { recursive: true, force: true }));
@@ -155,4 +155,47 @@ for (const agent of ['trae', 'workbuddy'] as const) {
 test('Nootify-specific rule file overrides select explicit Trae and WorkBuddy targets', () => {
   const files = promptFiles({ NOOTIFY_TRAE_RULES_FILE: '/custom/trae/nootify.md', NOOTIFY_WORKBUDDY_RULES_FILE: '/custom/codebuddy/CODEBUDDY.md' });
   assert.equal(files.trae, '/custom/trae/nootify.md'); assert.equal(files.workbuddy, '/custom/codebuddy/CODEBUDDY.md');
+  assert.deepEqual(promptTargets({ NOOTIFY_TRAE_RULES_FILE: '/custom/trae/nootify.md' }).trae, ['/custom/trae/nootify.md']);
+  const defaults = promptTargets({}).trae;
+  assert.equal(defaults.length, 2);
+  assert.match(defaults[0], /\/\.trae\/user_rules\/nootify\.md$/);
+  assert.match(defaults[1], /\/\.trae-cn\/user_rules\/nootify\.md$/);
+});
+
+test('Trae enables both editions before installation and refreshes/removes both without restarting the service', async t => {
+  const f = await fixture(t);
+  const files = [join(f.root, 'trae', 'user_rules', 'nootify.md'), join(f.root, 'trae-cn', 'user_rules', 'nootify.md')];
+  const agents = new AgentPrompts({ stateDir: f.state, port: 9417, files: { ...f.files, trae: files } });
+  assert.equal((await agents.inspect('trae')).status, 'missing');
+  const enabled = await agents.set('trae', true);
+  assert.equal(enabled.status, 'current'); assert.deepEqual(enabled.files, files);
+  for (const file of files) assert.match(await readFile(file, 'utf8'), /alwaysApply: true[\s\S]*thread-open --agent trae/);
+  const ownRule = join(f.root, 'trae-cn', 'user_rules', 'mine.md');
+  await writeFile(ownRule, 'China edition user instructions\n');
+  await writeFile(files[1], 'China edition existing rules\n');
+  const partial = await agents.inspect('trae');
+  assert.equal(partial.status, 'outdated'); assert.equal(partial.injected, true);
+  await agents.set('trae', true);
+  assert.equal((await agents.inspect('trae')).status, 'current');
+  assert.match(await readFile(files[1], 'utf8'), /^China edition existing rules\n/);
+  await agents.set('trae', false);
+  for (const file of files) assert.ok(!(await readFile(file, 'utf8')).includes(BEGIN));
+  assert.equal(await readFile(files[1], 'utf8'), 'China edition existing rules\n');
+  assert.equal(await readFile(ownRule, 'utf8'), 'China edition user instructions\n');
+});
+
+test('Trae checks all edition targets for conflicting markers and shared files before editing either', async t => {
+  const f = await fixture(t);
+  const international = join(f.root, 'claude', 'trae.md'); const cn = join(f.root, 'claude', 'trae-cn.md');
+  const agents = new AgentPrompts({ stateDir: f.state, port: 9417, files: { ...f.files, trae: [international, cn] } });
+  await writeFile(international, 'International rules\n');
+  await writeFile(cn, `${BEGIN}\nbroken markers\n`);
+  assert.equal((await agents.inspect('trae')).status, 'conflict');
+  await assert.rejects(agents.set('trae', true), /unbalanced/);
+  assert.equal(await readFile(international, 'utf8'), 'International rules\n');
+  await writeFile(f.files.codex, 'Codex rules\n');
+  await rm(cn); await symlink(f.files.codex, cn);
+  await assert.rejects(agents.set('trae', true), /share the same prompt file/);
+  assert.equal(await readFile(international, 'utf8'), 'International rules\n');
+  assert.equal(await readFile(f.files.codex, 'utf8'), 'Codex rules\n');
 });
