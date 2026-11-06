@@ -1,6 +1,7 @@
 // Stages what the Tauri bundle ships besides the desktop shell (run after `npm run build`):
 //   src-tauri/resources/service/                 -> Nootify.app/Contents/Resources/service/
-//     dist/src/*.js, public/, package.json, node_modules/ (production), node-LICENSE
+//     dist/src/*.js, public/, package.json, node_modules/ (production), node-LICENSE,
+//     tailscale-licenses/, third-party-notices.txt (Rust crate and npm package licenses)
 //   src-tauri/binaries/node-aarch64-apple-darwin -> Nootify.app/Contents/MacOS/node
 //   src-tauri/binaries/nootify-tsnet-aarch64-apple-darwin -> Contents/MacOS/nootify-tsnet
 // The runtime is the official Node.js build, checked against its release's SHASUMS256.txt
@@ -17,6 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { buildTsnet } from './build-tsnet.mjs';
 import { sha256, verifyExecutable } from './bundle-utils.mjs';
+import { thirdPartyNotices } from './third-party-notices.mjs';
 
 const run = promisify(execFile);
 
@@ -114,6 +116,7 @@ async function stageService(nodeLicense, tailscale) {
       await writeFile(path, license.content);
     }
     await installProductionModules(join(staging, 'node_modules'));
+    await writeFile(join(staging, 'third-party-notices.txt'), await thirdPartyNotices(TARGET, join(staging, 'node_modules')));
 
     // mkdtemp creates the directory 0700. An identical tree stays untouched (chmod keeps mtimes)
     // so cargo does not rerun the build script and relink.

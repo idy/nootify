@@ -67,8 +67,14 @@ export class LarkService implements ServiceModule {
       await this.stopReceiver();
       this.connection = credentials ? 'connecting' : 'disabled';
       await this.queue;
+      const previousApp = this.api?.appId;
+      let migrated = false;
+      if (previousApp && previousApp !== credentials?.appId) {
+        for (const binding of this.state.bindings.values()) if (!binding.app_id) { binding.app_id = previousApp; migrated = true; }
+      }
       this.use(credentials);
       await this.connect();
+      if (migrated) await this.state.save();
     });
   }
   status(): string { return this.connection; }
@@ -126,7 +132,11 @@ export class LarkService implements ServiceModule {
     const context = { source: 'lark', chat_id, message_id };
     const sender = event.sender.sender_id?.open_id;
     const binding = this.state.bindings.get(chat_id);
-    const allowed = new Set([...this.state.bindings.values()].map(value => value.sender_open_id));
+    if (binding?.app_id && binding.app_id !== api.appId) {
+      this.report({ ...context, status: 'ignored', reason: 'app_mismatch' }); return Promise.resolve(true);
+    }
+    const bindings = [...this.state.bindings.values()].filter(value => !value.app_id || value.app_id === api.appId);
+    const allowed = new Set(bindings.map(value => value.sender_open_id));
     for (const id of (process.env.LARK_ALLOWED_OPEN_IDS ?? '').split(',').filter(Boolean)) allowed.add(id.trim());
     if (!sender || (binding ? sender !== binding.sender_open_id : !allowed.has(sender))) {
       this.report({ ...context, status: 'ignored', reason: 'sender_not_allowed' }); return Promise.resolve(true);
@@ -201,7 +211,7 @@ export class LarkService implements ServiceModule {
   drain(): Promise<void> { return this.queue; }
   /** Channel summary for the Agents page; never includes credentials. */
   channel(): { name: 'feishu'; configured: boolean; recipient?: string; groups: number } {
-    return { name: 'feishu', configured: Boolean(this.api), recipient: this.threads?.recipient()?.open_id, groups: this.state.bindings.size };
+    return { name: 'feishu', configured: Boolean(this.api), recipient: this.threads?.recipient()?.open_id, groups: [...this.state.bindings.values()].filter(binding => !binding.app_id || binding.app_id === this.api?.appId).length };
   }
   private requireThreads(): LarkThreads {
     if (!this.threads) throw new HttpError(503, 'Feishu is not configured; other services remain available');
@@ -248,7 +258,7 @@ export class LarkService implements ServiceModule {
     const existing = this.state.bindings.get(chat_id);
     if (existing && (existing.session_id !== session_id || existing.sender_open_id !== sender_open_id)) throw new HttpError(409, 'Group already has another local binding');
     const activation = Date.now(); const activationClock = performance.now();
-    const binding: LarkBinding = { chat_id, session_id, sender_open_id, metadata: body.metadata ?? 'announcement', pin: body.pin === true,
+    const binding: LarkBinding = { chat_id, app_id: this.api.appId, session_id, sender_open_id, metadata: body.metadata ?? 'announcement', pin: body.pin === true,
       activated_at: existing?.activated_at ?? activation,
       ...(isAdapter(body.adapter) ? { adapter: body.adapter } : {}), ...(typeof body.session_name === 'string' ? { session_name: body.session_name } : {}) };
     const remote = this.remote(binding);

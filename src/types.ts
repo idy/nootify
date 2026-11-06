@@ -34,6 +34,8 @@ export interface BindingRequest {
 }
 export interface LarkBinding extends BindingRequest {
   chat_id: string;
+  /** Groups belong to one app; a replacement app must not reuse another bot's chat IDs. */
+  app_id?: string;
   registration_message_id?: string;
   /** First activation, in milliseconds; later polling must not replay earlier commands. */
   activated_at?: number;

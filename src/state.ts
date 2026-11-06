@@ -7,9 +7,12 @@ import { HttpError, isAdapter, larkPollCursorKey, larkPollReceiptKey } from './t
 import { isNotificationChannel, validChatConfig, type ChatBinding, type ChatDelivery, type NotificationChannel, type SlackConfig, type TelegramConfig } from './chat-transport.js';
 import { StateDatabase, legacyLarkPollReceipts, validateLarkPollReceipt, type LarkPollPrune, type StateRows } from './state-database.js';
 
+export type LarkConnectionType = 'bot' | 'personal-app';
+export const isLarkConnectionType = (value: unknown): value is LarkConnectionType => value === 'bot' || value === 'personal-app';
+
 /** Owner choices that are not tied to one session or binding. */
 export interface Settings {
-  lark_recipient_open_id?: string; lark_app_id?: string; lark_app_secret?: string; github_token?: string; tailscale_enabled?: boolean;
+  lark_recipient_open_id?: string; lark_app_id?: string; lark_app_secret?: string; lark_connection_type?: LarkConnectionType; github_token?: string; tailscale_enabled?: boolean;
   notification_channel?: NotificationChannel; slack?: SlackConfig; telegram?: TelegramConfig;
 }
 /** The pre-SQLite format is read only for the first successful database migration. */
@@ -132,6 +135,7 @@ export class State {
     if (validChatConfig('slack', data.settings?.slack)) this.settings.slack = data.settings.slack;
     if (validChatConfig('telegram', data.settings?.telegram)) this.settings.telegram = data.settings.telegram;
     if (typeof data.settings?.tailscale_enabled === 'boolean') this.settings.tailscale_enabled = data.settings.tailscale_enabled;
+    if (isLarkConnectionType(data.settings?.lark_connection_type)) this.settings.lark_connection_type = data.settings.lark_connection_type;
     for (const field of ['lark_recipient_open_id', 'lark_app_id', 'lark_app_secret', 'github_token'] as const) {
       const value = data.settings?.[field];
       if (typeof value === 'string') this.settings[field] = value;

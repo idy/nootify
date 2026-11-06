@@ -3,7 +3,7 @@ import { setTimeout as wait } from 'node:timers/promises';
 import { InvalidAnnouncement, parseAnnouncement, readAnnouncement, requestLark, type LarkApi } from './lark-metadata.js';
 import { LarkHistoryBuffer, type LarkHistoryMessage, type LarkHistoryEntry } from './lark-history-buffer.js';
 import type { State } from './state.js';
-import { isAdapter, larkPollCursorKey, type LarkPollCursor, type LarkPollReceipt } from './types.js';
+import { isAdapter, larkPollCursorKey, type LarkBinding, type LarkPollCursor, type LarkPollReceipt } from './types.js';
 
 const INTERVAL_MS = 3_000;
 const REQUEST_INTERVAL_MS = 200;
@@ -59,7 +59,7 @@ export class LarkPoller implements LarkReceiver {
     this.wait = options.wait ?? (async (ms, signal) => { await wait(ms, undefined, { signal, ref: false }); });
     this.startedAt = (options.now ?? Date.now)();
     this.startedMono = this.monotonic();
-    for (const [chatId, binding] of options.state.bindings) this.startupBindings.set(chatId, binding.activated_at ?? this.startedAt);
+    for (const binding of this.bindings()) this.startupBindings.set(binding.chat_id, binding.activated_at ?? this.startedAt);
     this.startupDiscovery = this.trustedSenders();
   }
   private now(): number {
@@ -109,8 +109,11 @@ export class LarkPoller implements LarkReceiver {
     return { appId: this.options.api.appId, request: <T>(_method: unknown, path: string, _body?: unknown, context?: AbortSignal) =>
       this.request<T>(path, context ? AbortSignal.any([signal, context]) : signal) };
   }
+  private bindings(): LarkBinding[] {
+    return [...this.options.state.bindings.values()].filter(binding => !binding.app_id || binding.app_id === this.options.api.appId);
+  }
   private trustedSenders(): boolean {
-    return this.options.state.bindings.size > 0 || (process.env.LARK_ALLOWED_OPEN_IDS ?? '').split(',').some(id => id.trim());
+    return this.bindings().length > 0 || (process.env.LARK_ALLOWED_OPEN_IDS ?? '').split(',').some(id => id.trim());
   }
   private async save(cursors: readonly LarkPollCursor[], receipts: readonly LarkPollReceipt[] = [], prune: readonly { cursor_id: string; before: number }[] = []): Promise<void> {
     await this.options.state.saveLarkPollProgress(cursors, receipts, prune);
@@ -133,7 +136,7 @@ export class LarkPoller implements LarkReceiver {
   }
   private async ensureBaselines(): Promise<void> {
     const added: LarkPollCursor[] = [];
-    for (const chatId of this.options.state.bindings.keys()) {
+    for (const { chat_id: chatId } of this.bindings()) {
       const cursor = this.makeChat(chatId);
       const id = larkPollCursorKey(cursor);
       if (!this.options.state.larkPollCursors.has(id)) { added.push(cursor); if (cursor.provisional_clock) this.provisional.add(id); }
@@ -396,7 +399,7 @@ export class LarkPoller implements LarkReceiver {
       index.set(id, cursor);
     }
     await this.discover(signal);
-    const chats = new Set([...this.options.state.bindings.keys(), ...this.discovered.keys()]);
+    const chats = new Set([...this.bindings().map(binding => binding.chat_id), ...this.discovered.keys()]);
     let healthy = true;
     try {
       for (const chatId of chats) {

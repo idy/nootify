@@ -1,6 +1,6 @@
 {
   "name": "nootify",
-  "version": "0.1.12",
+  "version": "0.1.14",
   "private": true,
   "type": "module",
   "description": "Routes Feishu, Slack and Telegram replies to local coding-agent sessions and tracks pull requests, with a macOS tray app",
@@ -16,7 +16,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test dist/test/*.test.js",
+    "test": "npm run build && node --test dist/test/*.test.js scripts/*.test.mjs",
     "start": "node dist/src/server.js",
     "cli": "node dist/src/cli.js",
     "tauri": "tauri",

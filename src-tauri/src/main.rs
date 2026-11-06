@@ -186,6 +186,7 @@ fn main() {
                     if is_github_link(url)
                         || is_tailscale_link(url)
                         || is_feishu_permission_link(url)
+                        || is_feishu_registration_link(url)
                     {
                         open_in_browser(url);
                         return false;
@@ -213,6 +214,7 @@ fn main() {
                     if is_github_link(&url)
                         || is_tailscale_link(&url)
                         || is_feishu_permission_link(&url)
+                        || is_feishu_registration_link(&url)
                     {
                         open_in_browser(&url);
                     }
@@ -949,6 +951,24 @@ fn is_feishu_permission_link(url: &Url) -> bool {
                 }))
 }
 
+fn is_feishu_registration_link(url: &Url) -> bool {
+    no_credentials(url)
+        && url.scheme() == "https"
+        && url.host_str() == Some("open.feishu.cn")
+        && url.port().is_none()
+        && url.path() == "/page/cli"
+        && url.fragment().is_none()
+        && url
+            .query()
+            .and_then(|query| query.strip_prefix("user_code="))
+            .is_some_and(|code| {
+                (4..=64).contains(&code.len())
+                    && code
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            })
+}
+
 fn open_in_browser(url: &Url) {
     match std::process::Command::new("/usr/bin/open")
         .arg(url.as_str())
@@ -991,6 +1011,57 @@ mod tests {
                 "{link}"
             );
         }
+    }
+
+    #[test]
+    fn feishu_registration_links_open_only_valid_official_setup_links() {
+        for code in ["Ab09", "ABCD-1234", &"a".repeat(64)] {
+            let url =
+                Url::parse(&format!("https://open.feishu.cn/page/cli?user_code={code}")).unwrap();
+            assert!(is_feishu_registration_link(&url), "{url}");
+            // Registration opens externally and never replaces the native document.
+            assert!(!navigation_allowed(&url), "{url}");
+            assert!(!is_feishu_permission_link(&url), "{url}");
+        }
+    }
+
+    #[test]
+    fn feishu_registration_links_reject_untrusted_or_malformed_urls() {
+        for link in [
+            "http://open.feishu.cn/page/cli?user_code=ABCD",
+            "https://open.feishu.cn.evil.test/page/cli?user_code=ABCD",
+            "https://evil.test/page/cli?user_code=ABCD",
+            "https://user@open.feishu.cn/page/cli?user_code=ABCD",
+            "https://user:password@open.feishu.cn/page/cli?user_code=ABCD",
+            "https://open.feishu.cn:8443/page/cli?user_code=ABCD",
+            "https://open.feishu.cn/page/cli/?user_code=ABCD",
+            "https://open.feishu.cn/page/other?user_code=ABCD",
+            "https://open.feishu.cn/app?user_code=ABCD",
+            "https://open.feishu.cn/page/cli",
+            "https://open.feishu.cn/page/cli?",
+            "https://open.feishu.cn/page/cli?user_code=",
+            "https://open.feishu.cn/page/cli?user_code=ABC",
+            "https://open.feishu.cn/page/cli?user_code=AB_CD",
+            "https://open.feishu.cn/page/cli?user_code=AB+CD",
+            "https://open.feishu.cn/page/cli?user_code=AB%20CD",
+            "https://open.feishu.cn/page/cli?user_code=AB%2DCD",
+            "https://open.feishu.cn/page/cli?user_code=中文代码",
+            "https://open.feishu.cn/page/cli?user_code=ABCD&user_code=EFGH",
+            "https://open.feishu.cn/page/cli?user_code=ABCD&other=value",
+            "https://open.feishu.cn/page/cli?other=value&user_code=ABCD",
+            "https://open.feishu.cn/page/cli?USER_CODE=ABCD",
+            "https://open.feishu.cn/page/cli?user_code=ABCD#other",
+            "https://open.feishu.cn/page/cli?user_code=ABCD#",
+        ] {
+            let url = Url::parse(link).unwrap();
+            assert!(!is_feishu_registration_link(&url), "{link}");
+        }
+        let oversized = Url::parse(&format!(
+            "https://open.feishu.cn/page/cli?user_code={}",
+            "a".repeat(65)
+        ))
+        .unwrap();
+        assert!(!is_feishu_registration_link(&oversized));
     }
 
     #[test]
