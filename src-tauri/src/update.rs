@@ -3,7 +3,10 @@
 //! same state. The page receives it as a DOM event and asks for an action by navigating to
 //! `nootify://update/…`, which the window's policy cancels, so it never needs IPC.
 use std::{
-    sync::mpsc::{Receiver, RecvTimeoutError},
+    sync::{
+        mpsc::{Receiver, RecvTimeoutError},
+        Arc, Mutex,
+    },
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -16,6 +19,7 @@ use tauri::{
 use tauri_plugin_updater::{Update, UpdaterExt};
 
 use crate::{
+    language::{Locale, Text},
     service::{menu_text, BundledService, LaunchAgent},
     NativeState, MAIN_WINDOW,
 };
@@ -113,8 +117,51 @@ fn progress_step(received: u64, total: Option<u64>) -> u64 {
     }
 }
 
-/// Updates stay inside one native submenu. Its title advertises an available version or progress;
-/// 安装更新 is inserted only while a version is available. Full errors remain in Settings > About.
+/// Keep semantic state, rather than translated strings, so an in-flight update changes language
+/// immediately without restarting the worker or losing progress. Full errors stay in Settings > About.
+#[derive(Clone, Debug)]
+pub enum Status {
+    Version(String),
+    Checking,
+    Available(String),
+    Current(String),
+    Downloading(Option<u64>),
+    Installing,
+    Restarting,
+    CheckFailed,
+    InstallFailed,
+}
+
+impl Status {
+    pub fn text(&self, locale: Locale) -> String {
+        let (key, version) = match self {
+            Self::Version(version) => (Text::CurrentVersion, Some(version)),
+            Self::Available(version) => (Text::UpdateAvailable, Some(version)),
+            Self::Current(version) => (Text::UpToDate, Some(version)),
+            Self::Checking => (Text::CheckingUpdate, None),
+            Self::Downloading(Some(percent)) => {
+                return locale.format(Text::DownloadPercent, &[("percent", &percent.to_string())])
+            }
+            Self::Downloading(None) => (Text::Downloading, None),
+            Self::Installing => (Text::Installing, None),
+            Self::Restarting => (Text::Restarting, None),
+            Self::CheckFailed => (Text::CheckFailed, None),
+            Self::InstallFailed => (Text::InstallFailed, None),
+        };
+        version.map_or_else(
+            || locale.text(key).into(),
+            |version| locale.format(key, &[("version", &tag(version))]),
+        )
+    }
+}
+
+#[derive(Clone)]
+struct MenuState {
+    status: Status,
+    available: Option<String>,
+    busy: bool,
+}
+
 #[derive(Clone)]
 pub struct UpdateMenu {
     pub menu: Submenu<Wry>,
@@ -122,6 +169,7 @@ pub struct UpdateMenu {
     pub check: MenuItem<Wry>,
     pub install: MenuItem<Wry>,
     pub about: MenuItem<Wry>,
+    state: Arc<Mutex<MenuState>>,
 }
 
 impl UpdateMenu {
@@ -131,6 +179,7 @@ impl UpdateMenu {
         check: MenuItem<Wry>,
         install: MenuItem<Wry>,
         about: MenuItem<Wry>,
+        current: String,
     ) -> Self {
         Self {
             menu,
@@ -138,34 +187,65 @@ impl UpdateMenu {
             check,
             install,
             about,
+            state: Arc::new(Mutex::new(MenuState {
+                status: Status::Version(current),
+                available: None,
+                busy: false,
+            })),
         }
     }
 
-    pub fn render(&self, status: &str, available: Option<&str>, busy: bool) {
-        let title = if busy {
-            menu_text(status)
-        } else if let Some(version) = available {
-            format!("更新 {}", tag(version))
+    pub fn render(&self, app: &AppHandle, status: Status, available: Option<&str>, busy: bool) {
+        *self.state.lock().expect("update menu state") = MenuState {
+            status,
+            available: available.map(str::to_owned),
+            busy,
+        };
+        self.relocalize(app);
+    }
+
+    pub fn relocalize(&self, app: &AppHandle) {
+        let menu = self.clone();
+        let handle = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            // Snapshot on the main thread: queued worker renders cannot restore an old locale.
+            let state = menu.state.lock().expect("update menu state").clone();
+            menu.apply(crate::language_view(&handle).locale, &state);
+        });
+    }
+
+    fn apply(&self, locale: Locale, state: &MenuState) {
+        let status = state.status.text(locale);
+        let title = if state.busy {
+            menu_text(&status)
+        } else if let Some(version) = &state.available {
+            locale.format(Text::UpdateVersion, &[("version", &tag(version))])
         } else {
-            "软件更新".to_string()
+            locale.text(Text::SoftwareUpdates).into()
         };
         let _ = self.menu.set_text(title);
-        let _ = self.status.set_text(menu_text(status));
-        let _ = self.check.set_enabled(!busy);
-        let _ = self.install.set_enabled(!busy);
-        match available {
+        let _ = self.status.set_text(menu_text(&status));
+        let _ = self.check.set_text(locale.text(Text::CheckUpdate));
+        let _ = self.about.set_text(locale.text(Text::UpdateDetails));
+        let _ = self.check.set_enabled(!state.busy);
+        let _ = self.install.set_enabled(!state.busy);
+        match &state.available {
             Some(version) => {
-                let _ = self.install.set_text(format!("安装更新 {}", tag(version)));
+                let _ = self
+                    .install
+                    .set_text(locale.format(Text::InstallVersion, &[("version", &tag(version))]));
                 if !self.install_shown() {
                     if let Some(index) = self.position(CHECK_ID) {
                         let _ = self.menu.insert(&self.install, index + 1);
                     }
                 }
             }
-            None if self.install_shown() => {
-                let _ = self.menu.remove(&self.install);
+            None => {
+                let _ = self.install.set_text(locale.text(Text::InstallUpdate));
+                if self.install_shown() {
+                    let _ = self.menu.remove(&self.install);
+                }
             }
-            None => {}
         }
     }
 
@@ -250,9 +330,9 @@ impl Worker {
         }
     }
 
-    fn show(&self, status: &str, busy: bool) {
+    fn show(&self, status: Status, busy: bool) {
         let available = self.pending.as_ref().map(|update| update.version.as_str());
-        self.menu.render(status, available, busy);
+        self.menu.render(&self.app, status, available, busy);
     }
 
     fn view(&self, phase: Phase) -> UpdateView {
@@ -265,7 +345,7 @@ impl Worker {
     }
 
     fn check(&mut self) {
-        self.show("检查更新中…", true);
+        self.show(Status::Checking, true);
         publish(&self.app, &self.view(Phase::Checking));
         let result = self
             .app
@@ -275,21 +355,21 @@ impl Worker {
             .and_then(|updater| tauri::async_runtime::block_on(updater.check()));
         match result {
             Ok(Some(update)) => {
-                let status = format!("可更新至 {}", tag(&update.version));
+                let status = Status::Available(update.version.clone());
                 self.pending = Some(update);
                 self.checked_at = Some(now_ms());
-                self.show(&status, false);
+                self.show(status, false);
                 publish(&self.app, &self.view(Phase::Available));
             }
             Ok(None) => {
                 self.pending = None;
                 self.checked_at = Some(now_ms());
-                self.show(&format!("已是最新 {}", tag(&self.current)), false);
+                self.show(Status::Current(self.current.clone()), false);
                 publish(&self.app, &self.view(Phase::Current));
             }
             // A previously found update stays installable.
             Err(error) => {
-                self.show("检查失败，请重试", false);
+                self.show(Status::CheckFailed, false);
                 let phase = if self.pending.is_some() {
                     Phase::Available
                 } else {
@@ -310,8 +390,8 @@ impl Worker {
         };
         update.timeout = Some(DOWNLOAD_TIMEOUT);
         let menu = self.menu.clone();
-        let show = |status: String| menu.render(&status, Some(&update.version), true);
-        show("下载中…".into());
+        let show = |status: Status| menu.render(&self.app, status, Some(&update.version), true);
+        show(Status::Downloading(None));
         let app = &self.app;
         let mut progress = self.view(Phase::Downloading);
         let installing = self.view(Phase::Installing);
@@ -325,18 +405,18 @@ impl Worker {
                 if shown != Some(step) {
                     shown = Some(step);
                     if progress.total.is_some() {
-                        show(format!("下载中 {step}%"));
+                        show(Status::Downloading(Some(step)));
                     }
                     publish(app, &progress);
                 }
             },
             || {
-                show("安装中…".into());
+                show(Status::Installing);
                 publish(app, &installing);
             },
         ));
         if let Err(error) = result {
-            self.show("安装失败，请重试", false);
+            self.show(Status::InstallFailed, false);
             // Still pending: the page offers the same action again.
             let view = UpdateView {
                 error: Some(error.to_string()),
@@ -345,7 +425,7 @@ impl Worker {
             publish(&self.app, &view);
             return;
         }
-        self.show("重启中…", true);
+        self.show(Status::Restarting, true);
         publish(&self.app, &self.view(Phase::Restarting));
         // The bundle now holds the new service as well: restart the job if it runs this bundle's
         // Node.js. A failure only delays the new service code until the job next restarts.
@@ -419,6 +499,38 @@ mod tests {
             (value["received"].as_u64(), value["total"].as_u64()),
             (Some(5), Some(10))
         );
+    }
+
+    #[test]
+    fn update_statuses_can_change_language_without_losing_progress_or_version() {
+        assert_eq!(
+            Status::Downloading(Some(42)).text(Locale::English),
+            "Downloading 42%"
+        );
+        assert_eq!(
+            Status::Downloading(Some(42)).text(Locale::Chinese),
+            "下载中 42%"
+        );
+        assert_eq!(
+            Status::Available("0.2.0".into()).text(Locale::English),
+            "Update available: v0.2.0"
+        );
+        assert_eq!(
+            Status::Available("v0.2.0".into()).text(Locale::Chinese),
+            "可更新至 v0.2.0"
+        );
+        for status in [
+            Status::Checking,
+            Status::Downloading(None),
+            Status::Installing,
+            Status::Restarting,
+            Status::CheckFailed,
+            Status::InstallFailed,
+        ] {
+            let english = status.text(Locale::English);
+            assert!(english.is_ascii() || english.ends_with('…'), "{english}");
+            assert_ne!(english, status.text(Locale::Chinese));
+        }
     }
 
     #[test]

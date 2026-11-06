@@ -218,6 +218,10 @@ Group creation needs the bot's chat-creation permission (`im:chat:create` or `im
 
 Open `http://127.0.0.1:9417`. The layout follows the system's light or dark appearance without reloading and has a navigation column grouped by **message bridge** (run logs, routing sessions, agents) and **GitHub** (pull requests to our repositories, pull requests we sent upstream, followed repositories), with **设置** and module and connection status at its foot. The desktop window combines native window controls, the brand, page breadcrumbs, software updates, and refresh in one 52px title row. Logs and PR queues use bordered lists of two-line rows; subscriptions use a compact table with expandable source sessions. Segmented filters show counts; search and `/` focus the page's search field. Toolbars and settings reflow according to the available working width: narrow toolbars put filters above a shared search/action row, and field save actions remain next to their inputs. On narrow browser screens, primary navigation scrolls beside a fixed Settings entry, with settings pages in their own contextual row and the active destination kept visible. The desktop window keeps its sidebar and native title-row alignment.
 
+The application supports English and Simplified Chinese, following the system or browser language by default and falling back to English for unsupported languages. **Settings · General · Language** offers **Follow system**, **简体中文**, and **English**. Changes apply immediately, including page titles, accessible labels, status messages, dates, relative times, and number/list formatting, while preserving filters and unfinished form input. Browser preferences are stored locally on each device; unavailable storage does not prevent switching for the current page. The desktop app persists its preference in its own app configuration directory and shares it with the native tray, updater controls, and offline page. The public website keeps its separate language preference.
+
+The web catalog lives in `src/ui-i18n.ts`: Chinese source messages act as typed keys, with English translations and named interpolation parameters. Static markup uses explicit `data-i18n` markers; session names, messages, PR titles, raw diagnostic details, and agent prompt previews remain in their original language. Native strings and language preference handling live in `src-tauri/src/language.rs`; `desktop/` contains the offline page translations. Add a catalog entry for new interface copy and preserve its placeholders in every language. The desktop injects `window.__NOOTIFY_LANGUAGE__` before page JavaScript and replays it through the `nootify-language` event. Trusted service and offline pages can request one of the three fixed `nootify://language/system`, `nootify://language/zh-CN`, or `nootify://language/en` navigations; the shell cancels navigation and applies the preference without granting page IPC permissions.
+
 The operational UI uses local system fonts with a fixed role scale: 16px page headings, 14px primary content and field names, a 13px control/body baseline, and 12px metadata. Numeric counters and progress use tabular figures; code previews use the same local monospace family as IDs. Explanatory paragraphs have a constrained reading measure and more leading without changing the compact list line boxes.
 
 Log rows expand in place for full IDs, reasons, and message text; logs can be paused and the filtered set exported as NDJSON. The routing-session page displays only targets encountered by incoming messages or explicit sends, with their last lookup time and result. Refreshing it performs no client lookups. These are historical observations, not a live inventory.
@@ -226,10 +230,11 @@ The page polls a read-only snapshot every two seconds and needs no control token
 
 ## Settings
 
-**设置** at the foot of the navigation opens five pages. Everything can be read over Tailscale, but changes are accepted only from this Mac: credentials and imports decide who can reach local sessions.
+**Settings** at the foot of the navigation opens six pages. Service settings can be read over Tailscale, but changes are accepted only from this Mac: credentials and imports decide who can reach local sessions. The interface language is a local display preference and can be changed on each device.
 
 | Page | Purpose |
 | --- | --- |
+| General | Selects the local interface language, including over Tailscale |
 | GitHub | Signs Nootify in to GitHub with the device flow, and signs it out |
 | 飞书 | Feishu App ID, App Secret, and recipient |
 | Tailscale | Enroll Nootify as its own device, connect/disconnect, sign out, and copy its port-80 address |
