@@ -5,7 +5,11 @@ Set-StrictMode -Version 2.0
 [Console]::InputEncoding = New-Object System.Text.UTF8Encoding($false)
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 try {
-    Add-Type -Path (Join-Path $PSScriptRoot 'inbox-auth.cs')
+    $compile = @{ Path = (Join-Path $PSScriptRoot 'inbox-auth.cs') }
+    # .NET Framework stores named pipes and SafePipeHandle in System.Core, which
+    # Windows PowerShell 5.1 does not reference by default. Core editions use their defaults.
+    if ($PSVersionTable.PSVersion.Major -le 5) { $compile.ReferencedAssemblies = @('System.dll', 'System.Core.dll') }
+    Add-Type @compile
     [Console]::WriteLine('{"ready":true}')
     $request = ConvertFrom-Json -InputObject ([Console]::ReadLine())
     [Nootify.InboxWriter]::Write([string]$request.path, [uint32]$request.expectedPid, [string]$request.frames, [int]$request.timeout)

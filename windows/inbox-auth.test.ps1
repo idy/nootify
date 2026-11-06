@@ -4,7 +4,9 @@ Set-StrictMode -Version 2.0
 $tokens = $null; $parseErrors = $null
 $null = [Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'inbox-auth.ps1'), [ref]$tokens, [ref]$parseErrors)
 if ($parseErrors.Count -ne 0) { throw 'Inbox writer PowerShell syntax failed' }
-Add-Type -Path (Join-Path $PSScriptRoot 'inbox-auth.cs')
+$compile = @{ Path = (Join-Path $PSScriptRoot 'inbox-auth.cs') }
+if ($PSVersionTable.PSVersion.Major -le 5) { $compile.ReferencedAssemblies = @('System.dll', 'System.Core.dll') }
+Add-Type @compile
 function Assert-Denied([scriptblock]$Check) {
     $denied = $false
     try { & $Check } catch {

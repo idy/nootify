@@ -89,6 +89,12 @@ jobs:
   # every asset is present. A failed platform leaves the previous release intact.
   finalize:
     needs: build
+    # Different version tags may finish building out of order. Serialize the
+    # latest lookup and publication together across all releases.
+    concurrency:
+      group: nootify-release-publication
+      cancel-in-progress: false
+      queue: max
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -132,4 +138,5 @@ jobs:
           done
           gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
           gh release upload "$GITHUB_REF_NAME" .cache/release-publish/latest.json --clobber
-          gh release edit "$GITHUB_REF_NAME" --draft=false --prerelease=false --latest --notes-file .cache/release-notes.txt
+          latest="$(node scripts/release-policy.mjs)"
+          gh release edit "$GITHUB_REF_NAME" --draft=false --prerelease=false --latest="$latest" --notes-file .cache/release-notes.txt
