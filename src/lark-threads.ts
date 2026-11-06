@@ -24,12 +24,15 @@ export class LarkThreads {
   constructor(private readonly state: State, private readonly api: LarkApi,
     private readonly report: (record: Record<string, unknown>) => void = () => {}) {}
 
+  private bindings(): LarkBinding[] {
+    return [...this.state.bindings.values()].filter(binding => !binding.app_id || binding.app_id === this.api.appId);
+  }
   /** The Feishu user invited to new groups and trusted as their sender. */
   recipient(): { open_id: string; source: 'setting' | 'environment' | 'bindings' } | undefined {
     if (this.state.settings.lark_recipient_open_id) return { open_id: this.state.settings.lark_recipient_open_id, source: 'setting' };
     const env = process.env.LARK_NOTIFY_OPEN_ID?.trim();
     if (env) return { open_id: env, source: 'environment' };
-    const senders = new Set([...this.state.bindings.values()].map(binding => binding.sender_open_id));
+    const senders = new Set(this.bindings().map(binding => binding.sender_open_id));
     return senders.size === 1 ? { open_id: [...senders][0], source: 'bindings' } : undefined;
   }
   async setRecipient(openId: string): Promise<void> {
@@ -38,7 +41,7 @@ export class LarkThreads {
     await this.state.save();
   }
   binding(sessionId: string, adapter?: Adapter): LarkBinding | undefined {
-    return [...this.state.bindings.values()].find(binding => binding.session_id === sessionId && (!adapter || !binding.adapter || binding.adapter === adapter));
+    return this.bindings().find(binding => binding.session_id === sessionId && (!adapter || !binding.adapter || binding.adapter === adapter));
   }
   /** Concurrent calls for one session share a single lookup, so a session never gets two groups from this process. */
   open(adapter: Adapter, sessionId: string, sessionName: string): Promise<ThreadInfo> {
@@ -69,7 +72,7 @@ export class LarkThreads {
         name: threadName(sessionName, adapter, sessionId), chat_mode: 'group', chat_type: 'private', user_id_list: [recipient],
       });
       if (!chat.chat_id) throw new Error('Feishu returned no chat ID for the new group');
-      binding = { chat_id: chat.chat_id, session_id: sessionId, adapter, session_name: sessionName, sender_open_id: recipient, metadata: 'announcement', pin: false };
+      binding = { chat_id: chat.chat_id, app_id: this.api.appId, session_id: sessionId, adapter, session_name: sessionName, sender_open_id: recipient, metadata: 'announcement', pin: false };
       created = true;
       // Saved before the announcement write, so a failure there cannot lead to a second group on retry.
       this.state.bindings.set(binding.chat_id, binding); await this.state.save();
@@ -90,6 +93,8 @@ export class LarkThreads {
       const data = await this.api.request<{ items?: { chat_id?: string; name?: string }[]; has_more?: boolean; page_token?: string }>('GET', `/open-apis/im/v1/chats?${query}`);
       for (const chat of data.items ?? []) {
         if (!chat.chat_id || !chat.name?.toLowerCase().includes(needle)) continue;
+        const owner = this.state.bindings.get(chat.chat_id)?.app_id;
+        if (owner && owner !== this.api.appId) continue;
         // An unavailable announcement cannot establish that this is another session's group.
         // Let the read failure abort lookup rather than creating a duplicate on a transient error.
         const announcement = await readAnnouncement(this.api, chat.chat_id);
@@ -97,7 +102,7 @@ export class LarkThreads {
         try { route = parseAnnouncement(announcement.content); }
         catch (error) { if (error instanceof InvalidAnnouncement) continue; throw error; }
         if (route.session_id !== sessionId || route.adapter !== adapter || (route.host_id && route.host_id !== hostname())) continue;
-        return { chat_id: chat.chat_id, session_id: sessionId, adapter, session_name: sessionName, sender_open_id: this.requireRecipient(), metadata: 'announcement', pin: false };
+        return { chat_id: chat.chat_id, app_id: this.api.appId, session_id: sessionId, adapter, session_name: sessionName, sender_open_id: this.requireRecipient(), metadata: 'announcement', pin: false };
       }
       if (!data.has_more || !data.page_token) return;
       pageToken = data.page_token;
