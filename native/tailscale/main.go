@@ -131,6 +131,19 @@ func (n *tsnetNode) Client() (localClient, error)  { return n.server.LocalClient
 func (n *tsnetNode) Listen() (net.Listener, error) { return n.server.Listen("tcp", ":80") }
 func (n *tsnetNode) Close() error                  { return n.server.Close() }
 
+// Propagate RPC stream shutdown to startup before closing the underlying input.
+// serveRPC owns a child context; waiting for it to return leaves a window where
+// Start can finish after EOF while the service context still looks live.
+type cancelingInput struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (input cancelingInput) Close() error {
+	input.cancel()
+	return input.ReadCloser.Close()
+}
+
 func runService(parent context.Context, cfg config, stdin io.ReadCloser, stdout io.WriteCloser, node embeddedNode) error {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
@@ -149,7 +162,7 @@ func runService(parent context.Context, cfg config, stdin io.ReadCloser, stdout 
 	var rpcErr error
 	rpcDone := make(chan struct{})
 	go func() {
-		rpcErr = serveRPC(ctx, stdin, output, func(ctx context.Context, req request) response {
+		rpcErr = serveRPC(ctx, cancelingInput{ReadCloser: stdin, cancel: cancel}, output, func(ctx context.Context, req request) response {
 			select {
 			case <-ready:
 				return dispatcher.dispatch(ctx, req)

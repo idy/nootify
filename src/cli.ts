@@ -8,6 +8,7 @@ import { installLaunchd } from './launchd.js';
 import type { Adapter, SessionRegistration } from './types.js';
 import { isAdapter } from './types.js';
 import { agentSession, isAgent } from './agents.js';
+import { isNotificationChannel } from './chat-transport.js';
 
 export async function main(argv = process.argv.slice(2)): Promise<void> {
   const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, options: {
@@ -16,10 +17,12 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     'chat-id': { type: 'string' }, 'sender-id': { type: 'string' }, pin: { type: 'boolean', default: false },
     metadata: { type: 'string', default: 'announcement' }, text: { type: 'string' }, help: { type: 'boolean', short: 'h' },
     url: { type: 'string' }, directory: { type: 'string' },
-    'message-id': { type: 'string' }, 'text-file': { type: 'string' },
+    'message-id': { type: 'string' }, 'text-file': { type: 'string' }, channel: { type: 'string' },
   } });
   const command = positionals[0];
-  if (values.help) { console.log('Usage: cli.js <launchd-install|health|register|sessions|send|thread-open|thread-send|lark-bind|lark-ack|lark-reply|lark-recipient|backend-set> [options]'); return; }
+  if (values.help) { console.log('Usage: cli.js <launchd-install|health|register|sessions|send|thread-open|thread-send|chat-ack|chat-reply|lark-bind|lark-ack|lark-reply|lark-recipient|backend-set> [options] [--channel feishu|slack|telegram]'); return; }
+  if (values.channel !== undefined && !isNotificationChannel(values.channel)) throw new Error('Use --channel feishu, slack or telegram');
+  const channel = isNotificationChannel(values.channel) ? values.channel : undefined;
   const adapter = values.adapter ?? 'claude-desktop';
   const port = Number(values.port);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid port');
@@ -73,12 +76,12 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       if (!isAdapter(adapter)) throw new Error('Unsupported adapter');
       result = await client.sendMessage(required('session-id'), required('text'), adapter); break;
     }
-    case 'thread-open': result = await client.openThread({ ...threadTarget(), session_name: required('session-name') }); break;
+    case 'thread-open': result = await client.openThread({ ...threadTarget(), session_name: required('session-name'), ...(channel ? { channel } : {}) }); break;
     case 'thread-send': {
       const target = threadTarget();
       const message = await readText();
       if (!message?.trim()) throw new Error('Provide --text or --text-file for the message');
-      result = await client.sendThread(target.session_id, message, target.adapter); break;
+      result = await client.sendThread(target.session_id, message, target.adapter, channel); break;
     }
     case 'lark-recipient': result = values['open-id'] ? await client.setLarkRecipient(values['open-id']) : await client.larkRecipient(); break;
     case 'backend-set': {
@@ -89,6 +92,12 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
           username: process.env.OPENCODE_SERVER_USERNAME, password: process.env.OPENCODE_SERVER_PASSWORD,
         }),
       }); break;
+    }
+    case 'chat-ack': result = await client.acknowledgeChat(required('message-id')); break;
+    case 'chat-reply': {
+      const replyText = await readText();
+      if (!replyText?.trim()) throw new Error('Provide --text or --text-file for the reply');
+      result = await client.replyChat(required('message-id'), replyText); break;
     }
     case 'lark-ack': result = await client.acknowledgeLark(required('message-id')); break;
     case 'lark-reply': {

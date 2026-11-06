@@ -8,8 +8,8 @@ import { HttpError, type ServiceModule } from './types.js';
 
 export interface PullsSource { snapshot(): PullSnapshot; refresh(): void; setChoice(repository: string, follow: boolean | null): Promise<RepositoryEntry> }
 export interface AgentsSource { list(): Promise<AgentPrompt[]>; set(agent: AgentId, enabled: boolean): Promise<AgentPrompt> }
-export interface ChannelSummary { name: 'feishu'; configured: boolean; recipient?: string; groups: number }
-export type SettingsSource = Pick<SettingsService, 'page' | 'github' | 'startGitHubLogin' | 'cancelGitHubLogin' | 'signOutGitHub' | 'saveLark' | 'clearLark' | 'setRecipient' | 'exportConfig' | 'previewImport' | 'importConfig' | 'reveal' | 'tailscale' | 'setTailscaleEnabled' | 'startTailscaleLogin' | 'cancelTailscaleLogin' | 'logoutTailscale'>;
+export interface ChannelSummary { name: 'feishu' | 'slack' | 'telegram'; configured: boolean; recipient?: string; groups: number }
+export type SettingsSource = Pick<SettingsService, 'page' | 'github' | 'startGitHubLogin' | 'cancelGitHubLogin' | 'signOutGitHub' | 'saveLark' | 'clearLark' | 'setRecipient' | 'exportConfig' | 'previewImport' | 'importConfig' | 'reveal' | 'tailscale' | 'setTailscaleEnabled' | 'startTailscaleLogin' | 'cancelTailscaleLogin' | 'logoutTailscale' | 'saveChat' | 'clearChat' | 'setNotificationChannel'>;
 export interface UiContext {
   modules: ServiceModule[]; logs: EventLog; pulls?: PullsSource; tailnetUrl?: () => string | undefined;
   agents?: AgentsSource; channel?: () => ChannelSummary | undefined; settings?: SettingsSource;
@@ -60,6 +60,12 @@ async function settingsAction(request: IncomingMessage, path: string, settings: 
     if (body.action === 'logout') { await settings.logoutTailscale(); return { accepted: true }; }
     throw new HttpError(400, 'Expected a Tailscale action: enable, login, cancel or logout');
   }
+  if (path === '/ui/api/settings/slack' || path === '/ui/api/settings/telegram') {
+    const channel = path.endsWith('/slack') ? 'slack' : 'telegram';
+    if (body.clear === true) await settings.clearChat(channel); else await settings.saveChat(channel, body);
+    return { accepted: true };
+  }
+  if (path === '/ui/api/settings/channel') { await settings.setNotificationChannel(body.channel); return { accepted: true }; }
   if (path === '/ui/api/settings/lark') {
     if (body.clear === true) await settings.clearLark(); else await settings.saveLark(body.app_id, body.app_secret);
     return { accepted: true };

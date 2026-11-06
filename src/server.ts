@@ -8,6 +8,9 @@ import { parseArgs } from 'node:util';
 import { State } from './state.js';
 import { SessionsService } from './sessions.js';
 import { LarkService } from './lark.js';
+import { ChatService } from './chat-service.js';
+import { createSlackTransport } from './slack.js';
+import { createTelegramTransport } from './telegram.js';
 import { resolveCredentials } from './lark-metadata.js';
 import { HttpError } from './types.js';
 import type { ServiceModule } from './types.js';
@@ -99,6 +102,8 @@ export async function main(): Promise<void> {
   const sessions = new SessionsService(state, undefined, report);
   const resolved = await resolveCredentials(process.env, state.settings, values['mcp-config']);
   const lark = new LarkService(state, sessions, resolved?.credentials, report, undefined, port);
+  const slack = new ChatService('slack', state, sessions, createSlackTransport, report, port);
+  const telegram = new ChatService('telegram', state, sessions, createTelegramTransport, report, port);
   // Routine five-minute refreshes would push Feishu events out of the bounded log; record outcome changes only.
   let pullsOutcome: unknown;
   const pulls = new PullRequestsService(state.directory, record => {
@@ -110,11 +115,17 @@ export async function main(): Promise<void> {
   const tailnet = new TailnetAccess(80, { users: process.env.NOOTIFY_TAILNET_USERS?.split(',').map(user => user.trim()).filter(Boolean), probe: tsnet });
   const peers = new WeakMap<Socket, string>();
   const tailscale = new TailscaleService({ state, access: tailnet, client: tsnet, report, listen: () => listenTailnetProxy(tailnetServer, peers) });
-  const agents = new AgentPrompts({ stateDir: state.directory, port, tailnetAddress: () => { const url = tailnet.url(); return url ? new URL(url).hostname : undefined; } }, report);
-  const modules: ServiceModule[] = [sessions, lark, pulls, agents];
+  const agents = new AgentPrompts({ stateDir: state.directory, port, notificationChannel: () => state.settings.notification_channel ?? 'feishu', tailnetAddress: () => { const url = tailnet.url(); return url ? new URL(url).hostname : undefined; } }, report);
+  const modules: ServiceModule[] = [sessions, slack, telegram, lark, pulls, agents];
   const github = new GitHubAuth(state, report, () => pulls.refreshSoon());
-  const settings = new SettingsService({ state, lark, github, pulls, agents, tailscale, mcpConfig: values['mcp-config'], source: resolved?.source, report });
-  const page = { pulls, tailnet, agents, channel: () => lark.channel(), settings };
+  const settings = new SettingsService({ state, lark, slack, telegram, github, pulls, agents, tailscale, mcpConfig: values['mcp-config'], source: resolved?.source, report });
+  const channel = (): ChannelSummary => {
+    const selected = state.settings.notification_channel ?? 'feishu';
+    if (selected === 'feishu') return lark.channel();
+    const status = (selected === 'slack' ? slack : telegram).page();
+    return { name: selected, configured: status.configured, recipient: status.user_id, groups: status.threads };
+  };
+  const page = { pulls, tailnet, agents, channel, settings };
   const tailnetServer = createServiceHost(modules, state.token, logs, { ...page, via: 'tailnet', peerAddress: socket => peers.get(socket) });
   const server = createServiceHost(modules, state.token, logs, page);
   await listen(server, port, '127.0.0.1');

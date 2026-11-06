@@ -4,16 +4,22 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { Adapter, BackendConnection, LarkBinding, LarkDelivery, PublicSession, SessionRecord } from './types.js';
 import { HttpError } from './types.js';
+import { isNotificationChannel, validChatConfig, type ChatBinding, type ChatDelivery, type NotificationChannel, type SlackConfig, type TelegramConfig } from './chat-transport.js';
 
 /** Owner choices that are not tied to one session or binding. */
-export interface Settings { lark_recipient_open_id?: string; lark_app_id?: string; lark_app_secret?: string; github_token?: string; tailscale_enabled?: boolean }
-interface StoredState { version: 1; sessions: SessionRecord[]; lark_bindings: LarkBinding[]; backends?: [Adapter, BackendConnection][]; lark_deliveries?: LarkDelivery[]; settings?: Settings }
+export interface Settings {
+  lark_recipient_open_id?: string; lark_app_id?: string; lark_app_secret?: string; github_token?: string; tailscale_enabled?: boolean;
+  notification_channel?: NotificationChannel; slack?: SlackConfig; telegram?: TelegramConfig;
+}
+interface StoredState { version: 1; sessions: SessionRecord[]; lark_bindings: LarkBinding[]; backends?: [Adapter, BackendConnection][]; lark_deliveries?: LarkDelivery[]; chat_bindings?: ChatBinding[]; chat_deliveries?: ChatDelivery[]; settings?: Settings }
 export const defaultStateDir = () => join(homedir(), '.local/state/nootify');
 export class State {
   readonly sessions = new Map<string, SessionRecord>();
   readonly bindings = new Map<string, LarkBinding>();
   readonly backends = new Map<Adapter, BackendConnection>();
   readonly deliveries = new Map<string, LarkDelivery>();
+  readonly chatBindings = new Map<string, ChatBinding>();
+  readonly chatDeliveries = new Map<string, ChatDelivery>();
   readonly settings: Settings = {};
   private writes: Promise<void> = Promise.resolve();
   private constructor(readonly directory: string, readonly token: string) {}
@@ -33,6 +39,11 @@ export class State {
       for (const binding of data.lark_bindings) state.bindings.set(binding.chat_id, binding);
       for (const [adapter, backend] of data.backends ?? []) state.backends.set(adapter, backend);
       for (const delivery of data.lark_deliveries ?? []) state.deliveries.set(delivery.message_id, delivery);
+      for (const binding of data.chat_bindings ?? []) state.chatBindings.set(binding.id, binding);
+      for (const delivery of data.chat_deliveries ?? []) state.chatDeliveries.set(delivery.id, delivery);
+      if (isNotificationChannel(data.settings?.notification_channel)) state.settings.notification_channel = data.settings.notification_channel;
+      if (validChatConfig('slack', data.settings?.slack)) state.settings.slack = data.settings.slack;
+      if (validChatConfig('telegram', data.settings?.telegram)) state.settings.telegram = data.settings.telegram;
       if (typeof data.settings?.tailscale_enabled === 'boolean') state.settings.tailscale_enabled = data.settings.tailscale_enabled;
       for (const field of ['lark_recipient_open_id', 'lark_app_id', 'lark_app_secret', 'github_token'] as const) {
         const value = data.settings?.[field];
@@ -50,7 +61,7 @@ export class State {
     return [...this.sessions.values()].map(({ session_id, host_id, adapter, session_name }) => ({ session_id, host_id, adapter, session_name }));
   }
   async save(): Promise<void> {
-    const snapshot = JSON.stringify({ version: 1, sessions: [...this.sessions.values()], lark_bindings: [...this.bindings.values()], backends: [...this.backends.entries()], lark_deliveries: [...this.deliveries.values()], settings: this.settings }, null, 2) + '\n';
+    const snapshot = JSON.stringify({ version: 1, sessions: [...this.sessions.values()], lark_bindings: [...this.bindings.values()], backends: [...this.backends.entries()], lark_deliveries: [...this.deliveries.values()], chat_bindings: [...this.chatBindings.values()], chat_deliveries: [...this.chatDeliveries.values()], settings: this.settings }, null, 2) + '\n';
     const pending = this.writes.catch(() => {}).then(async () => {
       const temp = join(this.directory, `.state-${randomUUID()}.tmp`);
       await writeFile(temp, snapshot, { flag: 'wx', mode: 0o600 });

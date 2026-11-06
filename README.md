@@ -1,6 +1,6 @@
 # Nootify
 
-A general-purpose local **TypeScript service host**, managed as a per-user macOS LaunchAgent. Session messaging and Feishu are separate modules. Other TypeScript tools use the exported typed HTTP client; future services implement the same module interface. This is not a standalone Lark-only daemon.
+A general-purpose local **TypeScript service host**, managed as a per-user macOS LaunchAgent. Session messaging, Feishu, Slack, and Telegram are separate modules. Other TypeScript tools use the exported typed HTTP client; future services implement the same module interface. This is not a standalone Lark-only daemon.
 
 The HTTP listener binds to `127.0.0.1:9417`. Optional Tailscale access, enabled under **设置 · Tailscale**, exposes the Nootify node's Tailscale address on port 80 for the owner's other devices. Open either address for message-bridge logs, **encountered routing targets**, and the two GitHub pull-request queues. `/health` and the read-only `/ui/*` page data are available to permitted browsers; every `/v1/` control endpoint requires the per-user bearer token on both listeners. Host/origin checks prevent cross-site reads and DNS rebinding. The service routes input to existing Claude, Codex, or OpenCode clients rather than calling a model API directly.
 
@@ -190,9 +190,9 @@ Delivery logs distinguish `socket_written`/`input_accepted` (**waiting for a ses
 
 Only one process should receive an application's Feishu WebSocket events: multiple clients divide deliveries rather than broadcasting them. This service supports several registered sessions on this machine, but does not yet coordinate several machines.
 
-## Agents and Feishu updates
+## Agents and notification channels
 
-The **Agents** page lists Claude Code (`~/.claude/CLAUDE.md`, honoring `CLAUDE_CONFIG_DIR`), Codex (`~/.codex/AGENTS.md`, honoring `CODEX_HOME`) and OpenCode (`~/.config/opencode/AGENTS.md`, honoring `XDG_CONFIG_HOME`). Ticking an agent creates its configuration directory and prompt file if necessary, then appends a short Feishu section between `<!-- nootify:begin -->` and `<!-- nootify:end -->`; unticking removes that section. A missing directory is shown as unconfigured, rather than used to infer whether the agent is installed. Nothing outside the markers changes, symlinked prompt files are edited at their target, the previous file is copied to `agent-backups/` in the state directory (last ten per agent), and files with unbalanced markers are left alone. "Needs update" means the block differs from what this installation would write, for example after the app moved. Prompts can only be changed from this Mac; over Tailscale the page is read-only.
+The **Agents** page lists Claude Code (`~/.claude/CLAUDE.md`, honoring `CLAUDE_CONFIG_DIR`), Codex (`~/.codex/AGENTS.md`, honoring `CODEX_HOME`) and OpenCode (`~/.config/opencode/AGENTS.md`, honoring `XDG_CONFIG_HOME`). Ticking an agent creates its configuration directory and prompt file if necessary, then appends instructions for the selected notification channel between `<!-- nootify:begin -->` and `<!-- nootify:end -->`; unticking removes that section. A missing directory is shown as unconfigured, rather than used to infer whether the agent is installed. Nothing outside the markers changes, symlinked prompt files are edited at their target, the previous file is copied to `agent-backups/` in the state directory (last ten per agent), and files with unbalanced markers are left alone. "Needs update" means the block differs from what this installation would write, for example after the app moved. Prompts can only be changed from this Mac; over Tailscale the page is read-only.
 
 The section tells new conversations to use two commands, which find the calling session from the variables each client sets (`CLAUDE_CODE_HOST_SESSION_ID` for Claude Desktop, `CLAUDE_CODE_SESSION_ID` for the Claude Code CLI, `CODEX_THREAD_ID` for Codex). OpenCode does not export its session ID, so its section asks for `--session-id ses_…`.
 
@@ -212,7 +212,25 @@ The recipient is the Feishu user who is invited to new groups and trusted as the
 node dist/src/cli.js lark-recipient --open-id ou_example
 ```
 
-Group creation needs the bot's chat-creation permission (`im:chat:create` or `im:chat`), adoption needs `im:chat:readonly`, and progress messages need `im:message:send_as_bot`. Codex runs commands in a sandbox: the CLI needs local network access to `127.0.0.1:9417`, so Codex may ask to run it outside the sandbox. Feishu is the only channel today; the thread commands are channel-neutral so that Slack and others can be added behind them.
+Group creation needs the bot's chat-creation permission (`im:chat:create` or `im:chat`), adoption needs `im:chat:readonly`, and progress messages need `im:message:send_as_bot`. Codex runs commands in a sandbox: the CLI needs local network access to `127.0.0.1:9417`, so Codex may ask to run it outside the sandbox. The default channel is selected on the Agents page and initially remains Feishu. `thread-open` and `thread-send` accept `--channel feishu|slack|telegram` to override it. Changing the default makes existing injected prompts show “Needs update”; refresh them to use the selected provider. Existing Feishu bindings, commands and announcements remain supported.
+
+### Slack
+
+Create a Slack app, enable Socket Mode, and create an app-level token (`xapp-…`) with `connections:write`. Subscribe to the `message.channels` and `message.groups` bot events. Give the bot `chat:write`, `channels:read`, `groups:read`, and `users:read`, plus `channels:history` for `message.channels` and `groups:history` for `message.groups`; reinstall it in the workspace after changing scopes. Invite the bot to the intended public or private channel. Under **设置 · Slack**, save the bot token (`xoxb-…`), app-level token, channel ID (`C…` or `G…`), and the one trusted user's Slack member ID (`U…` or `W…`). Tokens are verified before saving and never returned by page APIs.
+
+Each agent conversation creates one parent message in that channel. Progress and replies stay in its thread. Socket Mode receives events over an outbound WebSocket; no public callback server is required. Only plain text replies in locally bound threads from the configured human user are forwarded; bot messages, edits, unbound threads, and other users are ignored. A channel must be dedicated to users who may read the session's progress, since its members can see thread messages.
+
+### Telegram
+
+Create a bot with BotFather and a supergroup with Topics enabled. Add the bot as an administrator with permission to manage topics. Under **设置 · Telegram**, save its bot token, the supergroup's numeric chat ID (`-100…`), and the trusted human user's numeric ID. Configuration verifies the bot, group, permissions, and that no webhook is active; it never deletes an existing webhook. Run only one polling client for this bot.
+
+Each agent conversation creates a forum topic. Progress and agent replies stay in that topic; only text from the configured user in a locally bound topic can enter a local session. Anonymous sender-chat messages, bots, edits, and unbound topics are ignored. Long polling uses outbound HTTPS, so no public callback server is needed. Initial startup skips queued historical updates rather than replaying stale commands; updates received while running are deduplicated in the durable ledger.
+
+### Routing, receipts, and credentials
+
+Slack and Telegram bindings include the verified workspace/bot identity, room, thread or topic, exact adapter/session, and trusted sender. Merely posting a session ID remotely cannot create a binding. Their delivery records use local UUIDs, so provider message IDs cannot collide. Forwarded messages include `chat-ack` and `chat-reply` commands bound to the original delivery; replies continue to work after restart, are deduplicated, and refuse a changed bot account or trusted user. Unknown or archived sessions remain unavailable; channel input cannot create or unarchive sessions.
+
+Saved tokens stay in private `state.json` (0600). Blank secret inputs retain saved values, clearing a provider stops only that connection, and all channel settings are editable only on this Mac. Configuration exports include saved channel credentials and the selected default, but never session bindings or message-delivery history. No bot account, real group, or external message is created by the automated tests.
 
 ## Web UI
 
@@ -230,13 +248,15 @@ The page polls a read-only snapshot every two seconds and needs no control token
 
 ## Settings
 
-**Settings** at the foot of the navigation opens six pages. Service settings can be read over Tailscale, but changes are accepted only from this Mac: credentials and imports decide who can reach local sessions. The interface language is a local display preference and can be changed on each device.
+**Settings** at the foot of the navigation opens eight pages. Service settings can be read over Tailscale, but changes are accepted only from this Mac: credentials and imports decide who can reach local sessions. The interface language is a local display preference and can be changed on each device.
 
 | Page | Purpose |
 | --- | --- |
 | General | Selects the local interface language, including over Tailscale |
 | GitHub | Signs Nootify in to GitHub with the device flow, and signs it out |
 | 飞书 | Feishu App ID, App Secret, and recipient |
+| Slack | Bot token, app-level token, destination channel, and trusted user |
+| Telegram | Bot token, forum supergroup, and trusted user |
 | Tailscale | Enroll Nootify as its own device, connect/disconnect, sign out, and copy its port-80 address |
 | 导入导出 | Export and import the configuration |
 | 关于 | App and service versions, update checks, and installation |
@@ -247,9 +267,9 @@ The page polls a read-only snapshot every two seconds and needs no control token
 
 **飞书** asks Feishu for a tenant token before saving, so a mistyped ID or secret cannot replace a working bot. Saved credentials go in the private `state.json` and the bot reconnects in place: queued messages finish on the old client first. The secret is write-only: a blank field keeps it, and no page or log receives it. Clearing saved credentials returns to the MCP file, or disables Feishu without one. `LARK_APP_ID` and `LARK_APP_SECRET` take precedence for their process, so saving is refused while they are set.
 
-**导入导出** writes `exports/nootify-config-<time>.json` in the state directory, mode `0600`, keeping the newest ten. The file has the active Feishu credentials and recipient, the pulls configuration and follow choices, Codex and OpenCode connections, and which agents are enabled. **It contains plaintext secrets, so it is only ever written to disk** and the page receives its path, because the page has no bearer token. The GitHub sign-in is not included.
+**导入导出** writes `exports/nootify-config-<time>.json` in the state directory, mode `0600`, keeping the newest ten. The file has the active Feishu credentials and recipient, saved Slack/Telegram configurations and the default channel, the pulls configuration and follow choices, Codex and OpenCode connections, and which agents are enabled. **It contains plaintext secrets, so it is only ever written to disk** and the page receives its path, because the page has no bearer token. The GitHub sign-in is not included.
 
-Importing validates the whole file and previews what it will change, without showing secrets, before anything is applied. An import replaces only the settings its file names: follow choices are replaced as a set, and agents listed in the file are enabled but none are disabled. Imported Feishu credentials are not checked against Feishu, so an import works offline; a failed connection shows on the page. A newer file version is refused.
+Importing validates the whole file and previews what it will change, without showing secrets, before anything is applied. An import replaces only the settings its file names: follow choices are replaced as a set, and agents listed in the file are enabled but none are disabled. Imported Feishu credentials are not checked against Feishu, so a Feishu-only import works offline; a failed connection shows on the page. Slack and Telegram configurations are verified against their providers before replacing a working connection. A newer file version is refused.
 
 ## GitHub pull requests
 
@@ -323,14 +343,17 @@ Read the bearer token from the private state file in your local application; nev
 | `GET /ui/api/agents`, `POST /ui/api/agents` | Agent prompt status and `{"agent", "enabled"}` changes; changes need the UI header and the loopback listener |
 | `GET /ui/api/settings`, `GET /ui/api/settings/github` | Settings page data and the GitHub account; neither carries a secret |
 | `POST /ui/api/settings/lark`, `POST /ui/api/settings/recipient` | Save `{"app_id", "app_secret"}`, clear with `{"clear": true}`, or set `{"open_id"}`; these and the actions below need the UI header and the loopback listener |
+| `POST /ui/api/settings/slack`, `POST /ui/api/settings/telegram` | Verify and save bot credentials, destination and trusted user, or clear with `{"clear": true}`; local UI only |
+| `POST /ui/api/settings/channel` | Set the default notification provider with `{"channel": "feishu" \| "slack" \| "telegram"}`; local UI only |
 | `POST /ui/api/settings/github/login` | `{"action": "start" \| "cancel" \| "sign-out"}` for the device login |
 | `GET /ui/api/settings/tailscale` | Connection, remote-access state and URL; login URLs are omitted over Tailscale |
 | `POST /ui/api/settings/tailscale` | `{"action": "enable", "enabled": true}` or `{"action": "login" \| "cancel" \| "logout"}` for the independent node; local UI only |
 | `POST /ui/api/settings/export`, `POST /ui/api/settings/reveal` | Write a configuration file and return its path; show it in Finder |
 | `POST /ui/api/settings/import` | Preview `{"document"}`, or apply it with `"apply": true` |
 | `GET /v1/agents`, `PUT /v1/agents/:agent` | The same for token-authenticated clients |
-| `POST /v1/threads` | Find or create a session's Feishu group: `{"adapter", "session_id", "session_name"}` |
-| `POST /v1/threads/:session_id/messages` | Post `{"text"}` to that group, prefixed with the session name |
+| `POST /v1/threads` | Find or create a session's group/thread/topic: `{"adapter", "session_id", "session_name", "channel"?}` |
+| `POST /v1/threads/:session_id/messages` | Post `{"text", "adapter"?, "channel"?}` to that destination, prefixed with the session name |
+| `POST /v1/chat/messages/:id/ack`, `POST /v1/chat/messages/:id/reply` | Acknowledge or reply to an original Slack/Telegram delivery by its local UUID |
 | `GET /v1/lark/recipient`, `PUT /v1/lark/recipient` | Read or set the Feishu recipient's open_id |
 | `GET /v1/sessions` | In-memory routing observations; never queries clients |
 | `PUT /v1/backends/:adapter` | Configure an existing local Codex or OpenCode endpoint |
@@ -363,7 +386,9 @@ Read the bearer token from the private state file in your local application; nev
 | `src/launchd.ts`, `src/cli.ts` | LaunchAgent installation, acknowledgments, replies, and local control commands |
 | `src/lark-replies.ts` | Forwarding context, receipt tracking, and deduplicated Feishu replies |
 | `src/lark-threads.ts` | One Feishu group per agent session: lookup, adoption, creation, progress messages |
-| `src/agents.ts` | Marked Feishu section in each agent's global prompt file |
+| `src/chat-transport.ts`, `src/chat-service.ts` | Channel contracts, account-qualified session bindings, receipts, reply deduplication, and channel-neutral thread routing |
+| `src/slack.ts`, `src/telegram.ts` | Slack Socket Mode and Telegram forum-topic long polling, provider validation and plain-text transport |
+| `src/agents.ts` | Marked notification-channel instructions in each agent's global prompt file |
 | `src/settings.ts`, `src/github-auth.ts` | Settings pages' actions: Feishu credentials, configuration export and import, GitHub device login and sign-out |
 | `src-tauri/`, `desktop/`, `scripts/desktop.mjs` | Native window, tray, offline view, and desktop build launcher |
 | `scripts/stage-service.mjs` | Stage the service, dependencies, and both bundled runtimes |
@@ -372,4 +397,4 @@ Read the bearer token from the private state file in your local application; nev
 | `.github/workflows/` | macOS checks and version-tag-driven DMG/updater publication |
 | `test/` | Disposable HTTP/socket/state and routing tests |
 
-Official references: [Feishu Node SDK](https://github.com/larksuite/node-sdk), [message receive event](https://open.feishu.cn/document/server-docs/im-v1/message/events/receive), and [Claude Code inbox sockets](https://code.claude.com/docs/en/cross-session-messaging#the-sessions-inbox-socket).
+Official references: [Feishu Node SDK](https://github.com/larksuite/node-sdk), [message receive event](https://open.feishu.cn/document/server-docs/im-v1/message/events/receive), [Slack Socket Mode](https://docs.slack.dev/apis/events-api/using-socket-mode/), [Telegram Bot API](https://core.telegram.org/bots/api), and [Claude Code inbox sockets](https://code.claude.com/docs/en/cross-session-messaging#the-sessions-inbox-socket).
