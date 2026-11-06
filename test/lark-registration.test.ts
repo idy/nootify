@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import fs, { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import fs, { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { assertMode } from './platform-fixtures.js';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -169,7 +170,7 @@ test('a QR result saves private credentials and the app-specific scanning user, 
   assert.equal(persisted.settings.lark_connection_type, 'personal-app');
   assert.equal((await State.open(h.directory)).settings.lark_connection_type, 'personal-app');
   assert.equal((await h.settings.page()).lark.connection_type, 'personal-app');
-  assert.equal((await stat(join(h.directory, 'state.json'))).mode & 0o777, 0o600);
+  await assertMode(join(h.directory, 'state.json'), 0o600);
   assert.equal(h.lark.credentials?.appId, appId);
   assert.equal(h.settings.larkRegistration().setup?.status, 'permissions-required');
   const publicData = JSON.stringify([await h.settings.page(), h.settings.larkRegistration(), h.reports]);

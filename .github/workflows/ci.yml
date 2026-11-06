@@ -59,7 +59,17 @@ jobs:
           key: ${{ matrix.target }}
 
       - run: npm ci
-      - run: npm test
+      - name: Run tests with deadlines and JUnit output
+        timeout-minutes: 10
+        run: npm test
+      - name: Upload unit test report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: unit-tests-${{ matrix.target }}
+          path: .cache/test-results.xml
+          if-no-files-found: ignore
+          retention-days: 7
       - run: npm run check
 
       - name: cargo fmt

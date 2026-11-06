@@ -42,6 +42,8 @@ npm test
 npm run check
 ```
 
+`npm test` discovers test files without relying on shell glob expansion, sets a three-minute default test timeout, and writes `.cache/test-results.xml` in JUnit format. CI uploads that report for each platform and limits the test step to ten minutes as a separate guard against cleanup hooks that never finish. SQLite fixtures close databases and backend sockets before temporary-directory removal; bounded subprocess regressions cover Windows file locks and failed cleanup.
+
 ## Tauri desktop application and system tray
 
 The native **Nootify** app supports Apple Silicon with macOS 13.5+, and Windows 10/11 x64. Both distributions bundle the background service, their own Node.js runtime, and an independent Tailscale client built with tsnet. Its native window, web UI, and offline page follow the system's light or dark appearance, including changes while the app is open. It provides a menu-bar tray with **打开**, **退出**, service controls, and update controls. PR rows open GitHub in the default browser. Closing the window hides it; quitting the desktop app leaves the independent daemon running.
