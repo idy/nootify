@@ -8,7 +8,8 @@ import type { GitHubSettings, ImportSummary, SettingsPage, LarkRecipientsPage } 
 import type { TailscalePage } from './tailscale.js';
 import type { ChatChannel, NotificationChannel, ChatDirectory } from './chat-transport.js';
 import type { LarkPermissionHelp } from './lark-permissions.js';
-import { recipientDisplayName } from './lark-profile.js';
+import { mergeRecipients, recipientDisplayName } from './lark-profile.js';
+import { RecipientListRenderer } from './recipient-list.js';
 
 interface PullSummary { internal: number; upstream: number; followed: number; running: boolean; lastSuccessAt?: string; error?: string; signedOut?: boolean }
 interface Snapshot {
@@ -640,7 +641,7 @@ async function loadSettings(): Promise<void> {
     const response = await fetch('/ui/api/settings', { cache: 'no-store', signal: AbortSignal.timeout(8000) });
     if (!response.ok) throw new Error(response.status === 404 ? t('设置模块未启用') : `HTTP ${response.status}`);
     state.settings = await response.json() as SettingsPage & { editable: boolean };
-    if (state.recipientDirectory?.app_id !== state.settings.lark.app_id) state.recipientDirectory = undefined;
+    if (state.recipientDirectory && state.recipientDirectory.app_id !== state.settings.lark.app_id) invalidateRecipientDirectory();
     if (!state.larkEdited) fillLark();
     for (const channel of chatChannels) if (!state.chatEdited[channel]) fillChat(channel);
   } catch (error) { state.settingsNote = { text: () => t('无法读取设置：{p0}', { p0: (error as Error).message }), error: true }; }
@@ -782,29 +783,17 @@ function recipientUsers(): LarkRecipientsPage['users'] {
   if (!query && current > 0) users.unshift(...users.splice(current, 1));
   return users;
 }
-function recipientPerson(user: LarkRecipientsPage['users'][number], duplicate: boolean): HTMLButtonElement {
-  const button = node('button', undefined, `recipient-person${state.recipientActive === user.open_id && $('recipient-options').contains(document.activeElement) ? ' is-active' : ''}`);
-  button.type = 'button'; button.tabIndex = -1; button.id = `recipient-person-${user.open_id}`; button.dataset.key = button.id;
-  button.setAttribute('role', 'option'); button.setAttribute('aria-selected', String(state.recipientDraft === user.open_id)); button.title = user.open_id;
-  const name = user.name === user.open_id ? t('飞书用户') : recipientDisplayName(user);
-  button.title = `${name}\n${user.open_id}`;
-  const initial = [...name.trim()][0] ?? '';
-  const avatar = node('span', initial.toLocaleUpperCase(locale()), 'recipient-avatar'); avatar.setAttribute('aria-hidden', 'true');
-  if (user.avatar_url && !state.failedAvatars.has(user.avatar_url)) {
-    const image = node('img'); image.alt = ''; image.width = image.height = 36; image.loading = 'lazy'; image.decoding = 'async'; image.referrerPolicy = 'no-referrer';
-    image.addEventListener('error', () => { if (state.failedAvatars.size >= 500) state.failedAvatars.clear(); state.failedAvatars.add(user.avatar_url!); image.remove(); });
-    image.src = user.avatar_url; avatar.append(image);
-  }
-  const main = node('span', undefined, 'recipient-person-main');
-  main.append(node('span', name, 'recipient-person-name'));
-  const secondary = user.open_id === state.settings?.lark.recipient ? t('当前接收人') : user.en_name && user.en_name !== user.name ? user.en_name : duplicate || user.name === user.open_id ? `…${user.open_id.slice(-6)}` : '';
-  if (secondary) main.append(node('span', secondary, 'recipient-person-sub'));
-  const check = node('span', undefined, 'recipient-check'); check.setAttribute('aria-hidden', 'true');
-  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); svg.setAttribute('viewBox', '0 0 16 16');
-  const path = document.createElementNS('http://www.w3.org/2000/svg', 'path'); path.setAttribute('d', 'm3.5 8 3 3 6-6'); svg.append(path); check.append(svg);
-  button.append(avatar, main, check);
-  button.addEventListener('click', () => { state.recipientDraft = state.recipientActive = user.open_id; state.recipientSaveError = ''; renderRecipientPicker(false); });
-  return button;
+let recipientRows: RecipientListRenderer | undefined;
+function renderRecipientRows(users: LarkRecipientsPage['users']): void {
+  const list = $('recipient-options');
+  recipientRows ??= new RecipientListRenderer(list, list.parentElement!, id => {
+    state.recipientDraft = state.recipientActive = id; state.recipientSaveError = ''; renderRecipientPicker(false);
+  });
+  recipientRows.update(users, {
+    current: state.settings?.lark.recipient, selected: state.recipientDraft, active: state.recipientActive,
+    locale: locale(), currentLabel: t('当前接收人'), unknownLabel: t('飞书用户'), failedAvatars: state.failedAvatars,
+    retainIds: new Set(state.recipientDirectory?.users.map(user => user.open_id) ?? []),
+  });
 }
 function renderRecipientPicker(remote: boolean): void {
   const ready = !!state.settings?.lark.configured && field('lark-app-id').value.trim() === state.settings.lark.app_id;
@@ -823,10 +812,7 @@ function renderRecipientPicker(remote: boolean): void {
   const initialLoading = state.loadingRecipients && !state.recipientDirectory?.users.length;
   const list = $('recipient-options');
   if (!users.some(user => user.open_id === state.recipientActive)) state.recipientActive = users[0]?.open_id ?? '';
-  if (changed('recipient-options', [users, state.recipientDraft, state.recipientActive, list.contains(document.activeElement)])) {
-    const names = new Map<string, number>(); for (const user of users) { const name = recipientDisplayName(user); names.set(name, (names.get(name) ?? 0) + 1); }
-    replaceRows(list, users.map(user => recipientPerson(user, (names.get(recipientDisplayName(user)) ?? 0) > 1)));
-  }
+  renderRecipientRows(users);
   if (state.recipientActive) list.setAttribute('aria-activedescendant', `recipient-person-${state.recipientActive}`); else list.removeAttribute('aria-activedescendant');
   list.hidden = permissions || initialLoading || !users.length;
   $('recipient-loading').hidden = permissions || !initialLoading;
@@ -838,10 +824,10 @@ function renderRecipientPicker(remote: boolean): void {
   setText('recipient-empty-detail', error === 409 ? t('应用凭据已变更，请刷新后重试') : error ? t('请检查网络后重试，也可以手动填写 ID。')
     : searching ? t('试试其他姓名，或直接搜索 open_id。') : t('请检查应用的通讯录可见范围，或手动填写 ID。'));
   $('recipient-empty-retry').hidden = !error && searching;
-  const note = permissions ? t('开通权限后，可重新读取联系人。') : state.loadingRecipients ? (users.length ? t('已加载 {p0} 位，正在加载更多…', { p0: number(state.recipientDirectory?.users.length ?? users.length) }) : t('正在连接飞书通讯录…'))
+  const note = permissions ? t('开通权限后，可重新读取联系人。') : state.loadingRecipients ? (users.length ? state.recipientDirectory?.cached ? t('正在后台更新，缓存名单可直接选择。') : t('已加载 {p0} 位，正在加载更多…', { p0: number(state.recipientDirectory?.users.length ?? users.length) }) : t('正在连接飞书通讯录…'))
     : error && users.length ? t('加载已中断，已显示的联系人仍可选择。')
     : state.recipientDirectory?.truncated ? t('已显示 {p0} 位联系人', { p0: number(state.recipientDirectory.users.length) })
-    : t('{p0} 位联系人', { p0: number(users.length) });
+    : state.recipientDirectory?.cached ? t('本地缓存 · {p0} 位联系人', { p0: number(users.length) }) : t('{p0} 位联系人', { p0: number(users.length) });
   setText('recipient-directory-note', note);
   $('recipient-permission-notice').hidden = !help || permissions || !users.length;
   $('recipient-permission').hidden = !permissions;
@@ -868,6 +854,11 @@ function renderRecipientPicker(remote: boolean): void {
   if (opening) dialog.showModal();
   if (permissions && (opening || !wasPermission)) $('recipient-permission-retry').focus({ preventScroll: true });
   else if (wasPermission && !permissions) field('recipient-search').focus({ preventScroll: true });
+}
+function invalidateRecipientDirectory(): void {
+  state.recipientRequest?.abort(); state.recipientRequest = undefined; state.loadingRecipients = false;
+  state.recipientDirectory = undefined; state.recipientPermission = undefined; state.recipientLoadedAt = 0; state.failedAvatars.clear();
+  recipientRows?.clear();
 }
 function closeRecipientPicker(): void {
   state.recipientPicker = false; state.recipientRequest?.abort(); state.recipientRequest = undefined; state.loadingRecipients = false;
@@ -898,20 +889,25 @@ async function loadRecipients(refresh = false): Promise<void> {
   const controller = new AbortController(); state.recipientRequest = controller;
   const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(25000)]);
   state.loadingRecipients = true; state.recipientError = undefined; state.recipientSaveError = ''; state.recipientPermissionOpen = false;
-  if (refresh) { state.recipientDirectory = undefined; state.recipientPermission = undefined; state.recipientLoadedAt = 0; state.failedAvatars.clear(); }
+  if (refresh) state.failedAvatars.clear();
   renderRecipientPicker(false);
   let terminal = false;
   const receive = (event: { type: string; directory?: LarkRecipientsPage; status?: number; permission?: LarkPermissionHelp }) => {
     if (controller !== state.recipientRequest || controller.signal.aborted) return;
     if (event.type === 'error') {
       state.recipientError = event.status ?? 502; state.recipientPermission = event.permission; state.loadingRecipients = false; terminal = true;
-      if (event.status === 409) state.recipientDirectory = undefined;
+      if (event.status === 403 || event.status === 409) { state.recipientDirectory = undefined; state.recipientLoadedAt = 0; }
       if (event.permission && !state.recipientDirectory?.users.length) state.recipientPermissionOpen = true;
     } else if (event.directory) {
       const directory = event.directory;
       if (directory.app_id !== state.settings?.lark.app_id || directory.app_id !== field('lark-app-id').value.trim() || !Array.isArray(directory.users)) { state.recipientError = 409; state.recipientDirectory = undefined; controller.abort(); return; }
-      state.recipientDirectory = directory; state.recipientPermission = directory.permission;
-      if (event.type === 'complete') { state.loadingRecipients = false; state.recipientLoadedAt = Date.now(); terminal = true; }
+      const previous = state.recipientDirectory?.app_id === directory.app_id && (!state.recipientDirectory.expires_at || state.recipientDirectory.expires_at > Date.now()) ? state.recipientDirectory : undefined;
+      state.recipientDirectory = event.type === 'progress' && previous ? {
+        ...directory, users: mergeRecipients(previous.users, directory.users), permission: directory.permission ?? previous.permission,
+        cached: directory.cached ?? previous.cached, fetched_at: directory.fetched_at ?? previous.fetched_at, refresh_after: directory.refresh_after ?? previous.refresh_after, expires_at: directory.expires_at ?? previous.expires_at,
+      } : directory;
+      state.recipientPermission = state.recipientDirectory.permission;
+      if (event.type === 'complete') { state.loadingRecipients = false; state.recipientLoadedAt = directory.fetched_at ?? Date.now(); terminal = true; }
     }
     renderRecipientPicker(false);
   };
@@ -1308,7 +1304,7 @@ function saveLark(): void {
   if (state.settings?.editable !== true || state.pendingSettings.has('lark') || state.pendingSettings.has('lark-secret')) return;
   void settingsRun('lark', () => t('无法保存飞书凭据'), async () => {
     await post('/ui/api/settings/lark', { app_id: field('lark-app-id').value.trim(), app_secret: field('lark-app-secret').value });
-    state.larkEdited = false;
+    state.larkEdited = false; invalidateRecipientDirectory();
     await Promise.all([loadSettings(), loadSnapshot()]);
     return () => {
       const status = state.snapshot.modules.find(module => module.name === 'lark')?.status;
@@ -1327,17 +1323,20 @@ $('lark-save').addEventListener('click', saveLark);
 $('recipient-save').addEventListener('click', saveRecipient);
 $('recipient-choose').addEventListener('click', () => {
   if (state.settings?.editable !== true) return;
+  if (state.recipientDirectory?.expires_at && state.recipientDirectory.expires_at <= Date.now()) invalidateRecipientDirectory();
   state.recipientPicker = true; state.recipientDraft = state.recipientActive = field('lark-recipient').value;
   state.recipientSaveError = ''; state.recipientPermissionOpen = state.recipientError === 403 && !!state.recipientPermission;
-  field('recipient-search').value = ''; renderRecipientPicker(false);
-  if (!state.recipientDirectory || Date.now() - state.recipientLoadedAt > 60000) void loadRecipients();
+  field('recipient-search').value = '';
+  if (state.recipientDirectory) state.recipientDirectory.cached = true;
+  renderRecipientPicker(false); $('recipient-options').parentElement!.scrollTop = 0;
+  if (!state.recipientDirectory || Date.now() >= (state.recipientDirectory.refresh_after ?? state.recipientLoadedAt + 60000)) void loadRecipients();
 });
 for (const id of ['recipient-close', 'recipient-cancel']) $(id).addEventListener('click', closeRecipientPicker);
 for (const id of ['recipient-reload', 'recipient-empty-retry', 'recipient-permission-retry']) $(id).addEventListener('click', () => { void loadRecipients(true); });
 $('recipient-confirm').addEventListener('click', () => { void confirmRecipient(); });
 $('recipient-show-permission').addEventListener('click', () => { state.recipientPermissionOpen = true; renderRecipientPicker(false); });
 $('recipient-manual').addEventListener('click', () => { closeRecipientPicker(); field('lark-recipient').focus(); field('lark-recipient').select(); });
-field('recipient-search').addEventListener('input', () => renderRecipientPicker(state.settings?.editable === false));
+field('recipient-search').addEventListener('input', () => { renderRecipientPicker(state.settings?.editable === false); $('recipient-options').parentElement!.scrollTop = 0; });
 field('recipient-search').addEventListener('keydown', event => {
   if (event.key === 'ArrowDown') { event.preventDefault(); $('recipient-options').focus(); renderRecipientPicker(false); }
 });
@@ -1375,7 +1374,7 @@ $('lark-clear').addEventListener('click', () => {
   state.confirmClear = false;
   void settingsRun('lark', () => t('无法清除飞书凭据'), async () => {
     await post('/ui/api/settings/lark', { clear: true });
-    state.larkEdited = false;
+    state.larkEdited = false; invalidateRecipientDirectory();
     await loadSettings();
     return () => t('已清除保存的凭据');
   });
@@ -1481,7 +1480,7 @@ $('import-apply').addEventListener('click', () => {
   if (!importing) return;
   void settingsRun('import', () => t('无法导入配置'), async () => {
     const result = await post<ImportSummary>('/ui/api/settings/import', { document: importing.content, apply: true });
-    state.importing = undefined; state.larkEdited = false; state.channelEdited = false;
+    state.importing = undefined; state.larkEdited = false; state.channelEdited = false; invalidateRecipientDirectory();
     for (const channel of chatChannels) { state.chatEdited[channel] = false; state.confirmChatClear[channel] = false; clearChatTokens(channel); }
     await Promise.all([loadSettings(), loadAgents()]);
     return () => t('配置已导入{p0}', { p0: result.warnings.length ? t('；{p0}', { p0: result.warnings.join(t('；')) }) : '' });

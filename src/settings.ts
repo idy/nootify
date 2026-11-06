@@ -20,6 +20,8 @@ import { larkPermissionHelp, LarkPermissionRequiredError, type LarkPermissionHel
 import type { LarkApi } from './lark-metadata.js';
 import { slackDirectory } from './slack.js';
 import { telegramDirectory } from './telegram.js';
+import { DIRECTORY_FRESH_MS, DIRECTORY_MAX_AGE_MS, LarkDirectoryCache } from './lark-directory-cache.js';
+import { mergeRecipients } from './lark-profile.js';
 
 const FORMAT = 'nootify-config';
 const EXPORTS_KEPT = 10;
@@ -37,7 +39,7 @@ export interface SettingsPage {
   lark: { status: string; configured: boolean; source?: CredentialSource; app_id?: string; saved: boolean; recipient?: string; groups: number };
   notification_channel: NotificationChannel; slack: ChatSettingsPage; telegram: ChatSettingsPage;
 }
-export interface LarkRecipientsPage extends Omit<LarkDirectory, 'permission'> { permission?: LarkPermissionHelp }
+export interface LarkRecipientsPage extends Omit<LarkDirectory, 'permission'> { permission?: LarkPermissionHelp; cached?: boolean; fetched_at?: number; refresh_after?: number; expires_at?: number }
 export interface GitHubSettings { account?: GitHubAccount; login: GitHubLogin }
 /** What a configuration file changes, in terms safe to show before and after importing it. */
 export interface ImportSummary {
@@ -155,12 +157,14 @@ function summarize(file: ConfigFile): ImportSummary {
 export class SettingsService {
   private source?: CredentialSource;
   private lastExport?: string;
-  private directoryCache?: { api: LarkApi; at: number; page: LarkRecipientsPage };
+  private readonly directoryStore: LarkDirectoryCache;
+  private directoryRefresh = 0;
   private writes: Promise<unknown> = Promise.resolve();
   private readonly env: NodeJS.ProcessEnv;
   private readonly report: (record: Record<string, unknown>) => void;
   constructor(private readonly options: SettingsOptions) {
     this.source = options.source; this.env = options.env ?? process.env; this.report = options.report ?? (() => {});
+    this.directoryStore = new LarkDirectoryCache(options.state.directory);
   }
   private get exportsDir(): string { return join(this.options.state.directory, 'exports'); }
   private serialized<T>(operation: () => Promise<T>): Promise<T> {
@@ -263,6 +267,7 @@ export class SettingsService {
     const current = lark.credentials;
     if (!forceReconnect && current?.appId === resolved?.credentials.appId && current?.appSecret === resolved?.credentials.appSecret) return;
     await lark.configure(resolved?.credentials);
+    if (current?.appId !== resolved?.credentials.appId || current?.appSecret !== resolved?.credentials.appSecret) { this.directoryRefresh++; await this.directoryStore.clear(); }
     this.report({ source: 'lark', status: 'lark_configured', reason: resolved ? resolved.credentials.appId : undefined });
   }
   /** Used only by the eye button's same-origin, loopback-only POST action. */
@@ -306,34 +311,53 @@ export class SettingsService {
     if (!api || !credentials?.appSecret || api.appId !== credentials.appId) throw new HttpError(409, 'Configure the Feishu application first');
     const current = () => api === lark.api && credentials === lark.credentials;
     if (signal?.aborted) throw new HttpError(499, 'Directory request cancelled');
-    const cached = this.directoryCache;
-    if (!refresh && cached?.api === api && Date.now() - cached.at < 60000) { onProgress?.(cached.page); return cached.page; }
+    const cached = await this.directoryStore.read(credentials);
+    const checkCurrent = () => {
+      if (!current()) throw new HttpError(409, 'Feishu credentials changed; reload the directory');
+      if (signal?.aborted) throw new HttpError(499, 'Directory request cancelled');
+    };
+    checkCurrent();
     let updates = Promise.resolve();
-    let help: Promise<LarkPermissionHelp> | undefined;
+    const helps = new Map<string, Promise<LarkPermissionHelp>>();
     const decorate = async (directory: LarkDirectory): Promise<LarkRecipientsPage> => {
       const { permission, ...page } = directory;
-      return { ...page, ...(permission || directory.permission_limited ? { permission: await (help ??= larkPermissionHelp(api.appId, permission)) } : {}) };
+      if (!permission && !directory.permission_limited) return page;
+      const key = JSON.stringify(permission ?? null);
+      let help = helps.get(key); if (!help) { help = larkPermissionHelp(api.appId, permission); helps.set(key, help); }
+      return { ...page, permission: await help };
     };
+    if (cached) {
+      const page = { ...await decorate(cached.directory), cached: true, fetched_at: cached.at, refresh_after: cached.directory.truncated ? 0 : cached.at + DIRECTORY_FRESH_MS, expires_at: cached.at + DIRECTORY_MAX_AGE_MS }; checkCurrent();
+      onProgress?.(page);
+      if (!refresh && !cached.directory.truncated && Date.now() - cached.at < DIRECTORY_FRESH_MS) return page;
+    }
+    const fetchId = ++this.directoryRefresh;
     try {
       const directory = await larkDirectory(api, signal, onProgress ? page => {
         updates = updates.then(async () => {
           if (!current() || signal?.aborted) return;
           const next = await decorate(page);
-          if (current() && !signal?.aborted) onProgress(next);
+          if (current() && !signal?.aborted) onProgress({ ...next, ...(cached ? { users: mergeRecipients(cached.directory.users, next.users), cached: true, fetched_at: cached.at, refresh_after: cached.directory.truncated ? 0 : cached.at + DIRECTORY_FRESH_MS, expires_at: cached.at + DIRECTORY_MAX_AGE_MS } : {}) });
         }).catch(() => {});
       } : undefined);
       await updates;
       if (!current()) throw new HttpError(409, 'Feishu credentials changed; reload the directory');
       if (signal?.aborted) throw new HttpError(499, 'Directory request cancelled');
-      const page = await decorate(directory);
-      if (!current()) throw new HttpError(409, 'Feishu credentials changed; reload the directory');
-      if (signal?.aborted) throw new HttpError(499, 'Directory request cancelled');
-      this.directoryCache = { api, at: Date.now(), page };
+      const keptCache = !!cached && directory.truncated && !directory.permission_limited;
+      const snapshot = keptCache ? { ...directory, users: mergeRecipients(cached.directory.users, directory.users) } : directory;
+      const at = keptCache ? cached.at : Date.now();
+      const page = { ...await decorate(snapshot), cached: keptCache, fetched_at: at, refresh_after: snapshot.truncated ? 0 : at + DIRECTORY_FRESH_MS, expires_at: at + DIRECTORY_MAX_AGE_MS };
+      checkCurrent();
+      if (fetchId === this.directoryRefresh) await this.directoryStore.write(credentials, snapshot, at);
+      checkCurrent();
       return page;
     } catch (error) {
       await updates;
-      if (!current()) throw new HttpError(409, 'Feishu credentials changed; reload the directory');
-      if (error instanceof LarkDirectoryPermissionError) throw new LarkPermissionRequiredError(await larkPermissionHelp(api.appId, error.permission));
+      checkCurrent();
+      if (error instanceof LarkDirectoryPermissionError) {
+        if (fetchId === this.directoryRefresh) await this.directoryStore.clear();
+        throw new LarkPermissionRequiredError(await larkPermissionHelp(api.appId, error.permission));
+      }
       throw error;
     }
   }

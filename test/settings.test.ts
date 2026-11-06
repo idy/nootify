@@ -15,6 +15,7 @@ import { createServiceHost, type HostOptions } from '../src/server.js';
 import { SessionsService } from '../src/sessions.js';
 import { SettingsService, type AgentControl, type LarkControl } from '../src/settings.js';
 import { State } from '../src/state.js';
+import { DIRECTORY_FRESH_MS, LarkDirectoryCache } from '../src/lark-directory-cache.js';
 import type { TailnetAccess } from '../src/tailnet.js';
 
 const appId = 'cli_0123456789abcdef';
@@ -267,6 +268,37 @@ test('recipient snapshots are cached, while an explicit retry reads fresh provid
   await settings.larkRecipients(); const firstReads = reads;
   await settings.larkRecipients(); assert.equal(reads, firstReads);
   await settings.larkRecipients(undefined, undefined, true); assert.ok(reads > firstReads);
+});
+
+test('stale disk contacts appear before refresh finishes, then yield to the authoritative snapshot', async t => {
+  const { lark, settings, dir } = await harness(t);
+  const credentials = { appId, appSecret: 'test-secret' };
+  lark.credentials = credentials;
+  const at = Date.now() - DIRECTORY_FRESH_MS - 1000;
+  await new LarkDirectoryCache(dir).write(credentials, { app_id: appId, users: [{ open_id: 'ou_cached', name: 'Cached' }], truncated: false, permission_limited: false }, at);
+  let resume!: () => void; const slow = new Promise<void>(resolve => { resume = resolve; }); t.after(() => resume());
+  let first!: (page: any) => void; const ready = new Promise<any>(resolve => { first = resolve; });
+  lark.api = { appId, async request<T>(_method: string, path: string): Promise<T> {
+    if (path.includes('/scopes')) { await slow; return { user_ids: ['ou_new'] } as T; }
+    return { items: [{ open_id: 'ou_new', name: 'New' }] } as T;
+  } };
+  const snapshots: any[] = [];
+  const pending = settings.larkRecipients(page => { snapshots.push(page); first(page); });
+  const cached = await ready;
+  assert.equal(cached.cached, true); assert.equal(cached.fetched_at, at);
+  assert.deepEqual(cached.users.map((user: any) => user.open_id), ['ou_cached']);
+  resume(); const final = await pending;
+  assert.ok(snapshots.some(page => page.users.some((user: any) => user.open_id === 'ou_cached') && page.users.some((user: any) => user.open_id === 'ou_new')));
+  assert.deepEqual(final.users.map(user => user.open_id), ['ou_new']); assert.equal(final.cached, false);
+});
+
+test('a detected permission denial removes the old persisted directory', async t => {
+  const { lark, settings, dir } = await harness(t);
+  const credentials = { appId, appSecret: 'test-secret' }; lark.credentials = credentials;
+  await new LarkDirectoryCache(dir).write(credentials, { app_id: appId, users: [{ open_id: 'ou_cached', name: 'Cached' }], truncated: false, permission_limited: false });
+  lark.api = { appId, async request<T>(): Promise<T> { throw new ApiError(99991672, 'Permission denied'); } };
+  await assert.rejects(settings.larkRecipients(undefined, undefined, true), /permissions/);
+  assert.equal(await new LarkDirectoryCache(dir).read(credentials), undefined);
 });
 
 test('local directory streams deliver contacts before a slow later batch and include a completion event', async t => {

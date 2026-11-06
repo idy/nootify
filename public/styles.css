@@ -293,7 +293,7 @@ label.row:hover { background: var(--hover); }
 .recipient-dialog-status { display: flex; flex: none; align-items: center; justify-content: space-between; gap: 12px; min-height: 34px; padding: 0 18px 4px 24px; color: var(--muted); font-size: var(--type-meta); }
 .recipient-dialog-status .text-button { height: 28px; padding: 0 6px; color: var(--blue); font-size: var(--type-meta); }
 .recipient-dialog.is-permission .recipient-dialog-body { flex-basis: 420px; }
-.recipient-dialog-body { position: relative; flex: 0 1 336px; min-height: 0; overflow-y: auto; margin: 0 12px 12px; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+.recipient-dialog-body { position: relative; flex: 0 1 336px; min-height: 0; overflow-y: auto; overflow-anchor: none; margin: 0 12px 12px; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
 .recipient-people { min-height: 100%; padding: 3px; outline-offset: -2px; }
 .recipient-person { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 60px; padding: 10px 12px; border-radius: 10px; text-align: left; }
 .recipient-person:hover { background: var(--hover); }

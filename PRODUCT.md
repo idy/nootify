@@ -14,7 +14,7 @@ Preserve the application’s penguin identity, local system typography, compact 
 
 Use a focused searchable dialog, not a full-width native multi-row select. Provider-returned avatars and the nickname plus default name lead; names already containing the alias are preserved without duplicate formatting. Missing or unavailable avatars use an initial fallback. The current recipient is identified clearly, and long open_ids remain secondary. Rows change a draft selection. Only the visible confirmation action persists it. Keep manual ID entry available.
 
-Useful contacts should appear while the directory is still loading. Cache completed results briefly, bound requests, and cancel pending work when the picker closes. A partial directory must remain usable and explain missing access.
+Useful contacts should appear while the directory is still loading. Reuse existing row and avatar nodes, preserve the visible scroll anchor, and update selection without rebuilding the list. Cache completed results in private credential-scoped local storage: reuse fresh data for 15 minutes and show data up to 24 hours old while refreshing in the background. Bound requests and cancel pending work when the picker closes. A partial directory must remain usable and explain missing access.
 
 On permission failure, show the provider’s specific scopes, an official application-console link, a locally generated QR, and retry. Do not imply that ordinary user scanning grants application permissions. Administrators may need to publish a version and obtain approval; contact visibility is a separate setting.
 
