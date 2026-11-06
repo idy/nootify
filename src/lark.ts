@@ -6,6 +6,7 @@ import type { Adapter, LarkBinding, LarkDelivery, RemoteBinding, RouteRequest, R
 import { HttpError, identifier, object, isAdapter, text } from './types.js';
 import { forwardedLarkMessage, LarkReplies } from './lark-replies.js';
 import { LarkThreads } from './lark-threads.js';
+import { registerPolledSession } from './polled-sessions.js';
 import { createLarkApi, ensureAnnouncement, ensureBindingMessage, quietLogger, readAnnouncement, parseAnnouncement, InvalidAnnouncement } from './lark-metadata.js';
 import type { Credentials, LarkApi } from './lark-metadata.js';
 
@@ -141,7 +142,7 @@ export class LarkService implements ServiceModule {
     if (!sender || (boundSender ? sender !== boundSender : !allowed.has(sender))) {
       this.report({ ...context, status: 'ignored', reason: 'sender_not_allowed' }); return false;
     }
-    if (this.seen.has(message_id) || this.state.deliveries.has(message_id)) { this.report({ ...context, status: 'ignored', reason: 'duplicate' }); return false; }
+    if (this.seen.has(message_id) || this.state.larkDelivery(message_id)) { this.report({ ...context, status: 'ignored', reason: 'duplicate' }); return false; }
     const selected = selectMessage(event, { chat_id, sender_open_id: sender, session_id: '' });
     if (!selected) {
       this.report({ ...context, status: 'ignored', reason: event.message.message_type !== 'text' ? 'unsupported_message' : 'invalid_content' }); return false;
@@ -166,7 +167,8 @@ export class LarkService implements ServiceModule {
         if (this.state.deliveries.size > 2000) this.state.deliveries.delete(this.state.deliveries.keys().next().value!);
         await this.state.save();
         const result = await this.sessions.send(route.session_id,
-          forwardedLarkMessage(delivery, selected.text, this.state.directory, this.port), route.adapter);
+          forwardedLarkMessage(delivery, selected.text, this.state.directory, this.port), route.adapter,
+          { text: selected.text, source: { channel: 'feishu', delivery } });
         delivery.transport_status = result.status;
         delivery.session_name = this.sessions.sessionName(session_id, route.adapter);
         await this.state.save();
@@ -234,7 +236,9 @@ export class LarkService implements ServiceModule {
     if (existing && (existing.session_id !== session_id || existing.sender_open_id !== sender_open_id)) throw new HttpError(409, 'Group already has another local binding');
     const binding: LarkBinding = { chat_id, app_id: this.api.appId, session_id, sender_open_id, metadata: body.metadata ?? 'announcement', pin: body.pin === true,
       ...(isAdapter(body.adapter) ? { adapter: body.adapter } : {}), ...(typeof body.session_name === 'string' ? { session_name: body.session_name } : {}) };
-    await ensureAnnouncement(this.api, this.remote(binding));
+    const remote = this.remote(binding);
+    await registerPolledSession(this.state, remote.adapter, session_id, remote.session_name);
+    await ensureAnnouncement(this.api, remote);
     if (binding.metadata === 'message') {
       binding.registration_message_id = existing?.registration_message_id;
       binding.registration_message_id = await ensureBindingMessage(this.api, this.remote(binding));

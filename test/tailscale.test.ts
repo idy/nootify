@@ -14,6 +14,7 @@ import { TailnetAccess } from '../src/tailnet.js';
 import { TailscaleService, tailscaleLoginUrl, type TailscalePage } from '../src/tailscale.js';
 import type { EmbeddedTailscaleClient } from '../src/tsnet-client.js';
 import type { SettingsSource } from '../src/ui.js';
+import { failSettingsWriteBehindOlderSaves } from './state-failures.js';
 
 const address = '100.64.0.7'; const owner = 'owner@example.com'; const ownerPeer = '100.64.0.9';
 const loginUrl = 'https://login.tailscale.com/a/Abc123';
@@ -93,6 +94,19 @@ test('invalid or unsaved choices cannot start an embedded client', async t => {
   await assert.rejects(service.setEnabled(true), /disk full/); assert.equal(client.starts.length, 0); assert.equal((await service.page()).enabled, false);
   mock.mock.restore(); await service.setEnabled(true); assert.equal(client.starts.length, 1);
 });
+
+for (const enabled of [true, false]) {
+  test(`failed Tailscale setting ${enabled} cannot leak into an older queued save`, async t => {
+    const f = await harness(t);
+    await f.service.setEnabled(!enabled);
+    const starts = f.client.starts.length;
+    await failSettingsWriteBehindOlderSaves(t, f.state, () => f.service.setEnabled(enabled));
+    assert.equal(f.state.settings.tailscale_enabled, !enabled);
+    assert.equal((await State.open(f.dir)).settings.tailscale_enabled, !enabled);
+    assert.equal((await f.service.page()).enabled, !enabled);
+    assert.equal(f.client.starts.length, starts, 'a rejected setting must not start or reconfigure the client');
+  });
+}
 
 test('login explicitly enables only the independent node and cancel takes it offline', async t => {
   const { service, client, state } = await harness(t); await service.start();

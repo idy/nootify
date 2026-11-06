@@ -3,10 +3,11 @@ import { hostname } from 'node:os';
 import { ensureAnnouncement, InvalidAnnouncement, parseAnnouncement, readAnnouncement } from './lark-metadata.js';
 import type { LarkApi } from './lark-metadata.js';
 import type { State } from './state.js';
+import { registerPolledSession } from './polled-sessions.js';
 import { HttpError, isAdapter } from './types.js';
 import type { Adapter, LarkBinding, RemoteBinding, ThreadInfo, ThreadMessage } from './types.js';
 
-const labels: Record<Adapter, string> = { 'claude-desktop': 'Claude', 'claude-code': 'Claude Code', codex: 'Codex', opencode: 'OpenCode' };
+const labels: Record<Adapter, string> = { 'claude-desktop': 'Claude', 'claude-code': 'Claude Code', codex: 'Codex', opencode: 'OpenCode', trae: 'Trae', workbuddy: 'WorkBuddy' };
 const MAX_TEXT = 48_000;
 const MAX_CHAT_PAGES = 10;
 export const isOpenId = (value: unknown): value is string => typeof value === 'string' && /^ou_[A-Za-z0-9]+$/.test(value);
@@ -61,6 +62,7 @@ export class LarkThreads {
     return recipient.open_id;
   }
   private async ensure(adapter: Adapter, sessionId: string, sessionName: string): Promise<ThreadInfo> {
+    await registerPolledSession(this.state, adapter, sessionId, sessionName);
     let binding = this.binding(sessionId, adapter);
     let created = false;
     binding ??= await this.adopt(adapter, sessionId, sessionName);

@@ -1,11 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { fileURLToPath } from 'node:url';
+import { forwardedChatMessage } from './forwarded-messages.js';
+export { forwardedChatMessage } from './forwarded-messages.js';
 import type { State } from './state.js';
 import type { SessionsService } from './sessions.js';
+import { registerPolledSession } from './polled-sessions.js';
 import { HttpError, SessionUnavailable, identifier, isAdapter, object, text, type Adapter, type RouteRequest, type RouteResponse, type ServiceModule, type ThreadInfo, type ThreadMessage } from './types.js';
 import { ChatTransportError, isNotificationChannel, validChatConfig, type ChatBinding, type ChatChannel, type ChatConfigs, type ChatDelivery, type ChatFactory, type ChatMessage, type ChatSettingsPage, type ChatDirectory, type ChatTransport } from './chat-transport.js';
 
-const quote = (value: string): string => `'${value.replace(/'/g, `'"'"'`)}'`;
 const providerName = (channel: ChatChannel): string => channel === 'slack' ? 'Slack' : 'Telegram';
 const bindingKey = (binding: { identity: string; chat_id: string; thread_id: string }): string => JSON.stringify([binding.identity, binding.chat_id, binding.thread_id]);
 const messageKey = (channel: ChatChannel, identity: string, message: { chat_id: string; message_id: string }): string => JSON.stringify([channel, identity, message.chat_id, message.message_id]);
@@ -14,20 +15,6 @@ const validText = (value: unknown): string => {
   if (Buffer.byteLength(content) > 48000) throw new HttpError(413, 'Text exceeds 48,000 bytes');
   return content;
 };
-
-export function forwardedChatMessage(delivery: ChatDelivery, content: string, directory: string, port: number): string {
-  const name = providerName(delivery.channel);
-  const command = [process.execPath, fileURLToPath(new URL('./cli.js', import.meta.url))].map(quote).join(' ');
-  const args = `--state-dir ${quote(directory)} --port ${port} --message-id ${quote(delivery.id)}`;
-  return [
-    `【来自${name}用户的消息】`,
-    `这条消息由 Nootify 从 ${name} 转发给你，请在方便时回复原消息。`,
-    `目标会话：${delivery.session_id}`, `发送者：${delivery.sender_id}`, '', '用户原文：', content, '',
-    '先执行回执命令，仅确认收到，不发送远程回复：', `${command} chat-ack ${args}`,
-    '通过下面的命令回复原消息，替换占位文字；不要只在当前终端输出：', `${command} chat-reply ${args} --text '这里填写你的回复'`,
-    '多行回复可用 --text-file <本地文件>，或 --text-file - 从标准输入读取。',
-  ].join('\n');
-}
 
 /** A local, account-qualified route ledger shared by the two outbound-only bot transports. */
 export class ChatService<C extends ChatChannel> implements ServiceModule {
@@ -105,8 +92,11 @@ export class ChatService<C extends ChatChannel> implements ServiceModule {
   configure(value: unknown): Promise<void> {
     return this.serialized(async () => {
       const saved = this.state.settings[this.channel];
+      const rollback = () => { if (saved) Object.assign(this.state.settings, { [this.channel]: saved }); else delete this.state.settings[this.channel]; };
       if (value === undefined) {
-        await this.detach(); delete this.state.settings[this.channel]; await this.state.save(); this.outcome('disabled'); return;
+        await this.detach();
+        await this.state.save({ apply: () => { delete this.state.settings[this.channel]; }, rollback });
+        this.outcome('disabled'); return;
       }
       const input = object(value);
       const candidate = { ...input };
@@ -120,9 +110,8 @@ export class ChatService<C extends ChatChannel> implements ServiceModule {
       await this.detach();
       const config = this.channel === 'slack' ? { bot_token: candidate.bot_token, app_token: (candidate as ChatConfigs['slack']).app_token, channel_id: (candidate as ChatConfigs['slack']).channel_id, user_id: candidate.user_id }
         : { bot_token: candidate.bot_token, chat_id: (candidate as ChatConfigs['telegram']).chat_id, user_id: candidate.user_id };
-      Object.assign(this.state.settings, { [this.channel]: config });
-      try { await this.state.save(); }
-      catch (error) { Object.assign(this.state.settings, { [this.channel]: saved }); await next.stop(); throw error; }
+      try { await this.state.save({ apply: () => { Object.assign(this.state.settings, { [this.channel]: config }); }, rollback }); }
+      catch (error) { await next.stop(); throw error; }
       this.outcome('connecting');
       try { await this.attach(next); } catch { this.outcome('failed'); this.scheduleReconnect(); throw new HttpError(502, `${providerName(this.channel)} connection failed; settings were saved and will retry`); }
     });
@@ -145,6 +134,7 @@ export class ChatService<C extends ChatChannel> implements ServiceModule {
     const transport = this.connection();
     const name = title.trim();
     if (!name || name.length > 200) throw new HttpError(400, 'Session name must be 1 to 200 characters');
+    await registerPolledSession(this.state, adapter, session, name);
     let binding = this.binding(adapter, session, transport);
     const created = !binding;
     if (!binding) {
@@ -168,7 +158,7 @@ export class ChatService<C extends ChatChannel> implements ServiceModule {
   }
   private receive(transport: ChatTransport, message: ChatMessage): Promise<void> {
     const key = messageKey(this.channel, transport.identity, message);
-    if (this.seen.has(key) || [...this.state.chatDeliveries.values()].some(delivery => messageKey(delivery.channel, delivery.identity, delivery) === key)) return Promise.resolve();
+    if (this.seen.has(key) || [...this.state.chatDeliveryRecords()].some(delivery => messageKey(delivery.channel, delivery.identity, delivery) === key)) return Promise.resolve();
     if (message.sender_id !== this.state.settings[this.channel]?.user_id || !message.text?.trim() || Buffer.byteLength(message.text) > 48000) return Promise.resolve();
     const binding = [...this.state.chatBindings.values()].find(binding => binding.channel === this.channel && bindingKey(binding) === bindingKey({ ...message, identity: transport.identity })
       && binding.sender_id === message.sender_id);
@@ -183,20 +173,21 @@ export class ChatService<C extends ChatChannel> implements ServiceModule {
       await this.state.save();
       this.report({ source: this.channel, status: 'received', message_id: delivery.id, chat_id: delivery.chat_id, session_id: delivery.session_id, session_name: delivery.session_name });
       try {
-        const result = await this.sessions.send(delivery.session_id, forwardedChatMessage(delivery, message.text, this.state.directory, this.port), delivery.adapter);
+        const result = await this.sessions.send(delivery.session_id, forwardedChatMessage(delivery, message.text, this.state.directory, this.port), delivery.adapter,
+          { text: message.text, source: { channel: this.channel, delivery } });
         delivery.transport_status = result.status;
       } catch (error) {
         delivery.transport_status = error instanceof SessionUnavailable ? 'ignored' : 'delivery_failed';
         this.report({ source: this.channel, status: delivery.transport_status, reason: error instanceof SessionUnavailable ? error.reason : 'delivery_failed', message_id: delivery.id, session_id: delivery.session_id });
       }
       await this.state.save();
-      if (delivery.transport_status === 'socket_written' || delivery.transport_status === 'input_accepted') this.report({ source: this.channel, status: delivery.transport_status, message_id: delivery.id, chat_id: delivery.chat_id, session_id: delivery.session_id });
+      if (delivery.transport_status === 'socket_written' || delivery.transport_status === 'input_accepted' || delivery.transport_status === 'inbox_queued') this.report({ source: this.channel, status: delivery.transport_status, message_id: delivery.id, chat_id: delivery.chat_id, session_id: delivery.session_id });
     }).finally(() => { this.queued--; });
     this.pending = work.catch(() => { this.report({ source: this.channel, status: 'delivery_failed', reason: 'state_write_failed' }); });
     return this.pending;
   }
   private delivery(id: string): ChatDelivery {
-    const delivery = this.state.chatDeliveries.get(id);
+    const delivery = this.state.chatDelivery(id);
     if (!delivery || delivery.channel !== this.channel) throw new HttpError(404, 'No forwarded channel message with this ID');
     if (delivery.transport_status === 'ignored' || delivery.transport_status === 'delivery_failed') throw new HttpError(409, 'This message was not delivered');
     return delivery;
@@ -233,7 +224,7 @@ export class ChatService<C extends ChatChannel> implements ServiceModule {
     const receipt = /^\/v1\/chat\/messages\/([^/]+)\/(ack|reply)$/.exec(request.path);
     if (receipt && request.method === 'POST') {
       const id = identifier(decodeURIComponent(receipt[1]), 'message_id');
-      if (this.state.chatDeliveries.get(id)?.channel !== this.channel) return;
+      if (this.state.chatDelivery(id)?.channel !== this.channel) return;
       return { body: receipt[2] === 'ack' ? await this.acknowledge(id) : await this.reply(id, validText(object(request.body).text)) };
     }
     const send = /^\/v1\/threads\/([^/]+)\/messages$/.exec(request.path);
