@@ -5,14 +5,15 @@ import type { AgentPrompt } from './agents.js';
 import type { GitHubLogin } from './github-auth.js';
 import type { GitHubSettings, ImportSummary, SettingsPage } from './settings.js';
 import type { TailscalePage } from './tailscale.js';
+import type { ChatChannel, NotificationChannel } from './chat-transport.js';
 
 interface PullSummary { internal: number; upstream: number; followed: number; running: boolean; lastSuccessAt?: string; error?: string; signedOut?: boolean }
 interface Snapshot {
   time: string; modules: ModuleStatus[]; sessions: PublicSession[]; logs: LogEntry[];
   pulls?: PullSummary; access?: { tailnet_url?: string };
 }
-type View = 'logs' | 'sessions' | 'agents' | 'pulls-internal' | 'pulls-upstream' | 'repos' | 'settings-github' | 'settings-lark' | 'settings-tailscale' | 'settings-backup' | 'settings-about';
-interface AgentsPage { agents: AgentPrompt[]; editable: boolean; channel?: { name: string; configured: boolean; recipient?: string; groups: number } }
+type View = 'logs' | 'sessions' | 'agents' | 'pulls-internal' | 'pulls-upstream' | 'repos' | 'settings-github' | 'settings-lark' | 'settings-slack' | 'settings-telegram' | 'settings-tailscale' | 'settings-backup' | 'settings-about';
+interface AgentsPage { agents: AgentPrompt[]; editable: boolean; channel?: { name: NotificationChannel; configured: boolean; recipient?: string; groups: number } }
 interface Tone { label: string; tone: string }
 /** Pushed by the desktop shell as a `nootify-update` event; mirrors `UpdateView` in src-tauri/src/update.rs. A plain browser never receives it. */
 interface UpdateView {
@@ -29,20 +30,23 @@ const views: Record<View, { hash: string; group: string; title: string; section:
   repos: { hash: '#/repos', group: 'GitHub', title: 'PR 订阅', section: 'repos-view' },
   'settings-github': { hash: '#/settings/github', group: '设置', title: 'GitHub', section: 'settings-view' },
   'settings-lark': { hash: '#/settings/lark', group: '设置', title: '飞书', section: 'settings-view' },
+  'settings-slack': { hash: '#/settings/slack', group: '设置', title: 'Slack', section: 'settings-view' },
+  'settings-telegram': { hash: '#/settings/telegram', group: '设置', title: 'Telegram', section: 'settings-view' },
   'settings-tailscale': { hash: '#/settings/tailscale', group: '设置', title: 'Tailscale', section: 'settings-view' },
   'settings-backup': { hash: '#/settings/backup', group: '设置', title: '导入导出', section: 'settings-view' },
   'settings-about': { hash: '#/settings/about', group: '设置', title: '关于', section: 'settings-view' },
 };
 const descriptions: Record<string, string> = {
   ready: '服务已启动', lark_ready: '飞书长连接已建立', lark_failed: '飞书连接失败',
-  received: '服务收到飞书消息', socket_written: '已写入客户端，等待会话回执', input_accepted: '客户端已接受输入，等待会话回执',
-  session_acknowledged: '会话已确认收到', replied: '回复已发回原飞书消息', reply_failed: '发送飞书回复失败',
+  slack_ready: 'Slack 连接已建立', slack_failed: 'Slack 连接失败', telegram_ready: 'Telegram 连接已建立', telegram_failed: 'Telegram 连接失败',
+  received: '服务收到消息', socket_written: '已写入客户端，等待会话回执', input_accepted: '客户端已接受输入，等待会话回执',
+  session_acknowledged: '会话已确认收到', replied: '回复已发回原消息', reply_failed: '发送回复失败',
   delivery_failed: '消息转发失败', ignored: '已跳过此消息', queue_full: '消息队列已满', registered: '本机会话已注册',
-  bound: '已保存会话绑定', stopped: '监听已停止', connecting: '正在连接飞书', pin_failed: '绑定消息置顶失败',
-  reconnecting: '飞书正在重连', reconnected: '飞书已重新连接', refresh_completed: 'GitHub PR 已刷新', refresh_failed: 'GitHub PR 刷新失败',
-  thread_created: '已为会话创建飞书群', thread_reused: '会话已连接飞书群', thread_message: '会话发送了进度消息', thread_failed: '进度消息发送失败',
-  prompt_injected: '已写入 agent 提示词', prompt_removed: '已移除 agent 提示词',
-  github_login: 'GitHub 已登录', github_logout: 'GitHub 已退出登录', lark_configured: '飞书应用凭据已更新', config_exported: '配置已导出', config_imported: '配置已导入',
+  bound: '已保存会话绑定', stopped: '监听已停止', connecting: '正在连接消息服务', pin_failed: '绑定消息置顶失败',
+  reconnecting: '消息服务正在重连', reconnected: '消息服务已重新连接', refresh_completed: 'GitHub PR 已刷新', refresh_failed: 'GitHub PR 刷新失败',
+  thread_created: '已为会话创建消息桥接', thread_reused: '会话已连接消息桥接', thread_message: '会话发送了进度消息', thread_failed: '进度消息发送失败',
+  prompt_injected: '已写入 agent 提示词', prompt_removed: '已移除 agent 提示词', notification_channel_changed: '默认通知渠道已更新',
+  github_login: 'GitHub 已登录', github_logout: 'GitHub 已退出登录', lark_configured: '飞书应用凭据已更新', slack_configured: 'Slack 配置已更新', telegram_configured: 'Telegram 配置已更新', config_exported: '配置已导出', config_imported: '配置已导入',
   tailnet_listening: 'Tailscale 访问已开启', tailnet_failed: 'Tailscale 监听失败', tailnet_unavailable: 'Tailscale 未运行，仅本机可访问',
 };
 const reasons: Record<string, string> = {
@@ -52,7 +56,12 @@ const reasons: Record<string, string> = {
   sender_not_allowed: '发送者不在允许名单', duplicate: '重复消息', unsupported_message: '暂不处理此消息类型',
   host_mismatch: '会话位于另一台机器', invalid_content: '消息内容无效', delivery_failed: '投递失败',
 };
-const sourceNames: Record<string, string> = { host: '服务', sessions: '会话', lark: '飞书', pulls: 'GitHub', agents: 'Agents' };
+const sourceNames: Record<string, string> = { host: '服务', sessions: '会话', lark: '飞书', slack: 'Slack', telegram: 'Telegram', pulls: 'GitHub', agents: 'Agents' };
+const channelNames: Record<NotificationChannel, string> = { feishu: '飞书', slack: 'Slack', telegram: 'Telegram' };
+const channelUnits: Record<NotificationChannel, string> = { feishu: '群', slack: '线程', telegram: '话题' };
+const channelViews: Record<NotificationChannel, View> = { feishu: 'settings-lark', slack: 'settings-slack', telegram: 'settings-telegram' };
+const chatChannels: ChatChannel[] = ['slack', 'telegram'];
+const chatFields = { slack: ['bot-token', 'app-token', 'channel-id', 'user-id'], telegram: ['bot-token', 'chat-id', 'user-id'] } as const;
 const categories: Record<string, Tone> = {
   received: { label: '已收件', tone: 'info' }, forwarded: { label: '待回执', tone: 'warn' },
   acknowledged: { label: '已确认', tone: 'ok' }, replied: { label: '已回复', tone: 'ok' },
@@ -74,7 +83,7 @@ const availability: Record<string, Tone> = {
 const reviews: Record<string, Tone> = {
   APPROVED: { label: '已批准', tone: 'ok' }, CHANGES_REQUESTED: { label: '需要修改', tone: 'error' }, REVIEW_REQUIRED: { label: '待审查', tone: 'warn' },
 };
-const moduleNames: Record<string, string> = { sessions: '会话', lark: '飞书', pulls: 'GitHub' };
+const moduleNames: Record<string, string> = { sessions: '会话', lark: '飞书', slack: 'Slack', telegram: 'Telegram', pulls: 'GitHub' };
 const moduleStates: Record<string, Tone> = {
   ready: { label: '就绪', tone: 'ok' }, idle: { label: '等待刷新', tone: 'warn' }, refreshing: { label: '刷新中', tone: 'warn' },
   stale: { label: '刷新失败', tone: 'error' }, error: { label: '异常', tone: 'error' }, failed: { label: '异常', tone: 'error' },
@@ -111,11 +120,12 @@ const state = {
   pullsError: '',
   outcome: 'all', pullFilter: 'all', pullSort: 'asc' as 'asc' | 'desc', repoFilter: 'all',
   pendingRepos: new Set<string>(), repoError: '', openRepoSources: new Set<string>(),
-  agents: undefined as AgentsPage | undefined, agentsError: '', pendingAgents: new Set<string>(), openPreviews: new Set<string>(),
+  agents: undefined as AgentsPage | undefined, agentsError: '', pendingAgents: new Set<string>(), openPreviews: new Set<string>(), channelEdited: false, pendingChannel: false,
   settings: undefined as (SettingsPage & { editable: boolean }) | undefined, github: undefined as GitHubSettings | undefined, loadingGitHub: false,
   tailscale: undefined as (TailscalePage & { editable: boolean }) | undefined, loadingTailscale: false, tailscaleError: '',
   settingsNote: undefined as { text: string; error: boolean } | undefined, pendingSettings: new Set<string>(),
-  larkEdited: false, confirmClear: false, importing: undefined as { name: string; content: unknown; summary: ImportSummary } | undefined,
+  larkEdited: false, confirmClear: false, chatEdited: { slack: false, telegram: false }, confirmChatClear: { slack: false, telegram: false },
+  importing: undefined as { name: string; content: unknown; summary: ImportSummary } | undefined,
   update: undefined as UpdateView | undefined,
   paused: false, loading: false, loadingPulls: false, connected: false,
   expanded: new Set<string>(),
@@ -181,7 +191,8 @@ function rowMain(title: string | Node[], meta: string): HTMLElement {
 
 // ---- Logs ----
 function source(entry: LogEntry): string {
-  return entry.source ?? (entry.status.startsWith('lark') || entry.chat_id ? 'lark' : entry.session_id ? 'sessions' : 'host');
+  return entry.source ?? (entry.status.startsWith('slack_') ? 'slack' : entry.status.startsWith('telegram_') ? 'telegram'
+    : entry.status.startsWith('lark') || entry.chat_id ? 'lark' : entry.session_id ? 'sessions' : 'host');
 }
 function category(entry: LogEntry): string {
   if (entry.status === 'ignored') return 'ignored';
@@ -192,7 +203,14 @@ function category(entry: LogEntry): string {
   if (entry.error || entry.status.includes('failed') || entry.status === 'queue_full') return 'error';
   return 'system';
 }
-const summary = (entry: LogEntry): string => (entry.reason && reasons[entry.reason]) || descriptions[entry.status] || entry.status;
+function summary(entry: LogEntry): string {
+  if (entry.reason && reasons[entry.reason]) return reasons[entry.reason];
+  const provider = source(entry);
+  const conversation = provider === 'lark' ? '飞书群' : provider === 'slack' ? 'Slack 线程' : provider === 'telegram' ? 'Telegram 话题' : undefined;
+  if (conversation && entry.status === 'thread_created') return `已为会话创建${conversation}`;
+  if (conversation && entry.status === 'thread_reused') return `会话已连接${conversation}`;
+  return descriptions[entry.status] || entry.status;
+}
 function sessionLabel(entry: LogEntry): string | undefined {
   return entry.session_name ?? state.snapshot.sessions.find(session => session.session_id === entry.session_id)?.session_name ?? entry.session_id;
 }
@@ -217,7 +235,7 @@ function logDetails(entry: LogEntry): HTMLElement {
   const grid = node('dl', undefined, 'detail-grid');
   const fields: [string, string | undefined, boolean][] = [
     ['时间', fullTime(entry.time), false], ['事件', entry.status, true], ['会话', entry.session_id, true], ['会话名称', entry.session_name, false],
-    ['群聊', entry.chat_id, true], ['消息 ID', entry.message_id, true], ['飞书用户', entry.sender_open_id, true], ['回复 ID', entry.reply_id, true],
+    ['聊天 ID', entry.chat_id, true], ['消息 ID', entry.message_id, true], ['发送者 ID', entry.sender_open_id, true], ['回复 ID', entry.reply_id, true],
     ['原因', entry.reason && reasons[entry.reason] ? `${reasons[entry.reason]}（${entry.reason}）` : entry.reason, false], ['错误', entry.error, false], ['消息内容', entry.preview, false],
   ];
   for (const [label, value, mono] of fields) if (value) grid.append(node('dt', label), node('dd', value, mono ? 'mono' : undefined));
@@ -467,7 +485,8 @@ function agentDetail(agent: AgentPrompt): string {
   if (agent.status === 'conflict') return '文件里的 nootify 标记不成对，请先手动修正';
   if (agent.status === 'error') return agent.error ?? '无法读取文件';
   if (agent.status === 'outdated') return '写入内容与当前版本不同';
-  return agent.injected ? '新对话会按说明使用飞书' : '勾选后写入飞书说明';
+  const channel = channelNames[state.agents?.channel?.name ?? 'feishu'];
+  return agent.injected ? `新对话会按说明使用${channel}` : `勾选后写入${channel}通知说明`;
 }
 async function loadAgents(): Promise<void> {
   try {
@@ -478,6 +497,7 @@ async function loadAgents(): Promise<void> {
   renderChrome(); renderAgents();
 }
 async function setAgent(agent: AgentPrompt, enabled: boolean): Promise<void> {
+  if (state.agents?.editable !== true || state.pendingChannel || state.pendingAgents.has(agent.agent)) return;
   state.pendingAgents.add(agent.agent); state.agentsError = ''; renderAgents();
   try {
     const response = await fetch('/ui/api/agents', { method: 'POST', headers: { 'x-nootify-ui': '1', 'content-type': 'application/json' },
@@ -488,30 +508,51 @@ async function setAgent(agent: AgentPrompt, enabled: boolean): Promise<void> {
   state.pendingAgents.delete(agent.agent);
   await loadAgents();
 }
+async function saveChannel(): Promise<void> {
+  if (state.agents?.editable !== true || state.pendingChannel || state.pendingAgents.size) return;
+  const channel = $<HTMLSelectElement>('notification-channel').value;
+  if (channel === state.agents.channel?.name) return;
+  state.pendingChannel = true; state.agentsError = ''; renderAgents();
+  try {
+    await post('/ui/api/settings/channel', { channel });
+    state.channelEdited = false;
+    await loadAgents();
+  } catch (error) { state.agentsError = `无法保存默认通知渠道：${(error as Error).message}`; }
+  finally { state.pendingChannel = false; renderAgents(); }
+}
 function renderAgents(): void {
   const page = state.agents;
   $('agents-count').textContent = page ? String(page.agents.filter(agent => agent.injected).length || '') : '';
-  const remote = page && !page.editable;
-  const banner = state.agentsError || (remote ? '通过 Tailscale 访问时只能查看；请在这台 Mac 上修改 agent 提示词。' : '');
+  const remote = page?.editable !== true;
+  const banner = state.agentsError || (page && remote ? '通过 Tailscale 访问时只能查看；请在这台 Mac 上修改 agent 提示词和通知渠道。' : '');
   $('agents-banner').hidden = !banner; $('agents-banner').textContent = banner;
   const channel = page?.channel;
-  $('channel-sub').textContent = !channel ? '飞书模块未启用' : !channel.configured ? '未配置飞书应用凭据，提示词写入后也无法建群：到「设置 · 飞书」配置'
-    : channel.recipient ? `接收人 ${channel.recipient.slice(0, 7)}…${channel.recipient.slice(-4)} · 已绑定 ${channel.groups} 个群` : '还没有设置接收人：到「设置 · 飞书」填写';
-  $('channel-side').textContent = 'Slack 等渠道之后支持';
+  const name = channelNames[channel?.name ?? 'feishu'];
+  setText('channel-title', channel ? `通知渠道 · ${name}` : '通知渠道');
+  setText('channel-sub', !page ? '正在读取通知渠道…' : !channel ? '通知模块未启用' : !channel.configured ? `还没有完成 ${name} 配置：到「设置 · ${name}」配置后再使用`
+    : channel.recipient ? `${channel.name === 'feishu' ? '接收人' : '信任的用户'} ${channel.recipient} · 已绑定 ${channel.groups} 个${channelUnits[channel.name]}` : `还没有设置信任的用户：到「设置 · ${name}」填写`);
+  const settings = $<HTMLAnchorElement>('channel-settings');
+  settings.href = views[channelViews[channel?.name ?? 'feishu']].hash;
+  setText('channel-settings', `配置${name}`);
+  const choice = $<HTMLSelectElement>('notification-channel');
+  if (!state.channelEdited) choice.value = channel?.name ?? 'feishu';
+  choice.disabled = remote || !channel || state.pendingChannel || state.pendingAgents.size > 0;
+  $<HTMLButtonElement>('channel-save').disabled = choice.disabled || choice.value === channel?.name;
+  setText('channel-save', state.pendingChannel ? '保存中…' : '保存');
   if (state.view !== 'agents' || !page) return;
-  if (!changed('agent-rows', [page, [...state.pendingAgents]])) return;
+  if (!changed('agent-rows', [page, [...state.pendingAgents], state.pendingChannel])) return;
   replaceRows($('agent-rows'), page.agents.map(agent => {
     const item = node('div', undefined, 'entry'); item.setAttribute('role', 'listitem');
     const row = node('label', undefined, 'row');
     const box = node('input', undefined, 'check'); box.type = 'checkbox'; box.checked = agent.injected; box.dataset.key = agent.agent;
-    box.disabled = remote || state.pendingAgents.has(agent.agent) || ['conflict', 'error'].includes(agent.status);
-    box.setAttribute('aria-label', `向 ${agent.name} 写入飞书说明`);
+    box.disabled = remote || state.pendingChannel || state.pendingAgents.has(agent.agent) || ['conflict', 'error'].includes(agent.status);
+    box.setAttribute('aria-label', `向 ${agent.name} 写入${name}通知说明`);
     box.addEventListener('change', () => { void setAgent(agent, box.checked); });
     row.append(box, rowMain(agent.name, `${home(agent.file)} · ${agentDetail(agent)}`), sideBlock(promptStates[agent.status] ?? promptStates.error));
     const extra = node('div', undefined, 'agent-extra');
     if (agent.status === 'outdated' && !remote) {
       const update = node('button', '更新为当前内容', 'text-button'); update.type = 'button';
-      update.disabled = state.pendingAgents.has(agent.agent);
+      update.disabled = state.pendingChannel || state.pendingAgents.has(agent.agent);
       update.addEventListener('click', () => { void setAgent(agent, true); });
       extra.append(update);
     }
@@ -537,7 +578,8 @@ function setTone(id: string, tone: Tone): void { setText(id, tone.label); $(id).
 const field = (id: string): HTMLInputElement => $<HTMLInputElement>(id);
 async function post<T>(path: string, body?: unknown): Promise<T> {
   const response = await fetch(path, { method: 'POST', headers: { 'x-nootify-ui': '1', 'content-type': 'application/json' },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(20000) });
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    signal: AbortSignal.timeout(path === '/ui/api/settings/import' ? 180000 : ['/ui/api/settings/slack', '/ui/api/settings/telegram'].includes(path) ? 90000 : 20000) });
   if (!response.ok) throw new Error(((await response.json().catch(() => ({}))) as { error?: string }).error ?? `HTTP ${response.status}`);
   return await response.json() as T;
 }
@@ -547,12 +589,23 @@ function fillLark(): void {
   field('lark-app-secret').value = '';
   field('lark-recipient').value = lark?.recipient ?? '';
 }
+function clearChatTokens(channel: ChatChannel): void {
+  field(`${channel}-bot-token`).value = '';
+  if (channel === 'slack') field('slack-app-token').value = '';
+}
+function fillChat(channel: ChatChannel): void {
+  const page = state.settings?.[channel];
+  clearChatTokens(channel);
+  field(`${channel}-${channel === 'slack' ? 'channel-id' : 'chat-id'}`).value = page?.chat_id ?? '';
+  field(`${channel}-user-id`).value = page?.user_id ?? '';
+}
 async function loadSettings(): Promise<void> {
   try {
     const response = await fetch('/ui/api/settings', { cache: 'no-store', signal: AbortSignal.timeout(8000) });
     if (!response.ok) throw new Error(response.status === 404 ? '设置模块未启用' : `HTTP ${response.status}`);
     state.settings = await response.json() as SettingsPage & { editable: boolean };
     if (!state.larkEdited) fillLark();
+    for (const channel of chatChannels) if (!state.chatEdited[channel]) fillChat(channel);
   } catch (error) { state.settingsNote = { text: `无法读取设置：${(error as Error).message}`, error: true }; }
   renderSettings();
 }
@@ -690,14 +743,36 @@ function renderLark(remote: boolean): void {
   clear.hidden = remote || !lark?.saved; clear.disabled = busy;
   setText('lark-clear', state.confirmClear ? '再点一次确认清除' : '清除保存的凭据');
 }
+function renderChat(channel: ChatChannel, remote: boolean): void {
+  const page = state.settings?.[channel];
+  const status = state.snapshot.modules.find(module => module.name === channel)?.status ?? page?.status ?? 'disabled';
+  setTone(`${channel}-state`, !page ? { label: '', tone: 'muted' } : status === 'ready' ? { label: '已连接', tone: 'ok' } : moduleStates[status] ?? { label: status, tone: 'muted' });
+  setText(`${channel}-status`, !page ? '正在读取设置…' : !page.configured ? '还没有完成机器人配置'
+    : `${page.account ?? '配置已保存'} · 已绑定 ${page.threads} 个${channelUnits[channel]}`);
+  const busy = state.pendingSettings.has(channel);
+  for (const suffix of chatFields[channel]) {
+    const input = field(`${channel}-${suffix}`);
+    input.disabled = remote || !page || busy;
+    if (suffix.endsWith('token')) input.placeholder = page?.saved ? '已保存，留空则不修改'
+      : suffix === 'app-token' ? 'xapp-…' : channel === 'slack' ? 'xoxb-…' : '123456789:…';
+  }
+  $<HTMLButtonElement>(`${channel}-save`).disabled = remote || !page || busy;
+  setText(`${channel}-save`, busy ? '处理中…' : '验证并保存');
+  const clear = $<HTMLButtonElement>(`${channel}-clear`);
+  clear.hidden = remote || !page?.saved; clear.disabled = busy;
+  setText(`${channel}-clear`, state.confirmChatClear[channel] ? `确认清除 ${channelNames[channel]} 配置` : `清除 ${channelNames[channel]} 配置`);
+}
 function importLines(summary: ImportSummary): string[] {
   const lines: string[] = [];
+  if (summary.notification_channel) lines.push(`默认通知渠道：${channelNames[summary.notification_channel]}`);
   if (summary.app_id) lines.push(`飞书应用 ${summary.app_id} 和它的 App Secret`);
   if (summary.recipient) lines.push(`飞书接收人 ${summary.recipient}`);
+  if (summary.slack) lines.push(`Slack 令牌、频道 ${summary.slack.chat_id} 和信任的用户 ${summary.slack.user_id}`);
+  if (summary.telegram) lines.push(`Telegram 令牌、超级群 ${summary.telegram.chat_id} 和信任的用户 ${summary.telegram.user_id}`);
   if (summary.pulls_config) lines.push('GitHub PR 配置');
   if (summary.follow !== undefined) lines.push(`用文件里的 ${summary.follow} 条选择替换现有的仓库关注选择`);
   if (summary.backends.length) lines.push(`${summary.backends.map(adapter => adapters[adapter] ?? adapter).join('、')} 连接`);
-  if (summary.agents.length) lines.push(`启用 ${summary.agents.map(agent => agentNames[agent] ?? agent).join('、')} 的飞书说明`);
+  if (summary.agents.length) lines.push(`启用 ${summary.agents.map(agent => agentNames[agent] ?? agent).join('、')} 的通知说明`);
   return lines.length ? lines : ['这个文件没有可导入的设置'];
 }
 function renderBackup(remote: boolean): void {
@@ -727,6 +802,7 @@ function renderSettings(): void {
   banner.hidden = !note; banner.className = note && !note.error ? 'banner note' : 'banner';
   setText('settings-banner', note?.text ?? '');
   renderGitHub(remote); renderLark(remote); renderTailscale(); renderBackup(remote);
+  for (const channel of chatChannels) renderChat(channel, remote);
 }
 
 // ---- Updates ----
@@ -829,7 +905,7 @@ function renderChrome(): void {
   if (changed('modules', state.snapshot.modules)) {
     $('modules').replaceChildren(...state.snapshot.modules.filter(module => module.name in moduleNames).map(module => {
       const status = moduleStates[module.status] ?? { label: module.status, tone: 'muted' };
-      const display = module.name === 'lark' && module.status === 'ready' ? { label: '已连接', tone: 'ok' } : status;
+      const display = ['lark', 'slack', 'telegram'].includes(module.name) && module.status === 'ready' ? { label: '已连接', tone: 'ok' } : status;
       const line = node('div', undefined, 'status-line');
       line.append(node('span', undefined, `dot ${display.tone === 'muted' ? '' : display.tone}`), node('span', moduleNames[module.name] ?? module.name), node('span', display.label, 'value'));
       return line;
@@ -891,6 +967,7 @@ async function refreshNow(): Promise<void> {
 window.addEventListener('hashchange', () => {
   state.view = viewFromHash();
   state.settingsNote = undefined;
+  state.confirmChatClear.slack = false; state.confirmChatClear.telegram = false;
   renderAll();
   requestAnimationFrame(revealActiveNavigation);
   if (usesPulls(state.view)) void loadPulls();
@@ -979,6 +1056,48 @@ $('lark-clear').addEventListener('click', () => {
     return '已清除保存的凭据';
   });
 });
+$('notification-channel').addEventListener('change', () => { state.channelEdited = true; renderAgents(); });
+$('channel-save').addEventListener('click', () => { void saveChannel(); });
+function saveChat(channel: ChatChannel): void {
+  if (state.settings?.editable !== true || state.pendingSettings.has(channel)) return;
+  state.chatEdited[channel] = true; state.confirmChatClear[channel] = false;
+  void settingsRun(channel, `无法保存 ${channelNames[channel]} 配置`, async () => {
+    await post(`/ui/api/settings/${channel}`, {
+      bot_token: field(`${channel}-bot-token`).value.trim(), user_id: field(`${channel}-user-id`).value.trim(),
+      ...(channel === 'slack' ? { app_token: field('slack-app-token').value.trim(), channel_id: field('slack-channel-id').value.trim() }
+        : { chat_id: field('telegram-chat-id').value.trim() }),
+    });
+    clearChatTokens(channel); state.chatEdited[channel] = false;
+    await Promise.all([loadSettings(), loadAgents()]);
+    return `${channelNames[channel]} 配置已验证并保存`;
+  });
+}
+for (const channel of chatChannels) {
+  $(`${channel}-save`).addEventListener('click', () => saveChat(channel));
+  for (const suffix of chatFields[channel]) {
+    const input = field(`${channel}-${suffix}`);
+    input.addEventListener('input', () => {
+      state.chatEdited[channel] = true;
+      if (state.confirmChatClear[channel]) { state.confirmChatClear[channel] = false; renderSettings(); }
+    });
+    input.addEventListener('keydown', event => { if (event.key === 'Enter' && !event.isComposing) { event.preventDefault(); saveChat(channel); } });
+  }
+  $(`${channel}-clear`).addEventListener('click', () => {
+    if (state.settings?.editable !== true || !state.settings[channel].saved || state.pendingSettings.has(channel)) return;
+    if (!state.confirmChatClear[channel]) {
+      state.confirmChatClear[channel] = true; renderSettings();
+      setTimeout(() => { state.confirmChatClear[channel] = false; renderSettings(); }, 4000);
+      return;
+    }
+    state.confirmChatClear[channel] = false;
+    void settingsRun(channel, `无法清除 ${channelNames[channel]} 配置`, async () => {
+      await post(`/ui/api/settings/${channel}`, { clear: true });
+      clearChatTokens(channel); state.chatEdited[channel] = false;
+      await Promise.all([loadSettings(), loadAgents()]);
+      return `已清除 ${channelNames[channel]} 配置`;
+    });
+  });
+}
 $('export-config').addEventListener('click', () => {
   void settingsRun('export', '无法导出配置', async () => { await post('/ui/api/settings/export'); await loadSettings(); return '配置已导出'; });
 });
@@ -1001,7 +1120,8 @@ $('import-apply').addEventListener('click', () => {
   if (!importing) return;
   void settingsRun('import', '无法导入配置', async () => {
     const result = await post<ImportSummary>('/ui/api/settings/import', { document: importing.content, apply: true });
-    state.importing = undefined; state.larkEdited = false;
+    state.importing = undefined; state.larkEdited = false; state.channelEdited = false;
+    for (const channel of chatChannels) { state.chatEdited[channel] = false; state.confirmChatClear[channel] = false; clearChatTokens(channel); }
     await Promise.all([loadSettings(), loadAgents()]);
     return `配置已导入${result.warnings.length ? `；${result.warnings.join('；')}` : ''}`;
   });

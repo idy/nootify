@@ -27,6 +27,8 @@
   <nav class="subnav" id="settings-subnav" aria-label="设置页面" hidden>
     <a class="nav-item" href="#/settings/github" data-view="settings-github"><span>GitHub</span></a>
     <a class="nav-item" href="#/settings/lark" data-view="settings-lark"><span>飞书</span></a>
+    <a class="nav-item" href="#/settings/slack" data-view="settings-slack"><span>Slack</span></a>
+    <a class="nav-item" href="#/settings/telegram" data-view="settings-telegram"><span>Telegram</span></a>
     <a class="nav-item" href="#/settings/tailscale" data-view="settings-tailscale"><span>Tailscale</span></a>
     <a class="nav-item" href="#/settings/backup" data-view="settings-backup"><span>导入导出</span></a>
     <a class="nav-item" href="#/settings/about" data-view="settings-about"><span>关于</span><span class="update-dot" title="有新版本" hidden></span></a>
@@ -54,17 +56,17 @@
     <div class="toolbar">
       <div class="segmented" id="outcome-tabs" aria-label="按结果筛选"></div>
       <div class="toolbar-actions">
-        <label class="search"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/></svg><input id="search" type="search" placeholder="搜索消息、会话、群 ID" autocomplete="off" aria-label="搜索日志"></label>
+        <label class="search"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/></svg><input id="search" type="search" placeholder="搜索消息、会话、聊天 ID" autocomplete="off" aria-label="搜索日志"></label>
         <button type="button" id="pause" class="text-button" aria-pressed="false">暂停</button>
         <button type="button" id="export" class="text-button" title="导出当前筛选结果">导出</button>
       </div>
     </div>
-    <p class="hint">待回执：已写入客户端，还没有收到会话回执。已回复：回复已发回原飞书消息。保留最近 1,000 条，最新在前。</p>
-    <div class="group"><div class="rows" id="logs-table" role="list"></div><div id="empty" class="empty" hidden><strong>没有匹配的日志</strong><span>换个筛选条件，或在飞书群里发一条消息。</span></div></div>
+    <p class="hint">待回执：已写入客户端，还没有收到会话回执。已回复：回复已发回原消息。保留最近 1,000 条，最新在前。</p>
+    <div class="group"><div class="rows" id="logs-table" role="list"></div><div id="empty" class="empty" hidden><strong>没有匹配的日志</strong><span>换个筛选条件，或在飞书群、Slack 线程、Telegram 话题里发一条消息。</span></div></div>
   </section>
   <section id="sessions-view" class="view" aria-label="路由会话" hidden>
-    <p class="hint">收到消息时才按群公告查找对应的 Claude、Codex 或 OpenCode 会话。这里只列出本次运行遇到的会话和最近一次查找结果。</p>
-    <div class="group"><div class="rows" id="sessions-body" role="list"></div><div id="no-sessions" class="empty" hidden><strong>还没有会话路由记录</strong><span>群里收到带会话声明的消息后，这里会显示查找结果。</span></div></div>
+    <p class="hint">收到消息时才查找对应的 Claude、Codex 或 OpenCode 会话：飞书按群公告，Slack 线程和 Telegram 话题按本地绑定。这里只列出本次运行遇到的会话和最近一次查找结果。</p>
+    <div class="group"><div class="rows" id="sessions-body" role="list"></div><div id="no-sessions" class="empty" hidden><strong>还没有会话路由记录</strong><span>绑定会话的飞书群、Slack 线程或 Telegram 话题收到消息后，这里会显示查找结果。</span></div></div>
   </section>
   <section id="pulls-view" class="view" aria-label="PR" hidden>
     <div class="toolbar">
@@ -83,10 +85,11 @@
     <details class="warnings" id="pull-warnings" hidden><summary></summary><ul></ul></details>
   </section>
   <section id="agents-view" class="view" aria-label="Agents" hidden>
-    <p class="hint">勾选后，Nootify 会在该 agent 的全局提示词文件末尾写入一段飞书说明，只改动 nootify 标记之间的内容。之后的对话会各自建一个飞书群，把会话标识写进群公告并在群里汇报进度；群里的回复会转发回对应会话。每次修改前都会把原文件备份到 Nootify 的状态目录。</p>
+    <p class="hint">勾选后，Nootify 会在该 agent 的全局提示词文件末尾写入通知说明，只改动 nootify 标记之间的内容。之后的对话会各自使用一个飞书群、Slack 线程或 Telegram 话题来汇报进度，回复会转发回对应会话。飞书把会话标识写进群公告；Slack 和 Telegram 使用本地绑定。每次修改前都会把原文件备份到 Nootify 的状态目录。</p>
     <div id="agents-banner" class="banner" role="alert" hidden></div>
     <div class="group">
-      <div class="group-head"><div><div class="group-title">通知渠道 · 飞书</div><div class="group-sub" id="channel-sub"></div></div><div class="group-side" id="channel-side"></div></div>
+      <div class="group-head"><div><div class="group-title" id="channel-title">通知渠道</div><div class="group-sub" id="channel-sub"></div></div><div class="group-side" id="channel-side"><a id="channel-settings" class="inline-link" href="#/settings/lark">配置飞书</a></div></div>
+      <div class="setting setting-field-row"><label class="setting-main" for="notification-channel"><span class="setting-title">默认通知渠道</span><span class="setting-sub" id="channel-help">先在设置中配置渠道。更改默认渠道后，在「需要更新」的项目中点击「更新为当前内容」，刷新已注入的说明。</span></label><select id="notification-channel" class="setting-field" aria-describedby="channel-help" autocomplete="off" disabled><option value="feishu">飞书</option><option value="slack">Slack</option><option value="telegram">Telegram</option></select><div class="setting-actions"><button type="button" id="channel-save" class="text-button primary" disabled>保存</button></div></div>
       <div class="rows" id="agent-rows" role="list"></div>
     </div>
   </section>
@@ -128,6 +131,29 @@
       </div>
       <p class="hint">App ID 和 App Secret 在飞书开放平台应用的「凭证与基础信息」页。优先级：环境变量、这里保存的凭据、MCP 配置文件。保存后机器人会用新凭据重新连接；密钥保存在状态目录的 state.json（权限 0600）。</p>
     </div>
+    <div data-panel="settings-slack" hidden>
+      <div class="group">
+        <div class="setting"><div class="setting-main"><div class="setting-title">Slack 机器人</div><div class="setting-sub" id="slack-status">正在读取设置…</div></div><span id="slack-state"></span></div>
+        <div class="setting setting-field-row"><label class="setting-main" for="slack-bot-token"><span class="setting-title">Bot Token</span></label><input id="slack-bot-token" class="setting-field mono" type="password" placeholder="xoxb-…" autocomplete="off" spellcheck="false" disabled></div>
+        <div class="setting setting-field-row"><label class="setting-main" for="slack-app-token"><span class="setting-title">App-Level Token</span></label><input id="slack-app-token" class="setting-field mono" type="password" placeholder="xapp-…" autocomplete="off" spellcheck="false" disabled></div>
+        <div class="setting setting-field-row"><label class="setting-main" for="slack-channel-id"><span class="setting-title">频道 ID</span><span class="setting-sub">机器人已加入的公开或私有频道</span></label><input id="slack-channel-id" class="setting-field mono" type="text" placeholder="C… 或 G…" autocomplete="off" spellcheck="false" disabled></div>
+        <div class="setting setting-field-row"><label class="setting-main" for="slack-user-id"><span class="setting-title">信任的用户 ID</span><span class="setting-sub">允许把回复发送回本机会话的人类用户</span></label><input id="slack-user-id" class="setting-field mono" type="text" placeholder="U…" autocomplete="off" spellcheck="false" disabled></div>
+        <div class="setting"><div class="setting-main"><div class="setting-sub">保存前会向 Slack 验证配置；令牌不会显示在页面上。</div></div><div class="setting-actions"><button type="button" id="slack-clear" class="text-button" hidden>清除 Slack 配置</button><button type="button" id="slack-save" class="text-button primary" disabled>验证并保存</button></div></div>
+      </div>
+      <p class="hint">每个会话在指定频道里使用一个独立线程。先把机器人邀请到频道，启用 Socket Mode；App-Level Token 需要 connections:write。事件订阅启用 message.channels 和 message.groups；Bot Token 需要 chat:write、channels:read、groups:read、users:read；接收公开频道或私有频道的消息事件还需相应的 channels:history 或 groups:history。</p>
+      <p class="hint">保存后机器人会重新连接。令牌保存在状态目录的 state.json（权限 0600）；已保存时留空则不修改。到 Agents 页面选择默认通知渠道。</p>
+    </div>
+    <div data-panel="settings-telegram" hidden>
+      <div class="group">
+        <div class="setting"><div class="setting-main"><div class="setting-title">Telegram 机器人</div><div class="setting-sub" id="telegram-status">正在读取设置…</div></div><span id="telegram-state"></span></div>
+        <div class="setting setting-field-row"><label class="setting-main" for="telegram-bot-token"><span class="setting-title">Bot Token</span><span class="setting-sub">由 BotFather 提供</span></label><input id="telegram-bot-token" class="setting-field mono" type="password" placeholder="123456789:…" autocomplete="off" spellcheck="false" disabled></div>
+        <div class="setting setting-field-row"><label class="setting-main" for="telegram-chat-id"><span class="setting-title">超级群 ID</span><span class="setting-sub">已创建并启用话题（Forum）的超级群</span></label><input id="telegram-chat-id" class="setting-field mono" type="text" placeholder="-100…" autocomplete="off" spellcheck="false" disabled></div>
+        <div class="setting setting-field-row"><label class="setting-main" for="telegram-user-id"><span class="setting-title">信任的用户 ID</span><span class="setting-sub">允许把回复发送回本机会话的人类用户，填写数字 ID</span></label><input id="telegram-user-id" class="setting-field mono" type="text" inputmode="numeric" placeholder="123456789" autocomplete="off" spellcheck="false" disabled></div>
+        <div class="setting"><div class="setting-main"><div class="setting-sub">保存前会向 Telegram 验证配置；令牌不会显示在页面上。</div></div><div class="setting-actions"><button type="button" id="telegram-clear" class="text-button" hidden>清除 Telegram 配置</button><button type="button" id="telegram-save" class="text-button primary" disabled>验证并保存</button></div></div>
+      </div>
+      <p class="hint">每个会话在指定超级群中使用一个独立话题。先创建启用话题的超级群，把机器人设为管理员并允许管理话题；只有上面填写的数字用户 ID 可以把回复发送回本机会话。</p>
+      <p class="hint">保存后机器人会重新连接。令牌保存在状态目录的 state.json（权限 0600）；已保存时留空则不修改。到 Agents 页面选择默认通知渠道。</p>
+    </div>
     <div data-panel="settings-tailscale" hidden>
       <div class="group">
         <div class="setting setting-with-switch"><div class="setting-main"><label class="setting-title" for="tailscale-enabled">接入 Tailscale 网络</label><div class="setting-sub" id="tailscale-sharing">正在读取设置…</div></div><input id="tailscale-enabled" class="switch" type="checkbox" role="switch" aria-describedby="tailscale-sharing" disabled></div>
@@ -143,7 +169,7 @@
         <div class="setting"><div class="setting-main"><div class="setting-title">导入配置</div><div class="setting-sub">选择导出的文件，确认内容后再写入</div></div><div class="setting-actions"><input id="import-file" type="file" accept=".json,application/json" aria-label="选择配置文件" hidden><button type="button" id="import-choose" class="text-button primary">选择文件…</button></div></div>
         <div class="setting" id="import-preview" hidden><div class="setting-main"><div class="setting-title" id="import-name"></div><div class="setting-sub" id="import-date"></div><ul id="import-lines" class="setting-list"></ul></div><div class="setting-actions"><button type="button" id="import-cancel" class="text-button">取消</button><button type="button" id="import-apply" class="text-button primary">写入这些设置</button></div></div>
       </div>
-      <p class="hint">配置文件包含飞书凭据和接收人、PR 配置与关注选择、Codex 和 OpenCode 连接、已启用的 Agents。其中有明文密钥，文件权限是 0600，不要提交到仓库或转发。导入只覆盖文件里有的设置；Agents 只会启用，不会关闭。GitHub 登录不在文件里，换机器后重新登录。</p>
+      <p class="hint">配置文件包含默认通知渠道、飞书、Slack、Telegram 的凭据与信任的用户、PR 配置与关注选择、Codex 和 OpenCode 连接、已启用的 Agents。其中有明文密钥，文件权限是 0600，不要提交到仓库或转发。导入只覆盖文件里有的设置；Agents 只会启用，不会关闭。GitHub 登录不在文件里，换机器后重新登录。</p>
     </div>
     <div data-panel="settings-about" hidden>
       <div class="group">
