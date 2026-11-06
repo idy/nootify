@@ -3,7 +3,7 @@ export { checkSocket } from './inbox.js';
 import { createConnection } from 'node:net';
 import { hostname } from 'node:os';
 import type { State } from './state.js';
-import { HttpError, identifier, object, text, isAdapter, isPolledAdapter, SessionUnavailable } from './types.js';
+import { HttpError, identifier, object, text, isAdapter, isPolledAdapter, SessionUnavailable, RetryableDeliveryError, UnconfirmedDeliveryError } from './types.js';
 import { acknowledgeInbox, queueSessionMessage, sessionInbox } from './polled-sessions.js';
 import type { ForwardingOptions } from './forwarded-messages.js';
 export { SessionUnavailable } from './types.js';
@@ -16,7 +16,8 @@ import type { SessionCatalog } from './local-sessions.js';
 import { writeWindowsInbox } from './native-transport.js';
 
 export async function writeInbox(path: string, content: string, token?: string, timeout = 5000, expectedPid?: number): Promise<DeliveryResult> {
-  await checkSocket(path);
+  try { await checkSocket(path); }
+  catch (error) { throw new RetryableDeliveryError((error as Error).message); }
   const frames: unknown[] = [];
   if (token) frames.push({ type: 'auth', token });
   frames.push({ type: 'user', message: { role: 'user', content } });
@@ -24,19 +25,26 @@ export async function writeInbox(path: string, content: string, token?: string, 
   if (process.platform === 'win32') return writeWindowsInbox({ path, expectedPid, frames: payload, timeout });
   return new Promise((resolve, reject) => {
     const socket = createConnection({ path });
-    let finished = false;
+    let finished = false; let submitted = false;
+    const fail = (error: Error) => {
+      socket.setTimeout(0);
+      reject(submitted ? new UnconfirmedDeliveryError(error.message) : new RetryableDeliveryError(error.message));
+    };
     socket.setTimeout(timeout);
-    socket.once('error', reject);
-    socket.once('timeout', () => socket.destroy(new Error('Inbox socket write timed out')));
-    socket.once('connect', () => { socket.end(payload); });
+    socket.once('error', fail);
+    socket.once('timeout', () => socket.destroy(new Error('Inbox socket write timed out; delivery is unconfirmed')));
+    socket.once('connect', () => {
+      submitted = true;
+      try { socket.end(payload); } catch (error) { fail(error as Error); socket.destroy(); }
+    });
     socket.once('finish', () => { finished = true; });
     socket.once('end', () => {
       socket.setTimeout(0);
       if (finished) resolve({ status: 'socket_written' });
-      else reject(new Error('Inbox closed before the message was written'));
+      else fail(new Error('Inbox closed before the message was written'));
     });
     socket.once('close', hadError => {
-      if (!hadError && !socket.readableEnded) reject(new Error('Inbox exchange did not finish'));
+      if (!hadError && !socket.readableEnded) fail(new Error('Inbox exchange did not finish'));
     });
   });
 }
@@ -57,12 +65,19 @@ export class SessionsService implements ServiceModule {
     const key = `${kind}:${id}`;
     const observation: PublicSession = { session_id: id, adapter: kind, host_id: hostname(),
       session_name: this.observed.get(key)?.session_name ?? id, availability: 'unknown', last_seen: new Date().toISOString() };
+    let submitting = false;
     try {
       let target: SessionTarget | undefined;
       if (isPolledAdapter(kind)) {
         if (saved?.adapter === kind && saved.host_id === hostname()) target = {
           info: { session_id: id, host_id: saved.host_id, adapter: kind, session_name: saved.session_name, availability: 'unknown' },
-          send: content => queueSessionMessage(this.state, kind, id, origin?.text ?? content, origin?.source),
+          send: async content => {
+            try { return await queueSessionMessage(this.state, kind, id, origin?.text ?? content, origin?.source); }
+            catch (error) {
+              if (error instanceof HttpError && [429, 503].includes(error.status)) throw new RetryableDeliveryError(error.message, 'inbox_full');
+              throw error;
+            }
+          },
         };
       } else if (kind === 'codex' || kind === 'opencode') target = await this.external.resolve(id, kind);
       else {
@@ -78,16 +93,21 @@ export class SessionsService implements ServiceModule {
       observation.session_name = target.info.session_name;
       observation.availability = target.info.availability;
       if (target.info.availability === 'archived') throw new SessionUnavailable('session_archived');
+      submitting = true;
       const result = await target.send(`[Nootify: ${target.info.session_name}]\n${content}`);
       observation.last_result = result.status;
       return result;
     } catch (error) {
-      const reason = error instanceof SessionUnavailable ? error.reason : 'delivery_failed';
+      const beforeInput = !submitting && ((error instanceof SessionUnavailable && error.reason === 'backend_unavailable') || !(error instanceof HttpError));
+      const failure = beforeInput && !(error instanceof RetryableDeliveryError)
+        ? new RetryableDeliveryError((error as Error).message) : error;
+      const reason = failure instanceof SessionUnavailable || failure instanceof RetryableDeliveryError ? failure.reason
+        : failure instanceof UnconfirmedDeliveryError ? 'delivery_unconfirmed' : 'delivery_failed';
       observation.last_result = reason;
       if (reason === 'session_not_local') observation.availability = 'missing';
       else if (reason === 'session_archived') observation.availability = 'archived';
       else if (reason === 'session_offline') observation.availability = 'offline';
-      throw error;
+      throw failure;
     } finally {
       this.observed.delete(key); this.observed.set(key, observation);
       if (this.observed.size > 1000) this.observed.delete(this.observed.keys().next().value!);

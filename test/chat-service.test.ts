@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
+import { DatabaseSync } from 'node:sqlite';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -165,7 +166,9 @@ test('persisted deliveries deduplicate retries and reply to the original topic a
   assert.deepEqual(transport.sent[0], { location: { chat_id: '-100123', thread_id: '1' }, text: '[Task] Done', reply: '42' });
   assert.ok(state.chatDeliveries.get(id)?.acknowledged_at);
   assert.equal((await State.open(f.directory)).chatDeliveries.get(id)?.replies.length, 1);
-  assert.ok(!await readFile(join(f.directory, 'state.json'), 'utf8').then(value => value.includes('Continue the task')));
+  const db = new DatabaseSync(join(f.directory, 'state.sqlite'), { readOnly: true });
+  try { assert.equal(db.prepare("SELECT count(*) AS count FROM chat_deliveries WHERE instr(value, ?) > 0").get('Continue the task')!.count, 0); }
+  finally { db.close(); }
 });
 
 test('changing bot identity or recipient blocks stale replies and late callbacks', async t => {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import fs, { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { assertMode } from './platform-fixtures.js';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -13,6 +13,7 @@ import type { Credentials, LarkApi } from '../src/lark-metadata.js';
 import { createServiceHost, type HostOptions } from '../src/server.js';
 import { SettingsService, type LarkControl } from '../src/settings.js';
 import { State } from '../src/state.js';
+import { StateDatabase, type StateRows } from '../src/state-database.js';
 import { LarkService } from '../src/lark.js';
 import { SessionsService } from '../src/sessions.js';
 import type { TailnetAccess } from '../src/tailnet.js';
@@ -121,7 +122,7 @@ function scopeApi(scopes = defaultScopes): LarkApi {
 test('readiness identifies actual messaging gaps without treating a connected bot as a complete setup', async () => {
   const setup = await inspectLarkSetup(scopeApi());
   assert.equal(setup.status, 'permissions-required'); assert.equal(setup.mention_only, true);
-  assert.deepEqual(setup.missing, ['im:chat.announcement:read', 'im:chat.announcement:write_only', 'im:message.group_msg']);
+  assert.deepEqual(setup.missing, ['im:chat.announcement:read', 'im:chat.announcement:write_only', 'im:message.history:readonly', 'im:message.group_msg']);
   assert.match(setup.permission!.qr, /^data:image\/png;base64,/);
   const url = new URL(setup.permission!.url); assert.equal(url.origin, 'https://open.feishu.cn'); assert.equal(url.pathname, `/app/${appId}/auth`);
   assert.deepEqual(url.searchParams.get('q')?.split(','), setup.missing);
@@ -129,7 +130,7 @@ test('readiness identifies actual messaging gaps without treating a connected bo
   assert.deepEqual(all, ready);
 });
 test('chat-list access is required even when all other messaging scopes are present', async () => {
-  const primaryScopes = ['im:chat:create', 'im:chat.announcement:read', 'im:chat.announcement:write_only', 'im:message:send_as_bot', 'im:message.group_msg'];
+  const primaryScopes = ['im:chat:create', 'im:chat.announcement:read', 'im:chat.announcement:write_only', 'im:message:send_as_bot', 'im:message.history:readonly', 'im:message.group_msg'];
   const missingList = await inspectLarkSetup(scopeApi(primaryScopes));
   assert.equal(missingList.status, 'permissions-required');
   assert.deepEqual(missingList.missing, ['im:chat:read']);
@@ -137,6 +138,17 @@ test('chat-list access is required even when all other messaging scopes are pres
   assert.equal(new URL(missingList.permission!.url).searchParams.get('q'), 'im:chat:read');
   for (const grant of ['im:chat:read', 'im:chat:readonly', 'im:chat']) {
     assert.deepEqual(await inspectLarkSetup(scopeApi([...primaryScopes, grant])), ready);
+  }
+});
+
+test('history polling requires a history-read grant even when live messaging scopes are present', async () => {
+  const live = [...defaultScopes, 'im:chat.announcement:read', 'im:chat.announcement:write_only', 'im:message.group_msg'];
+  const missingHistory = await inspectLarkSetup(scopeApi(live));
+  assert.equal(missingHistory.status, 'permissions-required');
+  assert.deepEqual(missingHistory.missing, ['im:message.history:readonly']);
+  assert.equal(missingHistory.mention_only, false);
+  for (const grant of ['im:message.history:readonly', 'im:message:readonly', 'im:message']) {
+    assert.deepEqual(await inspectLarkSetup(scopeApi([...live, grant])), ready);
   }
 });
 
@@ -159,18 +171,32 @@ async function settingsHarness(t: TestContext, options: { env?: NodeJS.ProcessEn
   t.after(() => settings.stop());
   return { state, remote, settings, lark, directory, reports };
 }
+test('a version 0.1.13 JSON upgrade preserves personal app type, recipient and group ownership', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'nootify-personal-app-migration-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const settings = { lark_app_id: appId, lark_app_secret: complete.client_secret,
+    lark_recipient_open_id: complete.user_info.open_id, lark_connection_type: 'personal-app' as const };
+  const binding = { chat_id: 'oc_personal', app_id: appId, session_id: 'personal-session', sender_open_id: complete.user_info.open_id };
+  const original = JSON.stringify({ version: 1, sessions: [], lark_bindings: [binding], settings });
+  await writeFile(join(directory, 'state.json'), original, { mode: 0o600 });
+  const migrated = await State.open(directory);
+  assert.deepEqual(migrated.settings, settings);
+  assert.deepEqual(migrated.bindings.get(binding.chat_id), binding);
+  assert.deepEqual((await State.open(directory)).settings, settings);
+  assert.equal(await readFile(join(directory, 'state.json'), 'utf8'), original);
+});
+
 test('a QR result saves private credentials and the app-specific scanning user, then reconnects', async t => {
   const h = await settingsHarness(t);
   h.lark.credentials = { appId: 'cli_fedcba9876543210', appSecret: 'old-secret' }; h.state.settings.lark_recipient_open_id = 'ou_oldAppUser';
   h.remote.replies.push(() => complete); h.settings.startLarkRegistration();
   await until(() => h.settings.larkRegistration().status === 'complete');
-  const persisted = JSON.parse(await readFile(join(h.directory, 'state.json'), 'utf8'));
+  const persisted = await State.open(h.directory);
   assert.equal(persisted.settings.lark_app_secret, complete.client_secret);
   assert.equal(persisted.settings.lark_recipient_open_id, complete.user_info.open_id);
   assert.equal(persisted.settings.lark_connection_type, 'personal-app');
-  assert.equal((await State.open(h.directory)).settings.lark_connection_type, 'personal-app');
   assert.equal((await h.settings.page()).lark.connection_type, 'personal-app');
-  await assertMode(join(h.directory, 'state.json'), 0o600);
+  await assertMode(join(h.directory, 'state.sqlite'), 0o600);
   assert.equal(h.lark.credentials?.appId, appId);
   assert.equal(h.settings.larkRegistration().setup?.status, 'permissions-required');
   const publicData = JSON.stringify([await h.settings.page(), h.settings.larkRegistration(), h.reports]);
@@ -189,9 +215,9 @@ test('a failed QR save rolls back credentials, recipient and group ownership bef
   h.state.bindings.set(binding.chat_id, binding); await h.state.save();
   let entered = false; let release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; }); t.after(() => release());
-  const rename = fs.rename; let writes = 0;
-  t.mock.method(fs, 'rename', async (from: Parameters<typeof rename>[0], to: Parameters<typeof rename>[1]) => {
-    if (String(to) === join(h.directory, 'state.json')) {
+  const write = StateDatabase.prototype.write; let writes = 0;
+  t.mock.method(StateDatabase.prototype, 'write', async function (this: StateDatabase, rows: StateRows) {
+    if (this.path === join(h.directory, 'state.sqlite')) {
       const index = ++writes;
       if (index === 1) { entered = true; await gate; }
       if (index === 3) {
@@ -201,7 +227,7 @@ test('a failed QR save rolls back credentials, recipient and group ownership bef
         throw new Error('Injected QR write failure');
       }
     }
-    return rename(from, to);
+    return write.call(this, rows);
   });
   const save = h.state.save.bind(h.state); let scheduled = 0;
   t.mock.method(h.state, 'save', (transaction?: Parameters<State['save']>[0]) => { scheduled++; return save(transaction); });
@@ -220,7 +246,7 @@ test('a failed QR save rolls back credentials, recipient and group ownership bef
   const reopened = await State.open(h.directory);
   assert.deepEqual(reopened.settings, { ...original, github_token: 'parallel-token' });
   assert.deepEqual(reopened.bindings.get(binding.chat_id), binding); assert.ok(reopened.sessions.has('parallel-session'));
-  assert.ok(!(await readFile(join(h.directory, 'state.json'), 'utf8')).includes(complete.client_secret));
+  assert.ok(!JSON.stringify(reopened.settings).includes(complete.client_secret));
   h.remote.replies.push(() => complete); h.settings.startLarkRegistration();
   await until(() => h.settings.larkRegistration().status === 'complete');
   assert.equal(h.lark.credentials?.appId, appId); assert.equal(configure.mock.calls.length, 1);
@@ -331,7 +357,7 @@ test('QR URLs, status and permission actions remain loopback-only behind the UI 
 test('replacing a running app retains and persists the original app ownership of legacy bindings', async t => {
   const h = await settingsHarness(t); const sessions = new SessionsService(h.state);
   const lark = new LarkService(h.state, sessions, { appId, appSecret: 'original-secret' }, () => {}, scopeApi(), 9417,
-    options => ({ start: async () => { options.onReady?.(); }, close() {} }));
+    options => ({ start: async () => { options.status('ready'); }, stop: async () => {} }));
   t.after(async () => { await lark.stop(); await sessions.stop(); });
   h.state.bindings.set('oc_legacy', { chat_id: 'oc_legacy', session_id: 'old-session', sender_open_id: 'ou_oldAppUser' });
   const otherId = 'cli_fedcba9876543210';

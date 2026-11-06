@@ -28,7 +28,7 @@ const FORMAT = 'nootify-config';
 const EXPORTS_KEPT = 10;
 const BACKEND_PROTOCOLS: Record<'codex' | 'opencode', string[]> = { codex: ['ws:', 'wss:'], opencode: ['http:', 'https:'] };
 const packageFile = new URL('../../package.json', import.meta.url);
-/** The Feishu SDK silently refuses to connect with any other shape, which would leave the bot "connecting" forever. */
+/** Reject malformed application IDs before verifying or saving credentials. */
 const isAppId = (value: unknown): value is string => typeof value === 'string' && /^cli_[0-9a-fA-F]{16}$/.test(value);
 const isObject = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 

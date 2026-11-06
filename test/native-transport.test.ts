@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { inboxEnvironment, windowsInboxCommand, windowsInboxScript, writeWindowsInbox } from '../src/native-transport.js';
 import { writeInbox } from '../src/sessions.js';
+import { RetryableDeliveryError, UnconfirmedDeliveryError } from '../src/types.js';
 
 const request = { path: '\\\\.\\pipe\\nootify-transport-test', expectedPid: process.pid,
   frames: '{"type":"auth","token":"private-test-token"}\n{"type":"user","message":{"role":"user","content":"你好 🌍"}}\n', timeout: 200 };
@@ -66,6 +67,13 @@ test('helper errors, early exits and invalid success protocols never expose raw 
     const runtime = await fixture(t, body, ready);
     await assert.rejects(writeWindowsInbox(request, runtime), { message: 'Windows inbox authentication or write failed' });
   }
+});
+
+test('polling retries native startup failures but never blindly resubmits a dispatched request', async t => {
+  const startup = await fixture(t, 'process.exit(1);', false);
+  await assert.rejects(writeWindowsInbox(request, startup), RetryableDeliveryError);
+  const dispatched = await fixture(t, 'process.stdin.resume(); process.stdin.on("end", () => process.exit(1));');
+  await assert.rejects(writeWindowsInbox(request, dispatched), UnconfirmedDeliveryError);
 });
 
 test('both helper startup and a hung write are bounded even if the child never exits', async t => {

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
-import { ensureAnnouncement, InvalidAnnouncement, parseAnnouncement, readAnnouncement } from './lark-metadata.js';
+import { ensureAnnouncement, InvalidAnnouncement, parseAnnouncement, readAnnouncement, larkActivationTime } from './lark-metadata.js';
 import type { LarkApi } from './lark-metadata.js';
 import type { State } from './state.js';
 import { registerPolledSession } from './polled-sessions.js';
@@ -62,6 +62,7 @@ export class LarkThreads {
     return recipient.open_id;
   }
   private async ensure(adapter: Adapter, sessionId: string, sessionName: string): Promise<ThreadInfo> {
+    const activation = Date.now(); const activationClock = performance.now();
     await registerPolledSession(this.state, adapter, sessionId, sessionName);
     let binding = this.binding(sessionId, adapter);
     let created = false;
@@ -72,13 +73,23 @@ export class LarkThreads {
         name: threadName(sessionName, adapter, sessionId), chat_mode: 'group', chat_type: 'private', user_id_list: [recipient],
       });
       if (!chat.chat_id) throw new Error('Feishu returned no chat ID for the new group');
-      binding = { chat_id: chat.chat_id, app_id: this.api.appId, session_id: sessionId, adapter, session_name: sessionName, sender_open_id: recipient, metadata: 'announcement', pin: false };
+      binding = { chat_id: chat.chat_id, app_id: this.api.appId, session_id: sessionId, adapter, session_name: sessionName, sender_open_id: recipient, metadata: 'announcement', pin: false,
+        activated_at: larkActivationTime(this.api, activation, performance.now() - activationClock), announcement_pending: true };
       created = true;
       // Saved before the announcement write, so a failure there cannot lead to a second group on retry.
       this.state.bindings.set(binding.chat_id, binding); await this.state.save();
     }
+    const previous = this.state.bindings.get(binding.chat_id);
+    if (!previous && binding.activated_at === undefined) binding.activated_at = larkActivationTime(this.api, activation, performance.now() - activationClock);
     await ensureAnnouncement(this.api, this.remote(binding, adapter));
-    if (this.state.bindings.get(binding.chat_id) !== binding) { this.state.bindings.set(binding.chat_id, binding); await this.state.save(); }
+    if (previous !== binding || binding.announcement_pending) {
+      const pending = binding.announcement_pending;
+      const ready = binding;
+      await this.state.save({ apply: () => { delete ready.announcement_pending; this.state.bindings.set(ready.chat_id, ready); }, rollback: () => {
+        if (pending) ready.announcement_pending = true;
+        if (previous) this.state.bindings.set(ready.chat_id, previous); else this.state.bindings.delete(ready.chat_id);
+      } });
+    }
     const session_name = binding.session_name ?? sessionName;
     this.report({ source: 'lark', status: created ? 'thread_created' : 'thread_reused', chat_id: binding.chat_id, session_id: sessionId, session_name });
     return { channel: 'feishu', chat_id: binding.chat_id, session_id: sessionId, adapter, session_name, created };

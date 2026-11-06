@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { once } from 'node:events';
-import fs, { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer as createSocketServer, type AddressInfo } from 'node:net';
@@ -17,6 +17,7 @@ import { registerPolledSession } from '../src/polled-sessions.js';
 import { createServiceHost } from '../src/server.js';
 import { SessionsService } from '../src/sessions.js';
 import { State } from '../src/state.js';
+import { StateDatabase, type StateRows } from '../src/state-database.js';
 import type { PolledAdapter, SessionInbox, ThreadInfo } from '../src/types.js';
 import { sessionInbox } from '../src/polled-sessions.js';
 import { assertMode, inboxPath } from './platform-fixtures.js';
@@ -55,7 +56,7 @@ for (const adapter of ['trae', 'workbuddy'] as const) {
     const id = pending.messages[0].id;
     await assert.rejects(f.client.acknowledgeThread('conversation-two', adapter, id), /No inbox message/);
     assert.equal((await State.open(f.directory)).inboxMessages.get(id)?.text, pending.messages[0].text);
-    await assertMode(join(f.directory, 'state.json'), 0o600);
+    await assertMode(join(f.directory, 'state.sqlite'), 0o600);
     await f.client.acknowledgeThread('conversation-one', adapter, id);
     await f.client.acknowledgeThread('conversation-one', adapter, id);
     assert.deepEqual((await f.client.receiveThread('conversation-one', adapter)).messages, []);
@@ -105,18 +106,18 @@ test('a failed inbox acknowledgment is rolled back before an overlapping save ta
   let entered!: () => void; let release!: () => void;
   const started = new Promise<void>(resolve => { entered = resolve; });
   const gate = new Promise<void>(resolve => { release = resolve; });
-  const rename = fs.rename; let fail = true;
-  t.mock.method(fs, 'rename', async (from: Parameters<typeof rename>[0], to: Parameters<typeof rename>[1]) => {
-    if (fail && String(to) === join(f.directory, 'state.json')) {
-      fail = false; entered(); await gate; throw new Error('Injected state rename failure');
+  const write = StateDatabase.prototype.write; let fail = true;
+  t.mock.method(StateDatabase.prototype, 'write', async function (this: StateDatabase, rows: StateRows) {
+    if (fail && this.path === join(f.directory, 'state.sqlite')) {
+      fail = false; entered(); await gate; throw new Error('Injected state transaction failure');
     }
-    return rename(from, to);
+    return write.call(this, rows);
   });
   const acknowledgment = f.client.acknowledgeThread('atomic-ack', 'trae', message.id);
   await started;
   f.state.settings.notification_channel = 'slack';
   const overlapping = f.state.save();
-  const failed = assert.rejects(acknowledgment, /Injected state rename failure/);
+  const failed = assert.rejects(acknowledgment, /Injected state transaction failure/);
   release(); await failed; await overlapping;
   assert.ok(f.state.inboxMessages.has(message.id));
   const restored = await State.open(f.directory);
@@ -326,7 +327,7 @@ test('Feishu unread replies retain their source across eviction/restart and use 
   const server = createServiceHost([sessions, lark], state.token); server.listen(0, '127.0.0.1'); await once(server, 'listening');
   t.after(() => { server.closeAllConnections(); server.close(); }); runtime.port = (server.address() as AddressInfo).port;
   const client = new NootifyClient({ baseUrl: `http://127.0.0.1:${runtime.port}`, token: state.token });
-  assert.equal(lark.enqueue(incoming), false, 'retained source context still deduplicates provider retries');
+  assert.equal(await lark.enqueue(incoming), true, 'retained source context terminally handles provider retries without another inbox item');
   const pending = await client.receiveThread('retained-lark', 'workbuddy');
   assert.equal(pending.messages.length, 2);
   const message = pending.messages.find(message => message.text.includes('Original unread Feishu text'))!;

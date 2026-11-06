@@ -1,24 +1,24 @@
 import assert from 'node:assert/strict';
-import fs from 'node:fs/promises';
 import { join } from 'node:path';
 import type { TestContext } from 'node:test';
 import type { State } from '../src/state.js';
+import { StateDatabase, type StateRows } from '../src/state-database.js';
 
-/** Queue two successful saves ahead of a settings change, then fail only that change's atomic replacement. */
+/** Queue two successful transactions ahead of a settings change, then fail only that change. */
 export async function failSettingsWriteBehindOlderSaves(t: TestContext, state: State, change: () => Promise<unknown>): Promise<void> {
   let entered!: () => void; let release!: () => void; let queued!: () => void;
   const blocked = new Promise<void>(resolve => { entered = resolve; });
   const gate = new Promise<void>(resolve => { release = resolve; });
   const settingsQueued = new Promise<void>(resolve => { queued = resolve; });
   t.after(() => release());
-  const rename = fs.rename; let writes = 0;
-  t.mock.method(fs, 'rename', async (from: Parameters<typeof rename>[0], to: Parameters<typeof rename>[1]) => {
-    if (String(to) === join(state.directory, 'state.json')) {
+  const write = StateDatabase.prototype.write; let writes = 0;
+  t.mock.method(StateDatabase.prototype, 'write', async function (this: StateDatabase, rows: StateRows) {
+    if (this.path === join(state.directory, 'state.sqlite')) {
       const index = ++writes;
       if (index === 1) { entered(); await gate; }
       if (index === 3) throw new Error('Injected settings write failure');
     }
-    return rename(from, to);
+    return write.call(this, rows);
   });
   const save = state.save.bind(state); let scheduled = 0;
   t.mock.method(state, 'save', (transaction?: Parameters<State['save']>[0]) => {

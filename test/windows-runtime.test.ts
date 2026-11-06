@@ -150,7 +150,7 @@ test('Windows rejects a claimed pipe with zero token/message bytes even when the
   await closed;
   assert.equal(connections, 1, 'verification and write must share one connection'); assert.equal(bytes, 0);
   const observed = JSON.stringify((await sessions.handle({ method: 'GET', path: '/v1/sessions', body: undefined }))?.body);
-  assert.ok(observed.includes('delivery_failed'));
+  assert.ok(observed.includes('delivery_unconfirmed'));
   for (const privateField of ['runtime_pid', 'socket_path', 'socket_token', 'must-not-leak']) assert.ok(!observed.includes(privateField));
 });
 

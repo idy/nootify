@@ -37,6 +37,10 @@ export interface LarkBinding extends BindingRequest {
   /** Groups belong to one app; a replacement app must not reuse another bot's chat IDs. */
   app_id?: string;
   registration_message_id?: string;
+  /** First activation, in milliseconds; later polling must not replay earlier commands. */
+  activated_at?: number;
+  /** Creation is saved before writing metadata; polling waits until that write succeeds. */
+  announcement_pending?: boolean;
 }
 export interface RemoteBinding extends LarkBinding {
   adapter: Adapter;
@@ -44,6 +48,24 @@ export interface RemoteBinding extends LarkBinding {
   session_name: string;
   socket_path?: string;
 }
+/** Per-application history progress. Times are provider epoch milliseconds. */
+export interface LarkPollCursor {
+  app_id: string;
+  chat_id: string;
+  container_id: string;
+  container_type: 'chat' | 'thread';
+  root_message_id?: string;
+  started_at: number;
+  through: number;
+  /** A pre-authentication local estimate can be calibrated before the first history request. */
+  provisional_clock?: boolean;
+  /** Legacy input only; current completed IDs live in keyed SQLite receipt rows. */
+  recent?: [string, number][];
+}
+export const larkPollCursorKey = (cursor: Pick<LarkPollCursor, 'app_id' | 'container_type' | 'container_id'>): string =>
+  `${cursor.app_id}:${cursor.container_type}:${cursor.container_id}`;
+export interface LarkPollReceipt { readonly cursor_id: string; readonly message_id: string; readonly create_time: number }
+export const larkPollReceiptKey = (cursorId: string, messageId: string): string => JSON.stringify([cursorId, messageId]);
 export interface DeliveryResult { status: 'socket_written' | 'input_accepted' | 'inbox_queued' }
 export interface InboxMessage { id: string; text: string; created_at: string }
 export type InboxSource = { channel: 'feishu'; delivery: LarkDelivery } | { channel: 'slack' | 'telegram'; delivery: ChatDelivery };
@@ -59,7 +81,9 @@ export interface LarkDelivery {
   session_name: string;
   adapter: Adapter;
   created_at: string;
-  transport_status: 'pending' | DeliveryResult['status'] | 'ignored' | 'delivery_failed';
+  transport_status: 'pending' | DeliveryResult['status'] | 'ignored' | 'delivery_failed' | 'delivery_unconfirmed';
+  /** Only positively identified pre-submission failures may be automatically retried. */
+  retryable?: boolean;
   acknowledged_at?: string;
   replies: { digest: string; message_id: string; time: string }[];
 }
@@ -85,6 +109,14 @@ export class HttpError extends Error {
 }
 export class SessionUnavailable extends HttpError {
   constructor(readonly reason: string) { super(409, reason); }
+}
+/** The operation failed before any user input could be accepted by its target. */
+export class RetryableDeliveryError extends Error {
+  constructor(message: string, readonly reason = 'backend_unavailable') { super(message); this.name = 'RetryableDeliveryError'; }
+}
+/** Input may already have been accepted; another submission would not be safe. */
+export class UnconfirmedDeliveryError extends Error {
+  constructor(message: string) { super(message); this.name = 'UnconfirmedDeliveryError'; }
 }
 export function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new HttpError(400, 'Expected a JSON object');

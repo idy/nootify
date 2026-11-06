@@ -123,7 +123,7 @@ test('private state persists registrations across restarts and omits credentials
   assert.equal(reopened.token, state.token);
   assert.ok(!JSON.stringify(reopened.publicSessions()).includes('private-test-token'));
   assert.ok(!JSON.stringify(reopened.publicSessions()).includes('socket_path'));
-  await assertMode(join(dir, 'state.json'), 0o600);
+  await assertMode(join(dir, 'state.sqlite'), 0o600);
   await assertMode(join(dir, 'auth-token'), 0o600);
 });
 
@@ -142,8 +142,8 @@ test('Feishu replies use the registry, verify metadata and suppress duplicate ID
   state.bindings.set(binding.chat_id, { chat_id: binding.chat_id, session_id: binding.session_id, sender_open_id: binding.sender_open_id, registration_message_id: 'om_binding' });
   const reports: Record<string, unknown>[] = [];
   const lark = new LarkService(state, new SessionsService(state, catalogFor(state)), undefined, r => reports.push(r), announcementApi());
-  assert.equal(lark.enqueue(event('om_live', 'hello from Feishu')), true);
-  assert.equal(lark.enqueue(event('om_live', 'duplicate')), false);
+  assert.equal(await lark.enqueue(event('om_live', 'hello from Feishu')), true);
+  assert.equal(await lark.enqueue(event('om_live', 'duplicate')), true, 'an already handled ID is a terminal completion');
   await lark.drain();
   assert.match(target.messages.join(''), /hello from Feishu/); assert.ok(reports.some(report => report.status === 'socket_written'));
   assert.ok(reports.some(report => report.reason === 'duplicate'));
@@ -177,7 +177,7 @@ test('HTTP host protects APIs, serves health, supports unrelated modules and typ
   assert.equal((await client.listSessions())[0].session_id, binding.session_id);
   const observed = JSON.stringify(await client.listSessions());
   for (const privateField of ['private-test-token', 'socket_path', 'socket_token', 'runtime_pid']) assert.ok(!observed.includes(privateField));
-  const persisted = await readFile(join(dir, 'state.json'), 'utf8');
+  const persisted = JSON.stringify([...(await State.open(dir)).sessions.values()]);
   assert.ok(!persisted.includes('runtime_pid'), 'runtime PIDs are transient delivery metadata');
   assert.match(target.messages.join(''), /typed client marker/);
   assert.deepEqual(await (await fetch(baseUrl + '/v1/example', { headers: { authorization: `Bearer ${state.token}` } })).json(), { value: 42 });
