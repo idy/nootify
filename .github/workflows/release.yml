@@ -1,7 +1,6 @@
 name: Release
 
-# Push a tag such as v0.2.0 that matches package.json's version. To rebuild an existing release,
-# run this workflow manually and choose that tag under "Use workflow from".
+# Push a version tag matching package.json. A manual rebuild must select that tag.
 on:
   push:
     tags: ['v*']
@@ -14,11 +13,19 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
-    runs-on: macos-latest
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     permissions:
-      contents: write
+      contents: read
     steps:
       - uses: actions/checkout@v7
         with:
@@ -26,8 +33,11 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 24.22.2
           cache: npm
+
+      - name: Require a tag matching package.json
+        run: node scripts/release-assets.mjs check-tag
 
       - uses: actions/setup-go@v6
         with:
@@ -38,41 +48,88 @@ jobs:
         working-directory: native/tailscale
         run: go test ./...
 
-      - name: Require a tag matching package.json
-        env:
-          REF_TYPE: ${{ github.ref_type }}
-          REF_NAME: ${{ github.ref_name }}
-        run: |
-          expected="v$(node -p "require('./package.json').version")"
-          if [ "$REF_TYPE" != tag ] || [ "$REF_NAME" != "$expected" ]; then
-            echo "::error::Release from the tag $expected, not the $REF_TYPE $REF_NAME"
-            exit 1
-          fi
-
       - name: Install stable Rust
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
+          rustup target add ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: release-${{ matrix.target }}
+      - uses: actions/cache@v6
+        with:
+          path: .cache/node
+          key: node-runtime-${{ matrix.target }}-${{ hashFiles('scripts/build-targets.mjs', 'scripts/stage-service.mjs') }}
 
       - run: npm ci
       - run: npm test
 
-      # beforeBuildCommand compiles and stages the service and Node.js runtime. The bundle is
-      # ad-hoc signed (signingIdentity "-") and not notarized; the updater artifacts
-      # (.app.tar.gz, .sig, latest.json) are signed with the updater key.
-      - uses: tauri-apps/tauri-action@v0
+      # macOS keeps its ad-hoc app/DMG signing; both platforms produce signed
+      # updater artifacts. Matrix workers never write to the GitHub release.
+      - name: Build signed desktop release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run desktop:build -- --target ${{ matrix.target }} --ci
+
+      - name: Collect signed release assets
+        run: node scripts/release-assets.mjs collect --target ${{ matrix.target }} --bundles src-tauri/target/${{ matrix.target }}/release/bundle --output .cache/release-assets
+
+      - uses: actions/upload-artifact@v7
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: Nootify v__VERSION__
-          releaseBody: >-
-            Apple Silicon build. It is ad-hoc signed and not notarized: on first launch,
-            allow it under System Settings > Privacy & Security. Installed copies update
-            themselves from the latest release.
-          releaseDraft: false
-          prerelease: false
-          includeUpdaterJson: true
-          args: --target aarch64-apple-darwin --bundles app,dmg
+          name: release-${{ matrix.target }}
+          path: .cache/release-assets/*
+          if-no-files-found: error
+          retention-days: 7
+
+  # Exactly one writer generates latest.json from both completed builds. Publish
+  # installers first, then the complete manifest; a new release stays draft until
+  # every asset is present. A failed platform leaves the previous release intact.
+  finalize:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      RELEASE_NOTES: >-
+        Apple Silicon macOS 13.5+ DMG and Windows x64 per-user NSIS installer.
+        The macOS app is ad-hoc signed and not notarized; allow it under System
+        Settings > Privacy & Security on first launch. Installed copies update
+        from this signed manifest. The Windows installer is not Authenticode signed.
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.22.2
+      - run: node scripts/release-assets.mjs check-tag
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: .cache/release-input
+          merge-multiple: false
+      - name: Merge and validate both updater platforms
+        run: node scripts/release-assets.mjs merge --input .cache/release-input --output .cache/release-publish
+      - name: Publish complete release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          node -e 'require("node:fs").writeFileSync(".cache/release-notes.txt", process.env.RELEASE_NOTES + "\n")'
+          if ! gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --verify-tag --draft --title "Nootify $GITHUB_REF_NAME" --notes-file .cache/release-notes.txt
+          fi
+          assets=()
+          for asset in .cache/release-publish/*; do
+            if [[ "$(basename "$asset")" != latest.json ]]; then
+              assets+=("$asset")
+            fi
+          done
+          gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
+          gh release upload "$GITHUB_REF_NAME" .cache/release-publish/latest.json --clobber
+          gh release edit "$GITHUB_REF_NAME" --draft=false --prerelease=false --latest --notes-file .cache/release-notes.txt

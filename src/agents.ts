@@ -7,6 +7,7 @@ import { defaultStateDir } from './state.js';
 import { HttpError, object } from './types.js';
 import type { Adapter, RouteRequest, RouteResponse, ServiceModule } from './types.js';
 import type { NotificationChannel } from './chat-transport.js';
+import { shellCommand, shellQuote } from './shell.js';
 
 export type AgentId = 'claude' | 'codex' | 'opencode';
 export const AGENT_IDS: AgentId[] = ['claude', 'codex', 'opencode'];
@@ -42,13 +43,12 @@ export function agentSession(agent: AgentId, env: NodeJS.ProcessEnv = process.en
   return { adapter: 'opencode' };
 }
 
-const plain = /^[A-Za-z0-9_./:@%+=,-]+$/;
-const quote = (value: string): string => plain.test(value) ? value : `'${value.replace(/'/g, `'"'"'`)}'`;
+const quote = (value: string): string => shellQuote(value, process.platform, true);
 export interface PromptOptions { stateDir: string; port: number; tailnetAddress?: () => string | undefined; notificationChannel?: () => NotificationChannel; command?: string[] }
 
 /** The block for one agent. Commands name this installation's Node and CLI, so they work from any project directory. */
 export function promptBlock(agent: AgentId, options: PromptOptions): string {
-  const base = (options.command ?? [process.execPath, fileURLToPath(new URL('./cli.js', import.meta.url))]).map(quote).join(' ');
+  const base = shellCommand(options.command ?? [process.execPath, fileURLToPath(new URL('./cli.js', import.meta.url))], process.platform, true);
   const extra = `${options.stateDir !== defaultStateDir() ? ` --state-dir ${quote(options.stateDir)}` : ''}${options.port !== 9417 ? ` --port ${options.port}` : ''}`;
   const channel = options.notificationChannel?.() ?? 'feishu';
   const identity = (agent === 'opencode' ? '--agent opencode --session-id <this ses_… session ID>' : `--agent ${agent}`) + (channel === 'feishu' ? '' : ` --channel ${channel}`);
@@ -67,7 +67,7 @@ export function promptBlock(agent: AgentId, options: PromptOptions): string {
     "- Post progress, blockers and results as you go, in the user's language. Each message is prefixed with the session name:",
     `  ${run('thread-send', '--text "<message>"')}`,
     '  Use `--text-file -` to send multi-line text from standard input.',
-    `- Nootify's independent Tailscale device${address ? ` (\`http://${address}/\`)` : ''} exposes only Nootify on port 80. It does not expose this Mac's previews, files, or other ports. Share other local pages or files only through a separately configured and verified reachable address; never substitute the Nootify device IP for a host address.`,
+    `- Nootify's independent Tailscale device${address ? ` (\`http://${address}/\`)` : ''} exposes only Nootify on port 80. It does not expose this ${process.platform === 'darwin' ? 'Mac' : 'computer'}'s previews, files, or other ports. Share other local pages or files only through a separately configured and verified reachable address; never substitute the Nootify device IP for a host address.`,
     channel === 'feishu' ? '- Messages from the user in that group arrive here marked 【来自飞书用户的消息】 with `lark-ack` and `lark-reply` commands; answer them when convenient.'
       : `- Messages arrive here marked 【来自${channel === 'slack' ? 'Slack' : 'Telegram'}用户的消息】 with \`chat-ack\` and \`chat-reply\` commands. Answer when convenient; the reply goes to the original thread or topic.`,
     "- Nootify maintains this block; change it on Nootify's Agents page instead of editing it here.",

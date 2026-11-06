@@ -1,4 +1,5 @@
-import { stat } from 'node:fs/promises';
+import { checkSocket } from './inbox.js';
+export { checkSocket } from './inbox.js';
 import { createConnection } from 'node:net';
 import { hostname } from 'node:os';
 import type { State } from './state.js';
@@ -11,11 +12,6 @@ import type { Adapter, BackendConnection, DeliveryResult, PublicSession, RouteRe
 import { LocalSessions } from './local-sessions.js';
 import type { SessionCatalog } from './local-sessions.js';
 
-export async function checkSocket(path: string): Promise<void> {
-  const info = await stat(path);
-  if (!info.isSocket()) throw new Error('The configured inbox path is not a socket');
-  if (process.getuid && info.uid !== process.getuid()) throw new Error('The inbox belongs to another OS user');
-}
 export async function writeInbox(path: string, content: string, token?: string, timeout = 5000): Promise<DeliveryResult> {
   await checkSocket(path);
   return new Promise((resolve, reject) => {

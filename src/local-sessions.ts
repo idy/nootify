@@ -2,6 +2,8 @@ import { readFile, readdir, stat } from 'node:fs/promises';
 import { homedir, hostname } from 'node:os';
 import { join } from 'node:path';
 import type { Adapter, PublicSession } from './types.js';
+import { desktopSessionRoots } from './runtime-paths.js';
+import { checkSocket } from './inbox.js';
 
 export type Availability = 'active' | 'archived' | 'offline' | 'unknown';
 export interface LocalSession extends PublicSession { availability: Availability; socket_path?: string }
@@ -24,7 +26,7 @@ async function json(path: string): Promise<Record<string, unknown>> {
 export class LocalSessions implements SessionCatalog {
   constructor(private readonly options: { desktopRoots?: string[]; registryDir?: string } = {}) {}
   private roots(): string[] {
-    return this.options.desktopRoots ?? ['Claude-3p', 'Claude'].map(app => join(homedir(), 'Library/Application Support', app, 'claude-code-sessions'));
+    return this.options.desktopRoots ?? desktopSessionRoots();
   }
   private async desktopFolders(): Promise<string[]> {
     const folders: string[] = [];
@@ -48,8 +50,8 @@ export class LocalSessions implements SessionCatalog {
         if (!Number.isInteger(record.pid) || Number(record.pid) <= 0) continue;
         process.kill(record.pid!, 0);
         if (typeof record.messagingSocketPath !== 'string') continue;
-        const socket = await stat(record.messagingSocketPath);
-        if (socket.isSocket() && (!process.getuid || socket.uid === process.getuid())) records.push(record);
+        await checkSocket(record.messagingSocketPath);
+        records.push(record);
       } catch { /* Closed runtimes leave files behind; they are not live endpoints. */ }
     }
     return records;

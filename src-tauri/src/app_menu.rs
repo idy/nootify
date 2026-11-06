@@ -1,17 +1,37 @@
 //! The ordinary macOS application menu, with the same roles and shortcuts as Tauri's default.
+//! Windows uses the tray and in-page settings; WebView2 keeps its standard editing shortcuts.
+use tauri::AppHandle;
+#[cfg(target_os = "macos")]
 use tauri::{
     menu::{AboutMetadata, Menu, PredefinedMenuItem, Submenu},
-    AppHandle, Wry,
+    Wry,
 };
 
-use crate::language::{Locale, Text};
+use crate::language::Locale;
+#[cfg(target_os = "macos")]
+use crate::language::Text;
 
+#[cfg(target_os = "macos")]
 #[derive(Clone)]
 pub struct AppMenu {
     items: Vec<(PredefinedMenuItem<Wry>, Text)>,
     submenus: Vec<(Submenu<Wry>, Text)>,
 }
 
+#[cfg(target_os = "windows")]
+#[derive(Clone)]
+pub struct AppMenu;
+
+#[cfg(target_os = "windows")]
+impl AppMenu {
+    pub fn new(_app: &AppHandle, _locale: Locale) -> tauri::Result<Self> {
+        Ok(Self)
+    }
+
+    pub fn relocalize(&self, _locale: Locale) {}
+}
+
+#[cfg(target_os = "macos")]
 impl AppMenu {
     pub fn new(app: &AppHandle, locale: Locale) -> tauri::Result<Self> {
         let mut items = Vec::new();

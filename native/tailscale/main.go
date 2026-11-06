@@ -28,30 +28,6 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
 
-// openProcessStdin opts into the runtime poller for the parent's anonymous pipe,
-// as os.Pipe does.
-// os.Stdin starts in blocking mode, and os.Open excludes Darwin FIFOs from the
-// poller; either can make Close deadlock behind an idle read during SIGTERM.
-func openProcessStdin() (*os.File, error) {
-	info, err := os.Stdin.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if info.Mode()&(os.ModeNamedPipe|os.ModeSocket) == 0 {
-		return os.Stdin, nil
-	}
-	fd, err := syscall.Open("/dev/stdin", syscall.O_RDONLY|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
-	if err != nil {
-		return nil, err
-	}
-	// Darwin's /dev/fd duplication does not apply the Open flags to the pipe.
-	if err := syscall.SetNonblock(fd, true); err != nil {
-		syscall.Close(fd)
-		return nil, err
-	}
-	return os.NewFile(uintptr(fd), "/dev/stdin"), nil
-}
-
 func run(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Writer) int {
 	cfg, err := parseArgs(args)
 	if err != nil {
@@ -74,8 +50,7 @@ func run(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Wr
 		}
 	}
 
-	// This is a dedicated process: also protect files created by dependencies.
-	syscall.Umask(0077)
+	prepareProcess()
 	privateEnvironment()
 	log.SetOutput(io.Discard)
 	// tsnet sends its own user messages to logtail as well as UserLogf. Disable
@@ -83,9 +58,6 @@ func run(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Wr
 	logtail.Disable()
 	envknob.SetNoLogsNoSupport()
 
-	// A parent that disappears while a reply is being written should produce
-	// EPIPE and normal cleanup, rather than terminate us before Close runs.
-	signal.Ignore(syscall.SIGPIPE)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	node := &tsnetNode{server: &tsnet.Server{

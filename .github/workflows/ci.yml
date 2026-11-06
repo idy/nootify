@@ -14,8 +14,20 @@ concurrency:
 
 jobs:
   test:
-    runs-on: macos-latest
-    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+            bundles: app
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundles: nsis
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      TAURI_ENV_TARGET_TRIPLE: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -23,7 +35,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 24.22.2
           cache: npm
 
       - uses: actions/setup-go@v6
@@ -39,31 +51,39 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal --component clippy,rustfmt
           rustup default stable
+          rustup target add ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          key: ${{ matrix.target }}
 
       - run: npm ci
       - run: npm test
+      - run: npm run check
 
       - name: cargo fmt
         working-directory: src-tauri
         run: cargo fmt --check
 
-      # Real staging (as release builds do) instead of build.rs placeholders, so a broken
-      # stage script or lockfile fails here rather than at release time.
+      # Real staging validates the pinned runtime, PE/Mach-O architecture,
+      # Windows task resources, production lockfile, and embedded tsnet build.
       - name: Cache the Node.js runtime download
         uses: actions/cache@v6
         with:
           path: .cache/node
-          key: node-runtime-${{ hashFiles('scripts/stage-service.mjs') }}
+          key: node-runtime-${{ matrix.target }}-${{ hashFiles('scripts/build-targets.mjs', 'scripts/stage-service.mjs') }}
       - name: Stage the service, Node.js and embedded Tailscale
         run: node scripts/stage-service.mjs
 
       - name: cargo clippy
         working-directory: src-tauri
-        run: cargo clippy --features custom-protocol -- -D warnings
+        run: cargo clippy --target ${{ matrix.target }} --all-targets --features custom-protocol -- -D warnings
       - name: cargo test
         working-directory: src-tauri
-        run: cargo test --features custom-protocol
+        run: cargo test --target ${{ matrix.target }} --features custom-protocol
+
+      # CI has no release signing key. Build the actual app/NSIS payload so
+      # installer hooks, ICO, sidecar layout and platform config are validated.
+      - name: Build desktop bundle without updater signing
+        run: npm run desktop:build -- --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --config src-tauri/tauri.ci.conf.json --no-sign --ci

@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { DIRECTORY_FRESH_MS, DIRECTORY_MAX_AGE_MS, LarkDirectoryCache } from '../src/lark-directory-cache.js';
 import type { LarkDirectory } from '../src/lark-directory.js';
+import { assertMode } from './platform-fixtures.js';
 
 const credentials = { appId: 'cli_test', appSecret: 'test-secret-never-persist' };
 const directory: LarkDirectory = { app_id: credentials.appId, users: [{ open_id: 'ou_test', name: 'Test', nickname: 'T', avatar_url: 'https://image.feishucdn.com/avatar' }], truncated: false, permission_limited: false };
@@ -19,7 +20,7 @@ test('persists sanitized data privately across instances without credentials', a
   const source = { ...directory, users: [{ ...directory.users[0], email: 'private@example.invalid', avatar_url: 'https://example.invalid/image' }] };
   await cache.write(credentials, source);
   const stored = await readFile(file, 'utf8');
-  assert.equal((await stat(file)).mode & 0o777, 0o600);
+  await assertMode(file, 0o600);
   assert.ok(!stored.includes(credentials.appSecret)); assert.ok(!stored.includes('private@example.invalid'));
   const restored = await new LarkDirectoryCache(path, () => now).read(credentials);
   assert.deepEqual(restored, { at: now, directory: { ...directory, users: [{ open_id: 'ou_test', name: 'Test', nickname: 'T' }] } });
@@ -49,7 +50,7 @@ test('retains stale entries for the caller but rejects expired and future timest
   assert.equal(await new LarkDirectoryCache(path, () => clock).read(credentials), undefined);
 }));
 
-test('rejects malformed, oversized, excessive-user and symlink cache files', async () => fixture(async (path, file) => {
+test('rejects malformed, oversized, excessive-user and non-file cache files', async () => fixture(async (path, file) => {
   const cache = new LarkDirectoryCache(path, () => now);
   await cache.write(credentials, directory);
   const saved = JSON.parse(await readFile(file, 'utf8'));
@@ -62,17 +63,22 @@ test('rejects malformed, oversized, excessive-user and symlink cache files', asy
   await rm(file); await mkdir(file);
   assert.equal(await new LarkDirectoryCache(path, () => now).read(credentials), undefined);
   await rm(file, { recursive: true });
-  const target = join(path, 'target.json'); await writeFile(target, JSON.stringify(saved));
+}));
+
+test('rejects a symlink cache file', { skip: process.platform === 'win32' ? 'File symlinks require Windows Developer Mode; native service tests cover Windows DACLs and directory redirection' : false }, async () => fixture(async (path, file) => {
+  const cache = new LarkDirectoryCache(path, () => now); await cache.write(credentials, directory);
+  const target = join(path, 'target.json'); await writeFile(target, await readFile(file)); await rm(file);
   await symlink(target, file);
   assert.equal(await new LarkDirectoryCache(path, () => now).read(credentials), undefined);
 }));
 
-test('clear does not resurrect disk data when deleting the file temporarily fails', async t => {
-  if (process.getuid?.() === 0) { t.skip('Requires normal file permission enforcement'); return; }
+test('clear does not resurrect disk data when deleting the file temporarily fails', async () => {
   await fixture(async (path, file) => {
-    const cache = new LarkDirectoryCache(path, () => now); await cache.write(credentials, directory);
-    await chmod(path, 0o500);
-    try { await cache.clear(); } finally { await chmod(path, 0o700); }
+    let attempts = 0;
+    const cache = new LarkDirectoryCache(path, () => now, async () => { attempts++; throw Object.assign(new Error('Fixture delete denied'), { code: 'EACCES' }); });
+    await cache.write(credentials, directory);
+    await cache.clear();
+    assert.equal(attempts, 1);
     assert.ok(await readFile(file, 'utf8'));
     assert.equal(await cache.read(credentials), undefined);
   });

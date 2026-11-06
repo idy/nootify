@@ -1,7 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-#[cfg(not(target_os = "macos"))]
-compile_error!("Nootify currently supports macOS only");
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+compile_error!("Nootify desktop supports macOS and Windows");
 
 mod app_menu;
 mod language;
@@ -20,20 +20,25 @@ use std::{
 
 use language::{LanguageStore, LanguageView, Locale, Preference, Text};
 use service::{
-    check_health, health_client, menu_text, BundledService, Health, JobAction, LaunchAgent,
+    check_health, health_client, menu_text, BackgroundService, BundledService, Health, JobAction,
     SERVICE_URL,
 };
+#[cfg(target_os = "macos")]
+use tauri::RunEvent;
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::TrayIconBuilder,
     webview::{NewWindowResponse, PageLoadEvent},
-    AppHandle, Manager, RunEvent, Url, WebviewUrl, WebviewWindowBuilder, WindowEvent,
+    AppHandle, Manager, Url, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
 use update::{UpdateMenu, UpdateRequest, UpdateView};
 
 const MAIN_WINDOW: &str = "main";
 const TRAY_ID: &str = "nootify";
+#[cfg(target_os = "macos")]
 const FALLBACK_URL: &str = "tauri://localhost/index.html";
+#[cfg(target_os = "windows")]
+const FALLBACK_URL: &str = "http://tauri.localhost/index.html";
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
 
 enum Request {
@@ -130,13 +135,26 @@ fn main() {
                 .lock()
                 .expect("application menu") = Some(native_menu);
             let window_actions = app.handle().clone();
-            WebviewWindowBuilder::new(app, MAIN_WINDOW, WebviewUrl::App("index.html".into()))
-                .title("Nootify")
+            let window =
+                WebviewWindowBuilder::new(app, MAIN_WINDOW, WebviewUrl::App("index.html".into()))
+                    .title("Nootify");
+            #[cfg(target_os = "macos")]
+            let window = window
                 .title_bar_style(tauri::TitleBarStyle::Overlay)
                 .hidden_title(true)
-                .traffic_light_position(tauri::LogicalPosition::new(16.0, 28.0))
+                .traffic_light_position(tauri::LogicalPosition::new(16.0, 28.0));
+            // Windows keeps its native caption and minimize/maximize/close controls.
+            window
                 .initialization_script(initial_language.initialization_script())
-                .initialization_script(include_str!("../../desktop/titlebar.js"))
+                .initialization_script(format!(
+                    "window.__NOOTIFY_PLATFORM__ = '{}';\n{}",
+                    if cfg!(target_os = "windows") {
+                        "windows"
+                    } else {
+                        "macos"
+                    },
+                    include_str!("../../desktop/titlebar.js")
+                ))
                 .inner_size(1180.0, 760.0)
                 .min_inner_size(640.0, 420.0)
                 .center()
@@ -235,10 +253,10 @@ fn main() {
                     handle.clone(),
                     update_receiver,
                     tray_items.update.clone(),
-                    LaunchAgent::new(home.clone()),
+                    BackgroundService::new(home.clone()),
                     bundled.clone().ok().flatten(),
                 );
-                let agent = LaunchAgent::new(home);
+                let agent = BackgroundService::new(home);
                 std::thread::spawn(move || {
                     service_worker(handle, receiver, tray_items, agent, bundled)
                 });
@@ -257,16 +275,18 @@ fn main() {
         })
         .build(tauri::generate_context!())
         .expect("Cannot create Nootify desktop shell")
-        .run(|app, event| {
-            if let RunEvent::Reopen { .. } = event {
-                restore_window(app);
-                request_refresh(app);
+        .run(|_app, _event| {
+            #[cfg(target_os = "macos")]
+            if let RunEvent::Reopen { .. } = _event {
+                restore_window(_app);
+                request_refresh(_app);
             }
         });
 }
 
 fn restore_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+        #[cfg(target_os = "macos")]
         let _ = app.show();
         let _ = window.unminimize();
         let _ = window.show();
@@ -437,7 +457,7 @@ fn create_tray(app: &AppHandle) -> tauri::Result<TrayItems> {
         false,
         None::<&str>,
     )?;
-    // Enabled by render_install only while no LaunchAgent plist exists.
+    // Enabled only while the platform background service has not been installed.
     let install = MenuItem::with_id(
         app,
         "install_service",
@@ -547,11 +567,14 @@ fn create_tray(app: &AppHandle) -> tauri::Result<TrayItems> {
             current,
         ),
     };
+    let tray_icon: &[u8] = if cfg!(target_os = "windows") {
+        include_bytes!("../icons/32x32.png")
+    } else {
+        include_bytes!("../icons/tray-template.png")
+    };
     TrayIconBuilder::with_id(TRAY_ID)
-        .icon(tauri::image::Image::from_bytes(include_bytes!(
-            "../icons/tray-template.png"
-        ))?)
-        .icon_as_template(true)
+        .icon(tauri::image::Image::from_bytes(tray_icon)?)
+        .icon_as_template(cfg!(target_os = "macos"))
         .tooltip("Nootify")
         .menu(&menu)
         // Like other macOS menu-bar items, a click opens the menu; 打开 shows the window.
@@ -601,7 +624,7 @@ fn service_worker(
     app: AppHandle,
     receiver: Receiver<Request>,
     items: TrayItems,
-    agent: LaunchAgent,
+    agent: BackgroundService,
     bundled: Result<Option<BundledService>, String>,
 ) {
     let client = match health_client() {
@@ -624,7 +647,7 @@ fn service_worker(
             ActionStatus::Running(JobAction::Start),
             Text::StartService,
             || {
-                if agent.plist_present() {
+                if agent.installed() {
                     agent.request(JobAction::Start)?;
                     return Ok(Text::StartRequested);
                 }
@@ -641,7 +664,7 @@ fn service_worker(
         refresh_system_language(&app);
         let health = check_health(&client);
         render_health(&app, &items, &health);
-        render_install(&app, &items, agent.plist_present());
+        render_install(&app, &items, agent.installed());
         match receiver.recv_timeout(POLL_INTERVAL) {
             Ok(Request::Job(action)) => run_action(
                 &app,
@@ -726,13 +749,13 @@ fn render_action_items(app: &AppHandle, items: &TrayItems) {
     let _ = items.action.set_text(menu_text(&text));
 }
 
-/// 安装后台服务 is available only while no LaunchAgent plist exists; an existing one is never rewritten.
-fn render_install(app: &AppHandle, items: &TrayItems, plist_present: bool) {
+/// Installation is available only while no platform background service is registered.
+fn render_install(app: &AppHandle, items: &TrayItems, service_installed: bool) {
     let busy = app
         .state::<NativeState>()
         .action_pending
         .load(Ordering::SeqCst);
-    let _ = items.install.set_enabled(!plist_present && !busy);
+    let _ = items.install.set_enabled(!service_installed && !busy);
 }
 
 fn render_health(app: &AppHandle, items: &TrayItems, health: &Result<Health, String>) {
@@ -872,9 +895,13 @@ fn is_service_ui(url: &Url) -> bool {
 }
 
 fn is_fallback(url: &Url) -> bool {
+    let origin_matches = if cfg!(target_os = "windows") {
+        url.scheme() == "http" && url.host_str() == Some("tauri.localhost")
+    } else {
+        url.scheme() == "tauri" && url.host_str() == Some("localhost")
+    };
     no_credentials(url)
-        && url.scheme() == "tauri"
-        && url.host_str() == Some("localhost")
+        && origin_matches
         && url.port().is_none()
         // Tauri opens WebviewUrl::App("index.html") as bare `tauri://localhost`: a non-special
         // URL whose path is empty, which current WebKit passes to the policy unchanged.
@@ -949,6 +976,25 @@ fn is_feishu_permission_link(url: &Url) -> bool {
                 }))
 }
 
+#[cfg(target_os = "windows")]
+fn open_in_browser(url: &Url) {
+    use windows::{
+        core::{w, HSTRING},
+        Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
+    };
+    // URLs have already passed the fixed HTTPS allowlist. Pass the URL directly to the
+    // registered handler, with no cmd.exe, shell expansion, or executable arguments.
+    let url_text = HSTRING::from(url.as_str());
+    let result = unsafe { ShellExecuteW(None, w!("open"), &url_text, None, None, SW_SHOWNORMAL) };
+    if result.0 as isize <= 32 {
+        eprintln!(
+            "Cannot open {url}: Windows shell returned {}",
+            result.0 as isize
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn open_in_browser(url: &Url) {
     match std::process::Command::new("/usr/bin/open")
         .arg(url.as_str())
@@ -999,9 +1045,17 @@ mod tests {
             SERVICE_URL,
             "http://127.0.0.1:9417/#logs",
             FALLBACK_URL,
-            "tauri://localhost/",
+            if cfg!(target_os = "windows") {
+                "http://tauri.localhost/"
+            } else {
+                "tauri://localhost/"
+            },
             // The window's first navigation.
-            "tauri://localhost",
+            if cfg!(target_os = "windows") {
+                "http://tauri.localhost"
+            } else {
+                "tauri://localhost"
+            },
         ] {
             assert!(
                 navigation_allowed(&Url::parse(allowed).unwrap()),
@@ -1029,7 +1083,7 @@ mod tests {
 
     #[test]
     fn language_changes_only_trust_existing_native_documents() {
-        for trusted in [SERVICE_URL, FALLBACK_URL, "tauri://localhost"] {
+        for trusted in [SERVICE_URL, FALLBACK_URL] {
             assert!(trusted_document(&Url::parse(trusted).unwrap(), false));
         }
         for untrusted in [

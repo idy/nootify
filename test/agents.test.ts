@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { assertMode } from './platform-fixtures.js';
 import { test, type TestContext } from 'node:test';
 import { AgentPrompts, BEGIN, END, agentSession, promptBlock, withBlock, withoutBlock } from '../src/agents.js';
 
@@ -25,18 +26,19 @@ test('the block is appended and removed again without touching the rest of the p
   assert.equal(enabled.status, 'current'); assert.equal(enabled.injected, true);
   const written = await readFile(f.files.claude, 'utf8');
   assert.ok(written.startsWith(`${original}\n${BEGIN}`)); assert.ok(written.endsWith(`${END}\n`));
-  assert.match(written, /`\/opt\/nootify\/node \/opt\/nootify\/cli\.js thread-open --agent claude --session-name "<short task title>" --state-dir /);
+  const command = process.platform === 'win32' ? "& '/opt/nootify/node' '/opt/nootify/cli.js'" : '/opt/nootify/node /opt/nootify/cli.js';
+  assert.ok(written.includes(`\`${command} thread-open --agent claude --session-name "<short task title>" --state-dir `));
   assert.match(written, /independent Tailscale device \(`http:\/\/100\.64\.0\.7\/`\)/);
-  assert.match(written, /does not expose this Mac's previews, files, or other ports/);
+  assert.match(written, /does not expose this (?:Mac|computer)'s previews, files, or other ports/);
   assert.ok(!written.includes("this Mac's Tailscale address"));
-  assert.equal((await stat(f.files.claude)).mode & 0o777, 0o640, 'the file mode is kept');
+  await assertMode(f.files.claude, 0o640, 'the file write mode is kept');
   assert.equal((await f.agents.set('claude', true)).status, 'current', 'enabling again changes nothing');
   assert.equal((await f.agents.set('claude', false)).status, 'absent');
   assert.equal(await readFile(f.files.claude, 'utf8'), original);
   const backups = (await readdir(join(f.state, 'agent-backups'))).sort();
   assert.equal(backups.length, 2, 'one backup per change, none for the no-op');
   assert.equal(await readFile(join(f.state, 'agent-backups', backups[0]), 'utf8'), original);
-  assert.equal((await stat(join(f.state, 'agent-backups', backups[0]))).mode & 0o777, 0o600);
+  await assertMode(join(f.state, 'agent-backups', backups[0]), 0o600);
   assert.deepEqual(f.reports.map(record => record.status), ['prompt_injected', 'prompt_removed']);
   const list = await f.agents.list();
   assert.deepEqual(list.map(agent => [agent.agent, agent.status]), [['claude', 'absent'], ['codex', 'absent'], ['opencode', 'missing']]);
@@ -60,7 +62,7 @@ test('outdated blocks are refreshed in place and unbalanced markers are never ed
   await assert.rejects(stat(f.files.opencode), /ENOENT/);
   assert.equal((await f.agents.set('opencode', true)).status, 'current');
   assert.ok((await readFile(f.files.opencode, 'utf8')).includes('--agent opencode'));
-  assert.equal((await stat(join(f.root, 'missing', 'opencode'))).mode & 0o777, 0o700);
+  await assertMode(join(f.root, 'missing', 'opencode'), 0o700);
 });
 
 test('a file created for the block is removed with it; symlinked prompt files keep their link', async t => {
@@ -70,9 +72,12 @@ test('a file created for the block is removed with it; symlinked prompt files ke
   await f.agents.set('codex', false);
   await assert.rejects(stat(f.files.codex), /ENOENT/);
   const target = join(f.root, 'dotfiles', 'CLAUDE.md');
-  await mkdir(join(f.root, 'dotfiles')); await writeFile(target, 'shared\n'); await symlink(target, f.files.claude);
+  await mkdir(join(f.root, 'dotfiles')); await writeFile(target, 'shared\n');
+  const link = process.platform === 'win32' ? dirname(f.files.claude) : f.files.claude;
+  if (process.platform === 'win32') { await rm(link, { recursive: true }); await symlink(dirname(target), link, 'junction'); }
+  else await symlink(target, link);
   await f.agents.set('claude', true);
-  assert.ok((await lstat(f.files.claude)).isSymbolicLink());
+  assert.ok((await lstat(link)).isSymbolicLink());
   assert.ok((await readFile(target, 'utf8')).startsWith(`shared\n\n${BEGIN}`));
 });
 
@@ -81,13 +86,14 @@ test('agents sharing one prompt target cannot overwrite each other\'s commands',
   await writeFile(f.files.claude, 'shared instructions\n');
   await f.agents.set('claude', true);
   const before = await readFile(f.files.claude, 'utf8');
-  await symlink(f.files.claude, f.files.codex);
-  await assert.rejects(f.agents.set('codex', true), /share the same prompt file/);
+  const shared = process.platform === 'win32' ? new AgentPrompts({ stateDir: f.state, port: 9417, files: { ...f.files, codex: f.files.claude } }) : f.agents;
+  if (process.platform !== 'win32') await symlink(f.files.claude, f.files.codex);
+  await assert.rejects(shared.set('codex', true), /share the same prompt file/);
   assert.equal(await readFile(f.files.claude, 'utf8'), before);
-  assert.ok((await lstat(f.files.codex)).isSymbolicLink());
+  if (process.platform !== 'win32') assert.ok((await lstat(f.files.codex)).isSymbolicLink());
   assert.equal((await readdir(join(f.state, 'agent-backups'))).length, 1, 'the rejected write makes no new backup');
   await f.agents.set('claude', false);
-  assert.equal(await readFile(f.files.codex, 'utf8'), 'shared instructions\n', 'removing a block remains possible');
+  assert.equal(await readFile(process.platform === 'win32' ? f.files.claude : f.files.codex, 'utf8'), 'shared instructions\n', 'removing a block remains possible');
 });
 
 test('switching the notification channel marks existing prompts outdated and pins new commands to that channel', async t => {
@@ -114,7 +120,8 @@ test('sessions come from each client\'s variables; commands quote paths and name
   assert.deepEqual(agentSession('codex', { CODEX_THREAD_ID: 't1' }), { adapter: 'codex', session_id: 't1' });
   assert.deepEqual(agentSession('codex', {}), { adapter: 'codex', session_id: undefined });
   const block = promptBlock('opencode', { stateDir: '/x/state dir', port: 9500, command: ['/a b/node', '/c/cli.js'] });
-  assert.ok(block.includes("`'/a b/node' /c/cli.js thread-open --agent opencode --session-id <this ses_… session ID> --session-name \"<short task title>\" --state-dir '/x/state dir' --port 9500`"));
+  const command = process.platform === 'win32' ? "& '/a b/node' '/c/cli.js'" : "'/a b/node' /c/cli.js";
+  assert.ok(block.includes(`\`${command} thread-open --agent opencode --session-id <this ses_… session ID> --session-name "<short task title>" --state-dir '/x/state dir' --port 9500\``));
   assert.ok(!block.includes('Tailscale address ('));
   const marked = `${BEGIN}\nx\n${END}`;
   assert.equal(withoutBlock(withBlock('no final newline', marked)), 'no final newline\n');

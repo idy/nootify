@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { assertMode } from './platform-fixtures.js';
 import { once } from 'node:events';
 import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import type { AddressInfo } from 'node:net';
@@ -102,7 +103,7 @@ test('a device login shows the code, keeps the token private and refreshes after
   assert.deepEqual(auth.login(), { status: 'idle' });
   assert.deepEqual(await auth.account(), { signedIn: true, login: 'octo' });
   assert.equal((await State.open(dir)).settings.github_token, github.token);
-  assert.equal((await stat(join(dir, 'state.json'))).mode & 0o777, 0o600);
+  await assertMode(join(dir, 'state.json'), 0o600);
   assert.deepEqual(reports.map(record => record.status), ['github_login']);
   assert.ok(!JSON.stringify(reports).includes(github.token));
 });
@@ -205,7 +206,7 @@ test('Feishu credentials are verified before they replace the running bot', asyn
   assert.equal(configured.length, 2, 'an explicit save retains the secret and reconnects even unchanged credentials');
   await assert.rejects(settings.saveLark('cli_fedcba9876543210', ''), /App Secret/, 'another app never inherits this secret');
   assert.equal((await State.open(dir)).settings.lark_app_secret, 'right-secret');
-  assert.equal((await stat(join(dir, 'state.json'))).mode & 0o777, 0o600);
+  await assertMode(join(dir, 'state.json'), 0o600);
 });
 
 test('Feishu requires both credentials before Settings can report a connection', async t => {
@@ -387,8 +388,8 @@ test('an export keeps its secrets in a private file and keeps only the newest te
   state.backends.set('opencode', { url: 'http://127.0.0.1:4096', password: 'backend-secret' });
   const { path, summary } = await settings.exportConfig();
   assert.ok(!(await readFile(path, 'utf8')).includes('gho_stays-here'), 'the GitHub sign-in is not part of an export');
-  assert.equal((await stat(path)).mode & 0o777, 0o600);
-  assert.equal((await stat(dirname(path))).mode & 0o777, 0o700);
+  await assertMode(path, 0o600);
+  await assertMode(dirname(path), 0o700);
   const file = JSON.parse(await readFile(path, 'utf8'));
   assert.deepEqual([file.format, file.version], ['nootify-config', 1]);
   assert.deepEqual(file.lark, { app_id: appId, app_secret: 'export-secret', recipient_open_id: 'ou_owner' });
@@ -425,9 +426,9 @@ test('an exported file restores another installation, after a preview that chang
   assert.deepEqual(reopened.settings, { lark_recipient_open_id: 'ou_owner', lark_app_id: appId, lark_app_secret: 'export-secret' });
   assert.equal(reopened.backends.get('opencode')?.password, 'backend-secret');
   assert.deepEqual(JSON.parse(await readFile(join(target.dir, 'pulls.config.json'), 'utf8')), { ownedOwners: ['acme'] });
-  assert.equal((await stat(join(target.dir, 'pulls.config.json'))).mode & 0o777, 0o600);
+  await assertMode(join(target.dir, 'pulls.config.json'), 0o600);
   assert.deepEqual(await target.pulls.preferences(), { config: { ownedOwners: ['acme'] }, follow: [{ repository: 'acme/widgets', follow: true }] });
-  assert.equal((await stat(join(target.dir, 'repo-preferences.json'))).mode & 0o777, 0o600);
+  await assertMode(join(target.dir, 'repo-preferences.json'), 0o600);
 });
 
 test('a file that fails validation changes nothing, even with a valid section first', async t => {

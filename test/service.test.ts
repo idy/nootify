@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { createServer as createHttpServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -18,6 +18,7 @@ import { ApiError, assertMetadata, bindingToken, ensureAnnouncement, ensureBindi
 import type { LarkApi } from '../src/lark-metadata.js';
 import type { RemoteBinding, ServiceModule } from '../src/types.js';
 import type { SessionCatalog } from '../src/local-sessions.js';
+import { assertMode, inboxPath } from './platform-fixtures.js';
 
 function catalogFor(state: State): SessionCatalog {
   return {
@@ -39,7 +40,7 @@ async function temporary(t: TestContext): Promise<string> {
   t.after(() => rm(dir, { recursive: true, force: true })); return dir;
 }
 async function inbox(t: TestContext, dir: string): Promise<{ path: string; messages: string[] }> {
-  const path = join(dir, 'inbox.sock');
+  const path = inboxPath(dir);
   const messages: string[] = [];
   const server = createServer(socket => { socket.setEncoding('utf8'); socket.on('data', data => messages.push(data.toString())); socket.on('end', () => socket.end()); });
   server.listen(path); await once(server, 'listening'); t.after(() => server.close()); return { path, messages };
@@ -122,8 +123,8 @@ test('private state persists registrations across restarts and omits credentials
   assert.equal(reopened.token, state.token);
   assert.ok(!JSON.stringify(reopened.publicSessions()).includes('private-test-token'));
   assert.ok(!JSON.stringify(reopened.publicSessions()).includes('socket_path'));
-  assert.equal((await stat(join(dir, 'state.json'))).mode & 0o777, 0o600);
-  assert.equal((await stat(join(dir, 'auth-token'))).mode & 0o777, 0o600);
+  await assertMode(join(dir, 'state.json'), 0o600);
+  await assertMode(join(dir, 'auth-token'), 0o600);
 });
 
 test('inbox frames carry the real registered token without asserting a permission mode', async t => {

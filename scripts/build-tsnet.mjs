@@ -1,6 +1,7 @@
 // Builds the independent user-space Tailscale node shipped beside the bundled Node.js runtime.
 import { execFile } from 'node:child_process';
 import { sha256, verifyExecutable } from './bundle-utils.mjs';
+import { buildTarget, sidecarName } from './build-targets.mjs';
 import { chmod, mkdir, readFile, readdir, rename, rm, stat } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -8,9 +9,9 @@ import { promisify } from 'node:util';
 const run = promisify(execFile);
 const root = fileURLToPath(new URL('../', import.meta.url));
 const source = join(root, 'native', 'tailscale');
-const binary = join(root, 'src-tauri', 'binaries', 'nootify-tsnet-aarch64-apple-darwin');
-const env = { ...process.env, GOOS: 'darwin', GOARCH: 'arm64', CGO_ENABLED: '0' };
-export async function buildTsnet() {
+export async function buildTsnet(target = buildTarget()) {
+  const binary = join(root, 'src-tauri', 'binaries', sidecarName('nootify-tsnet', target));
+  const env = { ...process.env, GOOS: target.goos, GOARCH: target.goarch, CGO_ENABLED: '0' };
   await mkdir(dirname(binary), { recursive: true });
   const temporary = `${binary}.partial`;
   try {
@@ -19,9 +20,7 @@ export async function buildTsnet() {
     await run('go', ['build', '-mod=readonly', '-trimpath', '-buildvcs=false', `-ldflags=-s -w -X=main.tailscaleVersion=${version}`, '-o', temporary, '.'], { cwd: source, env, maxBuffer: 16 << 20 });
     const same = await sha256(binary).then(async current => current === await sha256(temporary)).catch(() => false);
     if (!same) { await chmod(temporary, 0o755); await rename(temporary, binary); }
-    if (process.platform === 'darwin' && process.arch === 'arm64') {
-      await verifyExecutable(binary, `nootify-tsnet ${version.replace(/^v/, '')}`);
-    }
+    await verifyExecutable(binary, `nootify-tsnet ${version.replace(/^v/, '')}`, target);
     // Ship dependency attribution together with the helper. No credentials or Go cache paths are included.
     const { stdout } = await run('go', ['list', '-deps', '-mod=readonly', '-f', '{{with .Module}}{{.Path}}\t{{.Version}}\t{{.Dir}}{{end}}', '.'], { cwd: source, env, maxBuffer: 4 << 20 });
     const licenses = [];

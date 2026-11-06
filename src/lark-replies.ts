@@ -4,10 +4,10 @@ import type { LarkApi } from './lark-metadata.js';
 import type { State } from './state.js';
 import { HttpError } from './types.js';
 import type { LarkDelivery, LarkReceipt, LarkReply } from './types.js';
+import { shellCommand, shellQuote } from './shell.js';
 
-const shellQuote = (value: string): string => `'${value.replace(/'/g, `'"'"'`)}'`;
 export function forwardedLarkMessage(delivery: LarkDelivery, content: string, stateDir: string, port = 9417): string {
-  const command = [process.execPath, fileURLToPath(new URL('./cli.js', import.meta.url))].map(shellQuote).join(' ');
+  const command = shellCommand([process.execPath, fileURLToPath(new URL('./cli.js', import.meta.url))]);
   const context = `--state-dir ${shellQuote(stateDir)} --port ${port} --message-id ${shellQuote(delivery.message_id)}`;
   return [
     '【来自飞书用户的消息】',

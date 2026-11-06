@@ -20,7 +20,7 @@ use tauri_plugin_updater::{Update, UpdaterExt};
 
 use crate::{
     language::{Locale, Text},
-    service::{menu_text, BundledService, LaunchAgent},
+    service::{menu_text, BackgroundService, BundledService},
     NativeState, MAIN_WINDOW,
 };
 
@@ -274,7 +274,7 @@ pub fn spawn(
     app: AppHandle,
     requests: Receiver<UpdateRequest>,
     menu: UpdateMenu,
-    agent: LaunchAgent,
+    agent: BackgroundService,
     bundled: Option<BundledService>,
 ) {
     let current = app.package_info().version.to_string();
@@ -293,7 +293,7 @@ pub fn spawn(
 struct Worker {
     app: AppHandle,
     menu: UpdateMenu,
-    agent: LaunchAgent,
+    agent: BackgroundService,
     bundled: Option<BundledService>,
     current: String,
     pending: Option<Update>,

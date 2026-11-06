@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { PullRequestsService, type PullRequest, type PullSnapshot } from '../src/github.js';
 import { GitHubCommands, GitHubSignedOut, loadPullConfig, parsePullConfig, type PullCollection, type PullTargets } from '../src/github-api.js';
 import { classifyPull, comparePulls, normalizePull, parseGitHubRemote, type GitHubPull } from '../src/github-model.js';
+import { assertMode } from './platform-fixtures.js';
 
 const date = '2026-10-01T00:00:00Z';
 const pull = (number: number, overrides: Partial<GitHubPull> = {}): GitHubPull => ({
@@ -30,7 +31,7 @@ async function settled(service: PullRequestsService): Promise<PullSnapshot> { aw
 async function fixture(t: TestContext) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'nootify-pulls-'))); const directory = join(root, 'state'); await mkdir(directory);
   const checkout = join(root, 'checkout'); await mkdir(checkout);
-  const git = (...args: string[]) => execFileSync('/usr/bin/git', ['-C', checkout, ...args], { stdio: 'ignore' });
+  const git = (...args: string[]) => execFileSync(process.platform === 'darwin' ? '/usr/bin/git' : 'git', ['-C', checkout, ...args], { stdio: 'ignore', windowsHide: true });
   git('init', '-q'); git('remote', 'add', 'origin', 'https://github.com/viewer/active.git');
   git('remote', 'add', 'upstream', 'https://github.com/External/Upstream.git');
   const desktop = join(root, 'desktop/account/profile'); await mkdir(desktop, { recursive: true });
@@ -107,6 +108,7 @@ test('configuration reads state and explicit paths without changing owner/author
   const override = await loadPullConfig(f.directory);
   assert.deepEqual(override.config.ownedOwners, ['OtherOrg']); assert.match(override.warnings[0], /every 5 minutes/);
   assert.throws(() => parsePullConfig({ authors: ['bad login'] }), /GitHub logins/);
+  assert.deepEqual(parsePullConfig({ scanRoots: ['~/Repos', '~\\Repos'] }).scanRoots, [join(homedir(), 'Repos')]);
 });
 
 test('subscriptions come from session PRs and checkout repos, with exact source sessions on every PR', async t => {
@@ -136,7 +138,7 @@ test('follow choices persist, filter scoped data, and refresh query targets', as
   assert.deepEqual(f.service.snapshot().internal, []);
   assert.ok(!f.calls.at(-1)!.repositories.includes('viewer/active'));
   assert.ok(!f.calls.at(-1)!.pulls.some(pull => pull.repository === 'viewer/active'));
-  assert.equal((await stat(join(f.directory, 'repo-preferences.json'))).mode & 0o777, 0o600);
+  await assertMode(join(f.directory, 'repo-preferences.json'), 0o600);
   await f.service.stop(); await f.service.start(); await settled(f.service);
   assert.equal(f.service.repositories().find(entry => entry.repository === 'viewer/active')?.choice, 'mute');
   assert.equal((await f.service.setChoice('viewer/active', true)).choice, undefined);
@@ -152,7 +154,7 @@ test('refresh is coalesced and failure retains the last session-scoped snapshot 
   assert.equal(response?.status, 202); const good = await settled(f.service); assert.equal(f.calls.length, 1);
   await f.service.stop();
   const cache = await readFile(join(f.directory, 'pulls-cache.json'), 'utf8');
-  assert.equal((await stat(join(f.directory, 'pulls-cache.json'))).mode & 0o777, 0o600);
+  await assertMode(join(f.directory, 'pulls-cache.json'), 0o600);
   await f.service.stop(); f.setBehavior(async () => { throw new Error('HTTP 403 ghp_fakePrivateToken'); });
   await f.service.start(); const failed = await settled(f.service);
   assert.deepEqual(failed.internal, good.internal); assert.equal(f.service.status(), 'stale');

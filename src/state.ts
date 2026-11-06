@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
+import { serviceStateDir } from './runtime-paths.js';
 import { join } from 'node:path';
 import type { Adapter, BackendConnection, LarkBinding, LarkDelivery, PublicSession, SessionRecord } from './types.js';
 import { HttpError } from './types.js';
@@ -12,7 +12,7 @@ export interface Settings {
   notification_channel?: NotificationChannel; slack?: SlackConfig; telegram?: TelegramConfig;
 }
 interface StoredState { version: 1; sessions: SessionRecord[]; lark_bindings: LarkBinding[]; backends?: [Adapter, BackendConnection][]; lark_deliveries?: LarkDelivery[]; chat_bindings?: ChatBinding[]; chat_deliveries?: ChatDelivery[]; settings?: Settings }
-export const defaultStateDir = () => join(homedir(), '.local/state/nootify');
+export const defaultStateDir = () => serviceStateDir();
 export class State {
   readonly sessions = new Map<string, SessionRecord>();
   readonly bindings = new Map<string, LarkBinding>();

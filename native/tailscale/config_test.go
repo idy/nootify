@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -120,10 +121,12 @@ func TestPrepareStateDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer lock.Close()
-	for path, want := range map[string]os.FileMode{root: 0700, file: 0600, filepath.Join(root, stateLockName): 0600} {
-		stat, err := os.Stat(path)
-		if err != nil || stat.Mode().Perm() != want {
-			t.Fatalf("permissions %s: %v, %v", path, stat, err)
+	if runtime.GOOS != "windows" {
+		for path, want := range map[string]os.FileMode{root: 0700, file: 0600, filepath.Join(root, stateLockName): 0600} {
+			stat, err := os.Stat(path)
+			if err != nil || stat.Mode().Perm() != want {
+				t.Fatalf("permissions %s: %v, %v", path, stat, err)
+			}
 		}
 	}
 	data, err := os.ReadFile(file)
@@ -133,6 +136,9 @@ func TestPrepareStateDir(t *testing.T) {
 }
 
 func TestPrepareStateDirRejectsLinksWithoutChangingTargets(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows link and DACL invariants are covered by state_windows_test.go")
+	}
 	for _, kind := range []string{"root-symlink", "root-symlink-slash", "directory-symlink", "file-symlink", "hardlink", "lock-symlink", "lock-hardlink"} {
 		t.Run(kind, func(t *testing.T) {
 			base := t.TempDir()

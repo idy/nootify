@@ -1,11 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { shellCommand, shellQuote as quote } from './shell.js';
 import type { State } from './state.js';
 import type { SessionsService } from './sessions.js';
 import { HttpError, SessionUnavailable, identifier, isAdapter, object, text, type Adapter, type RouteRequest, type RouteResponse, type ServiceModule, type ThreadInfo, type ThreadMessage } from './types.js';
 import { ChatTransportError, isNotificationChannel, validChatConfig, type ChatBinding, type ChatChannel, type ChatConfigs, type ChatDelivery, type ChatFactory, type ChatMessage, type ChatSettingsPage, type ChatDirectory, type ChatTransport } from './chat-transport.js';
 
-const quote = (value: string): string => `'${value.replace(/'/g, `'"'"'`)}'`;
 const providerName = (channel: ChatChannel): string => channel === 'slack' ? 'Slack' : 'Telegram';
 const bindingKey = (binding: { identity: string; chat_id: string; thread_id: string }): string => JSON.stringify([binding.identity, binding.chat_id, binding.thread_id]);
 const messageKey = (channel: ChatChannel, identity: string, message: { chat_id: string; message_id: string }): string => JSON.stringify([channel, identity, message.chat_id, message.message_id]);
@@ -17,7 +17,7 @@ const validText = (value: unknown): string => {
 
 export function forwardedChatMessage(delivery: ChatDelivery, content: string, directory: string, port: number): string {
   const name = providerName(delivery.channel);
-  const command = [process.execPath, fileURLToPath(new URL('./cli.js', import.meta.url))].map(quote).join(' ');
+  const command = shellCommand([process.execPath, fileURLToPath(new URL('./cli.js', import.meta.url))]);
   const args = `--state-dir ${quote(directory)} --port ${port} --message-id ${quote(delivery.id)}`;
   return [
     `【来自${name}用户的消息】`,

@@ -12,6 +12,7 @@ import { SessionsService } from '../src/sessions.js';
 import { LarkService } from '../src/lark.js';
 import { parseAnnouncement } from '../src/lark-metadata.js';
 import type { LarkApi } from '../src/lark-metadata.js';
+import { inboxPath } from './platform-fixtures.js';
 
 const id = 'local_12345678-1234-1234-1234-123456789abc';
 const marker = `agent-session:v1:${hostname()}:claude-desktop:${id}`;
@@ -28,7 +29,7 @@ test('Desktop discovery reads actual archive state every time and rejects stale 
   t.after(() => rm(dir, { recursive: true, force: true }));
   const root = join(dir, 'desktop'); const profile = join(root, 'account/profile'); const registry = join(dir, 'sessions');
   await mkdir(profile, { recursive: true }); await mkdir(registry);
-  const socket = join(dir, 'live.sock'); const server = createServer(connection => connection.end());
+  const socket = inboxPath(dir, 'live'); const server = createServer(connection => connection.end());
   server.listen(socket); await once(server, 'listening'); t.after(() => server.close());
   const path = join(profile, `${id}.json`);
   const metadata = { sessionId: id, cliSessionId: 'runtime-test', title: 'Real local session', isArchived: false };
@@ -53,7 +54,7 @@ test('Desktop discovery reads actual archive state every time and rejects stale 
 test('announcement routing needs no manual group mapping and logs archive, local and offline decisions', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'ws-route-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
-  const socket = join(dir, 'inbox.sock'); const received: string[] = [];
+  const socket = inboxPath(dir); const received: string[] = [];
   const server = createServer(connection => {
     connection.on('data', data => received.push(data.toString())); connection.on('end', () => connection.end());
   });

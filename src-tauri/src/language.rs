@@ -2,12 +2,17 @@
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
-    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+
+#[cfg(target_os = "macos")]
 use objc2::{MainThreadMarker, MainThreadOnly};
+#[cfg(target_os = "macos")]
 use objc2_foundation::{NSLocale, NSString};
+#[cfg(target_os = "macos")]
 use objc2_web_kit::{WKUserContentController, WKUserScript, WKUserScriptInjectionTime};
 use serde::{Deserialize, Serialize};
 use tauri::{Url, WebviewWindow};
@@ -45,12 +50,55 @@ impl Locale {
     }
 }
 
+#[cfg(target_os = "macos")]
 pub fn system_locale() -> Locale {
     NSLocale::preferredLanguages()
         .firstObject()
         .map_or(Locale::English, |language| {
             Locale::resolve(&language.to_string())
         })
+}
+
+#[cfg(target_os = "windows")]
+pub fn system_locale() -> Locale {
+    use windows::{
+        core::PWSTR,
+        Win32::Globalization::{
+            GetUserDefaultLocaleName, GetUserPreferredUILanguages, MUI_LANGUAGE_NAME,
+        },
+    };
+
+    // Match macOS's preferred UI language, rather than the user's date/number formatting locale.
+    // Windows returns a double-NUL-terminated list in preference order; only its first entry wins.
+    unsafe {
+        let mut count = 0;
+        let mut length = 0;
+        if GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &mut count, None, &mut length).is_ok()
+            && length > 0
+        {
+            let mut names = vec![0u16; length as usize];
+            if GetUserPreferredUILanguages(
+                MUI_LANGUAGE_NAME,
+                &mut count,
+                Some(PWSTR(names.as_mut_ptr())),
+                &mut length,
+            )
+            .is_ok()
+            {
+                let first = names.split(|unit| *unit == 0).next().unwrap_or_default();
+                if !first.is_empty() {
+                    return Locale::resolve(&String::from_utf16_lossy(first));
+                }
+            }
+        }
+        // LOCALE_NAME_MAX_LENGTH, including the terminating NUL.
+        let mut name = [0u16; 85];
+        let length = GetUserDefaultLocaleName(&mut name);
+        if length > 1 {
+            return Locale::resolve(&String::from_utf16_lossy(&name[..length as usize - 1]));
+        }
+    }
+    Locale::English
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -75,9 +123,36 @@ impl LanguageView {
 
     /// Runs at document start, before the service page's JavaScript reads its language.
     pub fn initialization_script(self) -> String {
+        #[cfg(target_os = "windows")]
+        {
+            self.windows_seed_script()
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            format!(
+                "{SCRIPT_MARKER}window.__NOOTIFY_LANGUAGE__ = {};\n{}",
+                serde_json::to_string(&self).expect("language state serializes"),
+                include_str!("../../desktop/offline.js")
+            )
+        }
+    }
+
+    // WebView2 does not expose the IDs of scripts added by Tauri's builder. Keep that immutable
+    // script as a seed and own at most one replaceable override. Either execution order is safe.
+    #[cfg(any(target_os = "windows", test))]
+    fn windows_seed_script(self) -> String {
         format!(
-            "{SCRIPT_MARKER}window.__NOOTIFY_LANGUAGE__ = {};\n{}",
+            "{SCRIPT_MARKER}if (window === window.top && !window.__NOOTIFY_LANGUAGE__) {{\nwindow.__NOOTIFY_LANGUAGE__ = {};\n{}\n}}",
             serde_json::to_string(&self).expect("language state serializes"),
+            include_str!("../../desktop/offline.js")
+        )
+    }
+
+    #[cfg(any(target_os = "windows", test))]
+    fn windows_override_script(self, revision: u64) -> String {
+        format!(
+            "{SCRIPT_MARKER}if (window === window.top && (window.__NOOTIFY_LANGUAGE_REVISION__ || 0) < {revision}) {{\nwindow.__NOOTIFY_LANGUAGE_REVISION__ = {revision};\n{}\n{}\n}}",
+            self.script(),
             include_str!("../../desktop/offline.js")
         )
     }
@@ -93,6 +168,7 @@ impl LanguageView {
 
 /// Replace only our document-start script. Preserving the other WKUserScripts keeps Tauri's
 /// security setup and the titlebar bridge intact; app preferences never touch web storage.
+#[cfg(target_os = "macos")]
 pub fn refresh_initialization(window: &WebviewWindow, view: LanguageView) -> tauri::Result<()> {
     let source = view.initialization_script();
     window.with_webview(move |platform| {
@@ -124,6 +200,173 @@ pub fn refresh_initialization(window: &WebviewWindow, view: LanguageView) -> tau
             }
         }
     })
+}
+
+#[cfg(target_os = "windows")]
+pub use windows_initialization::{
+    ready as initialization_ready, refresh as refresh_initialization,
+};
+
+#[cfg(any(target_os = "windows", test))]
+mod windows_initialization {
+    #[derive(Default)]
+    struct Registration {
+        revision: u64,
+        completed_revision: u64,
+        current: Option<String>,
+        obsolete: Vec<String>,
+    }
+
+    impl Registration {
+        fn next_revision(&mut self) -> u64 {
+            self.revision += 1;
+            self.revision
+        }
+
+        fn ready(&self) -> bool {
+            self.completed_revision == self.revision
+        }
+
+        fn complete(&mut self, revision: u64, id: String) -> Vec<String> {
+            if revision == self.revision {
+                self.completed_revision = revision;
+                if let Some(previous) = self.current.replace(id) {
+                    self.obsolete.push(previous);
+                }
+            } else {
+                // A newer preference was requested while WebView2 was registering this script.
+                self.obsolete.push(id);
+            }
+            std::mem::take(&mut self.obsolete)
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[derive(Default)]
+    struct Scripts(std::sync::Mutex<std::collections::HashMap<String, Registration>>);
+
+    #[cfg(target_os = "windows")]
+    pub fn ready(window: &super::WebviewWindow) -> bool {
+        use tauri::Manager;
+        window.try_state::<Scripts>().is_none_or(|scripts| {
+            scripts
+                .0
+                .lock()
+                .expect("language initialization scripts")
+                .get(window.label())
+                .is_none_or(Registration::ready)
+        })
+    }
+
+    /// Remove only IDs received from our own registrations. Tauri's immutable initialization
+    /// scripts, including its security setup and the titlebar bridge, are never enumerated or reset.
+    #[cfg(target_os = "windows")]
+    pub fn refresh(window: &super::WebviewWindow, view: super::LanguageView) -> tauri::Result<()> {
+        use tauri::Manager;
+        use webview2_com::AddScriptToExecuteOnDocumentCreatedCompletedHandler;
+        use windows::core::HSTRING;
+
+        let app = window.app_handle().clone();
+        app.manage(Scripts::default());
+        let label = window.label().to_owned();
+        window.with_webview(move |platform| {
+            // SAFETY: Tauri provides the live WebView2 controller on its owning UI thread.
+            let result = unsafe {
+                (|| -> windows::core::Result<()> {
+                    let webview = platform.controller().CoreWebView2()?;
+                    let revision = app
+                        .state::<Scripts>()
+                        .0
+                        .lock()
+                        .expect("language initialization scripts")
+                        .entry(label.clone())
+                        .or_default()
+                        .next_revision();
+                    let source = HSTRING::from(view.windows_override_script(revision));
+                    let completed_app = app.clone();
+                    let completed_webview = webview.clone();
+                    let callback = AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(
+                        Box::new(move |result, id| {
+                            if let Err(error) = result {
+                                eprintln!("Cannot register document language: {error}");
+                                return Err(error);
+                            }
+                            let obsolete = completed_app
+                                .state::<Scripts>()
+                                .0
+                                .lock()
+                                .expect("language initialization scripts")
+                                .entry(label.clone())
+                                .or_default()
+                                .complete(revision, id);
+                            for id in obsolete {
+                                if let Err(error) = completed_webview
+                                    .RemoveScriptToExecuteOnDocumentCreated(&HSTRING::from(&id))
+                                {
+                                    // Retain failed removals so the next refresh can retry them.
+                                    completed_app
+                                        .state::<Scripts>()
+                                        .0
+                                        .lock()
+                                        .expect("language initialization scripts")
+                                        .entry(label.clone())
+                                        .or_default()
+                                        .obsolete
+                                        .push(id);
+                                    eprintln!("Cannot remove previous document language: {error}");
+                                }
+                            }
+                            Ok(())
+                        }),
+                    );
+                    webview.AddScriptToExecuteOnDocumentCreated(&source, &callback)
+                })()
+            };
+            if let Err(error) = result {
+                eprintln!("Cannot refresh document language: {error}");
+            }
+        })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::Registration;
+
+        #[test]
+        fn completed_refreshes_keep_only_the_current_owned_script() {
+            let mut registration = Registration::default();
+            assert!(registration.ready());
+            let first = registration.next_revision();
+            assert!(!registration.ready());
+            assert!(registration.complete(first, "language-1".into()).is_empty());
+            assert!(registration.ready());
+            let second = registration.next_revision();
+            assert_eq!(
+                registration.complete(second, "language-2".into()),
+                ["language-1"]
+            );
+            assert_eq!(registration.current.as_deref(), Some("language-2"));
+            assert!(registration.obsolete.is_empty());
+        }
+
+        #[test]
+        fn an_out_of_order_completion_cannot_replace_a_newer_preference() {
+            let mut registration = Registration::default();
+            let older = registration.next_revision();
+            let newer = registration.next_revision();
+            assert!(registration.complete(newer, "newer".into()).is_empty());
+            assert_eq!(registration.complete(older, "older".into()), ["older"]);
+            assert_eq!(registration.current.as_deref(), Some("newer"));
+
+            registration.obsolete.push("retry-removal".into());
+            let latest = registration.next_revision();
+            assert_eq!(
+                registration.complete(latest, "latest".into()),
+                ["retry-removal", "newer"]
+            );
+            assert_eq!(registration.current.as_deref(), Some("latest"));
+        }
+    }
 }
 
 /// Exact fixed requests only: no credentials, port, query, fragment, escaping, or extra path.
@@ -211,11 +454,11 @@ fn write_preference(path: &Path, preference: Preference) -> io::Result<()> {
         .ok_or_else(|| io::Error::other("app config directory is missing"))?;
     fs::create_dir_all(parent)?;
     let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&temporary)?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(&temporary)?;
     let result = (|| {
         file.write_all(&serde_json::to_vec(&Settings { preference })?)?;
         file.write_all(b"\n")?;
@@ -249,14 +492,14 @@ fn interpolate(template: &str, values: &[(&str, &str)]) -> String {
 }
 
 macro_rules! catalog {
-    ($($key:ident => ($en:literal, $zh:literal)),+ $(,)?) => {
+    ($($(#[$attribute:meta])* $key:ident => ($en:literal, $zh:literal)),+ $(,)?) => {
         #[derive(Clone, Copy, Debug)]
-        pub enum Text { $($key),+ }
+        pub enum Text { $($(#[$attribute])* $key),+ }
         impl Locale {
             pub fn text(self, key: Text) -> &'static str {
                 match (self, key) {
-                    $((Self::English, Text::$key) => $en,
-                      (Self::Chinese, Text::$key) => $zh),+
+                    $($(#[$attribute])* (Self::English, Text::$key) => $en,
+                      $(#[$attribute])* (Self::Chinese, Text::$key) => $zh),+
                 }
             }
         }
@@ -322,24 +565,43 @@ catalog! {
     Installing => ("Installing…", "安装中…"),
     InstallFailed => ("Install failed. Try again.", "安装失败，请重试"),
     Restarting => ("Restarting…", "重启中…"),
+    #[cfg(target_os = "macos")]
     About => ("About Nootify", "关于 Nootify"),
+    #[cfg(target_os = "macos")]
     Services => ("Services", "服务"),
+    #[cfg(target_os = "macos")]
     Hide => ("Hide Nootify", "隐藏 Nootify"),
+    #[cfg(target_os = "macos")]
     HideOthers => ("Hide Others", "隐藏其他"),
+    #[cfg(target_os = "macos")]
     File => ("File", "文件"),
+    #[cfg(target_os = "macos")]
     CloseWindow => ("Close Window", "关闭窗口"),
+    #[cfg(target_os = "macos")]
     Edit => ("Edit", "编辑"),
+    #[cfg(target_os = "macos")]
     Undo => ("Undo", "撤销"),
+    #[cfg(target_os = "macos")]
     Redo => ("Redo", "重做"),
+    #[cfg(target_os = "macos")]
     Cut => ("Cut", "剪切"),
+    #[cfg(target_os = "macos")]
     Copy => ("Copy", "复制"),
+    #[cfg(target_os = "macos")]
     Paste => ("Paste", "粘贴"),
+    #[cfg(target_os = "macos")]
     SelectAll => ("Select All", "全选"),
+    #[cfg(target_os = "macos")]
     View => ("View", "显示"),
+    #[cfg(target_os = "macos")]
     Fullscreen => ("Enter Full Screen", "进入全屏幕"),
+    #[cfg(target_os = "macos")]
     Window => ("Window", "窗口"),
+    #[cfg(target_os = "macos")]
     Minimize => ("Minimize", "最小化"),
+    #[cfg(target_os = "macos")]
     Zoom => ("Zoom", "缩放"),
+    #[cfg(target_os = "macos")]
     Help => ("Help", "帮助"),
 }
 
@@ -414,11 +676,14 @@ mod tests {
             write_preference(&path, preference).unwrap();
             assert_eq!(read_preference(&path).unwrap(), preference);
         }
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(
-            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
         assert_eq!(
             fs::read_to_string(dir.join("daemon.json")).unwrap(),
             "untouched"
@@ -483,9 +748,14 @@ mod tests {
     fn initialization_and_replay_supply_the_same_contract() {
         let view = LanguageView::new(Preference::System, Locale::Chinese);
         let json = r#"{"preference":"system","locale":"zh-CN"}"#;
-        assert!(view.initialization_script().starts_with(&format!(
-            "{SCRIPT_MARKER}window.__NOOTIFY_LANGUAGE__ = {json};"
-        )));
+        for source in [
+            view.initialization_script(),
+            view.windows_seed_script(),
+            view.windows_override_script(2),
+        ] {
+            assert!(source.starts_with(SCRIPT_MARKER));
+            assert!(source.contains(&format!("window.__NOOTIFY_LANGUAGE__ = {json};")));
+        }
         assert!(view
             .script()
             .contains(&format!("window.__NOOTIFY_LANGUAGE__ = {json};")));
