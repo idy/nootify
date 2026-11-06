@@ -16,7 +16,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test dist/test/*.test.js",
+    "test": "npm run build && node --test dist/test/*.test.js scripts/*.test.mjs",
     "start": "node dist/src/server.js",
     "cli": "node dist/src/cli.js",
     "tauri": "tauri",
