@@ -416,3 +416,7 @@ Read the bearer token from the private state file in your local application; nev
 | `test/` | Disposable HTTP/socket/state and routing tests |
 
 Official references: [Feishu Node SDK](https://github.com/larksuite/node-sdk), [message receive event](https://open.feishu.cn/document/server-docs/im-v1/message/events/receive), [Slack Socket Mode](https://docs.slack.dev/apis/events-api/using-socket-mode/), [Telegram Bot API](https://core.telegram.org/bots/api), and [Claude Code inbox sockets](https://code.claude.com/docs/en/cross-session-messaging#the-sessions-inbox-socket).
+
+## License
+
+Nootify is available under the [MIT License](LICENSE). Third-party components keep their own licenses: the website's fonts and Phosphor icon font ship with their license files in `site/shared/`, and `scripts/stage-service.mjs` places the Node.js runtime license (`node-LICENSE`) and the Tailscale sidecar's dependency licenses (`tailscale-licenses/`) in the desktop app's service resources, next to the production npm packages and the license files they ship.
