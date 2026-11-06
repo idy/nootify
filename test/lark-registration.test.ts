@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import fs, { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -175,6 +175,58 @@ test('a QR result saves private credentials and the app-specific scanning user, 
   const publicData = JSON.stringify([await h.settings.page(), h.settings.larkRegistration(), h.reports]);
   assert.ok(!publicData.includes('private-app-secret')); assert.ok(!publicData.includes('private-device-code'));
 });
+test('a failed QR save rolls back credentials, recipient and group ownership before queued saves or a retry', async t => {
+  const h = await settingsHarness(t);
+  const oldAppId = 'cli_fedcba9876543210';
+  const credentials = { appId: oldAppId, appSecret: 'old-secret' }; h.lark.credentials = credentials;
+  const oldApi: LarkApi = { appId: oldAppId, async request() { throw new Error('Old API must not be used during failed save'); } };
+  h.lark.api = oldApi;
+  const configure = t.mock.method(h.lark, 'configure');
+  const original = { lark_app_id: oldAppId, lark_app_secret: 'old-secret', lark_recipient_open_id: 'ou_original', lark_connection_type: 'bot' as const };
+  Object.assign(h.state.settings, original, { github_token: 'initial-token' });
+  const binding = { chat_id: 'oc_original', session_id: 'original-session', sender_open_id: 'ou_original' };
+  h.state.bindings.set(binding.chat_id, binding); await h.state.save();
+  let entered = false; let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; }); t.after(() => release());
+  const rename = fs.rename; let writes = 0;
+  t.mock.method(fs, 'rename', async (from: Parameters<typeof rename>[0], to: Parameters<typeof rename>[1]) => {
+    if (String(to) === join(h.directory, 'state.json')) {
+      const index = ++writes;
+      if (index === 1) { entered = true; await gate; }
+      if (index === 3) {
+        // An unrelated setting and session change while this write is pending must survive its rollback.
+        h.state.settings.github_token = 'parallel-token';
+        h.state.sessions.set('parallel-session', { session_id: 'parallel-session', host_id: 'test-host', adapter: 'codex', session_name: 'Parallel session' });
+        throw new Error('Injected QR write failure');
+      }
+    }
+    return rename(from, to);
+  });
+  const save = h.state.save.bind(h.state); let scheduled = 0;
+  t.mock.method(h.state, 'save', (transaction?: Parameters<State['save']>[0]) => { scheduled++; return save(transaction); });
+  const first = h.state.save(); await until(() => entered);
+  const older = h.state.save();
+  h.remote.replies.push(() => complete); h.settings.startLarkRegistration();
+  await until(() => scheduled === 3);
+  assert.deepEqual(h.state.settings, { ...original, github_token: 'initial-token' }, 'queued QR changes have not been applied early');
+  const later = h.state.save(); release(); await Promise.all([first, older, later]);
+  await until(() => h.settings.larkRegistration().status === 'failed');
+  assert.equal(h.settings.larkRegistration().error, 'save_failed');
+  assert.deepEqual(h.state.settings, { ...original, github_token: 'parallel-token' });
+  assert.strictEqual(h.lark.credentials, credentials); assert.strictEqual(h.lark.api, oldApi);
+  assert.equal(configure.mock.calls.length, 0);
+  assert.strictEqual(h.state.bindings.get(binding.chat_id), binding); assert.equal(h.state.bindings.get(binding.chat_id)?.app_id, undefined);
+  const reopened = await State.open(h.directory);
+  assert.deepEqual(reopened.settings, { ...original, github_token: 'parallel-token' });
+  assert.deepEqual(reopened.bindings.get(binding.chat_id), binding); assert.ok(reopened.sessions.has('parallel-session'));
+  assert.ok(!(await readFile(join(h.directory, 'state.json'), 'utf8')).includes(complete.client_secret));
+  h.remote.replies.push(() => complete); h.settings.startLarkRegistration();
+  await until(() => h.settings.larkRegistration().status === 'complete');
+  assert.equal(h.lark.credentials?.appId, appId); assert.equal(configure.mock.calls.length, 1);
+  assert.equal(h.state.bindings.get(binding.chat_id)?.app_id, oldAppId);
+  assert.equal((await State.open(h.directory)).settings.lark_app_secret, complete.client_secret);
+});
+
 test('cancel after an unseen completion reports the committed app once without undoing it or creating another', async t => {
   const h = await settingsHarness(t);
   h.lark.credentials = { appId: 'cli_fedcba9876543210', appSecret: 'old-secret' };

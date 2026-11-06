@@ -11,7 +11,7 @@ import { parseGitHubRemote } from './github-model.js';
 import { resolveCredentials, verifyCredentials, type CredentialSource, type Credentials } from './lark-metadata.js';
 import { isOpenId } from './lark-threads.js';
 import { isLarkConnectionType, type LarkConnectionType, type State } from './state.js';
-import { HttpError, type BackendConnection } from './types.js';
+import { HttpError, type BackendConnection, type LarkBinding } from './types.js';
 import type { TailscaleService, TailscalePage, TailscaleLogin } from './tailscale.js';
 import { isNotificationChannel, validChatConfig, type ChatChannel, type ChatSettingsPage, type NotificationChannel, type SlackConfig, type TelegramConfig, type ChatDirectory, ChatTransportError } from './chat-transport.js';
 import type { ChatService } from './chat-service.js';
@@ -177,6 +177,43 @@ export class SettingsService {
     this.writes = pending;
     return pending;
   }
+  /** Apply local configuration only when its State write starts; failed writes cannot leak into another queued snapshot. */
+  private persistSettings(change: () => void): Promise<void> {
+    const { state } = this.options;
+    let before: typeof state.settings | undefined; let applied: typeof state.settings | undefined;
+    let beforeBackends: typeof state.backends = new Map(); let appliedBackends: typeof state.backends = new Map();
+    let owners: { binding: LarkBinding; before?: string; applied?: string }[] = [];
+    return state.save({
+      apply: () => {
+        before = { ...state.settings }; beforeBackends = new Map(state.backends);
+        owners = [...state.bindings.values()].map(binding => ({ binding, before: binding.app_id }));
+        try { change(); }
+        finally {
+          applied = { ...state.settings }; appliedBackends = new Map(state.backends);
+          for (const owner of owners) owner.applied = owner.binding.app_id;
+        }
+      },
+      rollback: () => {
+        if (!before || !applied) return;
+        const keys = new Set([...Object.keys(before), ...Object.keys(applied)] as (keyof typeof state.settings)[]);
+        for (const key of keys) {
+          // Preserve an unrelated writer's newer value while reverting this transaction's changes.
+          if (before[key] === applied[key] || state.settings[key] !== applied[key]) continue;
+          if (before[key] === undefined) delete state.settings[key];
+          else Object.assign(state.settings, { [key]: before[key] });
+        }
+        for (const adapter of new Set([...beforeBackends.keys(), ...appliedBackends.keys()])) {
+          if (beforeBackends.get(adapter) === appliedBackends.get(adapter) || state.backends.get(adapter) !== appliedBackends.get(adapter)) continue;
+          const previous = beforeBackends.get(adapter);
+          if (previous) state.backends.set(adapter, previous); else state.backends.delete(adapter);
+        }
+        for (const owner of owners) {
+          if (owner.before === owner.applied || owner.binding.app_id !== owner.applied) continue;
+          if (owner.before === undefined) delete owner.binding.app_id; else owner.binding.app_id = owner.before;
+        }
+      },
+    });
+  }
   private larkConnectionType(): LarkConnectionType {
     return this.source === 'settings' ? this.options.state.settings.lark_connection_type ?? 'bot' : 'bot';
   }
@@ -234,8 +271,7 @@ export class SettingsService {
     return this.serialized(async () => {
       if (!isNotificationChannel(value)) throw new HttpError(400, 'Expected feishu, slack or telegram');
       if (value !== 'feishu' && !this.chatPage(value).configured) throw new HttpError(409, 'Configure this notification channel first');
-      this.options.state.settings.notification_channel = value;
-      await this.options.state.save();
+      await this.persistSettings(() => { this.options.state.settings.notification_channel = value; });
     });
   }
   /** Asking GitHub costs a network round trip, so polling during a login reads only the flow. */
@@ -294,14 +330,16 @@ export class SettingsService {
       await (this.options.verify ?? verifyCredentials)(result.credentials);
       signal.throwIfAborted();
       const { state, lark } = this.options;
-      // An open_id belongs to an app. Never carry an old app's trusted recipient into the new one.
-      this.scopeLarkBindings(result.credentials.appId);
-      if (lark.credentials?.appId !== result.credentials.appId) delete state.settings.lark_recipient_open_id;
-      state.settings.lark_app_id = result.credentials.appId;
-      state.settings.lark_app_secret = result.credentials.appSecret;
-      state.settings.lark_connection_type = 'personal-app';
-      if (result.recipient) state.settings.lark_recipient_open_id = result.recipient;
-      await state.save();
+      await this.persistSettings(() => {
+        signal.throwIfAborted();
+        // An open_id belongs to an app. Never carry an old app's trusted recipient into the new one.
+        this.scopeLarkBindings(result.credentials.appId);
+        if (lark.credentials?.appId !== result.credentials.appId) delete state.settings.lark_recipient_open_id;
+        state.settings.lark_app_id = result.credentials.appId;
+        state.settings.lark_app_secret = result.credentials.appSecret;
+        state.settings.lark_connection_type = 'personal-app';
+        if (result.recipient) state.settings.lark_recipient_open_id = result.recipient;
+      });
       await this.reload(true);
       return this.larkSetup(result.credentials.appId, signal);
     });
@@ -339,11 +377,12 @@ export class SettingsService {
       const credentials = { appId, appSecret: secret.trim() };
       try { await (this.options.verify ?? verifyCredentials)(credentials); }
       catch (error) { throw new HttpError(400, `Could not verify these credentials with Feishu: ${(error as Error).message}`); }
-      this.scopeLarkBindings(credentials.appId);
-      if (lark.credentials?.appId !== credentials.appId) delete state.settings.lark_recipient_open_id;
-      state.settings.lark_connection_type = connectionType ?? (state.settings.lark_app_id === credentials.appId ? state.settings.lark_connection_type ?? 'bot' : 'bot');
-      state.settings.lark_app_id = credentials.appId; state.settings.lark_app_secret = credentials.appSecret;
-      await state.save();
+      await this.persistSettings(() => {
+        this.scopeLarkBindings(credentials.appId);
+        if (lark.credentials?.appId !== credentials.appId) delete state.settings.lark_recipient_open_id;
+        state.settings.lark_connection_type = connectionType ?? (state.settings.lark_app_id === credentials.appId ? state.settings.lark_connection_type ?? 'bot' : 'bot');
+        state.settings.lark_app_id = credentials.appId; state.settings.lark_app_secret = credentials.appSecret;
+      });
       await this.reload(true);
     });
   }
@@ -354,10 +393,11 @@ export class SettingsService {
       const { state, mcpConfig } = this.options;
       const { lark_app_id: _id, lark_app_secret: _secret, ...rest } = state.settings;
       const fallback = await resolveCredentials(this.env, rest, mcpConfig);
-      this.scopeLarkBindings(fallback?.credentials.appId);
-      if (fallback?.credentials.appId !== this.options.lark.credentials?.appId) delete state.settings.lark_recipient_open_id;
-      delete state.settings.lark_app_id; delete state.settings.lark_app_secret; delete state.settings.lark_connection_type;
-      await state.save();
+      await this.persistSettings(() => {
+        this.scopeLarkBindings(fallback?.credentials.appId);
+        if (fallback?.credentials.appId !== this.options.lark.credentials?.appId) delete state.settings.lark_recipient_open_id;
+        delete state.settings.lark_app_id; delete state.settings.lark_app_secret; delete state.settings.lark_connection_type;
+      });
       await this.reload();
     });
   }
@@ -421,8 +461,7 @@ export class SettingsService {
     return this.serialized(async () => {
       if (appId !== undefined && appId !== this.options.lark.credentials?.appId) throw new HttpError(409, 'Feishu credentials changed; reload the directory');
       if (!isOpenId(openId)) throw new HttpError(400, 'Expected a Feishu open_id (ou_…)');
-      this.options.state.settings.lark_recipient_open_id = openId;
-      await this.options.state.save();
+      await this.persistSettings(() => { this.options.state.settings.lark_recipient_open_id = openId; });
     });
   }
 
@@ -470,21 +509,23 @@ export class SettingsService {
           await service.configure(file[channel]);
         }
       }
-      if (file.notification_channel) state.settings.notification_channel = file.notification_channel;
-      if (file.lark?.app_id) {
-        const effective = await resolveCredentials(this.env, { ...state.settings, lark_app_id: file.lark.app_id, lark_app_secret: file.lark.app_secret }, this.options.mcpConfig);
-        const nextAppId = effective?.credentials.appId;
-        this.scopeLarkBindings(nextAppId);
-        if (nextAppId !== this.options.lark.credentials?.appId) delete state.settings.lark_recipient_open_id;
-        state.settings.lark_app_id = file.lark.app_id; state.settings.lark_app_secret = file.lark.app_secret;
-        state.settings.lark_connection_type = file.lark.connection_type ?? 'bot';
-      }
-      if (file.lark?.recipient_open_id) state.settings.lark_recipient_open_id = file.lark.recipient_open_id;
-      for (const adapter of ['codex', 'opencode'] as const) {
-        const connection = file.backends?.[adapter];
-        if (connection) state.backends.set(adapter, connection);
-      }
-      await state.save();
+      const effective = file.lark?.app_id ? await resolveCredentials(this.env,
+        { ...state.settings, lark_app_id: file.lark.app_id, lark_app_secret: file.lark.app_secret }, this.options.mcpConfig) : undefined;
+      await this.persistSettings(() => {
+        if (file.notification_channel) state.settings.notification_channel = file.notification_channel;
+        if (file.lark?.app_id) {
+          const nextAppId = effective?.credentials.appId;
+          this.scopeLarkBindings(nextAppId);
+          if (nextAppId !== this.options.lark.credentials?.appId) delete state.settings.lark_recipient_open_id;
+          state.settings.lark_app_id = file.lark.app_id; state.settings.lark_app_secret = file.lark.app_secret;
+          state.settings.lark_connection_type = file.lark.connection_type ?? 'bot';
+        }
+        if (file.lark?.recipient_open_id) state.settings.lark_recipient_open_id = file.lark.recipient_open_id;
+        for (const adapter of ['codex', 'opencode'] as const) {
+          const connection = file.backends?.[adapter];
+          if (connection) state.backends.set(adapter, connection);
+        }
+      });
       if (file.pulls) await pulls.restore(file.pulls);
       for (const agent of file.agents ?? []) {
         try { await agents.set(agent, true); } catch (error) { summary.warnings.push(`${agent}: ${(error as Error).message}`); }

@@ -18,6 +18,7 @@ import { SettingsService, type AgentControl, type LarkControl } from '../src/set
 import { State } from '../src/state.js';
 import { DIRECTORY_FRESH_MS, LarkDirectoryCache } from '../src/lark-directory-cache.js';
 import type { TailnetAccess } from '../src/tailnet.js';
+import { failSettingsWriteBehindOlderSaves } from './state-failures.js';
 
 const appId = 'cli_0123456789abcdef';
 async function temporary(t: TestContext): Promise<string> {
@@ -519,6 +520,38 @@ test('an import that actually changes the active app clears the previous app rec
   const threads = new LarkThreads(state, { appId: importedId, async request() { throw new Error('No API expected'); } });
   assert.equal(threads.recipient(), undefined, 'another app cannot inherit the old group recipient');
 });
+
+for (const operation of ['replace', 'clear', 'import', 'recipient', 'channel'] as const) {
+  test(`failed local settings ${operation} rolls back before another save can persist it`, async t => {
+    const { dir, state, lark, settings, configured } = await harness(t);
+    const credentials = { appId, appSecret: 'old-secret' }; lark.credentials = credentials;
+    const saved = { lark_app_id: appId, lark_app_secret: 'old-secret', lark_recipient_open_id: 'ou_original', lark_connection_type: 'bot' as const };
+    Object.assign(state.settings, saved);
+    const binding = { chat_id: 'oc_original', session_id: 'original-session', sender_open_id: 'ou_original' };
+    state.bindings.set(binding.chat_id, binding);
+    const backend = { url: 'ws://127.0.0.1:4500' }; state.backends.set('codex', backend);
+    await state.save();
+    const candidate = 'cli_fedcba9876543210';
+    const change = () => operation === 'replace' ? settings.saveLark(candidate, 'rejected-secret', 'personal-app')
+      : operation === 'clear' ? settings.clearLark()
+      : operation === 'recipient' ? settings.setRecipient('ou_rejected', appId)
+      : operation === 'channel' ? settings.setNotificationChannel('feishu')
+      : settings.importConfig({ format: 'nootify-config', version: 1, notification_channel: 'feishu',
+        lark: { app_id: candidate, app_secret: 'rejected-secret', recipient_open_id: 'ou_rejected', connection_type: 'personal-app' },
+        backends: { codex: { url: 'ws://127.0.0.1:4501', token: 'rejected-backend-secret' } } });
+    await failSettingsWriteBehindOlderSaves(t, state, change);
+    assert.deepEqual(state.settings, saved); assert.deepEqual((await State.open(dir)).settings, saved);
+    assert.strictEqual(lark.credentials, credentials); assert.equal(configured.length, 0);
+    assert.strictEqual(state.bindings.get(binding.chat_id), binding);
+    assert.equal(state.bindings.get(binding.chat_id)?.app_id, undefined);
+    assert.strictEqual(state.backends.get('codex'), backend);
+    await state.save();
+    const reopened = await State.open(dir);
+    assert.deepEqual(reopened.settings, saved); assert.deepEqual(reopened.bindings.get(binding.chat_id), binding);
+    assert.deepEqual(reopened.backends.get('codex'), backend);
+    assert.ok(!(await readFile(join(dir, 'state.json'), 'utf8')).includes('rejected-'));
+  });
+}
 
 test('settings pages never carry secrets, and only this Mac can change anything', async t => {
   const { dir, state, settings, configured } = await harness(t);
