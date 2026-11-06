@@ -122,6 +122,20 @@ test('an announcement read failure stops adoption without creating a duplicate g
   assert.equal(feishu.creates().length, 0);
 });
 
+test('switching apps retains old groups without reusing their bindings or trusted senders', async t => {
+  const state = await State.open(await stateDir(t));
+  state.bindings.set('oc_oldApp', { app_id: 'cli_other', chat_id: 'oc_oldApp', session_id: 'thread-1', adapter: 'codex', sender_open_id: 'ou_oldAppUser' });
+  const feishu = fakeFeishu(); const threads = new LarkThreads(state, feishu.api);
+  assert.equal(threads.binding('thread-1', 'codex'), undefined);
+  assert.equal(threads.recipient(), undefined, 'another app cannot supply the recipient');
+  await threads.setRecipient('ou_newAppUser');
+  const group = await threads.open('codex', 'thread-1', 'Same session, different app');
+  assert.equal(group.created, true); assert.notEqual(group.chat_id, 'oc_oldApp');
+  assert.equal(state.bindings.get(group.chat_id)?.app_id, feishu.api.appId);
+  assert.equal(state.bindings.get('oc_oldApp')?.sender_open_id, 'ou_oldAppUser');
+  assert.deepEqual(feishu.creates()[0]?.body?.user_id_list, ['ou_newAppUser']);
+});
+
 test('group names keep the session convention within Feishu\'s length', () => {
   const name = threadName('一个很长的任务名称'.repeat(10), 'claude-desktop', 'local_dd316d46-36e3-4dd8-b702-46945713e9a4');
   assert.ok(name.endsWith(' · Claude · dd316d46'));

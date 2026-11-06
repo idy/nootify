@@ -359,7 +359,7 @@ test('an export keeps its secrets in a private file and keeps only the newest te
   assert.equal((await stat(dirname(path))).mode & 0o777, 0o700);
   const file = JSON.parse(await readFile(path, 'utf8'));
   assert.deepEqual([file.format, file.version], ['nootify-config', 1]);
-  assert.deepEqual(file.lark, { app_id: appId, app_secret: 'export-secret', recipient_open_id: 'ou_owner' });
+  assert.deepEqual(file.lark, { app_id: appId, app_secret: 'export-secret', recipient_open_id: 'ou_owner', connection_type: 'bot' });
   assert.equal(file.backends.opencode.password, 'backend-secret');
   assert.deepEqual(file.agents, ['codex']);
   assert.ok(!JSON.stringify({ path, summary }).includes('secret'));
@@ -390,7 +390,7 @@ test('an exported file restores another installation, after a preview that chang
   assert.deepEqual(target.configured, [{ appId, appSecret: 'export-secret' }]);
   assert.deepEqual(target.enabled, ['codex']);
   const reopened = await State.open(target.dir);
-  assert.deepEqual(reopened.settings, { lark_recipient_open_id: 'ou_owner', lark_app_id: appId, lark_app_secret: 'export-secret' });
+  assert.deepEqual(reopened.settings, { lark_recipient_open_id: 'ou_owner', lark_app_id: appId, lark_app_secret: 'export-secret', lark_connection_type: 'bot' });
   assert.equal(reopened.backends.get('opencode')?.password, 'backend-secret');
   assert.deepEqual(JSON.parse(await readFile(join(target.dir, 'pulls.config.json'), 'utf8')), { ownedOwners: ['acme'] });
   assert.equal((await stat(join(target.dir, 'pulls.config.json'))).mode & 0o777, 0o600);
@@ -428,7 +428,7 @@ test('an import touches only what its file names and reports what it could not a
   await settings.saveLark(appId, 'saved-secret');
   state.backends.set('codex', { url: 'ws://127.0.0.1:4500' });
   const summary = await settings.importConfig({ format: 'nootify-config', version: 1, lark: { recipient_open_id: 'ou_new' }, agents: ['codex'] });
-  assert.deepEqual(state.settings, { lark_app_id: appId, lark_app_secret: 'saved-secret', lark_recipient_open_id: 'ou_new' });
+  assert.deepEqual(state.settings, { lark_app_id: appId, lark_app_secret: 'saved-secret', lark_recipient_open_id: 'ou_new', lark_connection_type: 'bot' });
   assert.equal(state.backends.size, 1);
   assert.equal(configured.length, 1, 'the bot is not reconnected');
   assert.deepEqual(summary.warnings, ['codex: unbalanced markers']);
