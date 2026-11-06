@@ -20,6 +20,7 @@ export const english = {
   '用飞书接收会话进度，并将回复发送回本机会话。': 'Receive session updates in Feishu and send replies back to your local sessions.',
   '还需开通群权限，才能按会话收发消息。': 'Enable the remaining group permissions to exchange messages with each session.',
   '应用已保存，请选择接收人。': 'App saved. Choose a recipient to continue.',
+  '应用已保存，请刷新设置查看当前连接。': 'The app was saved. Refresh Settings to view the current connection.',
   '连接方式': 'Connection method',
   '扫码配置新应用，或使用你已有的应用。': 'Set up a new app by scanning, or use an app you already have.',
   '扫码配置': 'Set up with QR code',

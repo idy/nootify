@@ -1434,10 +1434,27 @@ $('lark-secret-toggle').addEventListener('click', () => {
     showLarkSecret(true);
   });
 });
+/** A scan can commit between the last status poll and a cancel/retry click. Reconcile that saved app before dismissing the flow. */
+async function cancelLarkQr(): Promise<boolean> {
+  const previous = state.larkRegistration;
+  const next = await post<LarkRegistrationPage>('/ui/api/settings/lark/registration', { action: 'cancel' });
+  const completed = next.status === 'complete' ? next : previous?.status === 'complete' ? previous : undefined;
+  state.larkRegistration = completed ?? next;
+  if (!completed) return false;
+  state.larkConnectionType = 'personal-app'; state.larkEdited = false;
+  state.larkSetup = completed.setup; invalidateRecipientDirectory();
+  const previousSettings = state.settings;
+  await Promise.all([loadSettings(), loadSnapshot()]);
+  if (state.settings === previousSettings || state.settings?.lark.app_id !== completed.app_id || state.settings?.lark.connection_type !== 'personal-app') {
+    throw new Error(t('应用已保存，请刷新设置查看当前连接。'));
+  }
+  state.larkRegistration = { status: 'idle' };
+  return true;
+}
 function selectLarkType(type: LarkConnectionType): void {
   if (state.settings?.editable !== true || state.pendingSettings.has('lark-registration') || state.pendingSettings.has('lark') || type === selectedLarkType()) return;
   void settingsRun('lark-registration', () => t('更改接入类型失败'), async () => {
-    if (state.larkRegistration && state.larkRegistration.status !== 'idle') state.larkRegistration = await post<LarkRegistrationPage>('/ui/api/settings/lark/registration', { action: 'cancel' });
+    if (state.larkRegistration && state.larkRegistration.status !== 'idle') await cancelLarkQr();
     state.larkConnectionType = type; state.larkManual = false; state.larkEdited = false; fillLark();
   });
 }
@@ -1446,7 +1463,7 @@ $('lark-type-personal').addEventListener('click', () => selectLarkType('personal
 function startLarkQr(refresh = false): void {
   if (state.settings?.editable !== true || state.settings.lark.source === 'environment' || state.pendingSettings.has('lark-registration')) return;
   void settingsRun('lark-registration', () => t('无法开始扫码配置'), async () => {
-    if (refresh) await post('/ui/api/settings/lark/registration', { action: 'cancel' });
+    if (refresh && await cancelLarkQr()) return () => t('应用已保存');
     state.larkConnectionType = 'personal-app'; state.larkManual = false; state.larkEdited = false; fillLark();
     state.larkRegistration = await post<LarkRegistrationPage>('/ui/api/settings/lark/registration', { action: 'start' });
   }).then(() => { if (larkRegistrationActive()) $('lark-registration-cancel').focus(); });
@@ -1455,14 +1472,14 @@ $('lark-qr-start').addEventListener('click', () => startLarkQr());
 $('lark-qr-refresh').addEventListener('click', () => startLarkQr(true));
 $('lark-registration-cancel').addEventListener('click', () => {
   void settingsRun('lark-registration', () => t('无法取消扫码配置'), async () => {
-    state.larkRegistration = await post<LarkRegistrationPage>('/ui/api/settings/lark/registration', { action: 'cancel' });
+    await cancelLarkQr();
   }).then(() => $('lark-qr-start').focus());
 });
 $('lark-use-existing').addEventListener('click', () => {
   if (state.settings?.editable !== true || state.pendingSettings.has('lark-registration')) return;
   const open = !state.larkManual;
   void settingsRun('lark-registration', () => t('无法取消扫码配置'), async () => {
-    if (larkRegistrationActive()) state.larkRegistration = await post<LarkRegistrationPage>('/ui/api/settings/lark/registration', { action: 'cancel' });
+    if (larkRegistrationActive()) await cancelLarkQr();
     state.larkManual = open; showLarkSecret(false);
   }).then(() => { if (open) field('lark-app-id').focus(); });
 });

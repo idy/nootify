@@ -127,6 +127,18 @@ test('readiness identifies actual messaging gaps without treating a connected bo
   const all = await inspectLarkSetup(scopeApi([...defaultScopes, ...setup.missing]));
   assert.deepEqual(all, ready);
 });
+test('chat-list access is required even when all other messaging scopes are present', async () => {
+  const primaryScopes = ['im:chat:create', 'im:chat.announcement:read', 'im:chat.announcement:write_only', 'im:message:send_as_bot', 'im:message.group_msg'];
+  const missingList = await inspectLarkSetup(scopeApi(primaryScopes));
+  assert.equal(missingList.status, 'permissions-required');
+  assert.deepEqual(missingList.missing, ['im:chat:read']);
+  assert.equal(missingList.mention_only, false);
+  assert.equal(new URL(missingList.permission!.url).searchParams.get('q'), 'im:chat:read');
+  for (const grant of ['im:chat:read', 'im:chat:readonly', 'im:chat']) {
+    assert.deepEqual(await inspectLarkSetup(scopeApi([...primaryScopes, grant])), ready);
+  }
+});
+
 test('a failed scope inspection is unknown rather than permission denial, and user scopes do not authorize the bot', async () => {
   const inaccessible: LarkApi = { appId, async request() { throw new Error('private-provider-error'); } };
   const unknown = await inspectLarkSetup(inaccessible); assert.equal(unknown.status, 'unavailable'); assert.deepEqual(unknown.missing, []);
@@ -163,6 +175,31 @@ test('a QR result saves private credentials and the app-specific scanning user, 
   const publicData = JSON.stringify([await h.settings.page(), h.settings.larkRegistration(), h.reports]);
   assert.ok(!publicData.includes('private-app-secret')); assert.ok(!publicData.includes('private-device-code'));
 });
+test('cancel after an unseen completion reports the committed app once without undoing it or creating another', async t => {
+  const h = await settingsHarness(t);
+  h.lark.credentials = { appId: 'cli_fedcba9876543210', appSecret: 'old-secret' };
+  h.state.settings.lark_recipient_open_id = 'ou_oldAppUser';
+  const oldPage = await h.settings.page();
+  h.settings.startLarkRegistration();
+  const displayed = await until(() => h.settings.larkRegistration().status === 'waiting' && h.settings.larkRegistration());
+  h.remote.replies.push(() => complete);
+  await until(() => h.state.settings.lark_app_id === appId && h.settings.larkRegistration().status === 'complete');
+  assert.equal(displayed.status, 'waiting', 'the UI has not observed completion yet');
+  assert.notEqual(oldPage.lark.app_id, appId);
+  const origin = await serve(t, await EventLog.open(h.directory), { settings: h.settings });
+  const response = await fetch(origin + '/ui/api/settings/lark/registration', { method: 'POST', headers: { 'x-nootify-ui': '1' }, body: JSON.stringify({ action: 'cancel' }) });
+  assert.equal(response.status, 200);
+  const result = await response.json() as { status: string; app_id: string };
+  assert.equal(result.status, 'complete'); assert.equal(result.app_id, appId);
+  assert.ok(!JSON.stringify(result).includes(complete.client_secret));
+  assert.deepEqual(h.settings.larkRegistration(), { status: 'idle' }, 'dismiss the server flow after reporting the saved result');
+  assert.deepEqual(h.settings.cancelLarkRegistration(), { status: 'idle' });
+  const page = await (await fetch(origin + '/ui/api/settings')).json() as { lark: { app_id: string; recipient: string; connection_type: string } };
+  assert.equal(page.lark.app_id, appId); assert.equal(page.lark.recipient, complete.user_info.open_id); assert.equal(page.lark.connection_type, 'personal-app');
+  assert.equal((await State.open(h.directory)).settings.lark_app_secret, complete.client_secret);
+  assert.equal(h.remote.calls.filter(call => call.fields.get('action') === 'begin').length, 1);
+});
+
 test('personal app type survives export/import, while legacy credentials keep the original bot setup', async t => {
   const h = await settingsHarness(t);
   assert.equal((await h.settings.page()).lark.connection_type, 'bot');

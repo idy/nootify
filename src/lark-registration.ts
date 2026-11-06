@@ -40,6 +40,7 @@ interface RegistrationReply {
 
 const requirements = [
   ['im:chat:create', 'im:chat'],
+  ['im:chat:read', 'im:chat:readonly', 'im:chat'],
   ['im:chat.announcement:read', 'im:chat:readonly', 'im:chat'],
   ['im:chat.announcement:write_only', 'im:chat'],
   ['im:message:send_as_bot', 'im:message'],
@@ -95,9 +96,11 @@ export class LarkRegistration {
   cancel(): LarkRegistrationPage {
     // Saving is a local commit, not an outstanding scan. A cancellation must never claim to undo saved credentials.
     if (this.flow.status === 'connecting') throw new HttpError(409, 'Feishu configuration is being saved; wait for it to finish');
+    const completed = this.flow.status === 'complete' ? this.page() : undefined;
     this.controller?.abort(); this.controller = undefined;
     this.flow = { status: 'idle' };
-    return this.page();
+    // The caller may still be displaying a waiting/expired QR. Report the committed app once so it can refresh its settings.
+    return completed ?? this.page();
   }
   private async post(fields: Record<string, string>, signal: AbortSignal): Promise<RegistrationReply> {
     const response = await this.fetch(LARK_REGISTRATION_URL, { method: 'POST', redirect: 'error',
