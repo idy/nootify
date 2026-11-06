@@ -99,7 +99,7 @@ export async function main(): Promise<void> {
   const state = await State.open(values['state-dir']);
   const logs = await EventLog.open(state.directory);
   const report = (record: Record<string, unknown>) => { logs.report(record); };
-  const sessions = new SessionsService(state, undefined, report);
+  const sessions = new SessionsService(state, undefined, report, undefined, { port });
   const resolved = await resolveCredentials(process.env, state.settings, values['mcp-config']);
   const lark = new LarkService(state, sessions, resolved?.credentials, report, undefined, port);
   const slack = new ChatService('slack', state, sessions, createSlackTransport, report, port);

@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { EventLog } from './events.js';
 import type { PullSnapshot, RepositoryEntry } from './github.js';
-import { isAgent, type AgentId, type AgentPrompt } from './agents.js';
+import { AGENT_IDS, isAgent, type AgentId, type AgentPrompt } from './agents.js';
 import type { SettingsService } from './settings.js';
 import { HttpError, type ServiceModule } from './types.js';
 import { LarkPermissionRequiredError } from './lark-permissions.js';
@@ -126,7 +126,7 @@ export async function serveUi(request: IncomingMessage, response: ServerResponse
     else {
       try {
         const body = await smallJson(request);
-        if (!isAgent(body.agent) || typeof body.enabled !== 'boolean') throw new HttpError(400, 'Expected {"agent": "claude" | "codex" | "opencode", "enabled": boolean}');
+        if (!isAgent(body.agent) || typeof body.enabled !== 'boolean') throw new HttpError(400, `Expected {"agent": ${AGENT_IDS.map(id => JSON.stringify(id)).join(' | ')}, "enabled": boolean}`);
         json(response, 200, await context.agents.set(body.agent, body.enabled));
       } catch (error) { json(response, error instanceof HttpError ? error.status : 500, { error: (error as Error).message }); }
     }
