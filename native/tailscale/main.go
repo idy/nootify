@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 
@@ -80,10 +81,24 @@ func run(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Wr
 // The parent also uses an environment allowlist. Keeping this here prevents
 // auth keys, OAuth/WIF, alternate control servers, and forced login on direct use.
 func privateEnvironment() {
+	privateEnvironmentForOS(runtime.GOOS)
+}
+
+func privateEnvironmentForOS(goos string) {
 	for _, entry := range os.Environ() {
 		name, _, _ := strings.Cut(entry, "=")
-		if strings.HasPrefix(name, "TS_") || strings.HasPrefix(name, "TSNET_") || strings.HasPrefix(name, "TAILSCALE_") {
+		canonical := name
+		if goos == "windows" {
+			canonical = strings.ToUpper(name)
+		}
+		if strings.HasPrefix(canonical, "TS_") || strings.HasPrefix(canonical, "TSNET_") || strings.HasPrefix(canonical, "TAILSCALE_") {
+			// Windows looks up environment names without case, but envknob caches
+			// are keyed by exact spelling. Invalidate both before removing the value.
 			envknob.Setenv(name, "")
+			if canonical != name {
+				envknob.Setenv(canonical, "")
+				os.Unsetenv(canonical)
+			}
 			os.Unsetenv(name)
 		}
 	}

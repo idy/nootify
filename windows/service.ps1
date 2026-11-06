@@ -15,6 +15,8 @@ $ownerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $taskName = "Nootify.Service.$ownerSid"
 $descriptionPrefix = 'Nootify per-user service v1: '
 $powerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+$creationLockName = "Global\Nootify.Service.Creation.$ownerSid"
+$runLockName = "Global\Nootify.Service.Run.$ownerSid"
 
 function Full-Path([string]$Value) {
     # Rust canonical paths can carry a Win32 namespace prefix; NSIS uses DOS/UNC paths.
@@ -120,55 +122,65 @@ function New-ServiceTask {
     # TASK_CREATE, not CREATE_OR_UPDATE: a racing or unrelated registration is never overwritten.
     return $scheduler.GetFolder('\').RegisterTaskDefinition($taskName, $definition, 2, $ownerSid, $null, 3, $null)
 }
-function Owned-Processes {
-    # Capture handles before Stop, so PID reuse cannot make us wait on a later, unrelated process.
-    # These handles are only waited on; termination always targets the verified Scheduler task/job.
-    $found = New-Object 'Collections.Generic.List[Diagnostics.Process]'
+function Import-ServiceRunner {
+    # Only System.dll/mscorlib types are used, including on Windows PowerShell 5.1.
+    if (!('Nootify.ServiceJob' -as [type])) { Add-Type -Path (Join-Path $PSScriptRoot 'service-runner.cs') }
+}
+function Open-OwnedJob([bool]$TaskActive) {
+    try { $runtime = [IO.File]::ReadAllText($runtimePath) | ConvertFrom-Json }
+    catch [IO.FileNotFoundException] {
+        if ($TaskActive) { throw 'Cannot verify the active Nootify task job: its runtime record is missing' }
+        return $null
+    }
+    catch [IO.DirectoryNotFoundException] {
+        if ($TaskActive) { throw 'Cannot verify the active Nootify task job: its state directory is missing' }
+        return $null
+    }
+    # Private state plus the exact installation/SID and an unpredictable per-run name bind
+    # this handle to our job. Never fall back to a PID tree, a fixed job name, or an outer job.
+    $prefix = "Global\Nootify.Service.Job.$ownerSid."
+    if ($runtime.version -ne 2 -or $runtime.sid -ne $ownerSid -or !(Same-Path $runtime.script $scriptPath) -or $runtime.job -cnotmatch ('^' + [regex]::Escape($prefix) + '[0-9a-f]{32}$')) {
+        throw 'Cannot verify the Nootify job runtime record'
+    }
+    return [Nootify.ServiceJob]::Open([string]$runtime.job, $ownerSid)
+}
+function Publish-Job([string]$Name) {
+    $temporary = $runtimePath + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
     try {
-        $runtime = [IO.File]::ReadAllText($runtimePath) | ConvertFrom-Json
-        if ($runtime.sid -ne $ownerSid -or !(Same-Path $runtime.script $scriptPath)) { return ,$found }
-        $root = [Diagnostics.Process]::GetProcessById([int]$runtime.pid)
-        if ($root.StartTime.ToUniversalTime().Ticks.ToString() -ne $runtime.started -or !(Same-Path $root.MainModule.FileName $powerShell)) { $root.Dispose(); return ,$found }
-        $null = $root.Handle
-        $found.Add($root)
-        $pending = New-Object 'Collections.Generic.Queue[Diagnostics.Process]'
-        $pending.Enqueue($root)
-        while ($pending.Count -gt 0) {
-            $parent = $pending.Dequeue()
-            foreach ($child in @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $($parent.Id)")) {
-                try {
-                    $process = [Diagnostics.Process]::GetProcessById([int]$child.ProcessId)
-                    if ($process.StartTime.ToUniversalTime() -lt $parent.StartTime.ToUniversalTime()) { $process.Dispose(); continue }
-                    $null = $process.Handle
-                    $found.Add($process); $pending.Enqueue($process)
-                } catch { } # A child may have already exited.
-            }
-        }
-    } catch { } # Before Run writes its record it has not resumed node; Scheduler still owns PowerShell.
-    return ,$found
+        [IO.File]::WriteAllText($temporary, (@{ version = 2; sid = $ownerSid; script = $scriptPath; job = $Name } | ConvertTo-Json -Compress))
+        [IO.File]::Move($temporary, $runtimePath) # Same-directory atomic publication, before any Node creation.
+    } finally { Remove-Item -LiteralPath $temporary -ErrorAction SilentlyContinue }
 }
 function Stop-OwnedTask($Task) {
     $null = Assert-Owned $Task
-    $processes = Owned-Processes
+    Import-ServiceRunner
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    $creationLock = $null; $job = $null
+    # Prevent logon/restart policy from starting another instance after the empty check.
+    # Start re-enables this same task; upgrades retain its definition and private data.
+    $Task.Enabled = $false
     try {
+        $creationLock = Enter-Lock $creationLockName ([Math]::Max(0, 30000 - [int]$watch.ElapsedMilliseconds))
+        $job = Open-OwnedJob ($Task.GetInstances(0).Count -gt 0)
         if ($Task.GetInstances(0).Count -gt 0) { $Task.Stop(0) }
-        $until = [DateTime]::UtcNow.AddSeconds(30)
-        do {
-            if ($Task.GetInstances(0).Count -eq 0) { break }
-            if ([DateTime]::UtcNow -ge $until) { throw 'Timed out waiting for the Nootify task to stop' }
+        # Retaining the handle defeats KILL_ON_JOB_CLOSE, so terminate explicitly and
+        # query kernel membership until empty, including helpers spawned during Stop.
+        if ($job) { $job.TerminateAndWait([Math]::Max(0, 30000 - [int]$watch.ElapsedMilliseconds)) }
+        while ($Task.GetInstances(0).Count -ne 0) {
+            if ($watch.ElapsedMilliseconds -ge 30000) { throw 'Timed out waiting for the Nootify task to stop' }
             Start-Sleep -Milliseconds 50
-        } while ($true)
-        foreach ($process in $processes) {
-            $remaining = [Math]::Max(0, [int]($until - [DateTime]::UtcNow).TotalMilliseconds)
-            if (!$process.WaitForExit($remaining)) { throw 'Timed out waiting for Nootify node/helper processes to release their files' }
         }
-    } finally { foreach ($process in $processes) { $process.Dispose() } }
+        Remove-Item -LiteralPath $runtimePath -ErrorAction SilentlyContinue
+    } finally {
+        if ($job) { $job.Dispose() }
+        if ($creationLock) { $creationLock.ReleaseMutex(); $creationLock.Dispose() }
+    }
 }
 function Start-OwnedTask($Task) {
     $null = Assert-Owned $Task
+    $Task.Enabled = $true
     if ($Task.GetInstances(0).Count -eq 0) {
         Assert-PortFree
-        $Task.Enabled = $true
         $null = $Task.Run($null)
     }
     $until = [DateTime]::UtcNow.AddSeconds(30)
@@ -194,27 +206,49 @@ function Run-Service {
     if (!$task) { throw 'Nootify task is not installed' }
     $record = Assert-Owned $task
     if ($record.mcp -cne $McpConfig) { throw 'Run arguments do not match the registered task' }
-    $runLock = Enter-Lock "Global\Nootify.Service.Run.$ownerSid" 0
-    $runner = $null
+    $runLock = Enter-Lock $runLockName 0
+    $runner = $null; $job = $null; $creationLock = $null
     try {
         Prepare-State
         Assert-PortFree
         # Task Scheduler may inherit machine/user environment. Keep account secrets and code injection out.
         Get-ChildItem Env: | Where-Object { $_.Name -match '^(NODE_.*|LARK_.*|SLACK_.*|TELEGRAM_.*|GITHUB_.*|GH_.*|CODEX_APP_SERVER_.*|OPENCODE_SERVER_.*|TS_.*|TSNET_.*|TAILSCALE_.*|NOOTIFY_TSNET_BIN|NOOTIFY_GITHUB_CLIENT_ID)$' } | ForEach-Object { [Environment]::SetEnvironmentVariable($_.Name, $null, 'Process') }
-        Add-Type -Path (Join-Path $PSScriptRoot 'service-runner.cs')
+        Import-ServiceRunner
         $arguments = @($ServerPath, '--state-dir', $StateDir, '--port', [string]$Port)
         if ($McpConfig) { $arguments += @('--mcp-config', $McpConfig) }
-        $runner = [Nootify.ServiceRunner]::new($NodePath, [string[]]$arguments, $StateDir)
-        $current = [Diagnostics.Process]::GetCurrentProcess()
-        [IO.File]::WriteAllText($runtimePath, (@{ sid = $ownerSid; script = $scriptPath; pid = $PID; started = $current.StartTime.ToUniversalTime().Ticks.ToString() } | ConvertTo-Json -Compress))
-        $runner.Resume()
-        $exitCode = $runner.Wait()
+        $creationLock = Enter-Lock $creationLockName 30000
+        try {
+            # This is independent of Management, which Start/Install holds until health.
+            # A queued Run must observe Stop's disable before it can create any process.
+            $task = Get-Task
+            if (!$task) { throw 'Nootify task is no longer installed' }
+            $record = Assert-Owned $task
+            if ($record.mcp -cne $McpConfig) { throw 'Run arguments do not match the registered task' }
+            if (!$task.Enabled) { return 0 }
+            $previous = Open-OwnedJob $false
+            if ($previous) { try { $previous.TerminateAndWait(20000) } finally { $previous.Dispose() } }
+            Remove-Item -LiteralPath $runtimePath -ErrorAction SilentlyContinue
+            $name = "Global\Nootify.Service.Job.$ownerSid." + [guid]::NewGuid().ToString('N')
+            $job = [Nootify.ServiceJob]::Create($name, $ownerSid)
+            Publish-Job $name
+            $runner = [Nootify.ServiceRunner]::new($job, $NodePath, [string[]]$arguments, $StateDir)
+            $runner.Resume()
+        } finally {
+            $creationLock.ReleaseMutex(); $creationLock.Dispose(); $creationLock = $null
+        }
+        return $runner.Wait() # Preserve failures so Scheduler's restart policy applies.
     } finally {
-        if ($runner) { $runner.Dispose() }
-        Remove-Item -LiteralPath $runtimePath -ErrorAction SilentlyContinue
-        $runLock.ReleaseMutex(); $runLock.Dispose()
+        try {
+            if ($runner) { $runner.Dispose() }
+            elseif ($job) { $job.TerminateAndWait(20000) }
+        } finally {
+            if ($job) { $job.Dispose() }
+            if ($creationLock) { $creationLock.ReleaseMutex(); $creationLock.Dispose() }
+            # Keep the job identity for Stop/restart, even after a failed startup or an
+            # abrupt host exit. Only a successful management drain removes the record.
+            $runLock.ReleaseMutex(); $runLock.Dispose()
+        }
     }
-    exit $exitCode # Preserve failures so Scheduler's restart policy applies.
 }
 
 $operationLock = $null
@@ -225,7 +259,7 @@ try {
     $runtimePath = Join-Path $StateDir 'windows-runtime.json'
     $scheduler = New-Object -ComObject 'Schedule.Service'
     $scheduler.Connect()
-    if ($Action -eq 'Run') { Run-Service }
+    if ($Action -eq 'Run') { exit (Run-Service) }
     # Status stays read-only and cheap: one COM lookup, no subprocess, HTTP request, or lock wait.
     if ($Action -ne 'Status') { $operationLock = Enter-Lock "Global\Nootify.Service.Management.$ownerSid" 60000 }
     $task = Get-Task

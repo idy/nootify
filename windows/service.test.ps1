@@ -8,6 +8,13 @@ function Must-Fail([scriptblock]$Code, [string]$Message) {
     try { $null = & $Code } catch { $failed = $true }
     Assert $failed $Message
 }
+function Wait-File([string]$Path) {
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    while (!(Test-Path -LiteralPath $Path)) {
+        if ($watch.ElapsedMilliseconds -ge 10000) { throw "Fixture did not publish $Path" }
+        Start-Sleep -Milliseconds 10
+    }
+}
 $serviceScript = Join-Path $PSScriptRoot 'service.ps1'
 $tokens = $null; $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($serviceScript, [ref]$tokens, [ref]$errors)
@@ -138,18 +145,28 @@ $folder | Add-Member ScriptMethod GetTask { param($Name); throw [Runtime.Interop
 Assert ($null -eq (Get-Task)) 'A missing task must report absent through wrapped COM exceptions'
 $folder | Add-Member ScriptMethod GetTask { param($Name); throw [Runtime.InteropServices.COMException]::new('Access denied', -2147024891) } -Force
 Must-Fail { Get-Task } 'Access denied must not look like an absent task'
-function Owned-Processes { return ,([Collections.Generic.List[Diagnostics.Process]]::new()) }
-Stop-OwnedTask $task
-Assert ($task.Stops -eq 1) 'Expected one stop of the owned task'
-Stop-OwnedTask $task
-Assert ($task.Stops -eq 1) 'Stopping an already stopped task must be idempotent'
-
-# Exercise the actual suspended-process/nested-job implementation with a node + helper tree.
-Add-Type -Path (Join-Path $PSScriptRoot 'service-runner.cs')
-$directory = Join-Path ([IO.Path]::GetTempPath()) ('nootify-job-test-' + [guid]::NewGuid().ToString())
+# Isolate every named object and state file from the user's installed service.
+$testId = [guid]::NewGuid().ToString('N')
+$creationLockName = "Global\Nootify.Service.Creation.Test.$testId"
+$runLockName = "Global\Nootify.Service.Run.Test.$testId"
+$directory = Join-Path ([IO.Path]::GetTempPath()) ('nootify-job-test-' + $testId)
 $null = [IO.Directory]::CreateDirectory($directory)
-$runner = $null
+$runtimePath = Join-Path $directory 'windows-runtime.json'
+Import-ServiceRunner
+$runner = $null; $job = $null; $unrelated = $null; $unrelatedJob = $null; $startup = $null
+$task | Add-Member NoteProperty Job $null
 try {
+    Must-Fail { Stop-OwnedTask $task } 'An active task without a runtime job identity must fail closed'
+    Assert ($task.Stops -eq 0) 'An unverifiable task must not report a successful stop'
+    Assert (!$task.Enabled) 'Stop must disable future logon/restart instances even if verification fails'
+    Publish-Job ("Global\Nootify.Service.Job.$ownerSid." + [guid]::NewGuid().ToString('N'))
+    # A recorded job can be absent only after all its processes/handles are gone.
+    Stop-OwnedTask $task
+    Assert ($task.Stops -eq 1) 'Expected one stop of the owned task'
+    Stop-OwnedTask $task
+    Assert ($task.Stops -eq 1) 'Stopping an already stopped task must be idempotent'
+
+    # Exercise the actual suspended-process/nested-job implementation with a node + helper tree.
     $StateDir = Join-Path $directory 'private-state'
     Prepare-State
     $acl = Get-Acl -LiteralPath $StateDir
@@ -180,7 +197,13 @@ setInterval(()=>{},1000);
 '@)
     $copiedNode = Join-Path $directory 'test-node.exe'
     Copy-Item -LiteralPath $NodePath -Destination $copiedNode
-    $runner = [Nootify.ServiceRunner]::new($copiedNode, [string[]]@($fixture, $directory), $directory)
+    $name = "Global\Nootify.Service.Job.$ownerSid." + [guid]::NewGuid().ToString('N')
+    $job = [Nootify.ServiceJob]::Create($name, $ownerSid)
+    $runner = [Nootify.ServiceRunner]::new($job, $copiedNode, [string[]]@($fixture, $directory), $directory)
+    Assert ($job.ActiveProcesses -eq 1) 'Suspended Node must already belong to its job at creation'
+    Must-Fail { [Nootify.ServiceJob]::Create($name, $ownerSid) } 'Creation must never reconnect to an existing job'
+    Must-Fail { [Nootify.ServiceJob]::Open($name, 'S-1-5-19') } 'A foreign job owner must fail verification'
+    Assert ($job.ActiveProcesses -eq 1) 'Failed ownership/collision checks must not terminate an existing job'
     $runner.Resume()
     $until = [DateTime]::UtcNow.AddSeconds(10)
     $pidsPath = Join-Path $directory 'pids.json'
@@ -194,9 +217,180 @@ setInterval(()=>{},1000);
     foreach ($process in $processes) { Assert ($process.WaitForExit(5000)) 'Node and helper must both leave the job'; $process.Dispose() }
     Assert ([IO.File]::ReadAllText((Join-Path $directory 'stdout.log')).Contains('stdout marker')) 'Expected private stdout log'
     Assert ([IO.File]::ReadAllText((Join-Path $directory 'stderr.log')).Contains('stderr marker')) 'Expected private stderr log'
+    $job = $null
+    $originalNode = $NodePath; $NodePath = $copiedNode
+    $runtimePath = Join-Path $StateDir 'windows-runtime.json'
+    $ServerPath = Join-Path $directory 'idle.cjs'
+    [IO.File]::WriteAllText($ServerPath, 'setInterval(()=>{},1000);')
+    $record.node = $NodePath; $record.server = $ServerPath; $record.state = $StateDir
+    $entry.WorkingDirectory = $StateDir; $entry.Arguments = Run-Arguments $record
+    $definition.RegistrationInfo.Description = $descriptionPrefix + ($record | ConvertTo-Json -Compress)
+    function Get-Task { return $task } # Scheduler boundary only; no installed task is accessed.
+
+    # A delayed Run after a successful Stop must recheck task enablement inside the barrier.
+    Assert ((Run-Service) -eq 0) 'A disabled task must reject a delayed Run without creating Node'
+    Assert (!(Test-Path -LiteralPath $runtimePath)) 'A disabled Run must not create or publish a job'
+
+    # Stop while real Run holds the creation barrier before publishing its job identity.
+    # Disabling the fake task releases that startup; Stop must wait for creation and drain
+    # the resulting Node even though Scheduler.Stop reports no instances immediately.
+    $configPath = Join-Path $directory 'startup-config.json'
+    $enabledPath = Join-Path $directory 'startup-enabled'
+    $releasePath = Join-Path $directory 'startup-release'
+    $readyPath = Join-Path $directory 'startup-ready'
+    $harness = Join-Path $directory 'startup.ps1'
+    [IO.File]::WriteAllText($enabledPath, '1')
+    @{ record = $record; runtimePath = $runtimePath; creationLockName = $creationLockName; runLockName = $runLockName; enabledPath = $enabledPath; releasePath = $releasePath; readyPath = $readyPath } |
+        ConvertTo-Json -Depth 5 -Compress | Set-Content -LiteralPath $configPath -Encoding UTF8
+    [IO.File]::WriteAllText($harness, @'
+param($ServiceScript, $ConfigPath)
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version 2.0
+$config = [IO.File]::ReadAllText($ConfigPath) | ConvertFrom-Json
+$record = $config.record
+$ownerSid = $record.sid; $scriptPath = $record.script; $NodePath = $record.node; $ServerPath = $record.server; $StateDir = $record.state; $Port = $record.port; $McpConfig = $record.mcp
+$runtimePath = $config.runtimePath; $creationLockName = $config.creationLockName; $runLockName = $config.runLockName
+$descriptionPrefix = 'Nootify per-user service v1: '
+$powerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+$tokens = $null; $errors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile($ServiceScript, [ref]$tokens, [ref]$errors)
+foreach ($statement in $ast.EndBlock.Statements) {
+    if ($statement -is [Management.Automation.Language.FunctionDefinitionAst]) { . ([scriptblock]::Create($statement.Extent.Text)) }
+}
+Add-Type -Path (Join-Path (Split-Path $ServiceScript) 'service-runner.cs')
+$entry = [pscustomobject]@{ Type = 0; Path = $powerShell; Arguments = (Run-Arguments $record); WorkingDirectory = $StateDir }
+$actions = [pscustomobject]@{ Count = 1; Entry = $entry }
+$actions | Add-Member ScriptMethod Item { param($Index); return $this.Entry }
+$task = [pscustomobject]@{ Definition = [pscustomobject]@{ RegistrationInfo = [pscustomobject]@{ Description = $descriptionPrefix + ($record | ConvertTo-Json -Compress) }; Actions = $actions; Principal = [pscustomobject]@{ UserId = $ownerSid; LogonType = 3; RunLevel = 0 } }; EnabledPath = $config.enabledPath }
+$task | Add-Member ScriptProperty Enabled { return [IO.File]::ReadAllText($this.EnabledPath) -eq '1' }
+function Get-Task { return $task }
+$publish = ${function:Publish-Job}
+function Publish-Job($Name) {
+    [IO.File]::WriteAllText($config.readyPath, 'barrier held; no record or Node yet')
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    while (!(Test-Path -LiteralPath $config.releasePath)) {
+        if ($watch.ElapsedMilliseconds -ge 10000) { throw 'Stop did not release startup fixture' }
+        Start-Sleep -Milliseconds 10
+    }
+    & $publish $Name
+}
+exit (Run-Service)
+'@)
+    $startup = Start-Process -FilePath $powerShell -ArgumentList ('-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ' + (Quote-Argument $harness) + ' -ServiceScript ' + (Quote-Argument $serviceScript) + ' -ConfigPath ' + (Quote-Argument $configPath)) -PassThru -WindowStyle Hidden -RedirectStandardOutput (Join-Path $directory 'startup.stdout') -RedirectStandardError (Join-Path $directory 'startup.stderr')
+    $null = $startup.Handle
+    Wait-File $readyPath
+    Assert (!(Test-Path -LiteralPath $runtimePath)) 'The startup fixture must stop before runtime publication'
+    $task | Add-Member NoteProperty EnabledPath $enabledPath
+    $task | Add-Member NoteProperty ReleasePath $releasePath
+    $task | Add-Member NoteProperty Process $startup
+    $task | Add-Member NoteProperty CountBeforeStop 0
+    $task | Add-Member ScriptProperty Enabled { return [IO.File]::ReadAllText($this.EnabledPath) -eq '1' } {
+        param($Value)
+        [IO.File]::WriteAllText($this.EnabledPath, $(if ($Value) { '1' } else { '0' }))
+        if (!$Value) { [IO.File]::WriteAllText($this.ReleasePath, 'stop waiting on creation barrier') }
+    } -Force
+    $task | Add-Member ScriptMethod GetInstances { param($Flags); return [pscustomobject]@{ Count = [int](!$this.Process.HasExited) } } -Force
+    $task | Add-Member ScriptMethod Stop {
+        param($Flags)
+        $this.Stops++
+        $runtime = [IO.File]::ReadAllText($runtimePath) | ConvertFrom-Json
+        $this.Job = [Nootify.ServiceJob]::Open($runtime.job, $ownerSid)
+        $this.CountBeforeStop = $this.Job.ActiveProcesses
+        $this.Process.Kill(); Assert ($this.Process.WaitForExit(5000)) 'Scheduler action must exit'
+    } -Force
+    Stop-OwnedTask $task
+    Assert ($task.CountBeforeStop -gt 0) 'The startup fixture must create Node after Stop disables the task'
+    Assert ($task.Job.ActiveProcesses -eq 0) 'Stop must drain startup Node despite additional open job handles'
+    $task.Job.Dispose(); $task.Job = $null
+    Assert (!(Test-Path -LiteralPath $runtimePath)) 'A successful stop may remove its completed runtime record'
+    [IO.File]::Move($copiedNode, (Join-Path $directory 'released-node.exe'))
+    [IO.File]::Move((Join-Path $directory 'released-node.exe'), $copiedNode)
+    $startup.Dispose(); $startup = $null
+
+    # Keep an unrelated job alive throughout Stop; a matching user alone is not ownership.
+    $unrelatedName = "Global\Nootify.Service.Job.$ownerSid." + [guid]::NewGuid().ToString('N')
+    $unrelatedJob = [Nootify.ServiceJob]::Create($unrelatedName, $ownerSid)
+    $unrelated = [Nootify.ServiceRunner]::new($unrelatedJob, $originalNode, [string[]]@('-e', 'setInterval(()=>{},1000)'), $directory)
+    $unrelated.Resume()
+    $lateFixture = Join-Path $directory 'late-helper.cjs'
+    [IO.File]::WriteAllText($lateFixture, @'
+const fs = require('node:fs');
+const { spawn } = require('node:child_process');
+const { join } = require('node:path');
+const directory = process.argv[2];
+fs.writeFileSync(join(directory, 'late-ready'), 'ready');
+let child;
+setInterval(() => {
+  if (!child && fs.existsSync(join(directory, 'spawn-helper'))) {
+    child = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { stdio: 'ignore', windowsHide: true });
+    fs.writeFileSync(join(directory, 'late-helper.tmp'), String(child.pid));
+    fs.renameSync(join(directory, 'late-helper.tmp'), join(directory, 'late-helper.pid'));
+  }
+}, 10);
+'@)
+    $name = "Global\Nootify.Service.Job.$ownerSid." + [guid]::NewGuid().ToString('N')
+    $job = [Nootify.ServiceJob]::Create($name, $ownerSid)
+    Publish-Job $name
+    $runner = [Nootify.ServiceRunner]::new($job, $copiedNode, [string[]]@($lateFixture, $directory), $directory)
+    $root = [Diagnostics.Process]::GetProcessById([int]$runner.ProcessId); $null = $root.Handle
+    $runner.Resume(); Wait-File (Join-Path $directory 'late-ready')
+    Assert ($job.ActiveProcesses -eq 1) 'The late-helper fixture must initially contain only Node'
+    $task | Add-Member NoteProperty Helper $null
+    $task | Add-Member ScriptMethod GetInstances { param($Flags); return [pscustomobject]@{ Count = $this.Instances } } -Force
+    $task | Add-Member ScriptMethod Stop {
+        param($Flags)
+        $this.Stops++
+        # This occurs after management opens the job, too late for any descendant snapshot.
+        [IO.File]::WriteAllText((Join-Path $directory 'spawn-helper'), 'go')
+        Wait-File (Join-Path $directory 'late-helper.pid')
+        $this.Helper = [Diagnostics.Process]::GetProcessById([int][IO.File]::ReadAllText((Join-Path $directory 'late-helper.pid')))
+        $null = $this.Helper.Handle
+        Assert ($job.ActiveProcesses -ge 2) 'The real helper must be in the job before Scheduler reports stopped'
+        $this.Instances = 0 # No process is killed at the mocked Scheduler boundary.
+    } -Force
+    $task.Instances = 1
+    Stop-OwnedTask $task
+    Assert ($job.ActiveProcesses -eq 0) 'Authoritative membership must include helpers born during Stop'
+    Assert ($root.WaitForExit(0) -and $task.Helper.WaitForExit(0)) 'Stop must return only after Node/helper exit'
+    Assert ($unrelatedJob.ActiveProcesses -eq 1) 'Stop must leave an unrelated current-user job running'
+    $root.Dispose(); $task.Helper.Dispose()
+    $runner.Dispose(); $runner = $null
+    $job = [Nootify.ServiceJob]::Create($name, $ownerSid)
+    Publish-Job $name
+
+    # A real native query denial must abort Stop and retain evidence for retry.
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class NootifyJobTest {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern IntPtr OpenJobObject(uint access, bool inherit, string name);
+}
+'@
+    $limitedHandle = [NootifyJobTest]::OpenJobObject(8, $false, $name) # TERMINATE only; QueryInformationJobObject must fail.
+    Assert ($limitedHandle -ne [IntPtr]::Zero) 'Expected a real terminate-only job handle'
+    $constructor = [Nootify.ServiceJob].GetConstructor([Reflection.BindingFlags]'Instance,NonPublic', $null, [type[]]@([IntPtr]), $null)
+    $limited = $constructor.Invoke([object[]]@($limitedHandle))
+    $openJob = ${function:Open-OwnedJob}
+    function Open-OwnedJob { return $limited }
+    try {
+        Must-Fail { Stop-OwnedTask $task } 'A failed native job query must fail Stop'
+        Assert (Test-Path -LiteralPath $runtimePath) 'A failed drain must retain runtime evidence'
+    } finally { ${function:Open-OwnedJob} = $openJob }
+    $job.Dispose(); $job = $null
+    Stop-OwnedTask $task # Retry can prove this recorded job absent.
     [IO.File]::Move($copiedNode, (Join-Path $directory 'replaced-node.exe'))
 } finally {
+    if ($startup) { if (!$startup.HasExited) { $startup.Kill(); $null = $startup.WaitForExit(5000) }; $startup.Dispose() }
+    if ($task.Job) { try { $task.Job.TerminateAndWait(5000) } finally { $task.Job.Dispose() } }
     if ($runner) { $runner.Dispose() }
+    if ($job) { try { $job.TerminateAndWait(5000) } finally { $job.Dispose() } }
+    if ($unrelated) { $unrelated.Dispose() }
+    elseif ($unrelatedJob) { try { $unrelatedJob.TerminateAndWait(5000) } finally { $unrelatedJob.Dispose() } }
+    if (Test-Path -LiteralPath $runtimePath) {
+        $cleanupJob = Open-OwnedJob $false
+        if ($cleanupJob) { try { $cleanupJob.TerminateAndWait(5000) } finally { $cleanupJob.Dispose() } }
+    }
     Remove-Item -LiteralPath $directory -Recurse -Force
 }
 Write-Output 'Windows service tests passed'
