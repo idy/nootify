@@ -95,7 +95,14 @@ export class LarkService implements ServiceModule {
         onReady: () => { if (current()) { this.connection = 'ready'; this.report({ status: 'lark_ready' }); } },
         onReconnecting: () => { if (current()) this.connection = 'reconnecting'; },
         onReconnected: () => { if (current()) this.connection = 'ready'; },
-        onError: error => { if (current()) { this.connection = 'failed'; this.report({ status: 'lark_failed', error: error.message }); } },
+        onError: error => {
+          if (!current()) return;
+          // SDK onError is terminal (configuration rejected or retries exhausted).
+          // Retire it so an explicit start can retry and late callbacks cannot revive it.
+          this.closeSocket();
+          this.connection = 'failed';
+          this.report({ status: 'lark_failed', error: error.message });
+        },
       });
       // SDK start returns before network handshakes finish; every later callback must still belong to this client.
       await this.ws.start({ eventDispatcher: new sdk.EventDispatcher({ logger: quietLogger }).register({

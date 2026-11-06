@@ -72,6 +72,58 @@ test('Feishu stays connecting until the SDK confirms the handshake', async t => 
   assert.equal(lark.status(), 'ready');
 });
 
+test('SDK startup can finish before readiness without blocking other host modules', async t => {
+  const { lark, sockets, reports } = await fixture(t);
+  const starting = lark.start(); await nextTurn();
+  sockets[0].opening.resolve(); await starting;
+  assert.equal(lark.status(), 'connecting');
+  assert.equal(reports.length, 0);
+  sockets[0].ready();
+  assert.equal(lark.status(), 'ready');
+});
+
+for (const wasReady of [false, true]) {
+  test(`terminal SDK error ${wasReady ? 'after connection' : 'during startup'} permits an explicit retry`, async t => {
+    const { lark, sockets, reports } = await fixture(t);
+    const enqueue = t.mock.method(lark, 'enqueue', () => true);
+    const starting = lark.start(); await nextTurn();
+    if (wasReady) sockets[0].ready();
+    else sockets[0].opening.resolve();
+    await starting;
+    sockets[0].onClose = () => sockets[0].lateCallbacks();
+    sockets[0].options.onError?.(new Error('terminal connection failure'));
+    assert.equal(lark.status(), 'failed');
+    assert.equal(sockets[0].closed, 1);
+    const count = reports.length;
+    sockets[0].lateCallbacks();
+    await sockets[0].message({ retired: true });
+    assert.equal(enqueue.mock.calls.length, 0);
+    assert.equal(lark.status(), 'failed');
+    assert.equal(reports.length, count);
+    const retrying = lark.start(); await nextTurn();
+    assert.equal(sockets.length, 2);
+    assert.equal(sockets[1].options.appId, firstBot.appId);
+    sockets[1].ready(); await retrying;
+    assert.equal(lark.status(), 'ready');
+  });
+}
+
+test('reconfiguring unchanged credentials replaces the connection and resumes receiving', async t => {
+  const { lark, sockets } = await fixture(t);
+  const enqueue = t.mock.method(lark, 'enqueue', () => true);
+  const starting = lark.start(); await nextTurn(); sockets[0].ready(); await starting;
+  const configuring = lark.configure({ ...firstBot }); await nextTurn();
+  assert.equal(sockets[0].closed, 1);
+  assert.equal(sockets.length, 2);
+  assert.equal(lark.status(), 'connecting');
+  sockets[1].ready(); await configuring;
+  await sockets[0].message({ retired: true });
+  await sockets[1].message({ current: true });
+  assert.equal(lark.status(), 'ready');
+  assert.equal(enqueue.mock.calls.length, 1);
+  assert.deepEqual(enqueue.mock.calls[0].arguments, [{ current: true }]);
+});
+
 test('a retired Feishu client cannot change the current connection or dispatch messages', async t => {
   const { lark, sockets, reports } = await fixture(t);
   const enqueue = t.mock.method(lark, 'enqueue', () => true);

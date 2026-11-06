@@ -45,6 +45,7 @@ test('read-only UI serves real logs while cross-site and unauthenticated control
   assert.equal(rebindingStatus, 403);
   assert.equal((await fetch(origin + '/v1/sessions', { method: 'POST', body: '{}' })).status, 401);
   assert.equal((await fetch(origin + '/ui/app.js', { headers: { origin } })).status, 200);
+  assert.equal((await fetch(origin + '/ui/lark-profile.js', { headers: { origin } })).status, 200);
   const translations = await fetch(origin + '/ui/ui-i18n.js', { headers: { origin } });
   assert.equal(translations.status, 200);
   assert.match(translations.headers.get('content-type')!, /javascript/);

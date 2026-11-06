@@ -1,5 +1,38 @@
 /** Chinese source messages are the catalog keys, following the gettext convention. */
 export const english = {
+  '当前接收人': 'Current recipient',
+  '已选择 {p0}': 'Selected: {p0}',
+  '选择飞书接收人': 'Choose a Feishu recipient',
+  '选择一位联系人，接收会话消息并回复。': 'Choose someone to receive and reply to session messages.',
+  '关闭': 'Close',
+  '搜索姓名': 'Search contacts',
+  '部分联系人需要额外权限': 'Some contacts need additional access',
+  '处理权限': 'Set up access',
+  '重试': 'Retry',
+  '需要通讯录权限': 'Contact access is required',
+  '使用应用管理员账号扫码，在飞书后台开通所需权限并确认通讯录可见范围。': 'Scan with an app administrator account to enable permissions and check the contact access range in Feishu.',
+  '飞书权限配置二维码': 'QR code for Feishu permission settings',
+  '在浏览器中打开飞书后台': 'Open the Feishu developer console',
+  '权限详情': 'Permission details',
+  '如需审批，请发布应用版本并由管理员批准。普通用户扫码不会自动授予应用权限。': 'If approval is required, publish an app version for administrator review. Scanning as an ordinary user does not grant app permissions.',
+  '手动填写 ID': 'Enter ID manually',
+  '确认选择': 'Confirm selection',
+  '授权后重试': 'Retry after authorization',
+  '暂时无法读取联系人': 'Contacts could not be loaded',
+  '没有找到这位联系人': 'No matching contacts',
+  '暂无可见联系人': 'No contacts are visible',
+  '请检查网络后重试，也可以手动填写 ID。': 'Check your connection and retry, or enter an ID manually.',
+  '试试其他姓名，或直接搜索 open_id。': 'Try another name, or search by open_id.',
+  '请检查应用的通讯录可见范围，或手动填写 ID。': 'Check the app’s contact access range, or enter an ID manually.',
+  '开通权限后，可重新读取联系人。': 'Reload contacts after enabling access.',
+  '已加载 {p0} 位，正在加载更多…': '{p0} contacts loaded; loading more…',
+  '正在连接飞书通讯录…': 'Connecting to the Feishu directory…',
+  '加载已中断，已显示的联系人仍可选择。': 'Loading stopped. You can still choose a contact already shown.',
+  '已显示 {p0} 位联系人': 'Showing {p0} contacts',
+  '{p0} 位联系人': 'Contacts: {p0}',
+  '凭据已保存，飞书已连接': 'Credentials saved; Feishu is connected',
+  '凭据已保存，正在重新连接飞书…': 'Credentials saved; reconnecting to Feishu…',
+  '凭据已保存，连接失败，请重试': 'Credentials saved; connection failed. Please retry.',
   '从列表选择': 'Choose from list',
   '选择接收目标': 'Choose recipients',
   '目标频道': 'Destination channel',
@@ -568,7 +601,7 @@ export function setLanguage(value: LanguagePreference, native?: NativeLanguage):
 /** Only explicitly marked, trusted catalog strings are translated; user content is never touched. */
 export function translateDocument(root: ParentNode = document): void {
   document.documentElement.lang = locale();
-  for (const attribute of ['text', 'title', 'aria-label', 'placeholder'] as const) {
+  for (const attribute of ['text', 'title', 'aria-label', 'placeholder', 'alt'] as const) {
     const marker = attribute === 'text' ? 'data-i18n' : `data-i18n-${attribute}`;
     for (const element of root.querySelectorAll<HTMLElement>(`[${marker}]`)) {
       const key = element.getAttribute(marker)!;

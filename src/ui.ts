@@ -5,6 +5,7 @@ import type { PullSnapshot, RepositoryEntry } from './github.js';
 import { isAgent, type AgentId, type AgentPrompt } from './agents.js';
 import type { SettingsService } from './settings.js';
 import { HttpError, type ServiceModule } from './types.js';
+import { LarkPermissionRequiredError } from './lark-permissions.js';
 
 export interface PullsSource { snapshot(): PullSnapshot; refresh(): void; setChoice(repository: string, follow: boolean | null): Promise<RepositoryEntry> }
 export interface AgentsSource { list(): Promise<AgentPrompt[]>; set(agent: AgentId, enabled: boolean): Promise<AgentPrompt> }
@@ -17,12 +18,13 @@ export interface UiContext {
   via?: 'loopback' | 'tailnet';
 }
 
-const policy = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+const policy = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: https://*.feishucdn.com; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
 const assets = new Map([
   ['/', { path: new URL('../../public/index.html', import.meta.url), type: 'text/html; charset=utf-8' }],
   ['/ui/styles.css', { path: new URL('../../public/styles.css', import.meta.url), type: 'text/css; charset=utf-8' }],
   ['/ui/app.js', { path: new URL('./ui-app.js', import.meta.url), type: 'text/javascript; charset=utf-8' }],
   ['/ui/ui-i18n.js', { path: new URL('./ui-i18n.js', import.meta.url), type: 'text/javascript; charset=utf-8' }],
+  ['/ui/lark-profile.js', { path: new URL('./lark-profile.js', import.meta.url), type: 'text/javascript; charset=utf-8' }],
 ]);
 function json(response: ServerResponse, status: number, body: unknown): void {
   response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
@@ -40,6 +42,25 @@ async function smallJson(request: IncomingMessage, limit = 4096): Promise<Record
   try { value = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw new HttpError(400, 'Invalid JSON'); }
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new HttpError(400, 'Expected a JSON object');
   return value as Record<string, unknown>;
+}
+function settingsError(error: unknown): { status: number; error: string; permission?: LarkPermissionRequiredError['permission'] } {
+  return { status: error instanceof HttpError ? error.status : 500, error: (error as Error).message,
+    ...(error instanceof LarkPermissionRequiredError ? { permission: error.permission } : {}) };
+}
+/** Streams useful batches instead of holding the entire directory behind one spinner. */
+async function streamRecipients(request: IncomingMessage, response: ServerResponse, settings: SettingsSource): Promise<void> {
+  const body = await smallJson(request);
+  const controller = new AbortController();
+  const closed = () => controller.abort();
+  response.once('close', closed); request.once('aborted', closed);
+  response.writeHead(200, { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+  response.flushHeaders();
+  const send = (event: unknown) => { if (!controller.signal.aborted && !response.destroyed && !response.writableEnded) response.write(JSON.stringify(event) + '\n'); };
+  try {
+    const directory = await settings.larkRecipients(directory => send({ type: 'progress', directory }), controller.signal, body.refresh === true);
+    send({ type: 'complete', directory });
+  } catch (error) { send({ type: 'error', ...settingsError(error) }); }
+  finally { response.off('close', closed); request.off('aborted', closed); if (!response.destroyed) response.end(); }
 }
 /** Matches the limit on the pulls configuration file an import may restore. */
 const IMPORT_LIMIT = 1024 * 1024;
@@ -89,8 +110,10 @@ export async function serveUi(request: IncomingMessage, response: ServerResponse
     else if (context.via === 'tailnet') { request.resume(); json(response, 403, { error: 'Settings can only be changed on this Mac' }); }
     else if (!context.settings) { request.resume(); json(response, 404, { error: 'Settings are not enabled' }); }
     else {
-      try { json(response, 200, await settingsAction(request, path, context.settings)); }
-      catch (error) { json(response, error instanceof HttpError ? error.status : 500, { error: (error as Error).message }); }
+      try {
+        if (path === '/ui/api/settings/lark/recipients/stream') await streamRecipients(request, response, context.settings);
+        else json(response, 200, await settingsAction(request, path, context.settings));
+      } catch (error) { const failure = settingsError(error); json(response, failure.status, failure); }
     }
     return true;
   }

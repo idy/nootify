@@ -5,4 +5,5 @@ src-tauri/target/
 src-tauri/gen/
 # Node.js downloads cached by scripts/stage-service.mjs
 .cache/
+.impeccable/review/
 .claude/launch.json

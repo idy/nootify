@@ -183,7 +183,10 @@ fn main() {
                         let _ = page_updates.try_send(request);
                         return false;
                     }
-                    if is_github_link(url) || is_tailscale_link(url) {
+                    if is_github_link(url)
+                        || is_tailscale_link(url)
+                        || is_feishu_permission_link(url)
+                    {
                         open_in_browser(url);
                         return false;
                     }
@@ -207,7 +210,10 @@ fn main() {
                 })
                 // window.open() bypasses the policy above; it gets the same treatment, nothing else opens.
                 .on_new_window(|url, _| {
-                    if is_github_link(&url) || is_tailscale_link(&url) {
+                    if is_github_link(&url)
+                        || is_tailscale_link(&url)
+                        || is_feishu_permission_link(&url)
+                    {
                         open_in_browser(&url);
                     }
                     NewWindowResponse::Deny
@@ -927,6 +933,22 @@ fn is_tailscale_link(url: &Url) -> bool {
         }
 }
 
+fn is_feishu_permission_link(url: &Url) -> bool {
+    no_credentials(url)
+        && url.scheme() == "https"
+        && url.host_str() == Some("open.feishu.cn")
+        && url.port().is_none()
+        && url.fragment().is_none()
+        && (matches!(url.path(), "/app" | "/app/")
+            || url
+                .path()
+                .strip_prefix("/app/cli_")
+                .and_then(|path| path.strip_suffix("/auth"))
+                .is_some_and(|id| {
+                    id.len() == 16 && id.bytes().all(|byte| byte.is_ascii_hexdigit())
+                }))
+}
+
 fn open_in_browser(url: &Url) {
     match std::process::Command::new("/usr/bin/open")
         .arg(url.as_str())
@@ -945,6 +967,31 @@ fn open_in_browser(url: &Url) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn feishu_permission_links_open_only_the_official_app_console() {
+        for link in [
+            "https://open.feishu.cn/app",
+            "https://open.feishu.cn/app/cli_0123456789abcdef/auth?q=contact:group:readonly&op_from=openapi",
+        ] {
+            assert!(is_feishu_permission_link(&Url::parse(link).unwrap()), "{link}");
+        }
+        for link in [
+            "http://open.feishu.cn/app",
+            "https://open.feishu.cn.evil.test/app",
+            "https://user@open.feishu.cn/app",
+            "https://open.feishu.cn:8443/app",
+            "https://open.feishu.cn/app/cli_invalid/auth",
+            "https://open.feishu.cn/app/cli_0123456789abcdef/settings",
+            "https://open.feishu.cn/document/anything",
+            "https://open.feishu.cn/app#other",
+        ] {
+            assert!(
+                !is_feishu_permission_link(&Url::parse(link).unwrap()),
+                "{link}"
+            );
+        }
+    }
 
     #[test]
     fn navigation_is_limited_to_our_two_documents() {

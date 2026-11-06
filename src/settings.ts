@@ -15,7 +15,8 @@ import { HttpError, type BackendConnection } from './types.js';
 import type { TailscaleService, TailscalePage, TailscaleLogin } from './tailscale.js';
 import { isNotificationChannel, validChatConfig, type ChatChannel, type ChatSettingsPage, type NotificationChannel, type SlackConfig, type TelegramConfig, type ChatDirectory, ChatTransportError } from './chat-transport.js';
 import type { ChatService } from './chat-service.js';
-import { larkDirectory, type LarkDirectory } from './lark-directory.js';
+import { larkDirectory, LarkDirectoryPermissionError, type LarkDirectory } from './lark-directory.js';
+import { larkPermissionHelp, LarkPermissionRequiredError, type LarkPermissionHelp } from './lark-permissions.js';
 import type { LarkApi } from './lark-metadata.js';
 import { slackDirectory } from './slack.js';
 import { telegramDirectory } from './telegram.js';
@@ -36,6 +37,7 @@ export interface SettingsPage {
   lark: { status: string; configured: boolean; source?: CredentialSource; app_id?: string; saved: boolean; recipient?: string; groups: number };
   notification_channel: NotificationChannel; slack: ChatSettingsPage; telegram: ChatSettingsPage;
 }
+export interface LarkRecipientsPage extends Omit<LarkDirectory, 'permission'> { permission?: LarkPermissionHelp }
 export interface GitHubSettings { account?: GitHubAccount; login: GitHubLogin }
 /** What a configuration file changes, in terms safe to show before and after importing it. */
 export interface ImportSummary {
@@ -153,6 +155,7 @@ function summarize(file: ConfigFile): ImportSummary {
 export class SettingsService {
   private source?: CredentialSource;
   private lastExport?: string;
+  private directoryCache?: { api: LarkApi; at: number; page: LarkRecipientsPage };
   private writes: Promise<unknown> = Promise.resolve();
   private readonly env: NodeJS.ProcessEnv;
   private readonly report: (record: Record<string, unknown>) => void;
@@ -253,12 +256,12 @@ export class SettingsService {
   async stop(): Promise<void> { await this.options.github.stop(); await this.writes.catch(() => {}); }
 
   /** Re-derives the active bot from its sources and moves the connection only if that changed it. */
-  private async reload(): Promise<void> {
+  private async reload(forceReconnect = false): Promise<void> {
     const { lark, state, mcpConfig } = this.options;
     const resolved = await resolveCredentials(this.env, state.settings, mcpConfig);
     this.source = resolved?.source;
     const current = lark.credentials;
-    if (current?.appId === resolved?.credentials.appId && current?.appSecret === resolved?.credentials.appSecret) return;
+    if (!forceReconnect && current?.appId === resolved?.credentials.appId && current?.appSecret === resolved?.credentials.appSecret) return;
     await lark.configure(resolved?.credentials);
     this.report({ source: 'lark', status: 'lark_configured', reason: resolved ? resolved.credentials.appId : undefined });
   }
@@ -283,7 +286,7 @@ export class SettingsService {
       catch (error) { throw new HttpError(400, `Could not verify these credentials with Feishu: ${(error as Error).message}`); }
       state.settings.lark_app_id = credentials.appId; state.settings.lark_app_secret = credentials.appSecret;
       await state.save();
-      await this.reload();
+      await this.reload(true);
     });
   }
   /** Falls back to the MCP file, if any, and refuses rather than leaving saved credentials half removed if it is unreadable. */
@@ -297,13 +300,42 @@ export class SettingsService {
       await this.reload();
     });
   }
-  async larkRecipients(): Promise<LarkDirectory> {
+  async larkRecipients(onProgress?: (page: LarkRecipientsPage) => void, signal?: AbortSignal, refresh = false): Promise<LarkRecipientsPage> {
     const { lark } = this.options;
     const api = lark.api; const credentials = lark.credentials;
     if (!api || !credentials?.appSecret || api.appId !== credentials.appId) throw new HttpError(409, 'Configure the Feishu application first');
-    const directory = await larkDirectory(api);
-    if (api !== lark.api || credentials !== lark.credentials) throw new HttpError(409, 'Feishu credentials changed; reload the directory');
-    return directory;
+    const current = () => api === lark.api && credentials === lark.credentials;
+    if (signal?.aborted) throw new HttpError(499, 'Directory request cancelled');
+    const cached = this.directoryCache;
+    if (!refresh && cached?.api === api && Date.now() - cached.at < 60000) { onProgress?.(cached.page); return cached.page; }
+    let updates = Promise.resolve();
+    let help: Promise<LarkPermissionHelp> | undefined;
+    const decorate = async (directory: LarkDirectory): Promise<LarkRecipientsPage> => {
+      const { permission, ...page } = directory;
+      return { ...page, ...(permission || directory.permission_limited ? { permission: await (help ??= larkPermissionHelp(api.appId, permission)) } : {}) };
+    };
+    try {
+      const directory = await larkDirectory(api, signal, onProgress ? page => {
+        updates = updates.then(async () => {
+          if (!current() || signal?.aborted) return;
+          const next = await decorate(page);
+          if (current() && !signal?.aborted) onProgress(next);
+        }).catch(() => {});
+      } : undefined);
+      await updates;
+      if (!current()) throw new HttpError(409, 'Feishu credentials changed; reload the directory');
+      if (signal?.aborted) throw new HttpError(499, 'Directory request cancelled');
+      const page = await decorate(directory);
+      if (!current()) throw new HttpError(409, 'Feishu credentials changed; reload the directory');
+      if (signal?.aborted) throw new HttpError(499, 'Directory request cancelled');
+      this.directoryCache = { api, at: Date.now(), page };
+      return page;
+    } catch (error) {
+      await updates;
+      if (!current()) throw new HttpError(409, 'Feishu credentials changed; reload the directory');
+      if (error instanceof LarkDirectoryPermissionError) throw new LarkPermissionRequiredError(await larkPermissionHelp(api.appId, error.permission));
+      throw error;
+    }
   }
   setRecipient(openId: unknown, appId?: unknown): Promise<void> {
     return this.serialized(async () => {

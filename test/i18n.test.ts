@@ -37,7 +37,7 @@ test('interpolation preserves user content without interpreting HTML, placeholde
 
 test('all marked static UI messages and dynamic translation keys have a catalog entry', async () => {
   const page = await readFile(new URL('../../public/index.html', import.meta.url), 'utf8');
-  for (const match of page.matchAll(/data-i18n(?:-title|-aria-label|-placeholder)?="([^"]+)"/g)) {
+  for (const match of page.matchAll(/data-i18n(?:-title|-aria-label|-placeholder|-alt)?="([^"]+)"/g)) {
     const key = match[1].replaceAll('&quot;', '"').replaceAll('&amp;', '&');
     assert.ok(Object.hasOwn(english, key), `Missing static translation: ${key}`);
   }

@@ -11,8 +11,33 @@ export interface LarkApi {
   request<T>(method: 'GET' | 'POST' | 'PATCH', path: string, body?: unknown, signal?: AbortSignal): Promise<T>;
 }
 export const quietLogger = { debug() {}, info() {}, warn() {}, error() {}, trace() {} };
+export interface LarkPermission { url?: string; scopes: string[] }
+/** Keep only public permission names and an app-matching official console link. */
+export function permissionDetails(value: unknown, appId: string): LarkPermission | undefined {
+  if (!value || typeof value !== 'object') return;
+  const body = value as { code?: number; msg?: string; console_url?: string; error?: { console_url?: string; helps?: { url?: string }[]; permission_violations?: { subject?: string; scope?: string }[] } };
+  if (![99991672, 99991679, 99991668, 40004, 41050].includes(body.code ?? 0)) return;
+  const message = typeof body.msg === 'string' ? body.msg : '';
+  const scopes = new Set(message.match(/\bcontact:[a-z0-9_.]+(?::[a-z0-9_.]+)?\b/g) ?? []);
+  for (const violation of Array.isArray(body.error?.permission_violations) ? body.error.permission_violations : []) {
+    if (!violation || typeof violation !== 'object') continue;
+    for (const name of [violation.scope, violation.subject]) if (typeof name === 'string' && /^contact:[a-z0-9_.]+(?::[a-z0-9_.]+)?$/.test(name)) scopes.add(name);
+  }
+  const helps = Array.isArray(body.error?.helps) ? body.error.helps.map(help => help && typeof help === 'object' ? help.url : undefined) : [];
+  const candidates = [body.console_url, body.error?.console_url, ...helps, ...(message.match(/https:\/\/open\.feishu\.cn\/app\/[^\s<>"']+/g) ?? [])];
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'string') continue;
+    try {
+      const url = new URL(candidate);
+      if (url.protocol === 'https:' && url.hostname === 'open.feishu.cn' && !url.username && !url.password && !url.port && url.pathname === `/app/${appId}/auth`) {
+        return { url: candidate, scopes: [...scopes] };
+      }
+    } catch { /* Ignore provider text that is not a permission URL. */ }
+  }
+  return { scopes: [...scopes] };
+}
 export class ApiError extends Error {
-  constructor(public code: number, message = 'request failed') { super(`Feishu API ${code}: ${message}`); }
+  constructor(public code: number, message = 'request failed', readonly permission?: LarkPermission) { super(`Feishu API ${code}: ${message}`); }
 }
 export async function loadCredentials(env: NodeJS.ProcessEnv, mcpConfig?: string): Promise<Credentials | undefined> {
   if (env.LARK_APP_ID && env.LARK_APP_SECRET) return { appId: env.LARK_APP_ID, appSecret: env.LARK_APP_SECRET };
@@ -58,10 +83,10 @@ export function createLarkApi(credentials: Credentials): LarkApi {
     try { response = await client.request({ method, url, data, signal }); }
     catch (error) {
       const body = (error as { response?: { data?: { code?: number; msg?: string } } }).response?.data;
-      if (typeof body?.code === 'number') throw new ApiError(body.code, body.msg);
+      if (typeof body?.code === 'number') throw new ApiError(body.code, body.msg, permissionDetails(body, credentials.appId));
       throw error;
     }
-    if (response.code !== 0) throw new ApiError(response.code, response.msg);
+    if (response.code !== 0) throw new ApiError(response.code, response.msg, permissionDetails(response, credentials.appId));
     return response.data;
   } };
 }

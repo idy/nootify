@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { ApiError, type LarkApi } from '../src/lark-metadata.js';
-import { larkDirectory } from '../src/lark-directory.js';
+import { larkDirectory, LarkDirectoryPermissionError, type LarkDirectory } from '../src/lark-directory.js';
 import { HttpError } from '../src/types.js';
 
 function api(read: (url: URL, signal?: AbortSignal) => unknown | Promise<unknown>): LarkApi {
@@ -79,6 +79,109 @@ test('request failures are sanitized, and cancellation has a distinct timeout re
   await assert.rejects(larkDirectory(api(() => { throw new Error('private auth header'); })), (error: unknown) => error instanceof HttpError && error.status === 502 && !error.message.includes('private'));
   const controller = new AbortController();
   await assert.rejects(larkDirectory(api(() => { controller.abort(); throw new Error('aborted'); }), controller.signal), (error: unknown) => error instanceof HttpError && error.status === 504);
+});
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(done => { resolve = done; });
+  return { promise, resolve };
+}
+
+const turn = () => new Promise<void>(resolve => setImmediate(resolve));
+
+test('progress publishes users before a slow final page and preserves pagination', async () => {
+  const lastPage = deferred<unknown>();
+  const firstProgress = deferred<LarkDirectory>();
+  let completed = false;
+  const result = larkDirectory(api(url => {
+    if (url.pathname.endsWith('/scopes')) return { department_ids: ['od-root'] };
+    if (url.pathname.endsWith('/children')) return {};
+    if (url.searchParams.has('page_token')) return lastPage.promise;
+    return { items: [{ open_id: 'ou_first', name: 'First' }], has_more: true, page_token: 'last' };
+  }), undefined, snapshot => firstProgress.resolve(snapshot)).then(value => { completed = true; return value; });
+  const snapshot = await firstProgress.promise;
+  assert.deepEqual(snapshot.users.map(user => user.open_id), ['ou_first']);
+  assert.equal(completed, false);
+  lastPage.resolve({ items: [{ open_id: 'ou_last', name: 'Last' }] });
+  assert.equal((await result).users.length, 2);
+  assert.equal(snapshot.users.length, 1, 'published snapshots do not mutate');
+});
+
+test('profile batches and departments share a four-request concurrency limit', async () => {
+  let active = 0; let maximum = 0; const queries: string[] = [];
+  const result = await larkDirectory(api(async url => {
+    if (url.pathname.endsWith('/scopes')) return { user_ids: Array.from({ length: 250 }, (_, i) => `ou_${i}`), department_ids: ['od-one', 'od-two'] };
+    active++; maximum = Math.max(maximum, active); queries.push(url.pathname + url.search);
+    await turn(); active--;
+    if (url.pathname.endsWith('/children')) return { items: [{ open_department_id: 'od-shared' }] };
+    if (url.pathname.endsWith('/users/batch')) return { items: url.searchParams.getAll('user_ids').map(open_id => ({ open_id })) };
+    return { items: [{ open_id: `ou_${url.searchParams.get('department_id')?.replaceAll('-', '')}` }] };
+  }));
+  assert.equal(maximum, 4);
+  assert.equal(result.users.length, 253);
+  assert.equal(queries.filter(query => query.includes('department_id=od-shared')).length, 1);
+  assert.equal(queries.filter(query => query.includes('/users/batch')).length, 5);
+});
+
+test('first missing group permission stops all optional group expansion and retains metadata', async () => {
+  const permission = { url: 'https://open.feishu.cn/app/cli_test/auth?q=contact:group:readonly', scopes: ['contact:group:readonly'] };
+  let groupCalls = 0;
+  const snapshots: LarkDirectory[] = [];
+  const result = await larkDirectory(api(url => {
+    if (url.pathname.endsWith('/scopes')) return { user_ids: ['ou_owner'], group_ids: ['one', 'two', 'three'] };
+    if (url.pathname.endsWith('/users/batch')) return { items: [{ open_id: 'ou_owner' }] };
+    groupCalls++; throw Object.assign(new ApiError(99991672, 'secret-provider-text'), { permission });
+  }), undefined, value => snapshots.push(value));
+  assert.equal(groupCalls, 1);
+  assert.deepEqual(result.permission, permission);
+  assert.deepEqual(snapshots.at(-1)?.permission, permission);
+  assert.ok(!JSON.stringify(result).includes('secret-provider-text'));
+  await assert.rejects(larkDirectory(api(() => { throw Object.assign(new ApiError(99991672, 'secret-provider-text'), { permission }); })), error => {
+    assert.ok(error instanceof LarkDirectoryPermissionError);
+    assert.equal(error.status, 403); assert.deepEqual(error.permission, permission);
+    assert.ok(!error.message.includes('secret-provider-text')); return true;
+  });
+});
+
+test('abort settles ignored signals without users or phantom results', async () => {
+  const controller = new AbortController(); const started = deferred<void>();
+  const result = larkDirectory(api(() => { started.resolve(); return new Promise(() => {}); }), controller.signal);
+  await started.promise; controller.abort();
+  await assert.rejects(result, error => error instanceof HttpError && error.status === 504);
+  const alreadyAborted = new AbortController(); alreadyAborted.abort();
+  await assert.rejects(larkDirectory(api(() => assert.fail('must not request')), alreadyAborted.signal), error => error instanceof HttpError && error.status === 504);
+});
+
+test('abort returns partial users promptly and ignores late SDK results and callbacks', async () => {
+  const controller = new AbortController(); const slowPage = deferred<unknown>(); const started = deferred<void>();
+  const snapshots: LarkDirectory[] = [];
+  const result = larkDirectory(api(url => {
+    if (url.pathname.endsWith('/scopes')) return { department_ids: ['od-root'] };
+    if (url.pathname.endsWith('/children')) return {};
+    if (url.searchParams.has('page_token')) { started.resolve(); return slowPage.promise; }
+    return { items: [{ open_id: 'ou_first' }], has_more: true, page_token: 'slow' };
+  }), controller.signal, value => snapshots.push(value));
+  await started.promise; controller.abort();
+  const directory = await result;
+  assert.deepEqual(directory.users.map(user => user.open_id), ['ou_first']);
+  assert.equal(directory.truncated, true);
+  const count = snapshots.length;
+  slowPage.resolve({ items: [{ open_id: 'ou_late' }] });
+  await turn();
+  assert.equal(snapshots.length, count);
+  assert.equal(directory.users.length, 1);
+});
+
+test('a failed parallel request settles while another SDK request hangs', async () => {
+  const late = deferred<unknown>(); const snapshots: LarkDirectory[] = [];
+  const result = larkDirectory(api(url => {
+    if (url.pathname.endsWith('/scopes')) return { user_ids: Array.from({ length: 100 }, (_, i) => `ou_${i}`) };
+    if (url.searchParams.get('user_ids') === 'ou_0') return late.promise;
+    throw new Error('private upstream failure');
+  }), undefined, value => snapshots.push(value));
+  await assert.rejects(result, error => error instanceof HttpError && error.status === 502 && !error.message.includes('private'));
+  late.resolve({ items: [{ open_id: 'ou_late' }] });
+  await turn(); assert.deepEqual(snapshots, []);
 });
 
 test('large directory pagination is bounded and explicitly reports truncation', async () => {

@@ -135,13 +135,20 @@
       </div>
       <div class="group">
         <div class="setting setting-field-row"><label class="setting-main" for="lark-recipient"><span class="setting-title" data-i18n="接收人">接收人</span><span class="setting-sub" data-i18n="新群邀请的飞书用户，也是群里被信任的发送者">新群邀请的飞书用户，也是群里被信任的发送者</span></label><input id="lark-recipient" class="setting-field mono" type="text" placeholder="ou_…" autocomplete="off" spellcheck="false"><div class="setting-actions"><button type="button" id="recipient-choose" class="text-button" aria-expanded="false" aria-controls="recipient-picker" data-i18n="从飞书选择">从飞书选择</button><button type="button" id="recipient-save" class="text-button primary" data-i18n="保存">保存</button></div></div>
-        <div class="recipient-picker" id="recipient-picker" hidden>
-          <div class="recipient-toolbar"><label for="recipient-search" class="setting-title" data-i18n="选择接收人">选择接收人</label><div class="setting-actions"><button type="button" id="recipient-reload" class="text-button" data-i18n="重新读取">重新读取</button><button type="button" id="recipient-close" class="text-button" data-i18n="收起">收起</button></div></div>
-          <input id="recipient-search" class="setting-field" type="search" placeholder="搜索姓名或 open_id" data-i18n-placeholder="搜索姓名或 open_id" aria-label="搜索姓名或 open_id" data-i18n-aria-label="搜索姓名或 open_id" autocomplete="off" spellcheck="false">
-          <div id="recipient-directory-note" class="setting-sub" role="status" aria-live="polite"></div>
-          <select id="recipient-options" class="recipient-options" size="6" aria-label="飞书用户" data-i18n-aria-label="飞书用户" aria-describedby="recipient-directory-note"></select>
-          <p class="setting-sub" data-i18n="选中用户后点击保存。列表仅包含当前应用可见的用户，也可以直接填写 open_id。">选中用户后点击保存。列表仅包含当前应用可见的用户，也可以直接填写 open_id。</p>
-        </div>
+        <dialog class="recipient-dialog" id="recipient-picker" aria-labelledby="recipient-dialog-title" aria-describedby="recipient-directory-note">
+          <div class="recipient-dialog-head"><div><h2 id="recipient-dialog-title" data-i18n="选择飞书接收人">选择飞书接收人</h2><p data-i18n="选择一位联系人，接收会话消息并回复。">选择一位联系人，接收会话消息并回复。</p></div><button type="button" id="recipient-close" class="icon-button" aria-label="关闭" data-i18n-aria-label="关闭"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8"/></svg></button></div>
+          <div id="recipient-search-row" class="recipient-dialog-search"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/></svg><input id="recipient-search" type="search" placeholder="搜索姓名" data-i18n-placeholder="搜索姓名" aria-label="搜索姓名或 open_id" data-i18n-aria-label="搜索姓名或 open_id" autocomplete="off" spellcheck="false" autofocus></div>
+          <div class="recipient-dialog-status"><span id="recipient-directory-note" role="status" aria-live="polite"></span><button type="button" id="recipient-reload" class="text-button" data-i18n="重新读取">重新读取</button></div>
+          <div id="recipient-permission-notice" class="recipient-permission-notice" hidden><span data-i18n="部分联系人需要额外权限">部分联系人需要额外权限</span><button type="button" id="recipient-show-permission" class="text-button" data-i18n="处理权限">处理权限</button></div>
+          <div class="recipient-dialog-body">
+            <div id="recipient-options" class="recipient-people" role="listbox" tabindex="0" aria-label="飞书用户" data-i18n-aria-label="飞书用户"></div>
+            <div id="recipient-loading" class="recipient-loading" aria-hidden="true" hidden><div><i></i><span></span></div><div><i></i><span></span></div><div><i></i><span></span></div></div>
+            <div id="recipient-empty" class="recipient-empty" hidden><svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="14" cy="14" r="8"/><path d="m20 20 7 7"/></svg><strong id="recipient-empty-title"></strong><p id="recipient-empty-detail"></p><button type="button" id="recipient-empty-retry" class="text-button primary" data-i18n="重试">重试</button></div>
+            <div id="recipient-permission" class="recipient-permission" hidden><strong data-i18n="需要通讯录权限">需要通讯录权限</strong><p data-i18n="使用应用管理员账号扫码，在飞书后台开通所需权限并确认通讯录可见范围。">使用应用管理员账号扫码，在飞书后台开通所需权限并确认通讯录可见范围。</p><div id="recipient-permission-qr-host"></div><a id="recipient-open-console" class="text-button primary" target="_blank" rel="noopener noreferrer" data-i18n="在浏览器中打开飞书后台">在浏览器中打开飞书后台</a><details><summary data-i18n="权限详情">权限详情</summary><ul id="recipient-permission-scopes"></ul><p data-i18n="如需审批，请发布应用版本并由管理员批准。普通用户扫码不会自动授予应用权限。">如需审批，请发布应用版本并由管理员批准。普通用户扫码不会自动授予应用权限。</p></details></div>
+          </div>
+          <div id="recipient-save-error" class="recipient-save-error" role="alert" hidden></div>
+          <div class="recipient-dialog-foot"><button type="button" id="recipient-manual" class="text-button" data-i18n="手动填写 ID">手动填写 ID</button><span id="recipient-selected-name"></span><button type="button" id="recipient-cancel" class="dialog-secondary" data-i18n="取消">取消</button><button type="button" id="recipient-confirm" class="dialog-primary" data-i18n="确认选择">确认选择</button><button type="button" id="recipient-permission-retry" class="dialog-primary" data-i18n="授权后重试" hidden>授权后重试</button></div>
+        </dialog>
       </div>
       <p class="hint" data-i18n="App ID 和 App Secret 在飞书开放平台应用的「凭证与基础信息」页。优先级：环境变量、这里保存的凭据、MCP 配置文件。保存后机器人会用新凭据重新连接；密钥保存在状态目录的 state.json（权限 0600）。">App ID 和 App Secret 在飞书开放平台应用的「凭证与基础信息」页。优先级：环境变量、这里保存的凭据、MCP 配置文件。保存后机器人会用新凭据重新连接；密钥保存在状态目录的 state.json（权限 0600）。</p>
     </div>

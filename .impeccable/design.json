@@ -1,0 +1,116 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-06T00:00:00Z",
+  "title": "Design System: Nootify",
+  "extensions": {
+    "shadows": [
+      { "name": "recipient-dialog", "value": "0 20px 64px rgb(0 0 0 / .24)", "purpose": "Lift the modal above neutral settings groups." }
+    ],
+    "motion": [
+      { "name": "disclosure", "value": "transform .15s", "purpose": "Existing chevrons and switches; removed for reduced motion." },
+      { "name": "busy", "value": "spin 1s linear infinite", "purpose": "Existing refresh icon; removed for reduced motion." }
+    ],
+    "breakpoints": [
+      { "name": "recipient-mobile", "value": "480px" },
+      { "name": "browser-navigation", "value": "760px" },
+      { "name": "workspace-settings-container", "value": "640px" },
+      { "name": "workspace-logs-container", "value": "880px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Text action",
+      "kind": "button",
+      "refersTo": "button-text",
+      "description": "Quiet settings action.",
+      "html": "<button class=\"ds-text\">Choose from Feishu</button>",
+      "css": ".ds-text{display:inline-flex;align-items:center;height:30px;padding:0 10px;border:0;border-radius:7px;background:none;color:var(--text);font:500 13px var(--font-ui);cursor:pointer;white-space:nowrap}.ds-text:hover{background:var(--hover)}.ds-text:focus-visible{outline:2px solid var(--blue);outline-offset:1px}.ds-text:disabled{color:var(--faint);cursor:default}.ds-text:disabled:hover{background:none}"
+    },
+    {
+      "name": "Blue text action",
+      "kind": "button",
+      "refersTo": "button-text-primary",
+      "description": "Save, retry, or open a setup link without a filled button.",
+      "html": "<button class=\"ds-action\">Save</button>",
+      "css": ".ds-action{display:inline-flex;align-items:center;height:30px;padding:0 10px;border:0;border-radius:7px;background:none;color:var(--blue);font:500 13px var(--font-ui);cursor:pointer;white-space:nowrap}.ds-action:hover{background:var(--hover)}.ds-action:focus-visible{outline:2px solid var(--blue);outline-offset:1px}.ds-action:disabled{color:var(--faint);cursor:default}.ds-action:disabled:hover{background:none}"
+    },
+    {
+      "name": "Dialog confirmation",
+      "kind": "button",
+      "refersTo": "button-dialog-primary",
+      "description": "Explicit recipient persistence or permission retry.",
+      "html": "<button class=\"ds-confirm\">Confirm selection</button>",
+      "css": ".ds-confirm{display:inline-flex;align-items:center;justify-content:center;min-height:34px;padding:0 14px;border:1px solid var(--blue);border-radius:8px;background:var(--blue);color:var(--panel);font:500 13px var(--font-ui);cursor:pointer;white-space:nowrap}.ds-confirm:hover{filter:brightness(.94)}.ds-confirm:focus-visible{outline:2px solid var(--blue);outline-offset:1px}.ds-confirm:disabled{opacity:.5;cursor:default}.ds-confirm:disabled:hover{filter:none}"
+    },
+    {
+      "name": "Dialog cancellation",
+      "kind": "button",
+      "refersTo": "button-dialog-secondary",
+      "description": "Leave the modal without persisting the draft.",
+      "html": "<button class=\"ds-cancel\">Cancel</button>",
+      "css": ".ds-cancel{display:inline-flex;align-items:center;justify-content:center;min-height:34px;padding:0 14px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--text);font:500 13px var(--font-ui);cursor:pointer;white-space:nowrap}.ds-cancel:hover{background:var(--hover)}.ds-cancel:focus-visible{outline:2px solid var(--blue);outline-offset:1px}"
+    },
+    {
+      "name": "Settings field",
+      "kind": "input",
+      "refersTo": "field",
+      "description": "Compact manual input with a subdued focus border.",
+      "html": "<input class=\"ds-field\" aria-label=\"Recipient ID\" placeholder=\"ou_…\">",
+      "css": ".ds-field{height:30px;min-width:0;padding:0 10px;border:1px solid var(--line-soft);border-radius:8px;background:var(--field);color:var(--text);font:13px var(--font-ui);outline:none}.ds-field:focus{border-color:var(--focus-line)}.ds-field::placeholder{color:var(--faint)}.ds-field:disabled{color:var(--faint);cursor:default}"
+    },
+    {
+      "name": "Navigation item",
+      "kind": "nav",
+      "description": "Neutral current-page treatment, inherited by settings navigation.",
+      "html": "<nav aria-label=\"Settings\"><a class=\"ds-nav\" href=\"#feishu\" aria-current=\"page\">Feishu</a></nav>",
+      "css": ".ds-nav{display:flex;align-items:center;gap:10px;height:32px;padding:0 9px;border-radius:7px;color:var(--text);font:14px var(--font-ui);text-decoration:none}.ds-nav:hover{background:var(--hover)}.ds-nav[aria-current=page]{background:var(--selected)}.ds-nav:focus-visible{outline:2px solid var(--blue);outline-offset:1px}"
+    },
+    {
+      "name": "Metadata tag",
+      "kind": "chip",
+      "refersTo": "tag",
+      "description": "Noninteractive compact metadata, not a primary action.",
+      "html": "<span class=\"ds-tag\">Review</span>",
+      "css": ".ds-tag{display:inline-flex;align-items:center;height:18px;margin:1px 7px 0 0;padding:0 6px;border-radius:5px;background:var(--selected);color:var(--muted);font:11px/18px var(--font-ui);vertical-align:top}"
+    },
+    {
+      "name": "Settings group",
+      "kind": "card",
+      "refersTo": "group",
+      "description": "A bordered neutral group; rows provide internal hierarchy.",
+      "html": "<section class=\"ds-group\"><div class=\"ds-setting\"><div><span class=\"ds-title\">Recipient</span><span class=\"ds-sub\">Invited to new Feishu groups</span></div></div></section>",
+      "css": ".ds-group{overflow:hidden;border:1px solid var(--line);border-radius:11px;background:var(--panel);color:var(--text);font:13px/1.4 var(--font-ui)}.ds-setting{display:flex;align-items:center;gap:16px;min-height:57px;padding:10px 16px}.ds-title{display:block;font-size:14px;font-weight:500;line-height:20px}.ds-sub{display:block;margin-top:3px;color:var(--muted);font-size:12px;line-height:1.6;overflow-wrap:anywhere}"
+    },
+    {
+      "name": "Selected contact with initial fallback",
+      "kind": "custom",
+      "refersTo": "recipient-person",
+      "description": "Synthetic preview of draft selection. Runtime provider photos overlay this initial; they are not decorative assets.",
+      "html": "<div role=\"listbox\" aria-label=\"Synthetic preview contacts\"><button class=\"ds-person\" role=\"option\" aria-selected=\"true\"><span class=\"ds-avatar\" aria-hidden=\"true\">A</span><span class=\"ds-main\"><span class=\"ds-name\">Alex Chen</span><span class=\"ds-subtitle\">Current recipient</span></span><span class=\"ds-check\" aria-hidden=\"true\"><svg viewBox=\"0 0 16 16\"><path d=\"m3.5 8 3 3 6-6\"/></svg></span></button></div>",
+      "css": ".ds-person{display:flex;align-items:center;gap:12px;width:100%;min-height:60px;padding:10px 12px;border:0;border-radius:10px;background:none;color:var(--text);font:13px var(--font-ui);text-align:left;cursor:pointer}.ds-person:hover{background:var(--hover)}.ds-person[aria-selected=true]{background:color-mix(in srgb,var(--blue) 10%,var(--panel))}.ds-person:focus-visible{outline:2px solid var(--blue);outline-offset:1px}.ds-avatar{display:grid;flex:none;place-items:center;width:36px;height:36px;border-radius:50%;background:var(--field);color:var(--muted);font-size:14px;font-weight:600}.ds-main{display:grid;flex:1;gap:3px;min-width:0}.ds-name{overflow:hidden;color:var(--text);font-size:14px;font-weight:500;line-height:20px;text-overflow:ellipsis;white-space:nowrap}.ds-subtitle{overflow:hidden;color:var(--muted);font-size:12px;line-height:17px;text-overflow:ellipsis;white-space:nowrap}.ds-check{display:grid;flex:none;place-items:center;width:18px;height:18px;border:1px solid var(--check-line);border-radius:50%}.ds-check svg{width:12px;height:12px;fill:none;stroke:var(--panel);stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;visibility:hidden}.ds-person[aria-selected=true] .ds-check{border-color:var(--blue);background:var(--blue)}.ds-person[aria-selected=true] .ds-check svg{visibility:visible}"
+    }
+  ],
+  "narrative": {
+    "northStar": "Local settings",
+    "overview": "This is a descriptive record of the incumbent interface, not a new identity. Nootify uses compact neutral groups, local system typography, its existing penguin identity, and blue actions. Settings prioritize accurate connection and access states in Chinese and English.",
+    "keyCharacteristics": [
+      "Compact rows with names before metadata.",
+      "Neutral layers that follow system appearance.",
+      "Blue interactive states and explicit confirmation."
+    ],
+    "rules": [
+      { "name": "The Role Continuity Rule", "body": "Preserve color roles across appearances. Recipient selection mixes blue (10%) with panel; partial-access notice mixes amber (9%) with panel.", "section": "colors" },
+      { "name": "The Names First Rule", "body": "Lead contact rows with nickname plus default name, preserving already formatted aliases; show English names or short ID suffixes only as secondary disambiguation.", "section": "typography" }
+    ],
+    "dos": [
+      "Do inherit system fonts, semantic colors, and automatic appearance from the existing settings.",
+      "Do preserve useful loaded contacts and a reachable footer while loading or explaining access.",
+      "Do keep portraits as runtime provider data and the permission QR as locally generated functional imagery."
+    ],
+    "donts": [
+      "Don't persist a recipient from a row click; use explicit confirmation.",
+      "Don't let full IDs outrank human names or duplicate an alias already supplied by the provider.",
+      "Don't describe a QR scan as automatic application authorization."
+    ]
+  }
+}

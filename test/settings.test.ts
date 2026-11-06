@@ -9,7 +9,7 @@ import type { AgentPrompt } from '../src/agents.js';
 import { EventLog } from '../src/events.js';
 import { GitHubAuth } from '../src/github-auth.js';
 import { PullRequestsService } from '../src/github.js';
-import { resolveCredentials, type Credentials, type LarkApi } from '../src/lark-metadata.js';
+import { ApiError, resolveCredentials, type Credentials, type LarkApi } from '../src/lark-metadata.js';
 import { LarkService } from '../src/lark.js';
 import { createServiceHost, type HostOptions } from '../src/server.js';
 import { SessionsService } from '../src/sessions.js';
@@ -201,7 +201,7 @@ test('Feishu credentials are verified before they replace the running bot', asyn
   assert.ok(!JSON.stringify(page).includes('right-secret'));
   assert.ok(!JSON.stringify(reports).includes('right-secret'));
   await settings.saveLark(appId, '');
-  assert.equal(configured.length, 1, 'a blank secret keeps the saved one, and nothing changed, so the connection is left alone');
+  assert.equal(configured.length, 2, 'an explicit save retains the secret and reconnects even unchanged credentials');
   await assert.rejects(settings.saveLark('cli_fedcba9876543210', ''), /App Secret/, 'another app never inherits this secret');
   assert.equal((await State.open(dir)).settings.lark_app_secret, 'right-secret');
   assert.equal((await stat(join(dir, 'state.json'))).mode & 0o777, 0o600);
@@ -226,7 +226,7 @@ test('a masked MCP secret can be retained for its application when saving', asyn
   const { lark, settings, configured } = await harness(t);
   lark.credentials = { appId, appSecret: 'mcp-secret' };
   await settings.saveLark(appId, '');
-  assert.equal(configured.length, 0, 'retaining the active bot does not reconnect it');
+  assert.equal(configured.length, 1, 'saving the active MCP credentials also reconnects the receiver');
   assert.equal((await settings.page()).lark.saved, true);
   await assert.rejects(settings.saveLark('cli_fedcba9876543210', ''), /App Secret/);
 });
@@ -258,6 +258,55 @@ test('recipient directory reads are local-only and selections refuse a changed a
   assert.equal(state.settings.lark_recipient_open_id, 'ou_owner');
   lark.credentials = undefined;
   await assert.rejects(settings.larkRecipients(), /Configure/);
+});
+
+test('recipient snapshots are cached, while an explicit retry reads fresh provider data', async t => {
+  const { lark, settings } = await harness(t); let reads = 0;
+  lark.credentials = { appId, appSecret: 'secret' };
+  lark.api = { appId, async request<T>(_method: string, path: string): Promise<T> { reads++; return (path.includes('/scopes') ? { user_ids: ['ou_owner'] } : { items: [{ open_id: 'ou_owner', name: 'Owner' }] }) as T; } };
+  await settings.larkRecipients(); const firstReads = reads;
+  await settings.larkRecipients(); assert.equal(reads, firstReads);
+  await settings.larkRecipients(undefined, undefined, true); assert.ok(reads > firstReads);
+});
+
+test('local directory streams deliver contacts before a slow later batch and include a completion event', async t => {
+  const { lark, settings, dir } = await harness(t);
+  let release!: () => void; const slow = new Promise<void>(resolve => { release = resolve; });
+  t.after(() => release());
+  const ids = Array.from({ length: 51 }, (_, i) => `ou_person${i}`);
+  lark.credentials = { appId, appSecret: 'secret' };
+  lark.api = { appId, async request<T>(_method: string, path: string): Promise<T> {
+    if (path.includes('/scopes')) return { user_ids: ids } as T;
+    const requested = new URL(path, 'https://open.feishu.cn').searchParams.getAll('user_ids');
+    if (requested.includes('ou_person50')) await slow;
+    return { items: requested.map(open_id => ({ open_id, name: open_id })) } as T;
+  } };
+  const origin = await serve(t, await EventLog.open(dir), { settings });
+  const response = await action(origin, '/ui/api/settings/lark/recipients/stream', {});
+  assert.match(response.headers.get('content-type')!, /ndjson/);
+  const reader = response.body!.getReader();
+  const first = await reader.read();
+  assert.match(new TextDecoder().decode(first.value), /"type":"progress"/);
+  assert.match(new TextDecoder().decode(first.value), /ou_person0/);
+  release(); let rest = '';
+  while (true) { const chunk = await reader.read(); if (chunk.done) break; rest += new TextDecoder().decode(chunk.value); }
+  assert.match(rest, /"type":"complete"/);
+  assert.match(rest, /ou_person50/);
+});
+
+test('permission failure streams provide an official locally generated QR and stay unavailable remotely', async t => {
+  const { lark, settings, dir } = await harness(t);
+  lark.credentials = { appId, appSecret: 'secret' };
+  const url = `https://open.feishu.cn/app/${appId}/auth?q=contact:contact.base:readonly&op_from=openapi`;
+  lark.api = { appId, async request<T>(): Promise<T> { throw new ApiError(99991672, 'private provider text', { url, scopes: ['contact:contact.base:readonly'] }); } };
+  const logs = await EventLog.open(dir); const local = await serve(t, logs, { settings });
+  const response = await action(local, '/ui/api/settings/lark/recipients/stream', {});
+  const events = (await response.text()).trim().split('\n').map(line => JSON.parse(line));
+  const failure = events.find(event => event.type === 'error');
+  assert.equal(failure.status, 403); assert.equal(failure.permission.url, url); assert.match(failure.permission.qr, /^data:image\/png;base64,/);
+  assert.ok(!JSON.stringify(events).includes('private provider text'));
+  const remote = await serve(t, logs, { settings, via: 'tailnet', tailnet: { authorize: async () => undefined, url: () => undefined } as unknown as TailnetAccess });
+  assert.equal((await action(remote, '/ui/api/settings/lark/recipients/stream', {})).status, 403);
 });
 
 test('a directory response cannot survive a bot configuration change', async t => {
