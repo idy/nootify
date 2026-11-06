@@ -231,6 +231,45 @@ test('a masked MCP secret can be retained for its application when saving', asyn
   await assert.rejects(settings.saveLark('cli_fedcba9876543210', ''), /App Secret/);
 });
 
+test('recipient directory reads are local-only and selections refuse a changed application', async t => {
+  const { lark, settings, dir, state } = await harness(t);
+  const logs = await EventLog.open(dir);
+  let reads = 0;
+  lark.credentials = { appId, appSecret: 'private-secret' };
+  lark.api = { appId, async request<T>(_method: string, path: string): Promise<T> {
+    reads++;
+    return (path.includes('/scopes') ? { user_ids: ['ou_owner'] } : { items: [{ open_id: 'ou_owner', name: 'Owner' }] }) as T;
+  } };
+  const local = await serve(t, logs, { settings });
+  const remote = await serve(t, logs, { settings, via: 'tailnet', tailnet: { authorize: async () => undefined, url: () => undefined } as unknown as TailnetAccess });
+  const path = '/ui/api/settings/lark/recipients';
+  assert.equal((await action(local, path, undefined, {})).status, 403);
+  assert.equal((await action(remote, path)).status, 403);
+  assert.equal(reads, 0);
+  const result = await action(local, path);
+  assert.equal(result.status, 200);
+  const body = await result.text();
+  assert.equal(result.headers.get('cache-control'), 'no-store');
+  assert.deepEqual(JSON.parse(body).users, [{ open_id: 'ou_owner', name: 'Owner' }]);
+  assert.ok(!body.includes('private-secret'));
+  await assert.rejects(settings.setRecipient('ou_owner', 'cli_other'), /credentials changed/);
+  assert.equal(state.settings.lark_recipient_open_id, undefined);
+  await settings.setRecipient('ou_owner', appId);
+  assert.equal(state.settings.lark_recipient_open_id, 'ou_owner');
+  lark.credentials = undefined;
+  await assert.rejects(settings.larkRecipients(), /Configure/);
+});
+
+test('a directory response cannot survive a bot configuration change', async t => {
+  const { lark, settings } = await harness(t);
+  lark.credentials = { appId, appSecret: 'first' };
+  lark.api = { appId, async request<T>(): Promise<T> {
+    lark.credentials = { appId, appSecret: 'replacement' };
+    return {} as T;
+  } };
+  await assert.rejects(settings.larkRecipients(), /credentials changed/);
+});
+
 test('credentials set for this process cannot be overridden from the page', async t => {
   const { settings, configured } = await harness(t, { env: { LARK_APP_ID: appId, LARK_APP_SECRET: 'env-secret' } });
   await assert.rejects(settings.saveLark(appId, 'other-secret'), /take precedence/);

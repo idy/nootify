@@ -13,6 +13,7 @@ export interface ChatSettingsPage {
   status: string; configured: boolean; saved: boolean; account?: string; chat_id?: string; user_id?: string; threads: number;
 }
 export type NotificationChannel = 'feishu' | ChatChannel;
+export interface ChatDirectory { users: { id: string; name: string }[]; chats: { id: string; name: string }[]; limited: boolean }
 
 export interface SlackConfig { bot_token: string; app_token: string; channel_id: string; user_id: string }
 export interface TelegramConfig { bot_token: string; chat_id: string; user_id: string }
@@ -25,6 +26,7 @@ export interface ChatTransport {
   /** Includes the verified workspace/bot identity and configured room; contains no credentials. */
   readonly identity: string;
   readonly account: string;
+  directoryTargets?(): ChatDirectory;
   start(receive: (message: ChatMessage) => Promise<void>, status: (status: 'ready' | 'reconnecting' | 'failed') => void): Promise<void>;
   stop(): Promise<void>;
   openThread(title: string): Promise<ChatLocation>;

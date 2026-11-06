@@ -1,6 +1,6 @@
 import WebSocket from 'ws';
 import { ChatTransportError, textChunks, validChatConfig } from './chat-transport.js';
-import type { ChatLocation, ChatMessage, ChatTransport, SentChatMessage, SlackConfig } from './chat-transport.js';
+import type { ChatDirectory, ChatLocation, ChatMessage, ChatTransport, SentChatMessage, SlackConfig } from './chat-transport.js';
 
 const API_TIMEOUT = 15_000;
 const CONNECT_TIMEOUT = 10_000;
@@ -15,7 +15,7 @@ const MAX_TEXT = 128_000;
 const TIMESTAMP = /^\d{1,16}\.\d{6}$/;
 
 type Json = Record<string, unknown>;
-type Method = 'auth.test' | 'conversations.info' | 'users.info' | 'apps.connections.open' | 'chat.postMessage';
+type Method = 'auth.test' | 'conversations.info' | 'conversations.list' | 'conversations.members' | 'users.info' | 'apps.connections.open' | 'chat.postMessage';
 type Status = Parameters<ChatTransport['start']>[1];
 
 /** Small injectable boundary; production always uses fetch and ws with the options below. */
@@ -40,7 +40,7 @@ export interface SlackClient {
 }
 
 class SlackError extends ChatTransportError {
-  constructor(message: string, readonly permanent = false) { super(message); }
+  constructor(message: string, readonly permanent = false, readonly directoryUnavailable = false) { super(message); }
 }
 const object = (value: unknown): value is Json => !!value && typeof value === 'object' && !Array.isArray(value);
 const timestamp = (value: unknown): value is string => typeof value === 'string' && TIMESTAMP.test(value);
@@ -50,10 +50,13 @@ function apiFailure(method: Method, code?: unknown): SlackError {
   const error = typeof code === 'string' ? code : '';
   if (error === 'ratelimited') return new SlackError('Slack rate limit reached; try again later.');
   if (error === 'missing_scope' || error === 'not_allowed_token_type') {
-    return new SlackError('Slack credentials are missing the required bot or Socket Mode permissions.', true);
+    return new SlackError('Slack credentials are missing the required bot or Socket Mode permissions.', true, true);
   }
   if (['invalid_auth', 'not_authed', 'token_revoked', 'token_expired', 'account_inactive'].includes(error)) {
     return new SlackError('Slack credentials are invalid or expired.', true);
+  }
+  if ((method === 'conversations.members' || method === 'users.info') && ['channel_not_found', 'not_in_channel', 'no_permission', 'user_not_found'].includes(error)) {
+    return new SlackError('Slack directory information is unavailable.', false, true);
   }
   if (method === 'conversations.info' && ['channel_not_found', 'not_in_channel', 'no_permission'].includes(error)) {
     return new SlackError('Slack channel is unavailable. Invite the bot to the configured public or private channel.');
@@ -90,7 +93,7 @@ class SlackApi {
 
   private async perform(method: Method, parameters: Json, signal: AbortSignal): Promise<Json> {
     const url = new URL(`https://slack.com/api/${method}`);
-    const read = method === 'conversations.info' || method === 'users.info';
+    const read = method === 'conversations.info' || method === 'conversations.list' || method === 'conversations.members' || method === 'users.info';
     const app = method === 'apps.connections.open';
     const headers: Record<string, string> = {
       authorization: `Bearer ${app ? this.config.app_token : this.config.bot_token}`,
@@ -133,7 +136,8 @@ function socketUrl(value: unknown, config: SlackConfig): string {
 
 function label(value: unknown, fallback: string, config: SlackConfig): string {
   if (typeof value !== 'string' || !value.trim() || value.length > 120 || /[\p{C}]/u.test(value)
-    || /(?:xoxb|xapp)-/i.test(value) || value.includes(config.bot_token) || value.includes(config.app_token)) return fallback;
+    || /(?:xoxb|xapp)-/i.test(value) || (config.bot_token && value.includes(config.bot_token))
+    || (config.app_token && value.includes(config.app_token))) return fallback;
   return value.trim();
 }
 
@@ -402,6 +406,93 @@ class SlackTransport implements ChatTransport {
       }
     } finally { run.draining = false; }
   }
+}
+
+/** Visible member channels and active humans in the selected room; limited signals incomplete discovery. */
+export async function slackDirectory(config: SlackConfig): Promise<ChatDirectory> {
+  if (typeof config.bot_token !== 'string' || config.bot_token.length > 512 || !/^xoxb-[A-Za-z0-9-]+$/.test(config.bot_token)
+    || (config.channel_id && !/^[CG][A-Z0-9]+$/.test(config.channel_id))) {
+    throw new SlackError('Slack directory requires a valid bot token and optional channel ID.', true);
+  }
+  const snapshot = { ...config };
+  const api = new SlackApi(snapshot, { fetch: globalThis.fetch, webSocket: () => { throw new SlackError('Slack directory does not use Socket Mode.'); } });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30_000);
+  timer.unref?.();
+  const result: ChatDirectory = { users: [], chats: [], limited: !snapshot.channel_id };
+  let requests = 0;
+  const request = (method: Method, parameters: Json = {}) => {
+    if (++requests > 60) throw new SlackError('Slack directory request limit reached.');
+    return api.request(method, parameters, controller.signal);
+  };
+  // Empty pages can still have cursors. Repeated, oversized and excessive cursors stop discovery explicitly.
+  const pages = async (method: 'conversations.list' | 'conversations.members', parameters: Json, field: string): Promise<unknown[]> => {
+    const items: unknown[] = [];
+    const seen = new Set<string>();
+    let cursor = '';
+    for (let page = 0; page < 5; page++) {
+      let response: Json;
+      try { response = await request(method, { ...parameters, limit: 200, ...(cursor ? { cursor } : {}) }); }
+      catch (error) {
+        if (!(error instanceof SlackError && error.directoryUnavailable)) throw error;
+        result.limited = true; return items;
+      }
+      const values = response[field];
+      if (!Array.isArray(values)) throw new SlackError('Slack returned an invalid directory response.');
+      items.push(...values.slice(0, 200));
+      if (values.length > 200) result.limited = true;
+      const metadata = response.response_metadata;
+      if (metadata !== undefined && !object(metadata)) throw new SlackError('Slack returned invalid directory pagination.');
+      const next = object(metadata) ? metadata.next_cursor : undefined;
+      if (next === undefined || next === '') return items;
+      if (typeof next !== 'string' || next.length > 2_048 || /[\p{C}]/u.test(next)) {
+        throw new SlackError('Slack returned invalid directory pagination.');
+      }
+      if (seen.has(next)) { result.limited = true; return items; }
+      seen.add(next); cursor = next;
+    }
+    result.limited = true;
+    return items;
+  };
+  try {
+    const auth = await request('auth.test');
+    if (typeof auth.user_id !== 'string' || !/^[UW][A-Z0-9]+$/.test(auth.user_id)
+      || typeof auth.bot_id !== 'string' || !/^B[A-Z0-9]+$/.test(auth.bot_id)
+      || typeof auth.team_id !== 'string' || !/^T[A-Z0-9]+$/.test(auth.team_id)) {
+      throw new SlackError('Slack auth.test did not verify a bot and workspace.', true);
+    }
+    const channels = await pages('conversations.list', { types: 'public_channel,private_channel', exclude_archived: true }, 'channels');
+    const chatIds = new Set<string>();
+    for (const channel of channels) {
+      if (!object(channel) || typeof channel.id !== 'string' || !/^[CG][A-Z0-9]+$/.test(channel.id)
+        || channel.is_member !== true || channel.is_archived === true || channel.is_im === true || channel.is_mpim === true
+        || (channel.is_channel !== true && channel.is_group !== true) || chatIds.has(channel.id)) continue;
+      chatIds.add(channel.id);
+      result.chats.push({ id: channel.id, name: label(channel.name, channel.id, snapshot) });
+    }
+    if (snapshot.channel_id) {
+      const members = await pages('conversations.members', { channel: snapshot.channel_id }, 'members');
+      const ids = [...new Set(members.filter((id): id is string => typeof id === 'string' && /^[UW][A-Z0-9]+$/.test(id) && id !== auth.user_id))];
+      if (ids.length > 40) result.limited = true;
+      for (const id of ids.slice(0, 40)) {
+        let response: Json;
+        try { response = await request('users.info', { user: id }); }
+        catch (error) {
+          if (!(error instanceof SlackError && error.directoryUnavailable)) throw error;
+          result.limited = true; break;
+        }
+        const user = response.user;
+        if (!object(user) || user.id !== id || user.is_bot !== false || user.is_app_user === true || user.deleted === true
+          || (user.team_id !== undefined && user.team_id !== auth.team_id)) continue;
+        const profile = object(user.profile) ? user.profile : {};
+        const name = label(profile.display_name, '', snapshot) || label(user.real_name, '', snapshot) || label(user.name, id, snapshot);
+        result.users.push({ id, name });
+      }
+    }
+    result.chats.sort((a, b) => a.name.localeCompare(b.name));
+    result.users.sort((a, b) => a.name.localeCompare(b.name));
+    return result;
+  } finally { clearTimeout(timer); controller.abort(); }
 }
 
 export async function createSlackTransport(config: SlackConfig): Promise<ChatTransport> {

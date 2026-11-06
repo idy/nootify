@@ -9,7 +9,7 @@ import { HttpError, type ServiceModule } from './types.js';
 export interface PullsSource { snapshot(): PullSnapshot; refresh(): void; setChoice(repository: string, follow: boolean | null): Promise<RepositoryEntry> }
 export interface AgentsSource { list(): Promise<AgentPrompt[]>; set(agent: AgentId, enabled: boolean): Promise<AgentPrompt> }
 export interface ChannelSummary { name: 'feishu' | 'slack' | 'telegram'; configured: boolean; recipient?: string; groups: number }
-export type SettingsSource = Pick<SettingsService, 'page' | 'github' | 'startGitHubLogin' | 'cancelGitHubLogin' | 'signOutGitHub' | 'saveLark' | 'clearLark' | 'larkSecret' | 'setRecipient' | 'exportConfig' | 'previewImport' | 'importConfig' | 'reveal' | 'tailscale' | 'setTailscaleEnabled' | 'startTailscaleLogin' | 'cancelTailscaleLogin' | 'logoutTailscale' | 'saveChat' | 'clearChat' | 'setNotificationChannel'>;
+export type SettingsSource = Pick<SettingsService, 'page' | 'github' | 'startGitHubLogin' | 'cancelGitHubLogin' | 'signOutGitHub' | 'saveLark' | 'clearLark' | 'larkSecret' | 'larkRecipients' | 'setRecipient' | 'exportConfig' | 'previewImport' | 'importConfig' | 'reveal' | 'tailscale' | 'setTailscaleEnabled' | 'startTailscaleLogin' | 'cancelTailscaleLogin' | 'logoutTailscale' | 'saveChat' | 'clearChat' | 'chatSecret' | 'chatDirectory' | 'setNotificationChannel'>;
 export interface UiContext {
   modules: ServiceModule[]; logs: EventLog; pulls?: PullsSource; tailnetUrl?: () => string | undefined;
   agents?: AgentsSource; channel?: () => ChannelSummary | undefined; settings?: SettingsSource;
@@ -44,10 +44,16 @@ async function smallJson(request: IncomingMessage, limit = 4096): Promise<Record
 /** Matches the limit on the pulls configuration file an import may restore. */
 const IMPORT_LIMIT = 1024 * 1024;
 async function settingsAction(request: IncomingMessage, path: string, settings: SettingsSource): Promise<unknown> {
+  if (path === '/ui/api/settings/lark/recipients') { request.resume(); return settings.larkRecipients(); }
   if (path === '/ui/api/settings/lark/secret') { request.resume(); return settings.larkSecret(); }
   if (path === '/ui/api/settings/export') { request.resume(); return settings.exportConfig(); }
   if (path === '/ui/api/settings/reveal') { request.resume(); await settings.reveal(); return { accepted: true }; }
   const body = await smallJson(request, path === '/ui/api/settings/import' ? IMPORT_LIMIT : undefined);
+  const chatAction = /^\/ui\/api\/settings\/(slack|telegram)\/(secret|recipients)$/.exec(path);
+  if (chatAction) {
+    const channel = chatAction[1] as 'slack' | 'telegram';
+    return chatAction[2] === 'secret' ? settings.chatSecret(channel, body.field) : settings.chatDirectory(channel, body);
+  }
   if (path === '/ui/api/settings/github/login') {
     if (body.action === 'start') return settings.startGitHubLogin();
     if (body.action === 'cancel') return settings.cancelGitHubLogin();
@@ -71,7 +77,7 @@ async function settingsAction(request: IncomingMessage, path: string, settings: 
     if (body.clear === true) await settings.clearLark(); else await settings.saveLark(body.app_id, body.app_secret);
     return { accepted: true };
   }
-  if (path === '/ui/api/settings/recipient') { await settings.setRecipient(body.open_id); return { accepted: true }; }
+  if (path === '/ui/api/settings/recipient') { await settings.setRecipient(body.open_id, body.app_id); return { accepted: true }; }
   if (path === '/ui/api/settings/import') return body.apply === true ? settings.importConfig(body.document) : settings.previewImport(body.document);
   throw new HttpError(404, 'No such settings action');
 }

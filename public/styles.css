@@ -269,6 +269,13 @@ label.row:hover { background: var(--hover); }
 .secret-field .icon-button { position: absolute; top: 1px; right: 2px; }
 .secret-field .icon-button:disabled { color: var(--faint); cursor: default; }
 .secret-field .icon-button:disabled:hover { background: none; }
+.recipient-picker { display: grid; gap: 8px; padding: 12px var(--panel-inset) 14px; border-top: 1px solid var(--line-soft); }
+.recipient-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.recipient-picker .setting-field { width: 100%; }
+.recipient-picker .setting-sub { margin: 0; }
+.recipient-options { width: 100%; min-width: 0; height: 176px; padding: 4px; border: 1px solid var(--line); border-radius: 8px; background: var(--field); scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+.recipient-options option { padding: 6px 8px; }
+.recipient-options option:checked { color: var(--text); background: var(--selected); }
 .setting-list { margin: 6px 0 0; padding-left: 16px; color: var(--muted); font-size: var(--type-meta); line-height: 1.7; overflow-wrap: anywhere; }
 .device-code { flex: none; font-size: 18px; letter-spacing: 1px; user-select: all; cursor: text; }
 .selectable { user-select: all; cursor: text; }

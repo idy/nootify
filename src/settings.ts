@@ -13,8 +13,12 @@ import { isOpenId } from './lark-threads.js';
 import type { State } from './state.js';
 import { HttpError, type BackendConnection } from './types.js';
 import type { TailscaleService, TailscalePage, TailscaleLogin } from './tailscale.js';
-import { isNotificationChannel, validChatConfig, type ChatChannel, type ChatSettingsPage, type NotificationChannel, type SlackConfig, type TelegramConfig } from './chat-transport.js';
+import { isNotificationChannel, validChatConfig, type ChatChannel, type ChatSettingsPage, type NotificationChannel, type SlackConfig, type TelegramConfig, type ChatDirectory, ChatTransportError } from './chat-transport.js';
 import type { ChatService } from './chat-service.js';
+import { larkDirectory, type LarkDirectory } from './lark-directory.js';
+import type { LarkApi } from './lark-metadata.js';
+import { slackDirectory } from './slack.js';
+import { telegramDirectory } from './telegram.js';
 
 const FORMAT = 'nootify-config';
 const EXPORTS_KEPT = 10;
@@ -49,6 +53,7 @@ interface ConfigFile {
 }
 export interface LarkControl {
   credentials?: Credentials;
+  api?: LarkApi;
   status(): string;
   channel(): { recipient?: string; groups: number };
   configure(credentials?: Credentials): Promise<void>;
@@ -61,7 +66,8 @@ export interface AgentControl { list(): Promise<AgentPrompt[]>; set(agent: Agent
 export interface SettingsOptions {
   state: State; lark: LarkControl; github: GitHubAuth; pulls: PullPreferences; agents: AgentControl;
   tailscale?: TailscaleService;
-  slack?: Pick<ChatService<'slack'>, 'page' | 'configure'>; telegram?: Pick<ChatService<'telegram'>, 'page' | 'configure'>;
+  slack?: Pick<ChatService<'slack'>, 'page' | 'configure'> & { directoryTargets?(): ChatDirectory };
+  telegram?: Pick<ChatService<'telegram'>, 'page' | 'configure'> & { directoryTargets?(): ChatDirectory };
   mcpConfig?: string; source?: CredentialSource; env?: NodeJS.ProcessEnv;
   verify?: (credentials: Credentials) => Promise<void>;
   reveal?: (path: string) => Promise<void>;
@@ -181,6 +187,34 @@ export class SettingsService {
     });
   }
   clearChat(channel: ChatChannel): Promise<void> { return this.saveChat(channel, undefined); }
+  chatSecret(channel: ChatChannel, field: unknown): { secret?: string } {
+    if (field !== 'bot_token' && !(channel === 'slack' && field === 'app_token')) throw new HttpError(400, 'Invalid secret field');
+    const saved = this.options.state.settings[channel];
+    const secret = saved && (field === 'app_token' && 'app_token' in saved ? saved.app_token : field === 'bot_token' ? saved.bot_token : undefined);
+    return secret ? { secret } : {};
+  }
+  async chatDirectory(channel: ChatChannel, value: unknown): Promise<ChatDirectory> {
+    if (!isObject(value)) throw new HttpError(400, 'Expected channel fields');
+    const saved = this.options.state.settings[channel];
+    const input = (name: string): string => {
+      const valueForField = value[name];
+      if (valueForField !== undefined && typeof valueForField !== 'string') throw new HttpError(400, 'Invalid channel field');
+      const fallback = (saved as unknown as Record<string, string> | undefined)?.[name] ?? '';
+      return typeof valueForField === 'string' && valueForField.trim() ? valueForField.trim() : fallback;
+    };
+    const bot_token = input('bot_token');
+    let directory: ChatDirectory;
+    try {
+      directory = channel === 'slack'
+        ? await slackDirectory({ bot_token, app_token: input('app_token'), channel_id: input('channel_id'), user_id: input('user_id') })
+        : await telegramDirectory({ bot_token, chat_id: input('chat_id'), user_id: input('user_id') }, bot_token === saved?.bot_token ? this.options.telegram?.directoryTargets?.() : undefined);
+    } catch (error) {
+      if (error instanceof HttpError) throw error;
+      throw new HttpError(400, error instanceof ChatTransportError ? error.message : 'Could not read channel recipients');
+    }
+    if (saved !== this.options.state.settings[channel]) throw new HttpError(409, 'Channel configuration changed; reload recipients');
+    return directory;
+  }
   setNotificationChannel(value: unknown): Promise<void> {
     return this.serialized(async () => {
       if (!isNotificationChannel(value)) throw new HttpError(400, 'Expected feishu, slack or telegram');
@@ -263,8 +297,17 @@ export class SettingsService {
       await this.reload();
     });
   }
-  setRecipient(openId: unknown): Promise<void> {
+  async larkRecipients(): Promise<LarkDirectory> {
+    const { lark } = this.options;
+    const api = lark.api; const credentials = lark.credentials;
+    if (!api || !credentials?.appSecret || api.appId !== credentials.appId) throw new HttpError(409, 'Configure the Feishu application first');
+    const directory = await larkDirectory(api);
+    if (api !== lark.api || credentials !== lark.credentials) throw new HttpError(409, 'Feishu credentials changed; reload the directory');
+    return directory;
+  }
+  setRecipient(openId: unknown, appId?: unknown): Promise<void> {
     return this.serialized(async () => {
+      if (appId !== undefined && appId !== this.options.lark.credentials?.appId) throw new HttpError(409, 'Feishu credentials changed; reload the directory');
       if (!isOpenId(openId)) throw new HttpError(400, 'Expected a Feishu open_id (ou_…)');
       this.options.state.settings.lark_recipient_open_id = openId;
       await this.options.state.save();

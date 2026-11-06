@@ -8,7 +8,7 @@ export interface Credentials { appId: string; appSecret: string }
 export type CredentialSource = 'environment' | 'settings' | 'mcp-config';
 export interface LarkApi {
   appId: string;
-  request<T>(method: 'GET' | 'POST' | 'PATCH', path: string, body?: unknown): Promise<T>;
+  request<T>(method: 'GET' | 'POST' | 'PATCH', path: string, body?: unknown, signal?: AbortSignal): Promise<T>;
 }
 export const quietLogger = { debug() {}, info() {}, warn() {}, error() {}, trace() {} };
 export class ApiError extends Error {
@@ -53,9 +53,9 @@ export async function verifyCredentials(credentials: Credentials): Promise<void>
 }
 export function createLarkApi(credentials: Credentials): LarkApi {
   const client = new sdk.Client({ ...credentials, domain: sdk.Domain.Feishu, appType: sdk.AppType.SelfBuild, logger: quietLogger });
-  return { appId: credentials.appId, async request<T>(method: 'GET' | 'POST' | 'PATCH', url: string, data?: unknown): Promise<T> {
+  return { appId: credentials.appId, async request<T>(method: 'GET' | 'POST' | 'PATCH', url: string, data?: unknown, signal?: AbortSignal): Promise<T> {
     let response: { code: number; msg?: string; data: T };
-    try { response = await client.request({ method, url, data }); }
+    try { response = await client.request({ method, url, data, signal }); }
     catch (error) {
       const body = (error as { response?: { data?: { code?: number; msg?: string } } }).response?.data;
       if (typeof body?.code === 'number') throw new ApiError(body.code, body.msg);

@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import type { State } from './state.js';
 import type { SessionsService } from './sessions.js';
 import { HttpError, SessionUnavailable, identifier, isAdapter, object, text, type Adapter, type RouteRequest, type RouteResponse, type ServiceModule, type ThreadInfo, type ThreadMessage } from './types.js';
-import { ChatTransportError, isNotificationChannel, validChatConfig, type ChatBinding, type ChatChannel, type ChatConfigs, type ChatDelivery, type ChatFactory, type ChatMessage, type ChatSettingsPage, type ChatTransport } from './chat-transport.js';
+import { ChatTransportError, isNotificationChannel, validChatConfig, type ChatBinding, type ChatChannel, type ChatConfigs, type ChatDelivery, type ChatFactory, type ChatMessage, type ChatSettingsPage, type ChatDirectory, type ChatTransport } from './chat-transport.js';
 
 const quote = (value: string): string => `'${value.replace(/'/g, `'"'"'`)}'`;
 const providerName = (channel: ChatChannel): string => channel === 'slack' ? 'Slack' : 'Telegram';
@@ -52,6 +52,7 @@ export class ChatService<C extends ChatChannel> implements ServiceModule {
       chat_id: config && ('channel_id' in config ? config.channel_id : config.chat_id), user_id: config?.user_id,
       threads: [...this.state.chatBindings.values()].filter(binding => binding.channel === this.channel && binding.identity === this.transport?.identity).length };
   }
+  directoryTargets(): ChatDirectory { return this.transport?.directoryTargets?.() ?? { users: [], chats: [], limited: true }; }
   private outcome(status: string): void {
     if (status === this.currentStatus) return;
     this.currentStatus = status;

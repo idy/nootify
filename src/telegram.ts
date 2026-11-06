@@ -1,4 +1,4 @@
-import { ChatTransportError, textChunks, validChatConfig, type ChatLocation, type ChatMessage, type ChatTransport, type SentChatMessage, type TelegramConfig } from './chat-transport.js';
+import { ChatTransportError, textChunks, validChatConfig, type ChatDirectory, type ChatLocation, type ChatMessage, type ChatTransport, type SentChatMessage, type TelegramConfig } from './chat-transport.js';
 
 /** Optional runtime seams keep tests off Telegram and make retry/timeout behavior deterministic. */
 export interface TelegramTransportOptions {
@@ -11,7 +11,7 @@ export interface TelegramTransportOptions {
 }
 
 type Status = 'ready' | 'reconnecting' | 'failed';
-type Method = 'getMe' | 'getChat' | 'getChatMember' | 'getWebhookInfo' | 'createForumTopic' | 'sendMessage' | 'getUpdates';
+type Method = 'getMe' | 'getChat' | 'getChatMember' | 'getChatAdministrators' | 'getWebhookInfo' | 'createForumTopic' | 'sendMessage' | 'getUpdates';
 type JsonObject = Record<string, unknown>;
 function object(value: unknown): JsonObject | undefined {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : undefined;
@@ -82,6 +82,24 @@ class TelegramTransport implements ChatTransport {
   readonly account: string;
   private run?: Run;
   private initialized = false;
+  private readonly directoryUsers = new Map<string, string>();
+  private readonly directoryChats = new Map<string, string>();
+
+  directoryTargets(): ChatDirectory {
+    return { users: Array.from(this.directoryUsers, ([id, name]) => ({ id, name })), chats: Array.from(this.directoryChats, ([id, name]) => ({ id, name })), limited: true };
+  }
+  private observeTargets(update: JsonObject): void {
+    const message = object(update.message); const sender = object(message?.from); const chat = object(message?.chat);
+    if (!message || 'sender_chat' in message || 'edit_date' in message || sender?.is_bot !== false) return;
+    const userId = id(sender.id); const chatId = id(chat?.id, true);
+    if (!userId) return;
+    const name = [sender.first_name, sender.last_name].filter((part): part is string => typeof part === 'string' && !!part.trim()).map(part => part.trim()).join(' ');
+    if (this.directoryUsers.has(userId) || this.directoryUsers.size < 200) this.directoryUsers.set(userId, name || userId);
+    if (chatId && /^-100\d+$/.test(chatId) && chat?.type === 'supergroup' && chat.is_forum === true &&
+        (this.directoryChats.has(chatId) || this.directoryChats.size < 200)) {
+      this.directoryChats.set(chatId, typeof chat.title === 'string' && chat.title.trim() ? chat.title.trim() : chatId);
+    }
+  }
   private offset = 0;
   private readonly requestTimeout: number;
   private readonly pollTimeout: number;
@@ -168,6 +186,7 @@ class TelegramTransport implements ChatTransport {
           if (!this.current(run)) return;
           if (update.id < this.offset) continue;
           this.offset = update.id + 1;
+          this.observeTargets(update.value);
           const message = this.select(update.value);
           if (!message) continue;
           try {
@@ -216,15 +235,12 @@ class TelegramTransport implements ChatTransport {
   }
 }
 
-export async function createTelegramTransport(config: TelegramConfig, options: TelegramTransportOptions = {}): Promise<ChatTransport> {
-  if (!validChatConfig('telegram', config) || !id(config.chat_id, true) || !id(config.user_id)) throw new TelegramError('Invalid Telegram configuration.');
-  // Copy settings: changing the caller's object must not bypass the verified chat/user boundary.
-  config = { ...config };
+function telegramRequest(config: TelegramConfig, options: TelegramTransportOptions = {}): (method: Method, body?: JsonObject, signal?: AbortSignal, timeout?: number) => Promise<unknown> {
   const fetch = options.fetch ?? globalThis.fetch;
   const requestTimeout = positive(options.requestTimeoutMs, 10_000);
   positive(options.pollTimeoutMs, 35_000);
   if (positive(options.retryMaxMs, 30_000) < positive(options.retryBaseMs, 500)) throw new TelegramError('Invalid Telegram retry configuration.');
-  const request = async (method: Method, body: JsonObject = {}, signal?: AbortSignal, timeout = requestTimeout): Promise<unknown> => {
+  return async (method: Method, body: JsonObject = {}, signal?: AbortSignal, timeout = requestTimeout): Promise<unknown> => {
     if (signal?.aborted) throw new TelegramError('Telegram operation stopped.');
     const controller = new AbortController();
     const abort = () => controller.abort();
@@ -249,6 +265,13 @@ export async function createTelegramTransport(config: TelegramConfig, options: T
       throw new TelegramError(`Telegram ${method} network request failed.`, true);
     } finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); }
   };
+}
+
+export async function createTelegramTransport(config: TelegramConfig, options: TelegramTransportOptions = {}): Promise<ChatTransport> {
+  if (!validChatConfig('telegram', config) || !id(config.chat_id, true) || !id(config.user_id)) throw new TelegramError('Invalid Telegram configuration.');
+  // Copy settings: changing the caller's object must not bypass the verified chat/user boundary.
+  config = { ...config };
+  const request = telegramRequest(config, options);
 
   const bot = object(await request('getMe')); const botId = id(bot?.id);
   if (!botId || bot?.is_bot !== true || typeof bot.username !== 'string' || !/^[A-Za-z0-9_]{1,64}$/.test(bot.username)) throw new TelegramError('Telegram getMe did not identify a bot with a username.');
@@ -264,4 +287,31 @@ export async function createTelegramTransport(config: TelegramConfig, options: T
   if (typeof webhook?.url !== 'string') throw new TelegramError('Telegram returned invalid webhook information.');
   if (webhook.url) throw new TelegramError('Telegram bot already has a webhook. Remove it explicitly before using Nootify polling.');
   return new TelegramTransport(config, botId, bot.username, options, request);
+}
+
+/** Telegram cannot enumerate all users or chats; known candidates come from trusted live messages. */
+export async function telegramDirectory(config: TelegramConfig, known: { users: { id: string; name: string }[]; chats: { id: string; name: string }[] } = { users: [], chats: [] }): Promise<ChatDirectory> {
+  if (!config || typeof config.bot_token !== 'string' || !/^\d+:[A-Za-z0-9_-]+$/.test(config.bot_token) ||
+      typeof config.chat_id !== 'string' || (config.chat_id !== '' && (!/^-100\d+$/.test(config.chat_id) || !id(config.chat_id, true)))) {
+    throw new TelegramError('Invalid Telegram configuration.');
+  }
+  config = { ...config };
+  const request = telegramRequest(config);
+  const users = new Map<string, string>(); const chats = new Map<string, string>();
+  for (const candidate of known.users) if (id(candidate.id) && typeof candidate.name === 'string' && candidate.name.trim()) users.set(candidate.id, candidate.name.trim());
+  for (const candidate of known.chats) if (id(candidate.id, true) && typeof candidate.name === 'string' && candidate.name.trim()) chats.set(candidate.id, candidate.name.trim());
+  if (config.chat_id) {
+    const chat = object(await request('getChat', { chat_id: config.chat_id }));
+    if (id(chat?.id, true) !== config.chat_id || chat?.type !== 'supergroup' || chat.is_forum !== true) throw new TelegramError('Telegram requires the configured chat to be a forum supergroup.');
+    chats.set(config.chat_id, typeof chat.title === 'string' && chat.title.trim() ? chat.title.trim() : chats.get(config.chat_id) ?? config.chat_id);
+    const admins = await request('getChatAdministrators', { chat_id: config.chat_id });
+    if (!Array.isArray(admins)) throw apiError('getChatAdministrators', undefined, undefined);
+    for (const entry of admins) {
+      const member = object(entry); const user = object(member?.user); const userId = id(user?.id);
+      if (!userId || user?.is_bot !== false || (member?.status !== 'creator' && member?.status !== 'administrator')) continue;
+      const name = [user.first_name, user.last_name].filter((part): part is string => typeof part === 'string' && !!part.trim()).map(part => part.trim()).join(' ');
+      users.set(userId, name || users.get(userId) || userId);
+    }
+  }
+  return { users: Array.from(users, ([id, name]) => ({ id, name })), chats: Array.from(chats, ([id, name]) => ({ id, name })), limited: true };
 }

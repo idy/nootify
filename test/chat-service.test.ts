@@ -182,6 +182,28 @@ test('control APIs dispatch explicit and default channels, while legacy requests
   const unauthorized = await fetch(`${baseUrl}/v1/chat/messages/${id}/ack`, { method: 'POST', body: '{}' }); assert.equal(unauthorized.status, 401);
 });
 
+test('recipient lookups retain saved credentials without reconfiguring and reject stale configuration', async t => {
+  const f = await fixture(t); await f.telegram.configure(telegramConfig);
+  Object.assign(f.telegramTransports[0], { directoryTargets: () => ({ users: [{ id: '456', name: 'Known user' }], chats: [], limited: true }) });
+  const settings = new SettingsService({ state: f.state, slack: f.slack, telegram: f.telegram,
+    lark: { status: () => 'disabled', channel: () => ({ groups: 0 }), configure: async () => {} },
+    github: new GitHubAuth(f.state), pulls: new PullRequestsService(f.directory), agents: { list: async () => [], set: async () => { throw new Error('unused'); } }, env: {} });
+  let replace = false;
+  t.mock.method(globalThis, 'fetch', async (url: string | URL | Request): Promise<Response> => {
+    assert.ok(String(url).startsWith('https://api.telegram.org/bot123:secret/'));
+    if (String(url).endsWith('/getChat')) return Response.json({ ok: true, result: { id: -100123, type: 'supergroup', is_forum: true, title: 'Forum' } });
+    assert.ok(String(url).endsWith('/getChatAdministrators'));
+    if (replace) f.state.settings.telegram = { ...telegramConfig, user_id: '789' };
+    return Response.json({ ok: true, result: [{ status: 'creator', user: { id: 123, is_bot: false, first_name: 'Admin' } }] });
+  });
+  const page = await settings.chatDirectory('telegram', { bot_token: '', chat_id: '', user_id: '' });
+  assert.deepEqual(page.users, [{ id: '456', name: 'Known user' }, { id: '123', name: 'Admin' }]);
+  assert.deepEqual(f.state.settings.telegram, telegramConfig);
+  assert.equal(f.telegramTransports.length, 1, 'listing never replaces the receiver');
+  replace = true;
+  await assert.rejects(settings.chatDirectory('telegram', {}), /configuration changed/);
+});
+
 test('settings verify before saving, redact tokens, block remote edits and export private channel configuration', async t => {
   const f = await fixture(t);
   const settings = new SettingsService({ state: f.state, slack: f.slack, telegram: f.telegram,
@@ -195,12 +217,27 @@ test('settings verify before saving, redact tokens, block remote edits and expor
   const exported = await settings.exportConfig(); const document = JSON.parse(await readFile(exported.path, 'utf8'));
   assert.deepEqual(document.slack, slackConfig); assert.deepEqual(exported.summary.slack, { chat_id: 'C123', user_id: 'U123' });
   assert.ok(!JSON.stringify(exported.summary).includes('secret'));
+  assert.deepEqual(settings.chatSecret('slack', 'bot_token'), { secret: slackConfig.bot_token });
+  assert.deepEqual(settings.chatSecret('slack', 'app_token'), { secret: slackConfig.app_token });
+  await settings.saveChat('telegram', telegramConfig);
+  assert.deepEqual(settings.chatSecret('telegram', 'bot_token'), { secret: telegramConfig.bot_token });
+  assert.throws(() => settings.chatSecret('telegram', 'app_token'), /Invalid secret field/);
+  assert.throws(() => settings.chatSecret('slack', 'user_id'), /Invalid secret field/);
   await assert.rejects(settings.previewImport({ ...document, telegram: { bot_token: 'invalid' } }), /Invalid Telegram/);
   const logs = await EventLog.open(f.directory);
   for (const via of ['loopback', 'tailnet'] as const) {
     const server = createServiceHost([], f.state.token, logs, { settings, via, ...(via === 'tailnet' ? { tailnet: { authorize: async () => undefined, url: () => undefined } as never } : {}) });
     server.listen(0, '127.0.0.1'); await once(server, 'listening'); t.after(() => { server.closeAllConnections(); server.close(); });
     const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const secret = await fetch(base + '/ui/api/settings/slack/secret', { method: 'POST', headers: { 'x-nootify-ui': '1', 'content-type': 'application/json' }, body: JSON.stringify({ field: 'bot_token' }) });
+    assert.equal(secret.status, via === 'tailnet' ? 403 : 200);
+    if (via === 'loopback') {
+      assert.deepEqual(await secret.json(), { secret: slackConfig.bot_token });
+      assert.equal(secret.headers.get('cache-control'), 'no-store');
+      assert.equal((await fetch(base + '/ui/api/settings/slack/secret', { method: 'POST', body: '{}' })).status, 403);
+    }
+    const recipients = await fetch(base + '/ui/api/settings/telegram/recipients', { method: 'POST', headers: { 'x-nootify-ui': '1', 'content-type': 'application/json' }, body: '{}' });
+    assert.equal(recipients.status, via === 'tailnet' ? 403 : 400);
     const response = await fetch(base + '/ui/api/settings/slack', { method: 'POST', headers: { 'x-nootify-ui': '1', 'content-type': 'application/json' }, body: JSON.stringify({ clear: true }) });
     assert.equal(response.status, via === 'tailnet' ? 403 : 200);
   }
