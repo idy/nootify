@@ -7,14 +7,19 @@ import { HttpError, SessionUnavailable, isPolledAdapter, type Adapter, type Deli
 export async function registerPolledSession(state: State, adapter: Adapter, id: string, name: string): Promise<void> {
   if (!isPolledAdapter(adapter)) return;
   const saved = state.sessions.get(id);
-  if (saved) {
-    if (saved.adapter !== adapter) throw new HttpError(409, 'This session ID belongs to another adapter');
-    return;
-  }
-  const session: SessionRecord = { session_id: id, host_id: hostname(), adapter, session_name: name };
+  if (saved && saved.adapter !== adapter) throw new HttpError(409, 'This session ID belongs to another adapter');
+  const host_id = hostname();
+  if (saved?.host_id === host_id) return;
+  // Explicit local reopening reconciles a renamed host while retaining the conversation's inbox and title.
+  const session: SessionRecord = { session_id: id, host_id, adapter, session_name: saved?.session_name ?? name };
   state.sessions.set(id, session);
   try { await state.save(); }
-  catch (error) { if (state.sessions.get(id) === session) state.sessions.delete(id); throw error; }
+  catch (error) {
+    if (state.sessions.get(id) === session) {
+      if (saved) state.sessions.set(id, saved); else state.sessions.delete(id);
+    }
+    throw error;
+  }
 }
 
 function registered(state: State, adapter: PolledAdapter, id: string): SessionRecord {

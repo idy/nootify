@@ -111,7 +111,59 @@ for (const channel of ['slack', 'telegram'] as const) {
       await f.client.acknowledgeThread(id, adapter, messages[0].id);
     }
   });
+
+  test(`${channel}: reopening after a hostname change restores retained inbox messages without creating another thread`, async t => {
+    const f = await fixture(t); const originalTransport = new FakeTransport();
+    const original = new ChatService(channel, f.state, f.sessions, async () => originalTransport);
+    await original.configure(channel === 'slack' ? { bot_token: 'xoxb-fixture', app_token: 'xapp-fixture', channel_id: 'C123', user_id: 'U123' }
+      : { bot_token: '123:fixture', chat_id: '-100123', user_id: '123' });
+    const prior = new Map<PolledAdapter, ThreadInfo>();
+    for (const adapter of ['trae', 'workbuddy'] as const) {
+      const id = `renamed-${adapter}`;
+      prior.set(adapter, await original.open(adapter, id, `${adapter} task`));
+      await f.sessions.send(id, 'Retained before the hostname change', adapter);
+      f.state.sessions.get(id)!.host_id = 'previous-mac-hostname';
+    }
+    await f.state.save(); await original.stop();
+    const state = await State.open(f.directory); const transport = new FakeTransport();
+    const sessions = new SessionsService(state);
+    const restarted = new ChatService(channel, state, sessions, async () => transport);
+    await restarted.start(); t.after(async () => { await restarted.stop(); await sessions.stop(); });
+    const server = createServiceHost([sessions, restarted], state.token);
+    server.listen(0, '127.0.0.1'); await once(server, 'listening');
+    t.after(() => { server.closeAllConnections(); server.close(); });
+    const client = new NootifyClient({ baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, token: state.token });
+    for (const adapter of ['trae', 'workbuddy'] as const) {
+      const id = `renamed-${adapter}`; const thread = prior.get(adapter)!;
+      await assert.rejects(client.receiveThread(id, adapter), /session_not_local/);
+      const reopened = await client.openThread({ adapter, session_id: id, session_name: 'Reopen existing task', channel });
+      assert.equal(reopened.created, false); assert.equal(reopened.thread_id, thread.thread_id);
+      assert.equal(state.session(id).host_id, hostname());
+      assert.equal((await State.open(f.directory)).session(id).host_id, hostname());
+      const pending = await client.receiveThread(id, adapter);
+      assert.equal(pending.messages.length, 1); assert.match(pending.messages[0].text, /Retained before the hostname change/);
+      await client.acknowledgeThread(id, adapter, pending.messages[0].id);
+      const message: ChatMessage = { chat_id: thread.chat_id, thread_id: thread.thread_id!, message_id: `after-rename-${adapter}`,
+        sender_id: channel === 'slack' ? 'U123' : '123', text: 'Reply after reopening' };
+      await transport.receive(message);
+      assert.match((await client.receiveThread(id, adapter)).messages[0].text, /Reply after reopening/);
+    }
+    assert.equal(transport.opened, 0, 'existing remote threads are reused');
+  });
 }
+
+test('failed hostname reconciliation retains the prior registration and queued input', async t => {
+  const f = await fixture(t);
+  await registerPolledSession(f.state, 'trae', 'retained', 'Original task');
+  await f.sessions.send('retained', 'Pending input', 'trae');
+  const saved = { ...f.state.session('retained'), host_id: 'previous-mac-hostname' };
+  f.state.sessions.set('retained', saved); await f.state.save();
+  t.mock.method(f.state, 'save', async () => { throw new Error('Cannot persist registration'); });
+  await assert.rejects(registerPolledSession(f.state, 'trae', 'retained', 'Reopened task'), /Cannot persist registration/);
+  assert.deepEqual(f.state.session('retained'), saved);
+  assert.equal(f.state.inboxMessages.size, 1);
+  assert.equal((await State.open(f.directory)).session('retained').host_id, 'previous-mac-hostname');
+});
 
 function fakeFeishu() {
   const announcements = new Map<string, string>(); let next = 0;
