@@ -102,8 +102,8 @@ export class LarkThreads {
     binding ??= await this.adopt(adapter, sessionId, sessionName, signal);
     if (!binding) {
       const recipient = this.requireRecipient();
-      // Feishu deduplicates retries even if creation succeeded before its SQLite binding could commit.
-      const uuid = createHash('sha256').update(`${hostname()}\n${this.api.appId}\n${adapter}\n${sessionId}`).digest('hex').slice(0, 32);
+      // Deduplicate retries only for the same invitee, including when the response or SQLite save was lost.
+      const uuid = createHash('sha256').update(`${hostname()}\n${this.api.appId}\n${adapter}\n${sessionId}\n${recipient}`).digest('hex').slice(0, 32);
       const chat = await requestLark<{ chat_id?: string }>(this.api, 'POST', `/open-apis/im/v1/chats?user_id_type=open_id&uuid=${uuid}`, {
         name: threadName(sessionName, adapter, sessionId), chat_mode: 'group', chat_type: 'private', user_id_list: [recipient],
       }, signal);

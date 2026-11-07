@@ -25,6 +25,7 @@ async function fixture(t: TestContext) {
   state.settings.lark_recipient_open_id = 'ou_owner'; await state.save();
   const chats: { chat_id: string; name: string }[] = [];
   const announcements = new Map<string, string>();
+  const members = new Map<string, string[]>();
   const reports: Record<string, unknown>[] = [];
   let creates = 0;
   const createdByKey = new Map<string, string>();
@@ -39,6 +40,7 @@ async function fixture(t: TestContext) {
       const chat_id = `oc_${++creates}`;
       createdByKey.set(uuid, chat_id);
       chats.push({ chat_id, name: (body as { name: string }).name }); announcements.set(chat_id, '');
+      members.set(chat_id, [...(body as { user_id_list: string[] }).user_id_list]);
       return { chat_id } as T;
     }
     const id = /^\/open-apis\/im\/v1\/chats\/([^/]+)\/announcement$/.exec(url.pathname)?.[1];
@@ -55,7 +57,7 @@ async function fixture(t: TestContext) {
   const options = { state, threads, discover, report: (record: Record<string, unknown>) => reports.push(record) };
   const sync = new LarkThreadSync(options);
   t.after(() => sync.stop());
-  return { state, directory, api, chats, announcements, candidates, discover, threads, options, sync, reports,
+  return { state, directory, api, chats, announcements, members, candidates, discover, threads, options, sync, reports,
     creates: () => creates, failAnnouncement: (fail: boolean) => { failAnnouncement = fail; } };
 }
 
@@ -116,6 +118,41 @@ test('failed SQLite insertion rolls back and retries the same provider group aft
   assert.equal(f.creates(), 1);
   assert.equal((await State.open(f.directory)).bindings.get('oc_1')?.session_id, 'old-thread');
 });
+
+for (const failure of ['lost-response', 'sqlite-save'] as const) {
+  test(`recipient change after ${failure} creates a group for the new recipient`, async t => {
+    const f = await fixture(t);
+    if (failure === 'lost-response') {
+      const request = f.api.request.bind(f.api); let lost = false;
+      t.mock.method(f.api, 'request', async (method: 'GET' | 'POST' | 'PATCH', path: string, body?: unknown, signal?: AbortSignal) => {
+        const result = await request(method, path, body, signal);
+        if (!lost && method === 'POST' && path.startsWith('/open-apis/im/v1/chats?')) {
+          lost = true; throw new Error('Group created, but its response was lost');
+        }
+        return result;
+      });
+      await f.sync.reconcile();
+    } else {
+      const db = new DatabaseSync(join(f.directory, 'state.sqlite'));
+      db.exec("CREATE TRIGGER fail_binding BEFORE INSERT ON lark_bindings BEGIN SELECT RAISE(ABORT, 'injected binding failure'); END");
+      try { await f.sync.reconcile(); }
+      finally { db.exec('DROP TRIGGER fail_binding'); db.close(); }
+    }
+    assert.equal(f.creates(), 1); assert.equal(f.state.bindings.size, 0);
+    assert.deepEqual(f.members.get('oc_1'), ['ou_owner']);
+    f.state.settings.lark_recipient_open_id = 'ou_other'; await f.state.save();
+    const state = await State.open(f.directory); const threads = new LarkThreads(state, f.api);
+    const sync = new LarkThreadSync({ ...f.options, state, threads });
+    await sync.reconcile();
+    const binding = threads.binding('old-thread', 'codex')!;
+    assert.equal(f.creates(), 2);
+    assert.equal(binding.chat_id, 'oc_2'); assert.equal(binding.sender_open_id, 'ou_other');
+    assert.deepEqual(f.members.get(binding.chat_id), ['ou_other']);
+    assert.deepEqual(f.members.get('oc_1'), ['ou_owner'], 'the old recipient group is never rebound to the new sender');
+    assert.equal((await State.open(f.directory)).bindings.get('oc_2')?.sender_open_id, 'ou_other');
+    await sync.reconcile(); assert.equal(f.creates(), 2, 'unchanged recipient retries remain idempotent');
+  });
+}
 
 test('one thread failure does not prevent another old thread from receiving a group', async t => {
   const f = await fixture(t);
