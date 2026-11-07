@@ -26,6 +26,7 @@
 !ifdef NOOTIFY_INSTALLER_HOOK_DIAGNOSTICS
   Push $R9
   FileOpen $R9 "${NOOTIFY_INSTALLER_HOOK_LOG}" a
+  FileSeek $R9 0 END
   FileWrite $R9 "${TEXT}$\r$\n"
   FileClose $R9
   Pop $R9

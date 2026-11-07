@@ -85,7 +85,14 @@ function Invoke-Hook([string]$Executable, [string]$Arguments, [string]$Directory
     finally { Save-NativeTrace $Directory $Label }
     $state = Read-SafeLog (Join-Path $Directory 'probe-state.log')
     if (!$state.Contains("PASS $Hook mode=$Mode registers stack")) { throw "$Label did not preserve registers/stack or finish its hook" }
-    if (!(Read-SafeLog (Join-Path $Directory 'nootify-installer-hook.log'))) { throw "$Label produced no production hook diagnostics" }
+    $trace = Read-SafeLog (Join-Path $Directory 'nootify-installer-hook.log')
+    foreach ($name in $startupVariables) {
+        if (!$trace.Contains("clear ${name}: result=")) { throw "$Label lost an environment API diagnostic" }
+    }
+    $command = $(if ($Hook -eq 'NSIS_HOOK_PREINSTALL' -or $Mode -eq 1) { 'service-stop' } else { 'service-uninstall' })
+    if (!$trace.Contains("manage ${command}: invoking CLI") -or !$trace.Contains("manage ${command}: result=0")) {
+        throw "$Label lost CLI invocation or result diagnostics"
+    }
 }
 
 # No -Force: never reuse or overwrite existing fixtures or diagnostics.
