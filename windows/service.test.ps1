@@ -26,6 +26,24 @@ function Wait-File([string]$Path) {
         Start-Sleep -Milliseconds 10
     }
 }
+function Write-FixtureJobDiagnostics([string]$Label, $Job, $Process, [string]$Directory) {
+    # Only retained fixture handles and their dedicated logs are inspected. These
+    # observations never authorize production cleanup or replace the job query.
+    try {
+        $active = $Job.ActiveProcesses
+        $exited = $Process.WaitForExit(0)
+        $exitCode = if ($exited) { [string]$Process.ExitCode } else { 'running' }
+        [Console]::Error.WriteLine("${Label}: active=$active; pid=$($Process.Id); exited=$exited; exitCode=$exitCode")
+        foreach ($stream in @('stdout', 'stderr')) {
+            $path = Join-Path $Directory ($stream + '.log')
+            if (Test-Path -LiteralPath $path) {
+                $text = [IO.File]::ReadAllText($path)
+                if ($text.Length -gt 2048) { $text = $text.Substring(0, 2048) + ' [truncated]' }
+                [Console]::Error.WriteLine("${Label} ${stream}: $text")
+            }
+        }
+    } catch { [Console]::Error.WriteLine("${Label} diagnostics unavailable: $($_.Exception.Message)") }
+}
 $serviceScript = Join-Path $PSScriptRoot 'service.ps1'
 $tokens = $null; $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($serviceScript, [ref]$tokens, [ref]$errors)
@@ -197,6 +215,8 @@ Assert ($null -eq (Parse-TestBootData $sharedData)) 'An unknown native architect
 [BitConverter]::GetBytes([uint32]9600).CopyTo($sharedData, 0x260)
 Assert ($null -eq (Parse-TestBootData $sharedData)) 'A pre-Windows-10 layout must not produce boot evidence'
 $runner = $null; $job = $null; $unrelated = $null; $unrelatedJob = $null; $startup = $null
+$unrelatedProcess = $null; $orphanProcess = $null
+$unrelatedDirectory = $null; $orphanDirectory = $null
 $crashProcesses = @()
 $task | Add-Member NoteProperty Job $null
 try {
@@ -581,25 +601,45 @@ catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
     [IO.File]::Move((Join-Path $directory 'crash-released-node.exe'), $copiedNode)
 
     # Keep an unrelated job alive throughout Stop; a matching user alone is not ownership.
+    # Give each runner its own readiness marker and logs, so an early Node exit cannot
+    # be mistaken for Stop terminating the wrong job. Retain handles before resuming.
+    $idleArguments = [string[]]@('-e', "require('node:fs').writeFileSync('ready', String(process.pid));setInterval(()=>{},1000);")
+    $unrelatedDirectory = Join-Path $directory 'unrelated-job'
+    $orphanDirectory = Join-Path $directory 'orphan-job'
+    $null = [IO.Directory]::CreateDirectory($unrelatedDirectory)
+    $null = [IO.Directory]::CreateDirectory($orphanDirectory)
     $unrelatedName = "Global\Nootify.Service.Job.$ownerSid." + [guid]::NewGuid().ToString('N')
     $unrelatedJob = [Nootify.ServiceJob]::Create($unrelatedName, $ownerSid)
-    $unrelated = [Nootify.ServiceRunner]::new($unrelatedJob, $originalNode, [string[]]@('-e', 'setInterval(()=>{},1000)'), $directory)
+    $unrelated = [Nootify.ServiceRunner]::new($unrelatedJob, $originalNode, $idleArguments, $unrelatedDirectory)
+    $unrelatedProcess = [Diagnostics.Process]::GetProcessById([int]$unrelated.ProcessId); $null = $unrelatedProcess.Handle
     $unrelated.Resume()
+    Wait-File (Join-Path $unrelatedDirectory 'ready')
+    $unrelatedAfterStart = $unrelatedJob.ActiveProcesses
+    Assert ($unrelatedAfterStart -eq 1 -and !$unrelatedProcess.HasExited) "The unrelated fixture must start with one live process; active=$unrelatedAfterStart"
 
     # Deleting a registration does not terminate its action. With no task object,
     # Stop must still authenticate and drain the recorded job, preserving other jobs.
     $name = "Global\Nootify.Service.Job.$ownerSid." + [guid]::NewGuid().ToString('N')
     $job = [Nootify.ServiceJob]::Create($name, $ownerSid, (Job-CompletionPath $name))
     Publish-Job $name
-    $runner = [Nootify.ServiceRunner]::new($job, $copiedNode, [string[]]@('-e', 'setInterval(()=>{},1000)'), $directory)
+    $runner = [Nootify.ServiceRunner]::new($job, $copiedNode, $idleArguments, $orphanDirectory)
+    $orphanProcess = [Diagnostics.Process]::GetProcessById([int]$runner.ProcessId); $null = $orphanProcess.Handle
     $runner.Resume()
+    Wait-File (Join-Path $orphanDirectory 'ready')
+    $orphanBeforeStop = $job.ActiveProcesses
+    Assert ($orphanBeforeStop -eq 1 -and !$orphanProcess.HasExited) "The orphan fixture must be alive before Stop; active=$orphanBeforeStop"
+    $unrelatedBeforeStop = $unrelatedJob.ActiveProcesses
+    Assert ($unrelatedBeforeStop -eq 1 -and !$unrelatedProcess.HasExited) "Creating the orphan fixture must leave the unrelated process alive; active=$unrelatedBeforeStop"
     $beforeStops = $task.Stops
     Stop-OwnedTask $null
     Assert ($job.ActiveProcesses -eq 0) 'A missing task registration must not leave the daemon alive'
+    Assert ($orphanProcess.WaitForExit(0)) 'The stopped orphan fixture must have exited'
     Assert (!(Test-Path -LiteralPath $runtimePath)) 'An orphaned job must be verified empty before its runtime is removed'
     Assert ($task.Stops -eq $beforeStops) 'An absent registration must not control another task'
-    Assert ($unrelatedJob.ActiveProcesses -eq 1) 'Orphan cleanup must leave unrelated jobs running'
+    $unrelatedAfterStop = $unrelatedJob.ActiveProcesses
+    Assert ($unrelatedAfterStop -eq 1 -and !$unrelatedProcess.HasExited) "Orphan cleanup must leave unrelated jobs running; afterStart=$unrelatedAfterStart; beforeStop=$unrelatedBeforeStop; afterStop=$unrelatedAfterStop"
     $runner.Dispose(); $runner = $null; $job = $null
+    $orphanProcess.Dispose(); $orphanProcess = $null
     Stop-OwnedTask $null # No registration and no runtime is an idempotent stop.
 
     $lateFixture = Join-Path $directory 'late-helper.cjs'
@@ -642,7 +682,8 @@ setInterval(() => {
     Stop-OwnedTask $task
     Assert ($job.ActiveProcesses -eq 0) 'Authoritative membership must include helpers born during Stop'
     Assert ($root.WaitForExit(0) -and $task.Helper.WaitForExit(0)) 'Stop must return only after Node/helper exit'
-    Assert ($unrelatedJob.ActiveProcesses -eq 1) 'Stop must leave an unrelated current-user job running'
+    $unrelatedAfterLateStop = $unrelatedJob.ActiveProcesses
+    Assert ($unrelatedAfterLateStop -eq 1 -and !$unrelatedProcess.HasExited) "Stop must leave an unrelated current-user job running; active=$unrelatedAfterLateStop"
     $root.Dispose(); $task.Helper.Dispose()
     $runner.Dispose(); $runner = $null
     $name = "Global\Nootify.Service.Job.$ownerSid." + [guid]::NewGuid().ToString('N')
@@ -676,6 +717,8 @@ public static class NootifyJobTest {
 } catch {
     [Console]::Error.WriteLine('Service fixture failure: ' + $_.Exception.Message)
     [Console]::Error.WriteLine($_.ScriptStackTrace)
+    if ($unrelatedJob -and $unrelatedProcess) { Write-FixtureJobDiagnostics 'Unrelated fixture' $unrelatedJob $unrelatedProcess $unrelatedDirectory }
+    if ($job -and $orphanProcess) { Write-FixtureJobDiagnostics 'Orphan fixture' $job $orphanProcess $orphanDirectory }
     throw
 } finally {
     if ($startup) { if (!$startup.HasExited) { $startup.Kill(); $null = $startup.WaitForExit(5000) }; $startup.Dispose() }
@@ -688,6 +731,8 @@ public static class NootifyJobTest {
     if ($job) { Close-FixtureJob $job }
     if ($unrelated) { $unrelated.Dispose() }
     elseif ($unrelatedJob) { Close-FixtureJob $unrelatedJob }
+    if ($unrelatedProcess) { $unrelatedProcess.Dispose() }
+    if ($orphanProcess) { $orphanProcess.Dispose() }
     if (Test-Path -LiteralPath $runtimePath) {
         # Fixture teardown does not claim a production stop or discard real service state.
         # It may encounter the intentionally unverified crash record after an assertion fails.

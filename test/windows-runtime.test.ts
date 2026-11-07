@@ -15,7 +15,7 @@ import { checkSocket, isNamedPipe } from '../src/inbox.js';
 import { LocalSessions } from '../src/local-sessions.js';
 import { inboxEnvironment, windowsInboxCommand, windowsInboxScript } from '../src/native-transport.js';
 import { desktopSessionRoots, isAbsolutePath, serviceStateDir } from '../src/runtime-paths.js';
-import { SERVICE_ACTIONS, serviceEnvironment, windowsPowerShell, windowsServiceArgs, windowsServiceScript } from '../src/service.js';
+import { SERVICE_ACTIONS, manageService, serviceEnvironment, windowsPowerShell, windowsServiceArgs, windowsServiceScript } from '../src/service.js';
 import { SessionsService, writeInbox } from '../src/sessions.js';
 import { State } from '../src/state.js';
 import { shellCommand, shellQuote } from '../src/shell.js';
@@ -193,25 +193,17 @@ test('Windows native peer policy rejects foreign SIDs including reused expected 
   assert.match(stdout, /Windows inbox peer policy tests passed/);
 });
 
-test('the actual service status entry point runs hidden without an attached console', { skip: process.platform !== 'win32', timeout: 20_000 }, async t => {
+test('the production hidden launcher executes the actual service status entry point', { skip: process.platform !== 'win32', timeout: 20_000 }, async t => {
   const directory = await mkdtemp(join(tmpdir(), 'nootify-hidden-service-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
-  const child = spawn(windowsPowerShell(), windowsServiceArgs('status', { stateDir: join(directory, 'private-state'), port: 9517 }), {
-    windowsHide: true, detached: true, env: serviceEnvironment(process.env), stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  const deadline = setTimeout(() => child.kill(), 15_000).unref();
-  t.after(() => { clearTimeout(deadline); child.kill(); });
-  const closed = once(child, 'close');
-  let output = ''; let errors = '';
-  child.stdout.setEncoding('utf8'); child.stdout.on('data', data => { output += data; });
-  child.stderr.setEncoding('utf8'); child.stderr.on('data', data => { errors += data; });
-  const [code] = await closed;
-  if (code === 1 && /^Refusing (?:an unrelated Scheduled Task|to control a Scheduled Task)/.test(errors)) {
-    assert.equal(output, '', 'an installed task from another location remains untouched');
-  } else {
-    assert.equal(code, 0, 'hidden service status must reach its management logic');
-    assert.equal(typeof JSON.parse(output).installed, 'boolean');
-    assert.equal(errors, '');
+  try {
+    // Exercise the real windowsHide/redirected-stdio launch contract, including JSON
+    // decoding. A separate DETACHED_PROCESS/NUL-stdin fixture does not exercise it.
+    const status = await manageService('status', { stateDir: join(directory, 'private-state'), port: 9517 });
+    assert.equal(typeof status.installed, 'boolean');
+  } catch (error) {
+    // Status remains read-only on developer machines with another installation.
+    assert.match((error as Error).message, /^Refusing (?:an unrelated Scheduled Task|to control a Scheduled Task)/);
   }
 });
 
