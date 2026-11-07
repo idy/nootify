@@ -78,18 +78,24 @@ test('mac start loads an unloaded owned job, while restart only forces an alread
 });
 
 test('mac management uses absolute launchctl paths with an empty PATH', async t => {
-  const f = await fixture(t); const previous = process.env.PATH;
+  const f = await fixture(t);
+  const pathKey = Object.keys(process.env).find(key => key.toUpperCase() === 'PATH') ?? 'PATH';
+  const previous = process.env[pathKey];
   try {
-    process.env.PATH = '';
+    process.env[pathKey] = '';
     const execute: ServiceExecutor = async (file, args, options) => {
-      if (file === '/bin/launchctl' && args[0] === 'print') assert.equal(options?.env?.PATH, '');
+      if (file === '/bin/launchctl' && args[0] === 'print') {
+        // Windows preserves the original key casing and may omit empty variables.
+        const paths = Object.entries(options?.env ?? {}).filter(([key]) => key.toUpperCase() === 'PATH');
+        assert.ok(paths.every(([, value]) => !value), 'the scheduler must run without any usable PATH');
+      }
       return f.runtime.execute(file, args, options);
     };
     assert.equal((await manageService('stop', f.options, { ...f.runtime, execute })).status, 'stopped');
     assert.deepEqual(f.calls.map(([file]) => file), ['/usr/bin/plutil', '/bin/launchctl', '/bin/launchctl']);
     await stat(f.plist);
   } finally {
-    if (previous === undefined) delete process.env.PATH; else process.env.PATH = previous;
+    if (previous === undefined) delete process.env[pathKey]; else process.env[pathKey] = previous;
   }
 });
 
