@@ -13,6 +13,10 @@ import { launchdLabel } from '../src/launchd.js';
 import { assertLaunchdOwnership, manageService, windowsPowerShell, type ServiceExecutor } from '../src/service.js';
 
 const exec = promisify(execFile);
+const absentLaunchdJob = () => Object.assign(new Error('fixture missing service'), {
+  code: 113, killed: false, signal: null, stdout: '',
+  stderr: `Bad request.\nCould not find service "${launchdLabel}" in domain for user gui: 501\n`,
+});
 
 async function listener(t: TestContext) {
   let service = 'another-service';
@@ -37,11 +41,15 @@ async function fixture(t: TestContext, loaded = true, port = 9417) {
   const data = { Label: launchdLabel, ProgramArguments: [process.execPath, fileURLToPath(new URL('../src/server.js', import.meta.url)), '--state-dir', stateDir, '--port', String(port)],
     WorkingDirectory: stateDir, StandardOutPath: join(stateDir, 'stdout.log'), StandardErrorPath: join(stateDir, 'stderr.log') };
   const calls: [string, string[]][] = [];
-  const execute: ServiceExecutor = async (file, args) => {
+  const execute: ServiceExecutor = async (file, args, options) => {
     calls.push([file, args]);
     if (file === '/usr/bin/plutil') return { stdout: JSON.stringify(data) };
-    assert.equal(file, 'launchctl');
-    if (args[0] === 'print' && !loaded) throw new Error('not loaded');
+    assert.equal(file, '/bin/launchctl');
+    if (args[0] === 'print') {
+      assert.equal(options?.timeout, 5000);
+      assert.equal(options?.env?.LC_ALL, 'C');
+      if (!loaded) throw absentLaunchdJob();
+    }
     return { stdout: '' };
   };
   return { home, plist, data, calls, options: { stateDir, port }, runtime: { platform: 'darwin' as const, uid: 501, home, execute } };
@@ -51,7 +59,7 @@ test('mac service-start kickstarts a loaded job without restarting its live proc
   const { calls, options, runtime } = await fixture(t);
   await manageService('start', options, runtime);
   await manageService('start', options, runtime);
-  assert.deepEqual(calls.filter(([file]) => file === 'launchctl').map(([, args]) => args), [
+  assert.deepEqual(calls.filter(([file]) => file === '/bin/launchctl').map(([, args]) => args), [
     ['print', `gui/501/${launchdLabel}`], ['kickstart', `gui/501/${launchdLabel}`],
     ['print', `gui/501/${launchdLabel}`], ['kickstart', `gui/501/${launchdLabel}`],
   ]);
@@ -61,12 +69,73 @@ test('mac start loads an unloaded owned job, while restart only forces an alread
   const free = await listener(t); await free.close();
   const unloaded = await fixture(t, false, free.port);
   await manageService('start', unloaded.options, unloaded.runtime);
-  assert.deepEqual(unloaded.calls.filter(([file]) => file === 'launchctl').map(([, args]) => args), [
+  assert.deepEqual(unloaded.calls.filter(([file]) => file === '/bin/launchctl').map(([, args]) => args), [
     ['print', `gui/501/${launchdLabel}`], ['bootstrap', 'gui/501', unloaded.plist], ['kickstart', `gui/501/${launchdLabel}`],
   ]);
   const loaded = await fixture(t);
   await manageService('restart', loaded.options, loaded.runtime);
-  assert.deepEqual(loaded.calls.at(-1), ['launchctl', ['kickstart', '-k', `gui/501/${launchdLabel}`]]);
+  assert.deepEqual(loaded.calls.at(-1), ['/bin/launchctl', ['kickstart', '-k', `gui/501/${launchdLabel}`]]);
+});
+
+test('mac management uses absolute launchctl paths with an empty PATH', async t => {
+  const f = await fixture(t); const previous = process.env.PATH;
+  try {
+    process.env.PATH = '';
+    const execute: ServiceExecutor = async (file, args, options) => {
+      if (file === '/bin/launchctl' && args[0] === 'print') assert.equal(options?.env?.PATH, '');
+      return f.runtime.execute(file, args, options);
+    };
+    assert.equal((await manageService('stop', f.options, { ...f.runtime, execute })).status, 'stopped');
+    assert.deepEqual(f.calls.map(([file]) => file), ['/usr/bin/plutil', '/bin/launchctl', '/bin/launchctl']);
+    await stat(f.plist);
+  } finally {
+    if (previous === undefined) delete process.env.PATH; else process.env.PATH = previous;
+  }
+});
+
+test('mac management retains the plist and performs no action when scheduler state is unknown', async t => {
+  const f = await fixture(t);
+  const failures = [
+    Object.assign(new Error('missing executable'), { code: 'ENOENT' }),
+    Object.assign(new Error('denied executable'), { code: 'EACCES' }),
+    Object.assign(new Error('scheduler unavailable'), { code: 1, stderr: 'Operation not permitted' }),
+    Object.assign(absentLaunchdJob(), { killed: true }),
+    Object.assign(absentLaunchdJob(), { signal: 'SIGTERM' }),
+    Object.assign(absentLaunchdJob(), { stderr: 'Could not find domain for user gui: 501' }),
+    Object.assign(absentLaunchdJob(), { stderr: 'Could not find service "another.service" in domain for user gui: 501' }),
+    Object.assign(absentLaunchdJob(), { stderr: `Could not find service "${launchdLabel}" in domain for user gui: 502` }),
+    Object.assign(absentLaunchdJob(), { stdout: 'partial scheduler snapshot' }),
+    new Error('unknown scheduler failure'),
+  ];
+  for (const action of ['start', 'restart', 'stop', 'uninstall'] as const) for (const failure of failures) {
+    f.calls.length = 0;
+    const execute: ServiceExecutor = async (file, args, options) => {
+      const result = await f.runtime.execute(file, args, options);
+      if (file === '/bin/launchctl' && args[0] === 'print') throw failure;
+      return result;
+    };
+    await assert.rejects(manageService(action, f.options, { ...f.runtime, execute }), /Cannot query.*plist was retained/);
+    assert.deepEqual(f.calls.filter(([file]) => file === '/bin/launchctl').map(([, args]) => args), [['print', `gui/501/${launchdLabel}`]]);
+    assert.equal(await readFile(f.plist, 'utf8'), 'fixture-owned-plist');
+  }
+});
+
+test('mac management accepts only the explicit absent-job result before deleting an unloaded plist', async t => {
+  for (const prefix of ['', 'Bad request.\n']) {
+    const f = await fixture(t);
+    const execute: ServiceExecutor = async (file, args, options) => {
+      const result = await f.runtime.execute(file, args, options);
+      if (file === '/bin/launchctl' && args[0] === 'print') throw Object.assign(absentLaunchdJob(), {
+        stderr: `${prefix}Could not find service "${launchdLabel}" in domain for user gui: 501\n`,
+      });
+      return result;
+    };
+    assert.equal((await manageService('stop', f.options, { ...f.runtime, execute })).status, 'stopped');
+    await stat(f.plist);
+    assert.equal((await manageService('uninstall', f.options, { ...f.runtime, execute })).status, 'uninstalled');
+    await assert.rejects(stat(f.plist), { code: 'ENOENT' });
+    assert.ok(f.calls.filter(([file]) => file === '/bin/launchctl').every(([, args]) => args[0] === 'print'));
+  }
 });
 
 test('new mac management commands reject other install paths, altered arguments and unrelated plists before launchctl or deletion', async t => {
@@ -92,7 +161,7 @@ test('mac stop retains an owned plist; uninstall removes only that plist and is 
   const { calls, options, runtime, plist } = await fixture(t);
   assert.deepEqual(await manageService('stop', options, runtime), { installed: true, status: 'stopped', plist });
   await stat(plist);
-  assert.deepEqual(calls.at(-1), ['launchctl', ['bootout', `gui/501/${launchdLabel}`]]);
+  assert.deepEqual(calls.at(-1), ['/bin/launchctl', ['bootout', `gui/501/${launchdLabel}`]]);
   assert.deepEqual(await manageService('uninstall', options, runtime), { installed: false, status: 'uninstalled', plist });
   await assert.rejects(stat(plist), { code: 'ENOENT' });
   calls.length = 0;
@@ -110,7 +179,7 @@ test('mac start and restart refuse occupied ports before bootstrapping an unload
     for (const action of ['start', 'restart'] as const) {
       f.calls.length = 0;
       await assert.rejects(manageService(action, f.options, f.runtime), /stop the existing service/);
-      assert.deepEqual(f.calls.filter(([file]) => file === 'launchctl').map(([, args]) => args), [['print', `gui/501/${launchdLabel}`]]);
+      assert.deepEqual(f.calls.filter(([file]) => file === '/bin/launchctl').map(([, args]) => args), [['print', `gui/501/${launchdLabel}`]]);
       assert.equal(await readFile(f.plist, 'utf8'), 'fixture-owned-plist');
       const response = await fetch(`http://127.0.0.1:${occupied.port}/health`, { headers: { connection: 'close' }, signal: AbortSignal.timeout(1000) });
       assert.deepEqual(await response.json(), { service }, 'the unmanaged listener remains alive');
@@ -121,7 +190,7 @@ test('mac start and restart refuse occupied ports before bootstrapping an unload
 test('mac unloaded uninstall leaves an unrelated occupied listener running', async t => {
   const occupied = await listener(t); const f = await fixture(t, false, occupied.port);
   await manageService('uninstall', f.options, f.runtime);
-  assert.deepEqual(f.calls.filter(([file]) => file === 'launchctl').map(([, args]) => args), [['print', `gui/501/${launchdLabel}`]]);
+  assert.deepEqual(f.calls.filter(([file]) => file === '/bin/launchctl').map(([, args]) => args), [['print', `gui/501/${launchdLabel}`]]);
   await assert.rejects(stat(f.plist), { code: 'ENOENT' });
   const response = await fetch(`http://127.0.0.1:${occupied.port}/health`, { headers: { connection: 'close' }, signal: AbortSignal.timeout(1000) });
   assert.deepEqual(await response.json(), { service: 'another-service' });

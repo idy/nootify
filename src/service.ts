@@ -106,20 +106,33 @@ export async function manageService(action: ServiceAction, options: ServiceOptio
   }
   const target = `gui/${uid}/${launchdLabel}`;
   let loaded = true; let job = '';
-  try { job = (await run('launchctl', ['print', target])).stdout; } catch { loaded = false; }
+  try {
+    job = (await run('/bin/launchctl', ['print', target], {
+      timeout: 5000, maxBuffer: 1024 * 1024, env: { ...process.env, LC_ALL: 'C' },
+    })).stdout;
+  } catch (error) {
+    const failure = error as { code?: number | string; killed?: boolean; signal?: unknown; stdout?: unknown; stderr?: unknown } | undefined;
+    const detail = typeof failure?.stderr === 'string' ? failure.stderr.trim() : '';
+    const missing = `Could not find service "${launchdLabel}" in domain for user gui: ${uid}`;
+    if (failure?.code !== 113 || failure.killed || failure.signal || failure.stdout
+      || detail !== missing && detail !== `Bad request.\n${missing}`) {
+      throw new Error('Cannot query the Nootify LaunchAgent; the plist was retained and no service action was performed');
+    }
+    loaded = false;
+  }
   if (action === 'start' || action === 'restart') {
     if (!loaded) {
       await assertInstallPort(options.port, false);
-      await run('launchctl', ['bootstrap', `gui/${uid}`, plist]);
+      await run('/bin/launchctl', ['bootstrap', `gui/${uid}`, plist]);
     }
-    await run('launchctl', ['kickstart', ...(action === 'restart' && loaded ? ['-k'] : []), target]);
+    await run('/bin/launchctl', ['kickstart', ...(action === 'restart' && loaded ? ['-k'] : []), target]);
   } else {
     if (loaded) {
       const match = /^\s*pid\s*=\s*(\S+)\s*$/m.exec(job);
       const pid = match ? Number(match[1]) : undefined;
       if (pid !== undefined && (!Number.isSafeInteger(pid) || pid <= 0)) throw new Error('Cannot verify the Nootify launchd process ID');
       const identity = pid === undefined ? undefined : await launchdProcess(pid, run);
-      await run('launchctl', ['bootout', target]);
+      await run('/bin/launchctl', ['bootout', target]);
       if (identity) await waitForLaunchdExit(identity, run, runtime.shutdownTimeout ?? 30_000);
     }
     if (action === 'uninstall') await unlink(plist);
