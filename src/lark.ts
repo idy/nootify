@@ -6,6 +6,7 @@ import type { Adapter, LarkBinding, LarkDelivery, RemoteBinding, RouteRequest, R
 import { HttpError, RetryableDeliveryError, identifier, object, isAdapter, text } from './types.js';
 import { forwardedLarkMessage, LarkReplies } from './lark-replies.js';
 import { LarkThreads } from './lark-threads.js';
+import { LarkThreadSync, type ThreadDiscovery } from './lark-thread-sync.js';
 import { registerPolledSession } from './polled-sessions.js';
 import { createLarkApi, ensureAnnouncement, ensureBindingMessage, readAnnouncement, parseAnnouncement, InvalidAnnouncement, larkActivationTime } from './lark-metadata.js';
 import type { Credentials, LarkApi } from './lark-metadata.js';
@@ -30,6 +31,7 @@ export class LarkService implements ServiceModule {
   readonly name = 'lark';
   private connection = 'disabled';
   private receiver?: LarkReceiver;
+  private threadSync?: LarkThreadSync;
   private receiverGeneration = 0;
   private lifecycle: Promise<void> = Promise.resolve();
   private queue: Promise<void> = Promise.resolve();
@@ -41,7 +43,8 @@ export class LarkService implements ServiceModule {
   threads?: LarkThreads;
   constructor(readonly state: State, readonly sessions: SessionsService, credentials?: Credentials,
     private readonly report: (record: Record<string, unknown>) => void = () => {}, api?: LarkApi, private readonly port = 9417,
-    private readonly createReceiver: LarkPollingFactory = options => new LarkPoller(options)) {
+    private readonly createReceiver: LarkPollingFactory = options => new LarkPoller(options),
+    private readonly discoverThreads?: ThreadDiscovery) {
     this.use(credentials, api);
   }
   private use(credentials?: Credentials, api?: LarkApi): void {
@@ -59,7 +62,8 @@ export class LarkService implements ServiceModule {
     // Retire callbacks before cancellation; accepted deliveries still finish on their original API.
     this.receiverGeneration++;
     const receiver = this.receiver; this.receiver = undefined;
-    await receiver?.stop();
+    const sync = this.threadSync; this.threadSync = undefined;
+    await Promise.all([receiver?.stop(), sync?.stop()]);
   }
   /** Initial startup, settings changes and shutdown share one queue; accepted messages finish on the old API. */
   configure(credentials?: Credentials): Promise<void> {
@@ -109,6 +113,11 @@ export class LarkService implements ServiceModule {
         report: record => { if (current()) this.report(record); },
       });
       await this.receiver.start();
+      if (this.discoverThreads && this.threads) {
+        this.threadSync = new LarkThreadSync({ state: this.state, threads: this.threads, discover: this.discoverThreads,
+          report: record => { if (current()) this.report(record); } });
+        this.threadSync.start();
+      }
     } catch (error) {
       // Feishu failing must not prevent unrelated host modules from starting.
       if (current()) {

@@ -9,6 +9,7 @@ app that also keeps your GitHub pull requests in view.
 ## What it does
 
 - Gives each agent conversation its own Feishu group, Slack thread, or Telegram topic.
+- Automatically backfills missing Feishu groups for eligible existing conversations.
 - Routes replies to existing Claude Code, Codex, and OpenCode sessions.
 - Supports Trae and WorkBuddy through an inbox they check at work milestones;
   it cannot wake an idle or closed conversation in those clients.

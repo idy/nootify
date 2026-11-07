@@ -1,7 +1,7 @@
 import { createReadStream, type Dirent } from 'node:fs';
-import { open, readFile, readdir, stat } from 'node:fs/promises';
+import { lstat, open, readFile, readdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { key, parseGitHubPull, type GitHubPullReference } from './github-model.js';
 import type { Adapter } from './types.js';
@@ -46,15 +46,22 @@ export function defaultSources(env: NodeJS.ProcessEnv = process.env): Required<C
 }
 
 /** Read structured session metadata and explicit PR-link records, never infer subscriptions from message text. */
-export async function conversationSessions(sources: ConversationSources = defaultSources()): Promise<{ sessions: ConversationSession[]; warnings: string[] }> {
+export async function conversationSessions(sources: ConversationSources = defaultSources(), options: { includeTranscripts?: boolean } = {}): Promise<{ sessions: ConversationSession[]; warnings: string[] }> {
   const warnings: string[] = [];
-  const collect = async <T>(name: string, read: () => Promise<T[]>): Promise<T[]> => {
-    try { return await read(); } catch (error) { warnings.push(`${name} session metadata could not be read: ${(error as Error).message}`); return []; }
+  const collect = async <T>(name: string, read: () => Promise<T[]>, failed?: () => void): Promise<T[]> => {
+    try { return await read(); } catch (error) { failed?.(); warnings.push(`${name} session metadata could not be read: ${(error as Error).message}`); return []; }
   };
-  const desktop = await collect('Claude Desktop', () => desktopSessions(sources.desktopRoots ?? []));
+  let desktopReadable = true;
+  const incompleteDesktop = () => {
+    if (desktopReadable) warnings.push('Claude Desktop session metadata is incomplete; some identities could not be verified');
+    desktopReadable = false;
+  };
+  const desktop = await collect('Claude Desktop', () => desktopSessions(sources.desktopRoots ?? [], incompleteDesktop), () => { desktopReadable = false; });
   const cliIds = new Map(desktop.flatMap(entry => entry.cliIds.map(id => [id, entry] as const)));
   const [claude, codex, opencode] = await Promise.all([
-    sources.claudeDir ? collect('Claude Code', () => claudeSessions(sources.claudeDir!, cliIds)) : [],
+    // Backfill must not mistake Desktop aliases for standalone CLI identities after a catalog failure.
+    sources.claudeDir && (options.includeTranscripts !== false || desktopReadable)
+      ? collect('Claude Code', () => claudeSessions(sources.claudeDir!, cliIds, options.includeTranscripts !== false)) : [],
     sources.codexHome ? collect('Codex', () => codexSessions(sources.codexHome!)) : [],
     sources.opencodeData ? collect('OpenCode', () => opencodeSessions(sources.opencodeData!)) : [],
   ]);
@@ -77,8 +84,38 @@ export async function conversationDirectories(sources: ConversationSources = def
   return { directories: [...grouped.values()], warnings: found.warnings };
 }
 
-async function entries(directory: string): Promise<Dirent[]> {
-  try { return await readdir(directory, { withFileTypes: true }); } catch (error) { if (isMissing(error)) return []; throw error; }
+/** Windows may report a missing path beneath a regular file; verify the nearest existing ancestor. */
+async function directoryStatus(directory: string): Promise<'present' | 'absent' | 'invalid'> {
+  let current = directory;
+  for (;;) {
+    try {
+      const entry = await lstat(current);
+      const target = entry.isSymbolicLink() ? await stat(current).catch(() => undefined) : entry;
+      if (!target?.isDirectory()) return 'invalid';
+      return current === directory ? 'present' : 'absent';
+    } catch (error) {
+      if (!isMissing(error)) throw error;
+      const parent = dirname(current);
+      if (parent === current) return 'invalid';
+      current = parent;
+    }
+  }
+}
+async function entries(directory: string, incomplete?: () => void): Promise<Dirent[]> {
+  if (incomplete) {
+    const status = await directoryStatus(directory);
+    if (status !== 'present') {
+      if (status === 'invalid') incomplete();
+      return [];
+    }
+  }
+  try { return await readdir(directory, { withFileTypes: true }); }
+  catch (error) {
+    // A directory verified above disappearing mid-read is also an incomplete snapshot.
+    if (incomplete && isMissing(error)) incomplete();
+    if (isMissing(error)) return [];
+    throw error;
+  }
 }
 async function metadata(file: string): Promise<{ value: Record<string, unknown>; modified: number } | undefined> {
   const info = await stat(file);
@@ -96,17 +133,22 @@ function linkedPull(value: unknown): GitHubPullReference | undefined {
       ? parseGitHubPull(`https://github.com/${entry.repo ?? entry.prRepository}/pull/${entry.prNumber}`) : undefined);
 }
 interface DesktopEntry { session: ConversationSession; cliIds: string[]; authoritativePulls: boolean }
-async function desktopSessions(roots: string[]): Promise<DesktopEntry[]> {
+async function desktopSessions(roots: string[], incomplete: () => void): Promise<DesktopEntry[]> {
   const found = new Map<string, DesktopEntry>();
-  for (const root of roots) for (const account of await entries(root)) {
+  for (const root of roots) for (const account of await entries(root, incomplete)) {
+    if (account.isSymbolicLink()) { incomplete(); continue; }
     if (!account.isDirectory()) continue;
-    for (const profile of await entries(join(root, account.name))) {
+    for (const profile of await entries(join(root, account.name), incomplete)) {
+      if (profile.isSymbolicLink()) { incomplete(); continue; }
       if (!profile.isDirectory()) continue;
       const directory = join(root, account.name, profile.name);
-      for (const file of await entries(directory)) {
-        if (!file.isFile() || !/^local_[A-Za-z0-9_-]+\.json$/.test(file.name)) continue;
+      for (const file of await entries(directory, incomplete)) {
+        if (!/^local_[A-Za-z0-9_-]+\.json$/.test(file.name)) continue;
+        if (!file.isFile()) { incomplete(); continue; }
         const data = await metadata(join(directory, file.name));
-        if (!data || typeof data.value.sessionId !== 'string' || data.value.sessionId !== file.name.slice(0, -5)) continue;
+        if (!data || typeof data.value.sessionId !== 'string' || data.value.sessionId !== file.name.slice(0, -5)) {
+          incomplete(); continue;
+        }
         const value = data.value;
         const directories = [...new Set([value.cwd, value.worktreePath, value.originCwd,
           ...(Array.isArray(value.gitAnchors) ? value.gitAnchors.map(anchor => object(anchor)?.gitRoot) : [])].map(path).filter((item): item is string => !!item))];
@@ -123,7 +165,7 @@ async function desktopSessions(roots: string[]): Promise<DesktopEntry[]> {
         found.set(session.id, { session,
           cliIds: [value.cliSessionId, ...(Array.isArray(value.priorCliSessionIds) ? value.priorCliSessionIds : [])].filter((id): id is string => typeof id === 'string'),
           authoritativePulls: Array.isArray(value.prs) });
-        if (found.size >= MAX_SESSIONS) return [...found.values()];
+        if (found.size >= MAX_SESSIONS) { incomplete(); return [...found.values()]; }
       }
     }
   }
@@ -179,7 +221,7 @@ async function transcriptMetadata(file: string, id: string): Promise<TranscriptM
   if (transcriptCache.size > MAX_SESSIONS) transcriptCache.delete(transcriptCache.keys().next().value!);
   return result;
 }
-async function claudeSessions(root: string, desktop: Map<string, DesktopEntry>): Promise<ConversationSession[]> {
+async function claudeSessions(root: string, desktop: Map<string, DesktopEntry>, includeTranscripts: boolean): Promise<ConversationSession[]> {
   const result: ConversationSession[] = [];
   for (const project of await entries(join(root, 'projects'))) {
     if (!project.isDirectory()) continue;
@@ -187,13 +229,15 @@ async function claudeSessions(root: string, desktop: Map<string, DesktopEntry>):
     for (const file of await entries(join(root, 'projects', project.name))) {
       if (!file.isFile() || !file.name.endsWith('.jsonl')) continue;
       const id = file.name.slice(0, -6);
+      // Legacy sidechains use agent-* filenames, not standalone runtime session IDs.
+      if (!includeTranscripts && /^agent-/i.test(id)) continue;
       const mapped = desktop.get(id);
       // Desktop's persisted prs[] wins over historical link events, including an explicitly empty list after unlinking.
-      if (mapped?.authoritativePulls) continue;
+      if (mapped && (mapped.authoritativePulls || !includeTranscripts)) continue;
       const source = join(root, 'projects', project.name, file.name);
-      const data = await transcriptMetadata(source, id);
+      const data: TranscriptMeta = includeTranscripts ? await transcriptMetadata(source, id) : { pulls: [] };
       if (mapped) { mapped.session.pulls = uniquePulls([...mapped.session.pulls, ...data.pulls]); continue; }
-      fallback ??= data.directory ? undefined : await decodeProjectPath(project.name);
+      if (includeTranscripts) fallback ??= data.directory ? undefined : await decodeProjectPath(project.name);
       const directory = data.directory ?? fallback ?? '';
       result.push({ id, agent: 'claude', adapter: 'claude-code', title: data.title ?? id, directory, directories: directory ? [directory] : [],
         branch: data.branch, lastActive: iso((await stat(source)).mtimeMs), pulls: data.pulls });
@@ -247,7 +291,8 @@ async function codexSessions(home: string): Promise<ConversationSession[]> {
   });
   return rows.flatMap(row => typeof row.id === 'string' ? [{ id: row.id, agent: 'codex' as const, adapter: 'codex' as const,
     title: string(row.name) ?? string(row.title) ?? row.id, directory: path(row.cwd) ?? '', directories: path(row.cwd) ? [String(row.cwd)] : [],
-    branch: string(row.branch), origin: string(row.origin), lastActive: iso(epoch(row.updated)), archived: row.archived === 1, pulls: [] }] : []);
+    branch: string(row.branch), origin: string(row.origin), lastActive: iso(epoch(row.updated)),
+    archived: row.archived === 0 ? false : row.archived === 1 ? true : undefined, pulls: [] }] : []);
 }
 async function opencodeSessions(data: string): Promise<ConversationSession[]> {
   const database = join(data, 'opencode.db');
@@ -255,11 +300,12 @@ async function opencodeSessions(data: string): Promise<ConversationSession[]> {
   const rows = await query(database, 'session', columns => {
     if (!columns.has('id') || !columns.has('directory')) return;
     const updated = ['time_updated', 'time_created'].find(column => columns.has(column));
-    return `SELECT id, directory, ${columns.has('title') ? 'title' : 'NULL AS title'}, ${updated ?? 'NULL'} AS updated FROM session LIMIT ${MAX_SESSIONS}`;
+    return `SELECT id, directory, ${columns.has('title') ? 'title' : 'NULL AS title'}, ${updated ?? 'NULL'} AS updated,
+      ${columns.has('time_archived') ? 'time_archived' : 'NULL'} AS archived FROM session LIMIT ${MAX_SESSIONS}`;
   });
   return rows.flatMap(row => typeof row.id === 'string' ? [{ id: row.id, agent: 'opencode' as const, adapter: 'opencode' as const,
     title: string(row.title) ?? row.id, directory: path(row.directory) ?? '', directories: path(row.directory) ? [String(row.directory)] : [],
-    lastActive: iso(epoch(row.updated)), pulls: [] }] : []);
+    lastActive: iso(epoch(row.updated)), archived: row.archived !== null && row.archived !== 0, pulls: [] }] : []);
 }
 async function opencodeJsonSessions(root: string): Promise<ConversationSession[]> {
   const result: ConversationSession[] = [];
@@ -272,8 +318,10 @@ async function opencodeJsonSessions(root: string): Promise<ConversationSession[]
       const value = data.value;
       const id = string(value.id) ?? file.name.slice(0, -5);
       const directory = path(value.directory) ?? '';
+      const archived = object(value.time)?.archived;
       result.push({ id, agent: 'opencode', adapter: 'opencode', title: string(value.title) ?? id, directory, directories: directory ? [directory] : [],
-        lastActive: iso(epoch(object(value.time)?.updated ?? object(value.time)?.created)), pulls: [] });
+        lastActive: iso(epoch(object(value.time)?.updated ?? object(value.time)?.created)),
+        archived: archived !== undefined && archived !== null && archived !== 0, pulls: [] });
       if (result.length >= MAX_SESSIONS) return result;
     }
   }
