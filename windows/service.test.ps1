@@ -3,7 +3,60 @@ param([Parameter(Mandatory = $true)][string]$NodePath)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
 $env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules')
+Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+public static class NootifyJobTest {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern IntPtr OpenJobObject(uint access, bool inherit, string name);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool QueryInformationJobObject(IntPtr job, int kind, IntPtr data, uint size, IntPtr returned);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern uint WaitForSingleObject(IntPtr process, uint timeout);
+    [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr value);
+    public static IntPtr PinProcess(uint pid) {
+        IntPtr value = OpenProcess(0x100000, false, pid); // SYNCHRONIZE only; no termination rights.
+        if (value == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+        return value;
+    }
+    // Test observations only. Production shutdown continues to use kernel active count zero.
+    public static uint[] MemberPids(IntPtr job) {
+        for (int size = 256; size <= 65536; size *= 2) {
+            IntPtr data = Marshal.AllocHGlobal(size);
+            try {
+                if (!QueryInformationJobObject(job, 3, data, (uint)size, IntPtr.Zero)) {
+                    int error = Marshal.GetLastWin32Error();
+                    if (error == 234) continue;
+                    throw new Win32Exception(error);
+                }
+                int assigned = Marshal.ReadInt32(data), count = Marshal.ReadInt32(data, 4);
+                if (count < 0 || count > (size - 8) / IntPtr.Size) throw new InvalidOperationException("Invalid job PID list");
+                if (assigned != count) continue;
+                var result = new uint[count];
+                for (int index = 0; index < count; index++) result[index] = checked((uint)Marshal.ReadIntPtr(data, 8 + index * IntPtr.Size).ToInt64());
+                return result;
+            } finally { Marshal.FreeHGlobal(data); }
+        }
+        throw new InvalidOperationException("Incomplete job PID list");
+    }
+}
+'@
 function Assert($Condition, [string]$Message) { if (!$Condition) { throw $Message } }
+function Get-FixtureMembers($Job) {
+    $handle = $Job.GetType().GetProperty('Handle', [Reflection.BindingFlags]'Instance,NonPublic').GetValue($Job)
+    return [NootifyJobTest]::MemberPids([IntPtr]$handle) | Sort-Object
+}
+function Assert-FixtureMembers($Job, [uint32[]]$Expected, [IntPtr[]]$Handles, [string]$Label) {
+    $actual = @(Get-FixtureMembers $Job)
+    Assert (@(Compare-Object $Expected $actual).Count -eq 0) "${Label}: expected members=$($Expected -join ','); actual members=$($actual -join ',')"
+    Assert ($Job.ActiveProcesses -eq $Expected.Count) "${Label}: kernel active count changed"
+    foreach ($memberHandle in $Handles) {
+        Assert ([NootifyJobTest]::WaitForSingleObject($memberHandle, 0) -eq 258) "${Label}: a retained unrelated process exited"
+    }
+}
 function Must-Fail([scriptblock]$Code, [string]$Message) {
     $failed = $false
     try { $null = & $Code } catch { $failed = $true }
@@ -34,12 +87,22 @@ function Write-FixtureJobDiagnostics([string]$Label, $Job, $Process, [string]$Di
         $exited = $Process.WaitForExit(0)
         $exitCode = if ($exited) { [string]$Process.ExitCode } else { 'running' }
         [Console]::Error.WriteLine("${Label}: active=$active; pid=$($Process.Id); exited=$exited; exitCode=$exitCode")
+        foreach ($memberId in @(Get-FixtureMembers $Job)) {
+            try { $member = [Diagnostics.Process]::GetProcessById([int]$memberId); [Console]::Error.WriteLine("${Label} member: pid=$memberId; name=$($member.ProcessName)"); $member.Dispose() }
+            catch { [Console]::Error.WriteLine("${Label} member: pid=$memberId; identity unavailable") }
+        }
         foreach ($stream in @('stdout', 'stderr')) {
             $path = Join-Path $Directory ($stream + '.log')
             if (Test-Path -LiteralPath $path) {
-                $text = [IO.File]::ReadAllText($path)
-                if ($text.Length -gt 2048) { $text = $text.Substring(0, 2048) + ' [truncated]' }
-                [Console]::Error.WriteLine("${Label} ${stream}: $text")
+                $file = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+                $reader = [IO.StreamReader]::new($file)
+                try {
+                    $buffer = New-Object char[] 2049
+                    $length = $reader.ReadBlock($buffer, 0, $buffer.Length)
+                    $text = [string]::new($buffer, 0, [Math]::Min($length, 2048))
+                    if ($length -gt 2048) { $text += ' [truncated]' }
+                    [Console]::Error.WriteLine("${Label} ${stream}: $text")
+                } finally { $reader.Dispose() }
             }
         }
     } catch { [Console]::Error.WriteLine("${Label} diagnostics unavailable: $($_.Exception.Message)") }
@@ -216,6 +279,7 @@ Assert ($null -eq (Parse-TestBootData $sharedData)) 'An unknown native architect
 Assert ($null -eq (Parse-TestBootData $sharedData)) 'A pre-Windows-10 layout must not produce boot evidence'
 $runner = $null; $job = $null; $unrelated = $null; $unrelatedJob = $null; $startup = $null
 $unrelatedProcess = $null; $orphanProcess = $null
+$unrelatedMemberHandles = @()
 $unrelatedDirectory = $null; $orphanDirectory = $null
 $crashProcesses = @()
 $task | Add-Member NoteProperty Job $null
@@ -622,8 +686,12 @@ catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
     $unrelatedProcess = [Diagnostics.Process]::GetProcessById([int]$unrelated.ProcessId); $null = $unrelatedProcess.Handle
     $unrelated.Resume()
     Wait-File (Join-Path $unrelatedDirectory 'ready')
-    $unrelatedAfterStart = $unrelatedJob.ActiveProcesses
-    Assert ($unrelatedAfterStart -eq 1 -and !$unrelatedProcess.HasExited) "The unrelated fixture must start with one live process; active=$unrelatedAfterStart"
+    # Windows can associate additional runtime/console helpers with a running root.
+    # Pin the complete initial membership instead of assuming exactly one process.
+    $unrelatedMembers = @(Get-FixtureMembers $unrelatedJob)
+    Assert ($unrelatedMembers -contains [uint32]$unrelated.ProcessId) 'The unrelated job must contain its known root'
+    foreach ($memberId in $unrelatedMembers) { $unrelatedMemberHandles += [NootifyJobTest]::PinProcess([uint32]$memberId) }
+    Assert-FixtureMembers $unrelatedJob $unrelatedMembers $unrelatedMemberHandles 'Unrelated startup'
 
     # Deleting a registration does not terminate its action. With no task object,
     # Stop must still authenticate and drain the recorded job, preserving other jobs.
@@ -634,18 +702,17 @@ catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
     $orphanProcess = [Diagnostics.Process]::GetProcessById([int]$runner.ProcessId); $null = $orphanProcess.Handle
     $runner.Resume()
     Wait-File (Join-Path $orphanDirectory 'ready')
-    $orphanBeforeStop = $job.ActiveProcesses
-    Assert ($orphanBeforeStop -eq 1 -and !$orphanProcess.HasExited) "The orphan fixture must be alive before Stop; active=$orphanBeforeStop"
-    $unrelatedBeforeStop = $unrelatedJob.ActiveProcesses
-    Assert ($unrelatedBeforeStop -eq 1 -and !$unrelatedProcess.HasExited) "Creating the orphan fixture must leave the unrelated process alive; active=$unrelatedBeforeStop"
+    $orphanMembers = @(Get-FixtureMembers $job)
+    Assert ($orphanMembers -contains [uint32]$runner.ProcessId) 'The orphan job must contain its known root'
+    Assert ($job.ActiveProcesses -eq $orphanMembers.Count -and !$orphanProcess.HasExited) 'The complete orphan fixture must be alive before Stop'
+    Assert-FixtureMembers $unrelatedJob $unrelatedMembers $unrelatedMemberHandles 'Before orphan Stop'
     $beforeStops = $task.Stops
     Stop-OwnedTask $null
     Assert ($job.ActiveProcesses -eq 0) 'A missing task registration must not leave the daemon alive'
     Assert ($orphanProcess.WaitForExit(0)) 'The stopped orphan fixture must have exited'
     Assert (!(Test-Path -LiteralPath $runtimePath)) 'An orphaned job must be verified empty before its runtime is removed'
     Assert ($task.Stops -eq $beforeStops) 'An absent registration must not control another task'
-    $unrelatedAfterStop = $unrelatedJob.ActiveProcesses
-    Assert ($unrelatedAfterStop -eq 1 -and !$unrelatedProcess.HasExited) "Orphan cleanup must leave unrelated jobs running; afterStart=$unrelatedAfterStart; beforeStop=$unrelatedBeforeStop; afterStop=$unrelatedAfterStop"
+    Assert-FixtureMembers $unrelatedJob $unrelatedMembers $unrelatedMemberHandles 'After orphan Stop'
     $runner.Dispose(); $runner = $null; $job = $null
     $orphanProcess.Dispose(); $orphanProcess = $null
     Stop-OwnedTask $null # No registration and no runtime is an idempotent stop.
@@ -672,7 +739,9 @@ setInterval(() => {
     $runner = [Nootify.ServiceRunner]::new($job, $copiedNode, [string[]]@($lateFixture, $directory), $directory)
     $root = [Diagnostics.Process]::GetProcessById([int]$runner.ProcessId); $null = $root.Handle
     $runner.Resume(); Wait-File (Join-Path $directory 'late-ready')
-    Assert ($job.ActiveProcesses -eq 1) 'The late-helper fixture must initially contain only Node'
+    $initialLateMembers = @(Get-FixtureMembers $job)
+    Assert ($initialLateMembers -contains [uint32]$runner.ProcessId) 'The late-helper job must contain its known root'
+    Assert (!(Test-Path -LiteralPath (Join-Path $directory 'late-helper.pid'))) 'The controlled late helper must not exist before Stop'
     $task | Add-Member NoteProperty Helper $null
     $task | Add-Member ScriptMethod GetInstances { param($Flags); return [pscustomobject]@{ Count = $this.Instances } } -Force
     $task | Add-Member ScriptMethod Stop {
@@ -683,15 +752,15 @@ setInterval(() => {
         Wait-File (Join-Path $directory 'late-helper.pid')
         $this.Helper = [Diagnostics.Process]::GetProcessById([int][IO.File]::ReadAllText((Join-Path $directory 'late-helper.pid')))
         $null = $this.Helper.Handle
-        Assert ($job.ActiveProcesses -ge 2) 'The real helper must be in the job before Scheduler reports stopped'
+        $lateMembers = @(Get-FixtureMembers $job)
+        Assert ($lateMembers -contains [uint32]$this.Helper.Id -and $initialLateMembers -notcontains [uint32]$this.Helper.Id) 'The exact new helper must join the owned job before Scheduler reports stopped'
         $this.Instances = 0 # No process is killed at the mocked Scheduler boundary.
     } -Force
     $task.Instances = 1
     Stop-OwnedTask $task
     Assert ($job.ActiveProcesses -eq 0) 'Authoritative membership must include helpers born during Stop'
     Assert ($root.WaitForExit(0) -and $task.Helper.WaitForExit(0)) 'Stop must return only after Node/helper exit'
-    $unrelatedAfterLateStop = $unrelatedJob.ActiveProcesses
-    Assert ($unrelatedAfterLateStop -eq 1 -and !$unrelatedProcess.HasExited) "Stop must leave an unrelated current-user job running; active=$unrelatedAfterLateStop"
+    Assert-FixtureMembers $unrelatedJob $unrelatedMembers $unrelatedMemberHandles 'After late-helper Stop'
     $root.Dispose(); $task.Helper.Dispose()
     $runner.Dispose(); $runner = $null
     $name = "Global\Nootify.Service.Job.$ownerSid." + [guid]::NewGuid().ToString('N')
@@ -700,14 +769,6 @@ setInterval(() => {
     Publish-Job $name
 
     # A real native query denial must abort Stop and retain evidence for retry.
-    Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-public static class NootifyJobTest {
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    public static extern IntPtr OpenJobObject(uint access, bool inherit, string name);
-}
-'@
     $limitedHandle = [NootifyJobTest]::OpenJobObject(8, $false, $name) # TERMINATE only; QueryInformationJobObject must fail.
     Assert ($limitedHandle -ne [IntPtr]::Zero) 'Expected a real terminate-only job handle'
     $constructor = [Nootify.ServiceJob].GetConstructor([Reflection.BindingFlags]'Instance,NonPublic', $null, [type[]]@([IntPtr], [string], [string]), $null)
@@ -741,6 +802,7 @@ public static class NootifyJobTest {
     elseif ($unrelatedJob) { Close-FixtureJob $unrelatedJob }
     if ($unrelatedProcess) { $unrelatedProcess.Dispose() }
     if ($orphanProcess) { $orphanProcess.Dispose() }
+    foreach ($memberHandle in $unrelatedMemberHandles) { $null = [NootifyJobTest]::CloseHandle($memberHandle) }
     if (Test-Path -LiteralPath $runtimePath) {
         # Fixture teardown does not claim a production stop or discard real service state.
         # It may encounter the intentionally unverified crash record after an assertion fails.
