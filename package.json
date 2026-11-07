@@ -1,6 +1,6 @@
 {
   "name": "nootify",
-  "version": "0.1.15",
+  "version": "0.1.17",
   "private": true,
   "type": "module",
   "description": "Routes Feishu, Slack and Telegram replies to local coding-agent sessions and tracks pull requests, with a Windows and macOS tray app",
