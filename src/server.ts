@@ -23,6 +23,7 @@ import { TailscaleService } from './tailscale.js';
 import { TsnetClient } from './tsnet-client.js';
 import { listenTailnetProxy } from './tailnet-proxy.js';
 import { AgentPrompts } from './agents.js';
+import { sessionThreadDiscovery } from './session-threads.js';
 import { GitHubAuth } from './github-auth.js';
 import { SettingsService } from './settings.js';
 import type { AgentsSource, ChannelSummary, SettingsSource } from './ui.js';
@@ -116,7 +117,6 @@ export async function main(): Promise<void> {
     const report = (record: Record<string, unknown>) => { logs.report(record); };
     const sessions = new SessionsService(state, undefined, report, undefined, { port });
     const resolved = await resolveCredentials(process.env, state.settings, values['mcp-config']);
-    const lark = new LarkService(state, sessions, resolved?.credentials, report, undefined, port);
     const slack = new ChatService('slack', state, sessions, createSlackTransport, report, port);
     const telegram = new ChatService('telegram', state, sessions, createTelegramTransport, report, port);
     // Routine five-minute refreshes would push Feishu events out of the bounded log; record outcome changes only.
@@ -131,6 +131,8 @@ export async function main(): Promise<void> {
     const peers = new WeakMap<Socket, string>();
     const tailscale = new TailscaleService({ state, access: tailnet, client: tsnet, report, listen: () => listenTailnetProxy(tailnetServer, peers) });
     const agents = new AgentPrompts({ stateDir: state.directory, port, notificationChannel: () => state.settings.notification_channel ?? 'feishu', tailnetAddress: () => { const url = tailnet.url(); return url ? new URL(url).hostname : undefined; } }, report);
+    const lark = new LarkService(state, sessions, resolved?.credentials, report, undefined, port, undefined,
+      sessionThreadDiscovery(agents, state, report));
     const modules: ServiceModule[] = [sessions, slack, telegram, lark, pulls, agents];
     const github = new GitHubAuth(state, report, () => pulls.refreshSoon());
     const settings = new SettingsService({ state, lark, slack, telegram, github, pulls, agents, tailscale, mcpConfig: values['mcp-config'], source: resolved?.source, report });

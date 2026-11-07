@@ -1,6 +1,6 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
-import { ensureAnnouncement, InvalidAnnouncement, parseAnnouncement, readAnnouncement, larkActivationTime } from './lark-metadata.js';
+import { ensureAnnouncement, InvalidAnnouncement, parseAnnouncement, readAnnouncement, requestLark, larkActivationTime } from './lark-metadata.js';
 import type { LarkApi } from './lark-metadata.js';
 import type { State } from './state.js';
 import { registerPolledSession } from './polled-sessions.js';
@@ -44,11 +44,11 @@ export class LarkThreads {
     return this.bindings().find(binding => binding.session_id === sessionId && (!adapter || !binding.adapter || binding.adapter === adapter));
   }
   /** Concurrent calls for one session share a single lookup, so a session never gets two groups from this process. */
-  open(adapter: Adapter, sessionId: string, sessionName: string): Promise<ThreadInfo> {
+  open(adapter: Adapter, sessionId: string, sessionName: string, signal?: AbortSignal): Promise<ThreadInfo> {
     const key = `${adapter}:${sessionId}`;
     let pending = this.opening.get(key);
     if (!pending) {
-      pending = this.ensure(adapter, sessionId, sessionName).finally(() => this.opening.delete(key));
+      pending = this.ensure(adapter, sessionId, sessionName, signal).finally(() => this.opening.delete(key));
       this.opening.set(key, pending);
     }
     return pending;
@@ -61,27 +61,32 @@ export class LarkThreads {
     if (!recipient) throw new HttpError(409, 'No Feishu recipient is configured; run lark-recipient --open-id <ou_…> once');
     return recipient.open_id;
   }
-  private async ensure(adapter: Adapter, sessionId: string, sessionName: string): Promise<ThreadInfo> {
+  private async ensure(adapter: Adapter, sessionId: string, sessionName: string, signal?: AbortSignal): Promise<ThreadInfo> {
+    signal?.throwIfAborted();
     const activation = Date.now(); const activationClock = performance.now();
     await registerPolledSession(this.state, adapter, sessionId, sessionName);
     let binding = this.binding(sessionId, adapter);
     let created = false;
-    binding ??= await this.adopt(adapter, sessionId, sessionName);
+    binding ??= await this.adopt(adapter, sessionId, sessionName, signal);
     if (!binding) {
       const recipient = this.requireRecipient();
-      const chat = await this.api.request<{ chat_id?: string }>('POST', '/open-apis/im/v1/chats?user_id_type=open_id', {
+      // Feishu deduplicates retries even if creation succeeded before its SQLite binding could commit.
+      const uuid = createHash('sha256').update(`${hostname()}\n${this.api.appId}\n${adapter}\n${sessionId}`).digest('hex').slice(0, 32);
+      const chat = await requestLark<{ chat_id?: string }>(this.api, 'POST', `/open-apis/im/v1/chats?user_id_type=open_id&uuid=${uuid}`, {
         name: threadName(sessionName, adapter, sessionId), chat_mode: 'group', chat_type: 'private', user_id_list: [recipient],
-      });
+      }, signal);
       if (!chat.chat_id) throw new Error('Feishu returned no chat ID for the new group');
       binding = { chat_id: chat.chat_id, app_id: this.api.appId, session_id: sessionId, adapter, session_name: sessionName, sender_open_id: recipient, metadata: 'announcement', pin: false,
         activated_at: larkActivationTime(this.api, activation, performance.now() - activationClock), announcement_pending: true };
       created = true;
       // Saved before the announcement write, so a failure there cannot lead to a second group on retry.
-      this.state.bindings.set(binding.chat_id, binding); await this.state.save();
+      const pending = binding;
+      await this.state.save({ apply: () => { this.state.bindings.set(pending.chat_id, pending); },
+        rollback: () => { if (this.state.bindings.get(pending.chat_id) === pending) this.state.bindings.delete(pending.chat_id); } });
     }
     const previous = this.state.bindings.get(binding.chat_id);
     if (!previous && binding.activated_at === undefined) binding.activated_at = larkActivationTime(this.api, activation, performance.now() - activationClock);
-    await ensureAnnouncement(this.api, this.remote(binding, adapter));
+    await ensureAnnouncement(this.api, this.remote(binding, adapter), signal);
     if (previous !== binding || binding.announcement_pending) {
       const pending = binding.announcement_pending;
       const ready = binding;
@@ -95,29 +100,33 @@ export class LarkThreads {
     return { channel: 'feishu', chat_id: binding.chat_id, session_id: sessionId, adapter, session_name, created };
   }
   /** Groups made before Nootify managed them carry the short ID in their name and the session in their announcement. */
-  private async adopt(adapter: Adapter, sessionId: string, sessionName: string): Promise<LarkBinding | undefined> {
+  private async adopt(adapter: Adapter, sessionId: string, sessionName: string, signal?: AbortSignal): Promise<LarkBinding | undefined> {
     const needle = shortSessionId(sessionId).toLowerCase();
+    const tokens = new Set<string>();
     let pageToken: string | undefined;
     for (let page = 0; page < MAX_CHAT_PAGES; page++) {
       const query = new URLSearchParams({ page_size: '100' });
       if (pageToken) query.set('page_token', pageToken);
-      const data = await this.api.request<{ items?: { chat_id?: string; name?: string }[]; has_more?: boolean; page_token?: string }>('GET', `/open-apis/im/v1/chats?${query}`);
+      const data = await requestLark<{ items?: { chat_id?: string; name?: string }[]; has_more?: boolean; page_token?: string }>(this.api, 'GET', `/open-apis/im/v1/chats?${query}`, undefined, signal);
       for (const chat of data.items ?? []) {
         if (!chat.chat_id || !chat.name?.toLowerCase().includes(needle)) continue;
         const owner = this.state.bindings.get(chat.chat_id)?.app_id;
         if (owner && owner !== this.api.appId) continue;
         // An unavailable announcement cannot establish that this is another session's group.
         // Let the read failure abort lookup rather than creating a duplicate on a transient error.
-        const announcement = await readAnnouncement(this.api, chat.chat_id);
+        const announcement = await readAnnouncement(this.api, chat.chat_id, signal);
         let route;
         try { route = parseAnnouncement(announcement.content); }
         catch (error) { if (error instanceof InvalidAnnouncement) continue; throw error; }
         if (route.session_id !== sessionId || route.adapter !== adapter || (route.host_id && route.host_id !== hostname())) continue;
         return { chat_id: chat.chat_id, app_id: this.api.appId, session_id: sessionId, adapter, session_name: sessionName, sender_open_id: this.requireRecipient(), metadata: 'announcement', pin: false };
       }
-      if (!data.has_more || !data.page_token) return;
+      if (!data.has_more) return;
+      if (!data.page_token || tokens.has(data.page_token)) throw new Error('Feishu returned an invalid group-list page token; group creation was deferred');
       pageToken = data.page_token;
+      tokens.add(pageToken);
     }
+    throw new Error('Feishu group lookup is incomplete; group creation was deferred');
   }
   async send(sessionId: string, text: string, adapter?: Adapter): Promise<ThreadMessage> {
     const binding = this.binding(sessionId, adapter);

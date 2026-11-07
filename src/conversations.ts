@@ -45,7 +45,7 @@ export function defaultSources(env: NodeJS.ProcessEnv = process.env): Required<C
 }
 
 /** Read structured session metadata and explicit PR-link records, never infer subscriptions from message text. */
-export async function conversationSessions(sources: ConversationSources = defaultSources()): Promise<{ sessions: ConversationSession[]; warnings: string[] }> {
+export async function conversationSessions(sources: ConversationSources = defaultSources(), options: { includeTranscripts?: boolean } = {}): Promise<{ sessions: ConversationSession[]; warnings: string[] }> {
   const warnings: string[] = [];
   const collect = async <T>(name: string, read: () => Promise<T[]>): Promise<T[]> => {
     try { return await read(); } catch (error) { warnings.push(`${name} session metadata could not be read: ${(error as Error).message}`); return []; }
@@ -53,7 +53,7 @@ export async function conversationSessions(sources: ConversationSources = defaul
   const desktop = await collect('Claude Desktop', () => desktopSessions(sources.desktopRoots ?? []));
   const cliIds = new Map(desktop.flatMap(entry => entry.cliIds.map(id => [id, entry] as const)));
   const [claude, codex, opencode] = await Promise.all([
-    sources.claudeDir ? collect('Claude Code', () => claudeSessions(sources.claudeDir!, cliIds)) : [],
+    sources.claudeDir ? collect('Claude Code', () => claudeSessions(sources.claudeDir!, cliIds, options.includeTranscripts !== false)) : [],
     sources.codexHome ? collect('Codex', () => codexSessions(sources.codexHome!)) : [],
     sources.opencodeData ? collect('OpenCode', () => opencodeSessions(sources.opencodeData!)) : [],
   ]);
@@ -178,7 +178,7 @@ async function transcriptMetadata(file: string, id: string): Promise<TranscriptM
   if (transcriptCache.size > MAX_SESSIONS) transcriptCache.delete(transcriptCache.keys().next().value!);
   return result;
 }
-async function claudeSessions(root: string, desktop: Map<string, DesktopEntry>): Promise<ConversationSession[]> {
+async function claudeSessions(root: string, desktop: Map<string, DesktopEntry>, includeTranscripts: boolean): Promise<ConversationSession[]> {
   const result: ConversationSession[] = [];
   for (const project of await entries(join(root, 'projects'))) {
     if (!project.isDirectory()) continue;
@@ -188,11 +188,11 @@ async function claudeSessions(root: string, desktop: Map<string, DesktopEntry>):
       const id = file.name.slice(0, -6);
       const mapped = desktop.get(id);
       // Desktop's persisted prs[] wins over historical link events, including an explicitly empty list after unlinking.
-      if (mapped?.authoritativePulls) continue;
+      if (mapped && (mapped.authoritativePulls || !includeTranscripts)) continue;
       const source = join(root, 'projects', project.name, file.name);
-      const data = await transcriptMetadata(source, id);
+      const data: TranscriptMeta = includeTranscripts ? await transcriptMetadata(source, id) : { pulls: [] };
       if (mapped) { mapped.session.pulls = uniquePulls([...mapped.session.pulls, ...data.pulls]); continue; }
-      fallback ??= data.directory ? undefined : await decodeProjectPath(project.name);
+      if (includeTranscripts) fallback ??= data.directory ? undefined : await decodeProjectPath(project.name);
       const directory = data.directory ?? fallback ?? '';
       result.push({ id, agent: 'claude', adapter: 'claude-code', title: data.title ?? id, directory, directories: directory ? [directory] : [],
         branch: data.branch, lastActive: iso((await stat(source)).mtimeMs), pulls: data.pulls });
@@ -244,7 +244,8 @@ async function codexSessions(home: string): Promise<ConversationSession[]> {
   });
   return rows.flatMap(row => typeof row.id === 'string' ? [{ id: row.id, agent: 'codex' as const, adapter: 'codex' as const,
     title: string(row.name) ?? string(row.title) ?? row.id, directory: path(row.cwd) ?? '', directories: path(row.cwd) ? [String(row.cwd)] : [],
-    branch: string(row.branch), origin: string(row.origin), lastActive: iso(epoch(row.updated)), archived: row.archived === 1, pulls: [] }] : []);
+    branch: string(row.branch), origin: string(row.origin), lastActive: iso(epoch(row.updated)),
+    archived: row.archived === 0 ? false : row.archived === 1 ? true : undefined, pulls: [] }] : []);
 }
 async function opencodeSessions(data: string): Promise<ConversationSession[]> {
   const database = join(data, 'opencode.db');
@@ -252,11 +253,12 @@ async function opencodeSessions(data: string): Promise<ConversationSession[]> {
   const rows = await query(database, 'session', columns => {
     if (!columns.has('id') || !columns.has('directory')) return;
     const updated = ['time_updated', 'time_created'].find(column => columns.has(column));
-    return `SELECT id, directory, ${columns.has('title') ? 'title' : 'NULL AS title'}, ${updated ?? 'NULL'} AS updated FROM session LIMIT ${MAX_SESSIONS}`;
+    return `SELECT id, directory, ${columns.has('title') ? 'title' : 'NULL AS title'}, ${updated ?? 'NULL'} AS updated,
+      ${columns.has('time_archived') ? 'time_archived' : 'NULL'} AS archived FROM session LIMIT ${MAX_SESSIONS}`;
   });
   return rows.flatMap(row => typeof row.id === 'string' ? [{ id: row.id, agent: 'opencode' as const, adapter: 'opencode' as const,
     title: string(row.title) ?? row.id, directory: path(row.directory) ?? '', directories: path(row.directory) ? [String(row.directory)] : [],
-    lastActive: iso(epoch(row.updated)), pulls: [] }] : []);
+    lastActive: iso(epoch(row.updated)), archived: row.archived !== null && row.archived !== 0, pulls: [] }] : []);
 }
 async function opencodeJsonSessions(root: string): Promise<ConversationSession[]> {
   const result: ConversationSession[] = [];
@@ -269,8 +271,10 @@ async function opencodeJsonSessions(root: string): Promise<ConversationSession[]
       const value = data.value;
       const id = string(value.id) ?? file.name.slice(0, -5);
       const directory = path(value.directory) ?? '';
+      const archived = object(value.time)?.archived;
       result.push({ id, agent: 'opencode', adapter: 'opencode', title: string(value.title) ?? id, directory, directories: directory ? [directory] : [],
-        lastActive: iso(epoch(object(value.time)?.updated ?? object(value.time)?.created)), pulls: [] });
+        lastActive: iso(epoch(object(value.time)?.updated ?? object(value.time)?.created)),
+        archived: archived !== undefined && archived !== null && archived !== 0, pulls: [] });
       if (result.length >= MAX_SESSIONS) return result;
     }
   }
