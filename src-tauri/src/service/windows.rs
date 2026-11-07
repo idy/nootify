@@ -150,14 +150,28 @@ mod tests {
 
     #[test]
     fn windows_management_processes_have_bounded_output_and_runtime() {
-        let root = std::env::var_os("SystemRoot").expect("Windows system directory");
-        let mut echo = Command::new(PathBuf::from(&root).join("System32/cmd.exe"));
-        echo.args(["/D", "/C", "echo out&echo err 1>&2"]);
-        let output = run_with_timeout(echo, Duration::from_secs(5)).unwrap();
-        assert!(output.status.success());
-        assert_eq!(output.stdout.trim(), "out");
-        assert_eq!(output.stderr.trim(), "err");
+        // Exercise direct executable arguments, as the production Node launcher does.
+        // cmd.exe uses its own quoting and redirection rules rather than CRT argv.
+        let executable = std::env::current_exe().unwrap();
+        let mut help = Command::new(&executable);
+        help.arg("--help");
+        let output = run_with_timeout(help, Duration::from_secs(5)).unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(output.stdout.contains("Usage:"), "{output:?}");
+        assert!(output.stderr.is_empty(), "{output:?}");
 
+        let mut invalid = Command::new(executable);
+        invalid.arg("--nootify-invalid-test-fixture-argument");
+        let output = run_with_timeout(invalid, Duration::from_secs(5)).unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        assert!(
+            output
+                .stderr
+                .contains("nootify-invalid-test-fixture-argument"),
+            "{output:?}"
+        );
+
+        let root = std::env::var_os("SystemRoot").expect("Windows system directory");
         let mut sleep = Command::new(
             PathBuf::from(root).join("System32/WindowsPowerShell/v1.0/powershell.exe"),
         );
