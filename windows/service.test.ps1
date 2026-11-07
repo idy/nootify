@@ -2,6 +2,7 @@
 param([Parameter(Mandatory = $true)][string]$NodePath)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
+$env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules')
 function Assert($Condition, [string]$Message) { if (!$Condition) { throw $Message } }
 function Must-Fail([scriptblock]$Code, [string]$Message) {
     $failed = $false

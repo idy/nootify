@@ -10,6 +10,8 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
+# Load only this host's built-in modules, not PowerShell 7 modules inherited by 5.1.
+$env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules')
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 $ownerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $taskName = "Nootify.Service.$ownerSid"

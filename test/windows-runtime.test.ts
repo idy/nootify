@@ -111,24 +111,36 @@ test('generated commands quote Windows paths for PowerShell, and retain POSIX qu
   assert.equal(shellQuote("/O'Brien/state", 'linux'), `'/O'"'"'Brien/state'`);
 });
 
-test('hidden Windows PowerShell reads one-shot stdin and returns a fixed pre-delivery parse failure', { skip: process.platform !== 'win32', timeout: 20_000 }, async t => {
-  const command = windowsInboxCommand();
-  const child = spawn(command.file, command.args, {
-    windowsHide: true, env: inboxEnvironment(process.env), cwd: dirname(windowsInboxScript()), stdio: ['pipe', 'pipe', 'pipe'],
+for (const fixture of [
+  { name: 'rejects malformed JSON', input: '{"frames":"private-parse-test 你好 🌍"\n',
+    output: '{"error":"inbox_startup_failed"}\n', phases: ['inbox:started', 'inbox:reading', 'inbox:input'] },
+  { name: 'compiles and rejects an invalid pipe', input: JSON.stringify({ path: 'not-a-local-pipe', expectedPid: process.pid,
+    frames: 'private-compile-test 你好 🌍', timeout: 200 }) + '\n',
+    output: '{"ready":true}\n{"error":"inbox_write_failed"}\n',
+    phases: ['inbox:started', 'inbox:reading', 'inbox:input', 'inbox:compile', 'inbox:ready'] },
+]) {
+  test(`hidden Windows PowerShell ${fixture.name} without waiting for stdin EOF`, { skip: process.platform !== 'win32', timeout: 20_000 }, async t => {
+    const command = windowsInboxCommand();
+    const child = spawn(command.file, [...command.args, '-Diagnostics'], {
+      windowsHide: true, env: inboxEnvironment(process.env), cwd: dirname(windowsInboxScript()), stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    const deadline = setTimeout(() => child.kill(), 15_000).unref();
+    t.after(() => { clearTimeout(deadline); child.stdin.destroy(); child.kill(); });
+    child.stdin.on('error', () => {});
+    const closed = once(child, 'close');
+    let output = ''; let diagnostic = '';
+    child.stdout.setEncoding('utf8'); child.stdout.on('data', chunk => { output += chunk; });
+    child.stderr.setEncoding('utf8'); child.stderr.on('data', chunk => { diagnostic += chunk; });
+    child.stdin.write(fixture.input); // Deliberately keep stdin open: the request is newline-framed.
+    const [code] = await closed;
+    const lines = diagnostic.trim().split(/\r?\n/).filter(Boolean);
+    const phases = lines.filter(line => /^inbox:(started|reading|input|compile|ready)$/.test(line));
+    assert.equal(code, 1, `Known startup phases: ${phases.join(',')}; unexpected stderr lines: ${lines.length - phases.length}`);
+    assert.ok(output.replace(/\r\n/g, '\n') === fixture.output, 'only fixed protocol frames may reach stdout');
+    assert.deepEqual(phases, fixture.phases);
+    assert.equal(lines.length, phases.length, 'raw input and PowerShell errors must not appear in diagnostics');
   });
-  const deadline = setTimeout(() => child.kill(), 15_000).unref();
-  t.after(() => { clearTimeout(deadline); child.kill(); });
-  child.stdin.on('error', () => {});
-  const closed = once(child, 'close');
-  let output = ''; let stderrBytes = 0;
-  child.stdout.setEncoding('utf8'); child.stdout.on('data', chunk => { output += chunk; });
-  child.stderr.on('data', chunk => { stderrBytes += chunk.length; });
-  child.stdin.end('{"frames":"private-parse-test 你好 🌍"'); // Deliberately incomplete JSON; never valid pipe input.
-  const [code] = await closed;
-  assert.equal(code, 1);
-  assert.ok(/^\{"error":"inbox_startup_failed"\}\r?\n$/.test(output), 'only the fixed pre-delivery error may reach stdout');
-  assert.equal(stderrBytes, 0, 'malformed stdin must not appear in raw PowerShell errors');
-});
+}
 
 test('Windows named pipes deliver authenticated Unicode frames after checking the connected server', { skip: process.platform !== 'win32', timeout: 30_000 }, async t => {
   const pipe = `\\\\.\\pipe\\nootify-test-${randomUUID()}`;
