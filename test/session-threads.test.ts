@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -123,6 +123,31 @@ for (const obstruction of ['catalog-root', 'catalog-parent'] as const) {
     await writeFile(join(recovered, 'local_archived.json'), JSON.stringify({ sessionId: 'local_archived', cliSessionId: 'cli_archived', isArchived: true }));
     reports.length = 0;
     assert.deepEqual((await collect(discover)).map(item => item.session_id).sort(), ['local_active', 'standalone']);
+    assert.equal(reports.length, 0);
+  });
+}
+
+for (const broken of [false, true]) {
+  test(`a ${broken ? 'broken redirected Desktop root defers CLI enrollment' : 'working redirected ancestor permits an absent Desktop installation'} and recovers cleanly`, async t => {
+    const root = await mkdtemp(join(tmpdir(), 'nootify-desktop-redirect-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const state = await State.open(join(root, 'state'));
+    const files = Object.fromEntries(['claude', 'codex', 'opencode', 'trae', 'workbuddy'].map(agent => [agent, join(root, agent, 'rules.md')])) as Record<AgentId, string>;
+    const agents = new AgentPrompts({ stateDir: state.directory, port: 9417, files }); await agents.set('claude', true);
+    const project = join(root, 'claude/projects/project'); await mkdir(project, { recursive: true });
+    await writeFile(join(project, 'standalone.jsonl'), '{}\n');
+    const target = join(root, 'target'); const redirected = join(root, 'redirected'); await mkdir(target);
+    await symlink(target, redirected, process.platform === 'win32' ? 'junction' : 'dir');
+    if (broken) await rm(target, { recursive: true });
+    const sources = { claudeDir: join(root, 'claude'), desktopRoots: [broken ? redirected : join(redirected, 'not-installed')] };
+    const reports: Record<string, unknown>[] = [];
+    const discover = sessionThreadDiscovery(agents, state, record => reports.push(record), sources);
+    assert.deepEqual((await collect(discover)).map(item => item.session_id), broken ? [] : ['standalone']);
+    assert.equal(reports.length, broken ? 1 : 0);
+    const profile = join(target, 'account/profile'); await mkdir(profile, { recursive: true });
+    await writeFile(join(profile, 'local_archived.json'), JSON.stringify({ sessionId: 'local_archived', cliSessionId: 'standalone', isArchived: true }));
+    sources.desktopRoots[0] = redirected; reports.length = 0;
+    assert.deepEqual(await collect(discover), []);
     assert.equal(reports.length, 0);
   });
 }

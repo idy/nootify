@@ -1,7 +1,7 @@
 import { createReadStream, type Dirent } from 'node:fs';
-import { open, readFile, readdir, stat } from 'node:fs/promises';
+import { lstat, open, readFile, readdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { key, parseGitHubPull, type GitHubPullReference } from './github-model.js';
 import type { Adapter } from './types.js';
@@ -84,10 +84,35 @@ export async function conversationDirectories(sources: ConversationSources = def
   return { directories: [...grouped.values()], warnings: found.warnings };
 }
 
+/** Windows may report a missing path beneath a regular file; verify the nearest existing ancestor. */
+async function directoryStatus(directory: string): Promise<'present' | 'absent' | 'invalid'> {
+  let current = directory;
+  for (;;) {
+    try {
+      const entry = await lstat(current);
+      const target = entry.isSymbolicLink() ? await stat(current).catch(() => undefined) : entry;
+      if (!target?.isDirectory()) return 'invalid';
+      return current === directory ? 'present' : 'absent';
+    } catch (error) {
+      if (!isMissing(error)) throw error;
+      const parent = dirname(current);
+      if (parent === current) return 'invalid';
+      current = parent;
+    }
+  }
+}
 async function entries(directory: string, incomplete?: () => void): Promise<Dirent[]> {
+  if (incomplete) {
+    const status = await directoryStatus(directory);
+    if (status !== 'present') {
+      if (status === 'invalid') incomplete();
+      return [];
+    }
+  }
   try { return await readdir(directory, { withFileTypes: true }); }
   catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOTDIR') incomplete?.();
+    // A directory verified above disappearing mid-read is also an incomplete snapshot.
+    if (incomplete && isMissing(error)) incomplete();
     if (isMissing(error)) return [];
     throw error;
   }
