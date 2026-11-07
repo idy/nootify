@@ -72,6 +72,27 @@ jobs:
           retention-days: 7
       - run: npm run check
 
+      # Fail on real Task Scheduler lifecycle issues before staging or native builds.
+      - name: Probe the real Windows service task lifecycle
+        if: runner.os == 'Windows'
+        timeout-minutes: 5
+        shell: powershell
+        run: .\scripts\windows-task-smoke.ps1
+
+      - name: Upload Windows task lifecycle diagnostics
+        if: runner.os == 'Windows' && always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-task-lifecycle-diagnostics
+          path: |
+            .cache/windows-task-smoke/diagnostics.json
+            .cache/windows-task-smoke/*.stdout.log
+            .cache/windows-task-smoke/*.stderr.log
+            .cache/windows-task-smoke/fixture-stdout.log
+            .cache/windows-task-smoke/fixture-stderr.log
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: cargo fmt
         working-directory: src-tauri
         run: cargo fmt --check

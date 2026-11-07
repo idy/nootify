@@ -13,6 +13,7 @@ Set-StrictMode -Version 2.0
 if ($env:OS -ne 'Windows_NT' -or $env:GITHUB_ACTIONS -ne 'true' -or !$env:RUNNER_TEMP) {
     throw 'This test installs software and is restricted to disposable Windows GitHub Actions runners.'
 }
+$env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules')
 $Installer = (Resolve-Path -LiteralPath $Installer).Path
 $BaselineInstaller = (Resolve-Path -LiteralPath $BaselineInstaller).Path
 $OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
@@ -151,8 +152,18 @@ function Assert-Installation([string]$ExpectedVersion) {
     }
 }
 function Assert-RunningTask {
-    $task = Get-TestTask
-    if (!$task -or $task.GetInstances(0).Count -ne 1) { throw 'Expected exactly one running user task' }
+    # HTTP can be ready before Scheduler publishes the running-instance snapshot.
+    # Require the exact singleton contract, but wait for both startup signals.
+    $ready = [pscustomobject]@{ Task = $null }
+    Wait-Until 'exactly one running user task' {
+        $candidate = Get-TestTask
+        if (!$candidate) { throw 'The installed task is not registered yet' }
+        $count = $candidate.GetInstances(0).Count
+        if ($count -ne 1) { throw "Expected one instance; visible=$count; state=$($candidate.State); lastResult=$($candidate.LastTaskResult)" }
+        $ready.Task = $candidate
+        return $true
+    }
+    $task = $ready.Task
     $definition = $task.Definition
     if ($definition.Principal.LogonType -ne 3 -or $definition.Principal.RunLevel -ne 0) { throw 'The service must use an interactive, unelevated user task' }
     if (!(Invoke-Service 'status').installed) { throw 'The installed CLI does not recognize its task' }
@@ -176,7 +187,23 @@ function Capture-Diagnostics {
     }
     $task = Get-TestTask
     $diagnostic = @{ phase = $phase; task_present = [bool]$task; port_free = Test-PortFree; app_pids = @((Get-TestApps) | ForEach-Object { $_.ProcessId }) }
-    if ($task) { $diagnostic['task_state'] = $task.State; $diagnostic['last_task_result'] = $task.LastTaskResult }
+    if ($task) {
+        $diagnostic['task_state'] = $task.State
+        $diagnostic['last_task_result'] = $task.LastTaskResult
+        $diagnostic['task_hidden'] = $task.Definition.Settings.Hidden
+        $diagnostic['task_logon_type'] = $task.Definition.Principal.LogonType
+        $diagnostic['task_run_level'] = $task.Definition.Principal.RunLevel
+        try { $diagnostic['registered_task_instance_count'] = $task.GetInstances(0).Count }
+        catch { $diagnostic['instance_query_hresult'] = $_.Exception.HResult }
+        try {
+            $running = $scheduler.GetRunningTasks(1) # TASK_ENUM_HIDDEN; filter to this exact owned task path.
+            $matching = 0
+            for ($index = 1; $index -le $running.Count; $index++) {
+                if ([string]::Equals([string]$running.Item($index).Path, [string]$task.Path, [StringComparison]::OrdinalIgnoreCase)) { $matching++ }
+            }
+            $diagnostic['hidden_inclusive_instance_count'] = $matching
+        } catch { $diagnostic['hidden_query_hresult'] = $_.Exception.HResult }
+    }
     $diagnostic | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'diagnostics.json') -Encoding UTF8
 }
 
