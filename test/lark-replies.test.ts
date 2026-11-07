@@ -41,7 +41,7 @@ test('forwarded text identifies the Feishu user and gives original-message reply
   assert.ok(!forwarded.includes(state.token));
   const commands = forwarded.split('\n').filter(line => line.includes(' lark-'));
   assert.ok(commands.every(command => !command.includes('$(shell syntax)')));
-  assert.ok(commands.every(command => command.includes(process.platform === 'win32' ? "user''s" : `'"'"'`)), 'Paths with apostrophes must be shell quoted');
+  assert.ok(commands.every(command => command.includes(`'"'"'`)), 'Claude paths with apostrophes must be Bash quoted on every platform');
 });
 
 test('acknowledging receipt is idempotent, survives restart and sends no Feishu message', async t => {

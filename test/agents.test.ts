@@ -27,7 +27,7 @@ test('the block is appended and removed again without touching the rest of the p
   assert.equal(enabled.status, 'current'); assert.equal(enabled.injected, true);
   const written = await readFile(f.files.claude, 'utf8');
   assert.ok(written.startsWith(`${original}\n${BEGIN}`)); assert.ok(written.endsWith(`${END}\n`));
-  const command = process.platform === 'win32' ? "& '/opt/nootify/node' '/opt/nootify/cli.js'" : '/opt/nootify/node /opt/nootify/cli.js';
+  const command = process.platform === 'win32' ? "MSYS2_ARG_CONV_EXCL='*' /opt/nootify/node /opt/nootify/cli.js" : '/opt/nootify/node /opt/nootify/cli.js';
   assert.ok(written.includes(`\`${command} thread-open --agent claude --session-name "<short task title>" --state-dir `));
   assert.match(written, /independent Tailscale device \(`http:\/\/100\.64\.0\.7\/`\)/);
   assert.match(written, /does not expose this (?:Mac|computer)'s previews, files, or other ports/);
