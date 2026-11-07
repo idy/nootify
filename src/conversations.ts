@@ -48,13 +48,16 @@ export function defaultSources(env: NodeJS.ProcessEnv = process.env): Required<C
 /** Read structured session metadata and explicit PR-link records, never infer subscriptions from message text. */
 export async function conversationSessions(sources: ConversationSources = defaultSources(), options: { includeTranscripts?: boolean } = {}): Promise<{ sessions: ConversationSession[]; warnings: string[] }> {
   const warnings: string[] = [];
-  const collect = async <T>(name: string, read: () => Promise<T[]>): Promise<T[]> => {
-    try { return await read(); } catch (error) { warnings.push(`${name} session metadata could not be read: ${(error as Error).message}`); return []; }
+  const collect = async <T>(name: string, read: () => Promise<T[]>, failed?: () => void): Promise<T[]> => {
+    try { return await read(); } catch (error) { failed?.(); warnings.push(`${name} session metadata could not be read: ${(error as Error).message}`); return []; }
   };
-  const desktop = await collect('Claude Desktop', () => desktopSessions(sources.desktopRoots ?? []));
+  let desktopReadable = true;
+  const desktop = await collect('Claude Desktop', () => desktopSessions(sources.desktopRoots ?? []), () => { desktopReadable = false; });
   const cliIds = new Map(desktop.flatMap(entry => entry.cliIds.map(id => [id, entry] as const)));
   const [claude, codex, opencode] = await Promise.all([
-    sources.claudeDir ? collect('Claude Code', () => claudeSessions(sources.claudeDir!, cliIds, options.includeTranscripts !== false)) : [],
+    // Backfill must not mistake Desktop aliases for standalone CLI identities after a catalog failure.
+    sources.claudeDir && (options.includeTranscripts !== false || desktopReadable)
+      ? collect('Claude Code', () => claudeSessions(sources.claudeDir!, cliIds, options.includeTranscripts !== false)) : [],
     sources.codexHome ? collect('Codex', () => codexSessions(sources.codexHome!)) : [],
     sources.opencodeData ? collect('OpenCode', () => opencodeSessions(sources.opencodeData!)) : [],
   ]);

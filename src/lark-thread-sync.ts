@@ -44,10 +44,13 @@ export class LarkThreadSync {
   }
   async reconcile(signal = new AbortController().signal): Promise<void> {
     const { state, threads } = this.options;
-    if ((state.settings.notification_channel ?? 'feishu') !== 'feishu' || !threads.recipient()) return;
+    const recipient = threads.recipient()?.open_id;
+    const enrolled = () => (state.settings.notification_channel ?? 'feishu') === 'feishu' && threads.recipient()?.open_id === recipient;
+    if (!recipient || !enrolled()) return;
     const seen = new Set<string>();
     for await (const session of this.options.discover(signal)) {
       signal.throwIfAborted();
+      if (!enrolled()) return;
       const key = `${session.adapter}:${session.session_id}`;
       if (seen.has(key)) continue;
       seen.add(key);

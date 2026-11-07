@@ -55,6 +55,54 @@ test('enabled agents backfill old local identities without transcript reads or a
   assert.equal(reports.at(-1)?.status, 'lark_discovery_failed');
 });
 
+test('a failed Desktop catalog defers CLI aliases until identities can be read again', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'nootify-desktop-catalog-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const state = await State.open(join(root, 'state'));
+  const files = Object.fromEntries(['claude', 'codex', 'opencode', 'trae', 'workbuddy'].map(agent => [agent, join(root, agent, 'rules.md')])) as Record<AgentId, string>;
+  const agents = new AgentPrompts({ stateDir: state.directory, port: 9417, files });
+  await agents.set('claude', true); await agents.set('codex', true);
+  const desktop = join(root, 'desktop/account/profile'); await mkdir(desktop, { recursive: true });
+  await writeFile(join(desktop, 'local_archived.json'), JSON.stringify({ sessionId: 'local_archived', cliSessionId: 'desktop-cli-id', isArchived: true }));
+  const projects = join(root, 'claude/projects/project'); await mkdir(projects, { recursive: true });
+  for (const id of ['desktop-cli-id', 'standalone']) await writeFile(join(projects, `${id}.jsonl`), '{}\n');
+  const codexHome = join(root, 'codex'); const db = new DatabaseSync(join(codexHome, 'state_5.sqlite'));
+  db.exec("CREATE TABLE threads (id TEXT, cwd TEXT, archived INTEGER); INSERT INTO threads VALUES ('codex_open', '/work', 0)"); db.close();
+  // NUL produces a deterministic catalog-read error on both macOS and Windows.
+  const sources = { claudeDir: join(root, 'claude'), desktopRoots: [join(root, 'desktop'), `${root}\0`], codexHome };
+  const reports: Record<string, unknown>[] = [];
+  const discover = sessionThreadDiscovery(agents, state, record => reports.push(record), sources);
+  assert.deepEqual((await collect(discover)).map(item => item.session_id), ['codex_open']);
+  assert.ok(reports.some(record => String(record.error).startsWith('Claude Desktop session metadata could not be read:')));
+  sources.desktopRoots.pop(); reports.length = 0;
+  assert.deepEqual((await collect(discover)).map(item => item.session_id).sort(), ['codex_open', 'standalone']);
+  assert.equal(reports.length, 0);
+});
+
+for (const agent of ['opencode', 'trae'] as const) {
+  test(`disabling ${agent} during discovery stops its remaining native or cooperative candidates`, async t => {
+    const root = await mkdtemp(join(tmpdir(), 'nootify-enrollment-change-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const state = await State.open(join(root, 'state'));
+    const files = Object.fromEntries(['claude', 'codex', 'opencode', 'trae', 'workbuddy'].map(id => [id, join(root, id, 'rules.md')])) as Record<AgentId, string>;
+    const agents = new AgentPrompts({ stateDir: state.directory, port: 9417, files }); await agents.set(agent, true);
+    const opencodeData = join(root, 'opencode');
+    if (agent === 'opencode') {
+      const directory = join(opencodeData, 'storage/session/project'); await mkdir(directory, { recursive: true });
+      for (const id of ['ses_one', 'ses_two']) await writeFile(join(directory, `${id}.json`), JSON.stringify({ id, time: {} }));
+    } else {
+      for (const id of ['trae_one', 'trae_two']) state.sessions.set(id, { host_id: hostname(), adapter: 'trae', session_id: id, session_name: id });
+    }
+    const discover = sessionThreadDiscovery(agents, state, () => {}, { opencodeData });
+    const iterator = discover(new AbortController().signal)[Symbol.asyncIterator]();
+    assert.equal((await iterator.next()).done, false);
+    await agents.set(agent, false);
+    assert.equal((await iterator.next()).done, true);
+    await agents.set(agent, true);
+    assert.equal((await collect(discover)).length, 2, 'reenrollment is picked up by the next scan');
+  });
+}
+
 test('legacy OpenCode archive metadata is respected when backfilling groups', async t => {
   const root = await mkdtemp(join(tmpdir(), 'nootify-opencode-threads-'));
   t.after(() => rm(root, { recursive: true, force: true }));

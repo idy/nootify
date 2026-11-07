@@ -8,8 +8,16 @@ import { isPolledAdapter } from './types.js';
 /** Notification enrollment applies to old conversations as well as newly injected prompts. */
 export function sessionThreadDiscovery(agents: Pick<AgentPrompts, 'list'>, state: State,
   report: (record: Record<string, unknown>) => void, sources: ConversationSources = defaultSources()): ThreadDiscovery {
+  const enrollment = async () => (await agents.list()).filter(agent => agent.injected && !['error', 'conflict'].includes(agent.status))
+    .map(agent => agent.agent).sort();
   return async function* (signal) {
-    const enabled = new Set((await agents.list()).filter(agent => agent.injected && !['error', 'conflict'].includes(agent.status)).map(agent => agent.agent));
+    const enrolled = await enrollment();
+    const enabled = new Set(enrolled);
+    const unchanged = async () => {
+      const current = await enrollment();
+      signal.throwIfAborted();
+      return current.join(',') === enrolled.join(',');
+    };
     signal.throwIfAborted();
     const selected: ConversationSources = {
       ...(enabled.has('claude') ? { claudeDir: sources.claudeDir, desktopRoots: sources.desktopRoots } : {}),
@@ -24,12 +32,14 @@ export function sessionThreadDiscovery(agents: Pick<AgentPrompts, 'list'>, state
       signal.throwIfAborted();
       if (session.archived || (['claude-desktop', 'codex'].includes(session.adapter) && session.archived !== false)) continue;
       if (!/^[A-Za-z0-9._-]+$/.test(session.id)) continue;
+      if (!await unchanged()) return;
       yield { adapter: session.adapter, session_id: session.id, session_name: session.title.trim().slice(0, 80) || session.id };
     }
     // Cooperative clients have no native discovery API; their explicitly registered IDs are authoritative.
     for (const session of state.sessions.values()) {
       signal.throwIfAborted();
       if (isPolledAdapter(session.adapter) && enabled.has(session.adapter) && session.host_id === hostname()) {
+        if (!await unchanged()) return;
         yield { adapter: session.adapter, session_id: session.session_id, session_name: session.session_name };
       }
     }
