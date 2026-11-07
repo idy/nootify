@@ -175,6 +175,37 @@ test('the Feishu lifecycle starts backfilling and replies reach the old thread t
   assert.equal(lark.status(), 'disabled');
 });
 
+for (const first of ['manual', 'automatic'] as const) {
+  test(`cancelling backfill detaches promptly and preserves a ${first}-first manual open`, { timeout: 5000 }, async t => {
+    const f = await fixture(t); const reading = gate(); const release = gate(); const controller = new AbortController();
+    t.after(() => release.resolve());
+    let held = false; let sharedSignal: AbortSignal | undefined;
+    const request = f.api.request.bind(f.api);
+    t.mock.method(f.api, 'request', async (method: 'GET' | 'POST' | 'PATCH', path: string, body?: unknown, signal?: AbortSignal) => {
+      if (!held && method === 'GET' && path.startsWith('/open-apis/im/v1/chats?')) {
+        held = true; sharedSignal = signal; reading.resolve(); await release.promise;
+      }
+      return request(method, path, body, signal);
+    });
+    let manual: ReturnType<LarkThreads['open']>; let backfill: Promise<void>;
+    if (first === 'manual') {
+      manual = f.threads.open('codex', 'old-thread', 'Manual'); await reading.promise;
+      backfill = f.sync.reconcile(controller.signal);
+    } else {
+      backfill = f.sync.reconcile(controller.signal); await reading.promise;
+      manual = f.threads.open('codex', 'old-thread', 'Manual');
+    }
+    await new Promise<void>(resolve => setImmediate(resolve));
+    const cancelled = assert.rejects(backfill, { name: 'AbortError' });
+    controller.abort(); await cancelled;
+    assert.equal(sharedSignal?.aborted, false, 'the remaining manual caller still owns the shared API operation');
+    release.resolve();
+    assert.equal((await manual).session_id, 'old-thread');
+    assert.equal(f.creates(), 1);
+    assert.equal((await State.open(f.directory)).bindings.get('oc_1')?.session_id, 'old-thread');
+  });
+}
+
 test('cancelling reconciliation aborts group lookup and never creates a group', async t => {
   const f = await fixture(t); const reading = gate(); const controller = new AbortController();
   t.mock.method(f.api, 'request', async () => { reading.resolve(); return new Promise<never>(() => {}); });

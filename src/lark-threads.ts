@@ -18,9 +18,15 @@ export function threadName(sessionName: string, adapter: Adapter, sessionId: str
   return [...sessionName.trim()].slice(0, Math.max(8, 60 - suffix.length)).join('') + suffix;
 }
 
+interface Opening {
+  controller: AbortController;
+  promise: Promise<ThreadInfo>;
+  waiters: number;
+  finished: boolean;
+}
 /** Feishu groups for agent sessions: found or created on first use, reused afterwards, routed by their announcement token. */
 export class LarkThreads {
-  private readonly opening = new Map<string, Promise<ThreadInfo>>();
+  private readonly opening = new Map<string, Opening>();
   constructor(private readonly state: State, private readonly api: LarkApi,
     private readonly report: (record: Record<string, unknown>) => void = () => {}) {}
 
@@ -45,13 +51,39 @@ export class LarkThreads {
   }
   /** Concurrent calls for one session share a single lookup, so a session never gets two groups from this process. */
   open(adapter: Adapter, sessionId: string, sessionName: string, signal?: AbortSignal): Promise<ThreadInfo> {
+    if (signal?.aborted) return Promise.reject(signal.reason);
     const key = `${adapter}:${sessionId}`;
     let pending = this.opening.get(key);
-    if (!pending) {
-      pending = this.ensure(adapter, sessionId, sessionName, signal).finally(() => this.opening.delete(key));
-      this.opening.set(key, pending);
+    if (!pending || pending.controller.signal.aborted) {
+      const controller = new AbortController();
+      const current: Opening = { controller, waiters: 0, finished: false,
+        promise: this.ensure(adapter, sessionId, sessionName, controller.signal).finally(() => {
+          current.finished = true;
+          if (this.opening.get(key) === current) this.opening.delete(key);
+        }) };
+      this.opening.set(key, current);
+      pending = current;
     }
-    return pending;
+    return this.waitFor(pending, signal);
+  }
+  /** Cancelling one caller detaches it; only the final caller can cancel the shared API operation. */
+  private waitFor(pending: Opening, signal?: AbortSignal): Promise<ThreadInfo> {
+    pending.waiters++;
+    return new Promise((resolve, reject) => {
+      let waiting = true;
+      const finish = (deliver: () => void) => {
+        if (!waiting) return;
+        waiting = false;
+        signal?.removeEventListener('abort', abort);
+        pending.waiters--;
+        if (!pending.waiters && !pending.finished) pending.controller.abort();
+        deliver();
+      };
+      const abort = () => finish(() => reject(signal!.reason));
+      signal?.addEventListener('abort', abort, { once: true });
+      pending.promise.then(value => finish(() => resolve(value)), error => finish(() => reject(error)));
+      if (signal?.aborted) abort();
+    });
   }
   private remote(binding: LarkBinding, adapter: Adapter): RemoteBinding {
     return { ...binding, adapter, host_id: hostname(), session_name: binding.session_name ?? binding.session_id };
