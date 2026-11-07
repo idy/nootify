@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer as createSocketServer, type AddressInfo } from 'node:net';
@@ -20,6 +20,7 @@ import { State } from '../src/state.js';
 import { StateDatabase, type StateRows } from '../src/state-database.js';
 import type { PolledAdapter, SessionInbox, ThreadInfo } from '../src/types.js';
 import { sessionInbox } from '../src/polled-sessions.js';
+import { assertMode, inboxPath } from './platform-fixtures.js';
 
 const execute = promisify(execFile);
 async function fixture(t: TestContext) {
@@ -55,7 +56,7 @@ for (const adapter of ['trae', 'workbuddy'] as const) {
     const id = pending.messages[0].id;
     await assert.rejects(f.client.acknowledgeThread('conversation-two', adapter, id), /No inbox message/);
     assert.equal((await State.open(f.directory)).inboxMessages.get(id)?.text, pending.messages[0].text);
-    assert.equal((await stat(join(f.directory, 'state.sqlite'))).mode & 0o777, 0o600);
+    await assertMode(join(f.directory, 'state.sqlite'), 0o600);
     await f.client.acknowledgeThread('conversation-one', adapter, id);
     await f.client.acknowledgeThread('conversation-one', adapter, id);
     assert.deepEqual((await f.client.receiveThread('conversation-one', adapter)).messages, []);
@@ -70,7 +71,7 @@ for (const adapter of ['trae', 'workbuddy'] as const) {
 for (const adapter of ['trae', 'workbuddy'] as const) {
   test(`${adapter}: registration cannot be overwritten by a concurrent Claude socket validation`, async t => {
     const f = await fixture(t); const id = 'registration-race';
-    const socket_path = join(f.directory, 'inbox.sock');
+    const socket_path = inboxPath(f.directory);
     const socket = createSocketServer(connection => connection.end());
     socket.listen(socket_path); await once(socket, 'listening'); t.after(() => socket.close());
     // handle() reaches its async socket validation before the polled registration is queued.

@@ -46,7 +46,7 @@ export class LarkDirectoryCache {
   private diskCleared = false;
   private pending: Promise<unknown> = Promise.resolve();
 
-  constructor(private readonly stateDirectory: string, private readonly now: () => number = Date.now) {
+  constructor(private readonly stateDirectory: string, private readonly now: () => number = Date.now, private readonly remove: (path: string) => Promise<void> = unlink) {
     this.path = join(stateDirectory, 'lark-directory-cache.json');
   }
 
@@ -124,7 +124,7 @@ export class LarkDirectoryCache {
   async clear(): Promise<void> {
     await this.enqueue(async () => {
       this.memory = undefined; this.diskCleared = true;
-      await unlink(this.path);
+      await this.remove(this.path);
     });
   }
 }

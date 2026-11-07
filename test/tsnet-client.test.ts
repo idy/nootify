@@ -1,18 +1,19 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { tmpdir } from 'node:os';
 import { test, type TestContext } from 'node:test';
 import { embeddedEnvironment, TsnetClient } from '../src/tsnet-client.js';
+import { assertMode } from './platform-fixtures.js';
 
 async function fixture(t: TestContext, body: string, announceReady = true) {
   const directory = await mkdtemp(join(tmpdir(), 'nootify-tsnet-rpc-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const binary = join(directory, 'helper.mjs');
   const handshake = announceReady ? `process.stdout.write(JSON.stringify({id:0,result:{ready:true}})+'\\n');\n` : '';
-  await writeFile(binary, `#!${process.execPath}\n${handshake}${body}`, { mode: 0o700 });
+  await writeFile(binary, `${handshake}${body}`);
   const state = join(directory, 'private-node');
-  const client = new TsnetClient(state, binary);
+  const client = new TsnetClient(state, { file: process.execPath, args: [binary] });
   t.after(() => client.stop());
   return { client, state, directory };
 }
@@ -36,7 +37,7 @@ test('private stdio RPC preserves reply IDs, supplies an isolated state director
   const [status, whois] = await Promise.all([client.status(),client.whois('100.64.0.9')]) as any[];
   assert.equal(status.BackendState,'NeedsLogin'); assert.equal(whois.ip,'100.64.0.9');
   assert.ok(status.args.includes(state)); assert.ok(status.args.includes('nootify')); assert.ok(status.args.includes('tcp://127.0.0.1:12345'));
-  assert.equal(status.env.TS_AUTHKEY,undefined); assert.equal((await stat(state)).mode&0o777,0o700);
+  assert.equal(status.env.TS_AUTHKEY,undefined); await assertMode(state,0o700);
   await client.login(); await client.logout(); await client.stop();
   assert.equal(await readFile(join(state,'closed'),'utf8'),'EOF'); assert.equal(exits,0,'intentional stop is not a crash');
   await assert.rejects(client.status(),/embedded_client_stopped/);
@@ -71,7 +72,7 @@ test('a child that exits before readiness never counts as a successful startup',
 
 test('relative service state directories are made absolute before crossing the helper boundary', async t => {
   const {directory}=await fixture(t,standard);
-  const path=join(directory,'relative-state'); const client=new TsnetClient(relative(process.cwd(),path),join(directory,'helper.mjs'));
+  const path=join(directory,'relative-state'); const client=new TsnetClient(relative(process.cwd(),path),{file:process.execPath,args:[join(directory,'helper.mjs')]});
   t.after(()=>client.stop()); await client.start('tcp://127.0.0.1:12345',()=>{});
   const status=await client.status() as {args:string[]};
   assert.equal(status.args[status.args.indexOf('--state-dir')+1],path);
@@ -79,9 +80,9 @@ test('relative service state directories are made absolute before crossing the h
 
 test('a symlink cannot redirect private node state or change another directory permissions', async t => {
   const {client,state,directory}=await fixture(t,standard);
-  const other=join(directory,'other-state');await mkdir(other);await chmod(other,0o755);await symlink(other,state,'dir');
+  const other=join(directory,'other-state');await mkdir(other);await chmod(other,0o755);await symlink(other,state,process.platform==='win32'?'junction':'dir');
   await assert.rejects(client.start('tcp://127.0.0.1:12345',()=>{}),/state_unavailable/);
-  assert.equal((await stat(other)).mode&0o777,0o755);
+  await assertMode(other,0o755);
 });
 
 test('a missing embedded helper never starts an installed Tailscale client', async t => {

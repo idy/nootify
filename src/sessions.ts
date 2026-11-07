@@ -1,4 +1,5 @@
-import { stat } from 'node:fs/promises';
+import { checkSocket } from './inbox.js';
+export { checkSocket } from './inbox.js';
 import { createConnection } from 'node:net';
 import { hostname } from 'node:os';
 import type { State } from './state.js';
@@ -12,15 +13,16 @@ import { localEndpoint } from './codex-rpc.js';
 import type { Adapter, BackendConnection, DeliveryResult, InboxOrigin, PublicSession, RouteRequest, RouteResponse, ServiceModule, SessionRecord } from './types.js';
 import { LocalSessions } from './local-sessions.js';
 import type { SessionCatalog } from './local-sessions.js';
+import { writeWindowsInbox } from './native-transport.js';
 
-export async function checkSocket(path: string): Promise<void> {
-  const info = await stat(path);
-  if (!info.isSocket()) throw new Error('The configured inbox path is not a socket');
-  if (process.getuid && info.uid !== process.getuid()) throw new Error('The inbox belongs to another OS user');
-}
-export async function writeInbox(path: string, content: string, token?: string, timeout = 5000): Promise<DeliveryResult> {
+export async function writeInbox(path: string, content: string, token?: string, timeout = 5000, expectedPid?: number): Promise<DeliveryResult> {
   try { await checkSocket(path); }
   catch (error) { throw new RetryableDeliveryError((error as Error).message); }
+  const frames: unknown[] = [];
+  if (token) frames.push({ type: 'auth', token });
+  frames.push({ type: 'user', message: { role: 'user', content } });
+  const payload = frames.map(frame => JSON.stringify(frame)).join('\n') + '\n';
+  if (process.platform === 'win32') return writeWindowsInbox({ path, expectedPid, frames: payload, timeout });
   return new Promise((resolve, reject) => {
     const socket = createConnection({ path });
     let finished = false; let submitted = false;
@@ -32,12 +34,8 @@ export async function writeInbox(path: string, content: string, token?: string, 
     socket.once('error', fail);
     socket.once('timeout', () => socket.destroy(new Error('Inbox socket write timed out; delivery is unconfirmed')));
     socket.once('connect', () => {
-      const frames: unknown[] = [];
-      if (token) frames.push({ type: 'auth', token });
-      frames.push({ type: 'user', message: { role: 'user', content } });
-      const data = frames.map(frame => JSON.stringify(frame)).join('\n') + '\n';
       submitted = true;
-      try { socket.end(data); } catch (error) { fail(error as Error); socket.destroy(); }
+      try { socket.end(payload); } catch (error) { fail(error as Error); socket.destroy(); }
     });
     socket.once('finish', () => { finished = true; });
     socket.once('end', () => {
@@ -88,7 +86,7 @@ export class SessionsService implements ServiceModule {
           if (session.availability !== 'active' || !session.socket_path) {
             throw new SessionUnavailable(session.availability === 'archived' ? 'session_archived' : session.availability === 'unknown' ? 'archive_unknown' : 'session_offline');
           }
-          return writeInbox(session.socket_path, text, saved?.socket_path === session.socket_path ? saved.socket_token : undefined);
+          return writeInbox(session.socket_path, text, saved?.socket_path === session.socket_path ? saved.socket_token : undefined, 5000, session.runtime_pid);
         } };
       }
       if (!target) throw new SessionUnavailable('session_not_local');

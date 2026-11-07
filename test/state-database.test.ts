@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -8,6 +8,7 @@ import { State } from '../src/state.js';
 import { STATE_SCHEMA_VERSION, STATE_TABLES, StateDatabase, emptyStateRows, type StatePatch, type StateRows } from '../src/state-database.js';
 import { larkPollCursorKey, larkPollReceiptKey, type LarkDelivery, type LarkPollCursor, type LarkPollReceipt, type SessionRecord } from '../src/types.js';
 import type { ChatDelivery } from '../src/chat-transport.js';
+import { assertMode } from './platform-fixtures.js';
 
 async function directory(t: TestContext): Promise<string> {
   const path = await mkdtemp(join(tmpdir(), 'nootify-state-db-'));
@@ -87,9 +88,9 @@ test('a fresh install creates private, versioned SQLite tables and keeps the exi
   const state = await State.open(path);
   const bytes = await readFile(join(path, 'state.sqlite'));
   assert.equal(bytes.subarray(0, 16).toString(), 'SQLite format 3\0');
-  assert.equal((await stat(path)).mode & 0o777, 0o700);
-  assert.equal((await stat(join(path, 'state.sqlite'))).mode & 0o777, 0o600);
-  assert.equal((await stat(join(path, 'auth-token'))).mode & 0o777, 0o600);
+  await assertMode(path, 0o700);
+  await assertMode(join(path, 'state.sqlite'), 0o600);
+  await assertMode(join(path, 'auth-token'), 0o600);
   assert.equal((await State.open(path)).token, state.token);
   assert.ok(!(await readdir(path)).includes('state.json'));
   inspect(path, db => {
@@ -284,7 +285,7 @@ test('WAL and shared-memory files keep private permissions while another reader 
   try {
     reader.exec('BEGIN'); reader.prepare('SELECT count(*) FROM settings').get();
     state.settings.github_token = 'private-token'; await state.save();
-    for (const suffix of ['', '-wal', '-shm']) assert.equal((await stat(join(path, 'state.sqlite' + suffix))).mode & 0o777, 0o600);
+    for (const suffix of ['', '-wal', '-shm']) await assertMode(join(path, 'state.sqlite' + suffix), 0o600);
   } finally { reader.close(); }
 });
 

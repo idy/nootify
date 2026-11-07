@@ -76,39 +76,48 @@ test('OpenCode looks up only the requested ID and never posts to missing or arch
 test('Codex uses one indexed lookup and only the specified live app-server thread', async t => {
   const state = await stateFor(t);
   const db = new DatabaseSync(join(state.directory, 'state_5.sqlite'));
-  t.after(() => db.close());
-  db.exec('CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT NOT NULL, archived INTEGER NOT NULL)');
-  db.prepare('INSERT INTO threads VALUES (?, ?, ?)').run('thread_test', 'Codex test', 0);
-  db.prepare('INSERT INTO threads VALUES (?, ?, ?)').run('thread_archived', 'Archived test', 1);
-  const server = new WebSocketServer({ host: '127.0.0.1', port: 0 }); await once(server, 'listening');
-  const calls: { method: string; params?: Record<string, unknown> }[] = []; let connections = 0; let active = false;
-  server.on('connection', socket => {
-    connections++;
-    socket.on('message', bytes => {
-      const message = JSON.parse(bytes.toString()) as { id?: number; method: string; params?: Record<string, unknown> };
-      calls.push(message); if (message.id === undefined) return;
-      let result: unknown = {};
-      if (message.method === 'thread/read') result = { thread: { id: 'thread_test', name: 'Codex test', status: { type: active ? 'active' : 'idle' } } };
-      if (message.method === 'thread/turns/list') result = { data: [{ id: 'turn_current', status: 'inProgress' }] };
-      if (message.method === 'turn/start') result = { turn: { id: 'turn_current', status: 'inProgress' } };
-      if (message.method === 'turn/steer') result = { turnId: 'turn_current' };
-      socket.send(JSON.stringify({ id: message.id, result }));
+  try {
+    db.exec('CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT NOT NULL, archived INTEGER NOT NULL)');
+    db.prepare('INSERT INTO threads VALUES (?, ?, ?)').run('thread_test', 'Codex test', 0);
+    db.prepare('INSERT INTO threads VALUES (?, ?, ?)').run('thread_archived', 'Archived test', 1);
+  } finally { db.close(); }
+  const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
+  const external = new ExternalSessions(state, { codexHome: state.directory });
+  try {
+    await once(server, 'listening');
+    const calls: { method: string; params?: Record<string, unknown> }[] = []; let connections = 0; let active = false;
+    server.on('connection', socket => {
+      connections++;
+      socket.on('message', bytes => {
+        const message = JSON.parse(bytes.toString()) as { id?: number; method: string; params?: Record<string, unknown> };
+        calls.push(message); if (message.id === undefined) return;
+        let result: unknown = {};
+        if (message.method === 'thread/read') result = { thread: { id: 'thread_test', name: 'Codex test', status: { type: active ? 'active' : 'idle' } } };
+        if (message.method === 'thread/turns/list') result = { data: [{ id: 'turn_current', status: 'inProgress' }] };
+        if (message.method === 'turn/start') result = { turn: { id: 'turn_current', status: 'inProgress' } };
+        if (message.method === 'turn/steer') result = { turnId: 'turn_current' };
+        socket.send(JSON.stringify({ id: message.id, result }));
+      });
     });
-  });
-  t.after(() => { for (const socket of server.clients) socket.terminate(); server.close(); });
-  state.backends.set('codex', { url: `ws://127.0.0.1:${(server.address() as AddressInfo).port}` });
-  const external = new ExternalSessions(state, { codexHome: state.directory }); t.after(() => external.close());
-  const sessions = new SessionsService(state, { async inspect() { assert.fail('Must not inspect Claude'); } }, undefined, external);
-  assert.equal(connections, 0);
-  await assert.rejects(sessions.send('thread_missing', 'no delivery', 'codex'), /session_not_local/);
-  await assert.rejects(sessions.send('thread_archived', 'no delivery', 'codex'), /session_archived/);
-  assert.equal(connections, 0);
-  assert.equal((await sessions.send('thread_test', 'new input', 'codex')).status, 'input_accepted');
-  assert.ok(calls.some(call => call.method === 'turn/start'));
-  active = true;
-  assert.equal((await sessions.send('thread_test', 'steering input', 'codex')).status, 'input_accepted');
-  assert.ok(calls.some(call => call.method === 'turn/steer' && call.params?.expectedTurnId === 'turn_current'));
-  assert.equal(connections, 1);
-  assert.ok(calls.every(call => !['thread/list', 'thread/start', 'thread/resume', 'thread/unarchive'].includes(call.method)));
-  assert.ok(calls.filter(call => call.method.startsWith('thread/') || call.method.startsWith('turn/')).every(call => call.params?.threadId === 'thread_test'));
+    state.backends.set('codex', { url: `ws://127.0.0.1:${(server.address() as AddressInfo).port}` });
+    const sessions = new SessionsService(state, { async inspect() { assert.fail('Must not inspect Claude'); } }, undefined, external);
+    assert.equal(connections, 0);
+    await assert.rejects(sessions.send('thread_missing', 'no delivery', 'codex'), /session_not_local/);
+    await assert.rejects(sessions.send('thread_archived', 'no delivery', 'codex'), /session_archived/);
+    assert.equal(connections, 0);
+    assert.equal((await sessions.send('thread_test', 'new input', 'codex')).status, 'input_accepted');
+    assert.ok(calls.some(call => call.method === 'turn/start'));
+    active = true;
+    assert.equal((await sessions.send('thread_test', 'steering input', 'codex')).status, 'input_accepted');
+    assert.ok(calls.some(call => call.method === 'turn/steer' && call.params?.expectedTurnId === 'turn_current'));
+    assert.equal(connections, 1);
+    assert.ok(calls.every(call => !['thread/list', 'thread/start', 'thread/resume', 'thread/unarchive'].includes(call.method)));
+    assert.ok(calls.filter(call => call.method.startsWith('thread/') || call.method.startsWith('turn/')).every(call => call.params?.threadId === 'thread_test'));
+  } finally {
+    // Test after-hooks run FIFO and stop on error. Release handles before the
+    // directory-removal hook: Windows cannot unlink an open SQLite database.
+    external.close();
+    for (const socket of server.clients) socket.terminate();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
 });

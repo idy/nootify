@@ -1,7 +1,7 @@
 [package]
 name = "nootify"
-version = "0.1.15"
-description = "macOS window and tray for the Nootify background service"
+version = "0.1.16"
+description = "Desktop window and tray for the Nootify background service"
 edition = "2021"
 rust-version = "1.90"
 
@@ -9,11 +9,6 @@ rust-version = "1.90"
 tauri-build = { version = "2.7", features = [] }
 
 [dependencies]
-libc = "0.2"
-# Reuse Tauri's existing macOS bindings for system language and document-start state.
-objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["NSArray", "NSLocale", "NSString"] }
-objc2-web-kit = { version = "0.3", default-features = false, features = ["WKUserContentController", "WKUserScript"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -21,6 +16,17 @@ tauri = { version = "2.12", features = ["tray-icon", "image-png"] }
 tauri-plugin-single-instance = "2"
 # Used from Rust only; the webview gets no updater permissions. TLS comes from macOS (Security.framework).
 tauri-plugin-updater = { version = "2.14", default-features = false, features = ["native-tls", "system-proxy"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+# Reuse Tauri's macOS bindings for system language and document-start state.
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSArray", "NSLocale", "NSString"] }
+objc2-web-kit = { version = "0.3", default-features = false, features = ["WKUserContentController", "WKUserScript"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+webview2-com = "0.39.1"
+windows = { version = "0.62.2", features = ["Win32_Globalization", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

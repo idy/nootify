@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { key, parseGitHubPull, type GitHubPullReference } from './github-model.js';
 import type { Adapter } from './types.js';
+import { desktopSessionRoots, isAbsolutePath } from './runtime-paths.js';
 
 export type ConversationAgent = 'claude' | 'codex' | 'opencode';
 export interface ConversationSession {
@@ -30,7 +31,7 @@ const MAX_SESSIONS = 10_000;
 const isMissing = (error: unknown): boolean => ['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '');
 const object = (value: unknown): Record<string, unknown> | undefined => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 const string = (value: unknown): string | undefined => typeof value === 'string' && value ? value : undefined;
-const path = (value: unknown): string | undefined => typeof value === 'string' && value.startsWith('/') ? value : undefined;
+const path = (value: unknown): string | undefined => typeof value === 'string' && isAbsolutePath(value) ? value : undefined;
 const iso = (milliseconds: number): string | undefined => Number.isFinite(milliseconds) && milliseconds > 0 ? new Date(milliseconds).toISOString() : undefined;
 const epoch = (value: unknown): number => typeof value === 'number' ? (value < 1e12 ? value * 1000 : value) : NaN;
 const uniquePulls = (pulls: GitHubPullReference[]): GitHubPullReference[] => [...new Map(pulls.map(pull => [`${key(pull.repository)}#${pull.number}`, pull])).values()];
@@ -38,7 +39,7 @@ const uniquePulls = (pulls: GitHubPullReference[]): GitHubPullReference[] => [..
 export function defaultSources(env: NodeJS.ProcessEnv = process.env): Required<ConversationSources> {
   return {
     claudeDir: env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'),
-    desktopRoots: ['Claude-3p', 'Claude'].map(app => join(homedir(), 'Library/Application Support', app, 'claude-code-sessions')),
+    desktopRoots: desktopSessionRoots(env),
     codexHome: env.CODEX_HOME ?? join(homedir(), '.codex'),
     opencodeData: join(env.XDG_DATA_HOME ?? join(homedir(), '.local/share'), 'opencode'),
   };
@@ -203,8 +204,10 @@ async function claudeSessions(root: string, desktop: Map<string, DesktopEntry>, 
 }
 
 /** Match Claude's lossy project-directory encoding against real path segments, preserving dots and hyphens. */
-export async function decodeProjectPath(name: string, root = '/'): Promise<string | undefined> {
-  if (!name.startsWith('-')) return;
+export async function decodeProjectPath(name: string, root?: string): Promise<string | undefined> {
+  let encoded: string;
+  if (!root && process.platform === 'win32' && /^[A-Za-z]--/.test(name)) { root = `${name[0]}:\\`; encoded = name.slice(3); }
+  else { if (!name.startsWith('-')) return; root ??= '/'; encoded = name.slice(1); }
   const encode = (value: string): string => value.replace(/[^a-zA-Z0-9]/g, '-');
   let reads = 0;
   async function walk(directory: string, rest: string): Promise<string | undefined> {
@@ -218,7 +221,7 @@ export async function decodeProjectPath(name: string, root = '/'): Promise<strin
       if (found) return found;
     }
   }
-  return walk(root, name.slice(1));
+  return walk(root, encoded);
 }
 async function latestDatabase(directory: string): Promise<string | undefined> {
   const files = (await entries(directory)).filter(entry => entry.isFile() && /^state_\d+\.sqlite$/.test(entry.name)).map(entry => entry.name);

@@ -6,12 +6,13 @@ import { parseArgs } from 'node:util';
 import { NootifyClient } from './client.js';
 import { defaultStateDir } from './state.js';
 import { installLaunchd } from './launchd.js';
+import { manageService, SERVICE_ACTIONS, type ServiceAction } from './service.js';
 import type { Adapter, SessionRegistration } from './types.js';
 import { isAdapter, isPolledAdapter } from './types.js';
 import { AGENT_IDS, agentSession, isAgent } from './agents.js';
 import { isNotificationChannel } from './chat-transport.js';
 
-export async function main(argv = process.argv.slice(2)): Promise<void> {
+export async function main(argv = process.argv.slice(2), serviceManager = manageService): Promise<void> {
   const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, options: {
     'state-dir': { type: 'string' }, 'mcp-config': { type: 'string' }, port: { type: 'string', default: '9417' },
     'session-id': { type: 'string' }, 'session-name': { type: 'string' }, adapter: { type: 'string' }, agent: { type: 'string' }, 'open-id': { type: 'string' },
@@ -21,7 +22,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     'message-id': { type: 'string' }, 'text-file': { type: 'string' }, channel: { type: 'string' },
   } });
   const command = positionals[0];
-  if (values.help) { console.log('Usage: cli.js <launchd-install|health|register|sessions|send|thread-open|thread-send|thread-receive|thread-ack|chat-ack|chat-reply|lark-bind|lark-ack|lark-reply|lark-recipient|backend-set> [options] [--channel feishu|slack|telegram]'); return; }
+  if (values.help) { console.log('Usage: cli.js <service-install|service-start|service-restart|service-stop|service-uninstall|service-status|launchd-install|health|register|sessions|send|thread-open|thread-send|thread-receive|thread-ack|chat-ack|chat-reply|lark-bind|lark-ack|lark-reply|lark-recipient|backend-set> [options] [--channel feishu|slack|telegram]'); return; }
   if (values.channel !== undefined && !isNotificationChannel(values.channel)) throw new Error('Use --channel feishu, slack or telegram');
   const channel = isNotificationChannel(values.channel) ? values.channel : undefined;
   const adapter = values.adapter ?? 'claude-desktop';
@@ -29,6 +30,12 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid port');
   if (command === 'launchd-install') {
     console.log(JSON.stringify({ status: 'installed', plist: await installLaunchd({ stateDir: values['state-dir'], port, mcpConfig: values['mcp-config'] }) }));
+    return;
+  }
+  const serviceAction = command?.startsWith('service-') ? command.slice('service-'.length) : undefined;
+  if (serviceAction) {
+    if (!(SERVICE_ACTIONS as readonly string[]).includes(serviceAction)) throw new Error('Use --help for supported service commands');
+    console.log(JSON.stringify(await serviceManager(serviceAction as ServiceAction, { stateDir: values['state-dir'], port, mcpConfig: values['mcp-config'] })));
     return;
   }
   const token = (await readFile(join(values['state-dir'] ?? defaultStateDir(), 'auth-token'), 'utf8')).trim();
