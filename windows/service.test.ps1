@@ -774,7 +774,8 @@ setInterval(() => {
     $limitedHandle = [NootifyJobTest]::OpenJobObject(8, $false, $name) # TERMINATE only; QueryInformationJobObject must fail.
     Assert ($limitedHandle -ne [IntPtr]::Zero) 'Expected a real terminate-only job handle'
     $constructor = [Nootify.ServiceJob].GetConstructor([Reflection.BindingFlags]'Instance,NonPublic', $null, [type[]]@([IntPtr], [string], [string]), $null)
-    $limited = $constructor.Invoke([object[]]@($limitedHandle, $name, $completionPath))
+    # Reflection does not unwrap extended PSObject values produced by cmdlets.
+    $limited = $constructor.Invoke([object[]]@([IntPtr]$limitedHandle, [string]$name, [string]$completionPath))
     $openJob = ${function:Open-OwnedJob}
     function Open-OwnedJob { return $limited }
     try {
