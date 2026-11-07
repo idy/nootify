@@ -83,6 +83,59 @@ function writeVersionOne(path: string, rows: StateRows): void {
   } finally { db.close(); }
 }
 
+/** Schema v2 predates routing observations; do not use the current opener to construct it. */
+function writeVersionTwo(path: string, rows: StateRows): void {
+  writeVersionOne(path, rows);
+  const db = new DatabaseSync(join(path, 'state.sqlite'));
+  try {
+    db.exec(`BEGIN;
+      CREATE TABLE lark_poll_receipts (id TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL CHECK (json_valid(value)), position INTEGER NOT NULL) STRICT;
+      CREATE INDEX lark_poll_receipts_position ON lark_poll_receipts (position);
+      CREATE INDEX lark_poll_receipts_cursor_time ON lark_poll_receipts (json_extract(value, '$.cursor_id'), json_extract(value, '$.create_time'));
+      INSERT INTO schema_migrations VALUES (2, 'original-v2-migration');
+      PRAGMA user_version = 2;`);
+    const put = db.prepare('INSERT INTO lark_poll_receipts (id, value, position) VALUES (?, ?, ?)');
+    let position = 0;
+    for (const [id, value] of rows.lark_poll_receipts) put.run(id, value, position++);
+    db.exec('COMMIT');
+  } finally { db.close(); }
+}
+
+test('SQLite v2 adds routing history atomically without changing existing state or importing stale JSON', async t => {
+  const path = await directory(t); const rows = emptyStateRows();
+  rows.sessions.set('registered', JSON.stringify(session('registered')));
+  rows.settings.set('github_token', JSON.stringify('existing-private-token'));
+  const original = receipt(cursor('omt_existing'), 'om_existing', 1_001);
+  rows.lark_poll_receipts.set(larkPollReceiptKey(original.cursor_id, original.message_id), JSON.stringify(original));
+  writeVersionTwo(path, rows); await writeFile(join(path, 'state.json'), '{broken stale JSON');
+  const exec = DatabaseSync.prototype.exec;
+  const interruption = t.mock.method(DatabaseSync.prototype, 'exec', function (this: DatabaseSync, sql: string) {
+    if (sql === 'COMMIT') throw new Error('Interrupted routing-history migration');
+    return exec.call(this, sql);
+  });
+  await assert.rejects(State.open(path), /Interrupted routing-history migration/);
+  interruption.mock.restore();
+  inspect(path, db => {
+    assert.equal(db.prepare('PRAGMA user_version').get()!.user_version, 2);
+    assert.equal(db.prepare('SELECT count(*) AS count FROM schema_migrations').get()!.count, 2);
+    assert.equal(db.prepare("SELECT name FROM sqlite_schema WHERE name = 'session_observations'").get(), undefined);
+    assert.equal(db.prepare('SELECT value FROM sessions').get()!.value, rows.sessions.get('registered'));
+    assert.equal(db.prepare('SELECT value FROM lark_poll_receipts').get()!.value, JSON.stringify(original));
+  });
+  const upgraded = await State.open(path);
+  assert.equal(upgraded.sessionObservations.size, 0);
+  assert.equal(upgraded.settings.github_token, 'existing-private-token');
+  assert.equal(upgraded.session('registered').session_name, 'registered');
+  assert.equal(upgraded.hasLarkPollReceipt(original.cursor_id, original.message_id), true);
+  inspect(path, db => {
+    assert.equal(db.prepare('PRAGMA user_version').get()!.user_version, STATE_SCHEMA_VERSION);
+    assert.equal(db.prepare('SELECT count(*) AS count FROM session_observations').get()!.count, 0);
+    assert.deepEqual(db.prepare('SELECT applied_at FROM schema_migrations ORDER BY version LIMIT 2').all().map(row => row.applied_at),
+      ['original-v1-migration', 'original-v2-migration']);
+  });
+  assert.equal(await readFile(join(path, 'state.json'), 'utf8'), '{broken stale JSON');
+});
+
 test('a fresh install creates private, versioned SQLite tables and keeps the existing auth-token protocol', async t => {
   const path = await directory(t);
   const state = await State.open(path);

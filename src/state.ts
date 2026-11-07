@@ -16,7 +16,7 @@ export interface Settings {
   notification_channel?: NotificationChannel; slack?: SlackConfig; telegram?: TelegramConfig;
 }
 /** The pre-SQLite format is read only for the first successful database migration. */
-interface StoredState { version: 1; sessions: SessionRecord[]; lark_bindings: LarkBinding[]; backends?: [Adapter, BackendConnection][]; lark_deliveries?: LarkDelivery[]; lark_poll_cursors?: LarkPollCursor[]; lark_poll_receipts?: LarkPollReceipt[]; chat_bindings?: ChatBinding[]; chat_deliveries?: ChatDelivery[]; inbox_messages?: StoredInboxMessage[]; settings?: Settings }
+interface StoredState { version: 1; sessions: SessionRecord[]; session_observations?: PublicSession[]; lark_bindings: LarkBinding[]; backends?: [Adapter, BackendConnection][]; lark_deliveries?: LarkDelivery[]; lark_poll_cursors?: LarkPollCursor[]; lark_poll_receipts?: LarkPollReceipt[]; chat_bindings?: ChatBinding[]; chat_deliveries?: ChatDelivery[]; inbox_messages?: StoredInboxMessage[]; settings?: Settings }
 function validateCursor(value: unknown): asserts value is LarkPollCursor {
   const cursor = value as LarkPollCursor | null;
   if (!cursor || typeof cursor !== 'object' || Array.isArray(cursor) ||
@@ -32,7 +32,7 @@ function validate(data: unknown): asserts data is StoredState {
   if (!data || typeof data !== 'object' || Array.isArray(data)) return fail();
   const state = data as Record<string, unknown>;
   if (state.version !== 1 || !Array.isArray(state.sessions) || !Array.isArray(state.lark_bindings)) return fail();
-  for (const [field, identity] of [['sessions', 'session_id'], ['lark_bindings', 'chat_id'], ['lark_deliveries', 'message_id'],
+  for (const [field, identity] of [['sessions', 'session_id'], ['session_observations', 'session_id'], ['lark_bindings', 'chat_id'], ['lark_deliveries', 'message_id'],
     ['chat_bindings', 'id'], ['chat_deliveries', 'id'], ['inbox_messages', 'id']] as const) {
     const records = state[field];
     if (records === undefined) continue;
@@ -62,6 +62,7 @@ const decode = <T>(rows: Map<string, string>): T[] => [...rows.values()].map(val
 export const defaultStateDir = () => serviceStateDir();
 export class State {
   readonly sessions = new Map<string, SessionRecord>();
+  readonly sessionObservations = new Map<string, PublicSession>();
   readonly bindings = new Map<string, LarkBinding>();
   readonly backends = new Map<Adapter, BackendConnection>();
   readonly deliveries = new Map<string, LarkDelivery>();
@@ -107,7 +108,7 @@ export class State {
       return state.snapshot();
     });
     const rows = state.database.load();
-    const data: StoredState = { version: 1, sessions: decode(rows.sessions), lark_bindings: decode(rows.lark_bindings),
+    const data: StoredState = { version: 1, sessions: decode(rows.sessions), session_observations: decode(rows.session_observations), lark_bindings: decode(rows.lark_bindings),
       backends: [...rows.backends].map(([adapter, value]) => [adapter as Adapter, JSON.parse(value) as BackendConnection]),
       lark_deliveries: decode(rows.lark_deliveries), lark_poll_cursors: decode(rows.lark_poll_cursors), lark_poll_receipts: decode(rows.lark_poll_receipts),
       chat_bindings: decode(rows.chat_bindings), chat_deliveries: decode(rows.chat_deliveries), inbox_messages: decode(rows.inbox_messages),
@@ -116,10 +117,16 @@ export class State {
     return state;
   }
   private restore(data: StoredState): void {
-    this.sessions.clear(); this.bindings.clear(); this.backends.clear(); this.deliveries.clear(); this.larkPollCursors.clear();
+    this.sessions.clear(); this.sessionObservations.clear(); this.bindings.clear(); this.backends.clear(); this.deliveries.clear(); this.larkPollCursors.clear();
     this.chatBindings.clear(); this.chatDeliveries.clear(); this.inboxMessages.clear(); this.pollReceiptRows.clear(); this.pollReceipts.clear();
     for (const key of Object.keys(this.settings)) delete this.settings[key as keyof Settings];
     for (const session of data.sessions) this.sessions.set(session.session_id, session);
+    for (const saved of data.session_observations ?? []) {
+      const observation = { ...saved };
+      // A past live target is not proof that it is still available after restart.
+      if (observation.availability === 'active') observation.availability = 'unknown';
+      this.sessionObservations.set(`${observation.adapter}:${observation.session_id}`, observation);
+    }
     for (const binding of data.lark_bindings) this.bindings.set(binding.chat_id, binding);
     for (const [adapter, backend] of data.backends ?? []) this.backends.set(adapter, backend);
     for (const delivery of data.lark_deliveries ?? []) this.deliveries.set(delivery.message_id, delivery);
@@ -153,7 +160,7 @@ export class State {
     }
   }
   private snapshot(): StateRows {
-    return { sessions: encode(this.sessions), lark_bindings: encode(this.bindings), backends: encode(this.backends),
+    return { sessions: encode(this.sessions), session_observations: encode(this.sessionObservations), lark_bindings: encode(this.bindings), backends: encode(this.backends),
       lark_deliveries: encode(this.deliveries), lark_poll_cursors: encode(this.larkPollCursors), lark_poll_receipts: new Map(this.pollReceiptRows), chat_bindings: encode(this.chatBindings),
       chat_deliveries: encode(this.chatDeliveries), inbox_messages: encode(this.inboxMessages), settings: encode(Object.entries(this.settings)) };
   }

@@ -5,7 +5,7 @@ import { larkPollReceiptKey, type LarkPollReceipt } from './types.js';
 
 // Migration one must retain its original nine tables when later tables are added.
 const VERSION_ONE_TABLES = ['sessions', 'lark_bindings', 'backends', 'lark_deliveries', 'lark_poll_cursors', 'chat_bindings', 'chat_deliveries', 'inbox_messages', 'settings'] as const;
-export const STATE_TABLES = [...VERSION_ONE_TABLES, 'lark_poll_receipts'] as const;
+export const STATE_TABLES = [...VERSION_ONE_TABLES, 'lark_poll_receipts', 'session_observations'] as const;
 export type StateTable = typeof STATE_TABLES[number];
 /** Separate keyed rows keep nested provider payloads extensible without rewriting unrelated entities. */
 export type StateRows = Record<StateTable, Map<string, string>>;
@@ -81,7 +81,8 @@ function createPollReceipts(db: DatabaseSync): void {
   }
 }
 /** Ordered, append-only migration steps run in one transaction. */
-const migrations = [{ version: 1, apply: createSchema }, { version: 2, apply: createPollReceipts }] as const;
+const migrations = [{ version: 1, apply: createSchema }, { version: 2, apply: createPollReceipts },
+  { version: 3, apply: (db: DatabaseSync) => createTable(db, 'session_observations') }] as const;
 export const STATE_SCHEMA_VERSION = migrations.at(-1)!.version;
 function readRows(db: DatabaseSync): CachedRows {
   const rows = emptyCache();
