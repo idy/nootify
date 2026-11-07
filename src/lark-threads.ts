@@ -47,7 +47,10 @@ export class LarkThreads {
     await this.state.save();
   }
   binding(sessionId: string, adapter?: Adapter): LarkBinding | undefined {
-    return this.bindings().find(binding => binding.session_id === sessionId && (!adapter || !binding.adapter || binding.adapter === adapter));
+    for (const binding of this.state.bindings.values()) {
+      if (binding.app_id && binding.app_id !== this.api.appId) continue;
+      if (binding.session_id === sessionId && (!adapter || !binding.adapter || binding.adapter === adapter)) return binding;
+    }
   }
   /** Concurrent calls for one session share a single lookup, so a session never gets two groups from this process. */
   open(adapter: Adapter, sessionId: string, sessionName: string, signal?: AbortSignal): Promise<ThreadInfo> {

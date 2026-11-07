@@ -3,7 +3,7 @@ import type { LarkThreads } from './lark-threads.js';
 import type { State } from './state.js';
 import type { ThreadRequest } from './types.js';
 
-export type ThreadDiscovery = (signal: AbortSignal) => AsyncIterable<ThreadRequest>;
+export type ThreadDiscovery = (signal: AbortSignal, needsGroup?: (session: ThreadRequest) => boolean) => AsyncIterable<ThreadRequest>;
 interface Options {
   state: State;
   threads: LarkThreads;
@@ -47,15 +47,19 @@ export class LarkThreadSync {
     const recipient = threads.recipient()?.open_id;
     const enrolled = () => (state.settings.notification_channel ?? 'feishu') === 'feishu' && threads.recipient()?.open_id === recipient;
     if (!recipient || !enrolled()) return;
+    const needsGroup = (session: ThreadRequest) => {
+      const binding = threads.binding(session.session_id, session.adapter);
+      return !binding || Boolean(binding.announcement_pending);
+    };
     const seen = new Set<string>();
-    for await (const session of this.options.discover(signal)) {
+    for await (const session of this.options.discover(signal, needsGroup)) {
       signal.throwIfAborted();
       if (!enrolled()) return;
       const key = `${session.adapter}:${session.session_id}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      const binding = threads.binding(session.session_id, session.adapter);
-      if (binding && !binding.announcement_pending) continue;
+      // A manual open may have completed while discovery revalidated enrollment.
+      if (!needsGroup(session)) continue;
       try { await threads.open(session.adapter, session.session_id, session.session_name, signal); }
       catch (error) {
         if (signal.aborted) throw error;

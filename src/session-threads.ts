@@ -10,7 +10,7 @@ export function sessionThreadDiscovery(agents: Pick<AgentPrompts, 'list'>, state
   report: (record: Record<string, unknown>) => void, sources: ConversationSources = defaultSources()): ThreadDiscovery {
   const enrollment = async () => (await agents.list()).filter(agent => agent.injected && !['error', 'conflict'].includes(agent.status))
     .map(agent => agent.agent).sort();
-  return async function* (signal) {
+  return async function* (signal, needsGroup) {
     const enrolled = await enrollment();
     const enabled = new Set(enrolled);
     const unchanged = async () => {
@@ -32,15 +32,19 @@ export function sessionThreadDiscovery(agents: Pick<AgentPrompts, 'list'>, state
       signal.throwIfAborted();
       if (session.archived || (['claude-desktop', 'codex'].includes(session.adapter) && session.archived !== false)) continue;
       if (!/^[A-Za-z0-9._-]+$/.test(session.id)) continue;
+      const candidate = { adapter: session.adapter, session_id: session.id, session_name: session.title.trim().slice(0, 80) || session.id };
+      if (needsGroup && !needsGroup(candidate)) continue;
       if (!await unchanged()) return;
-      yield { adapter: session.adapter, session_id: session.id, session_name: session.title.trim().slice(0, 80) || session.id };
+      yield candidate;
     }
     // Cooperative clients have no native discovery API; their explicitly registered IDs are authoritative.
     for (const session of state.sessions.values()) {
       signal.throwIfAborted();
       if (isPolledAdapter(session.adapter) && enabled.has(session.adapter) && session.host_id === hostname()) {
+        const candidate = { adapter: session.adapter, session_id: session.session_id, session_name: session.session_name };
+        if (needsGroup && !needsGroup(candidate)) continue;
         if (!await unchanged()) return;
-        yield { adapter: session.adapter, session_id: session.session_id, session_name: session.session_name };
+        yield candidate;
       }
     }
   };
