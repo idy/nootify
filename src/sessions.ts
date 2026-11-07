@@ -50,10 +50,12 @@ export async function writeInbox(path: string, content: string, token?: string, 
 }
 export class SessionsService implements ServiceModule {
   readonly name = 'sessions';
-  private readonly observed = new Map<string, PublicSession>();
+  private readonly observed: Map<string, PublicSession>;
   constructor(readonly state: State, readonly catalog: SessionCatalog = new LocalSessions(),
     private readonly report: (record: Record<string, unknown>) => void = () => {},
-    private readonly external: ExternalResolver = new ExternalSessions(state), private readonly forwarding: ForwardingOptions = {}) {}
+    private readonly external: ExternalResolver = new ExternalSessions(state), private readonly forwarding: ForwardingOptions = {}) {
+    this.observed = state.sessionObservations;
+  }
   status(): string { return 'ready'; }
   sessionName(id: string, adapter: Adapter): string {
     return this.observed.get(`${adapter}:${id}`)?.session_name ?? this.state.sessions.get(id)?.session_name ?? id;
@@ -64,7 +66,7 @@ export class SessionsService implements ServiceModule {
     const kind = adapter ?? saved?.adapter ?? (id.startsWith('local_') ? 'claude-desktop' : 'claude-code');
     const key = `${kind}:${id}`;
     const observation: PublicSession = { session_id: id, adapter: kind, host_id: hostname(),
-      session_name: this.observed.get(key)?.session_name ?? id, availability: 'unknown', last_seen: new Date().toISOString() };
+      session_name: this.sessionName(id, kind), availability: 'unknown', last_seen: new Date().toISOString() };
     let submitting = false;
     try {
       let target: SessionTarget | undefined;
@@ -111,6 +113,12 @@ export class SessionsService implements ServiceModule {
     } finally {
       this.observed.delete(key); this.observed.set(key, observation);
       if (this.observed.size > 1000) this.observed.delete(this.observed.keys().next().value!);
+      try { await this.state.save(); }
+      catch (error) {
+        // A history write failure must not turn accepted input into a retryable delivery.
+        this.report({ source: 'sessions', status: 'failed', reason: 'session_history_save_failed',
+          session_id: id, session_name: observation.session_name, error: (error as Error).message });
+      }
     }
   }
   async handle(request: RouteRequest): Promise<RouteResponse | undefined> {

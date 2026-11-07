@@ -73,7 +73,8 @@ async function stageNode() {
     }
     return await readFile(join(work, release, 'LICENSE'));
   } finally {
-    await rm(work, { recursive: true, force: true });
+    // Windows may briefly retain an executable/scanner lock after runtime verification.
+    await rm(work, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 }
 

@@ -183,7 +183,7 @@ export const english = {
   "待回执：已写入客户端，还没有收到会话回执。已回复：回复已发回原消息。保留最近 1,000 条，最新在前。": "Awaiting receipt: written to the client, but the session has not acknowledged it yet. Replied: a reply was sent to the original message. Shows the latest 1,000 entries, newest first.",
   "换个筛选条件，或在飞书群、Slack 线程、Telegram 话题里发一条消息。": "Try another filter, or send a message in a Feishu group, Slack thread, or Telegram topic.",
   "搜索消息、会话、聊天 ID": "Search messages, sessions, chat IDs",
-  "收到消息时才查找对应的 Claude、Codex 或 OpenCode 会话：飞书按群公告，Slack 线程和 Telegram 话题按本地绑定。这里只列出本次运行遇到的会话和最近一次查找结果。": "Claude, Codex, or OpenCode sessions are looked up when a message arrives: Feishu uses group announcements, while Slack threads and Telegram topics use local bindings. Only sessions encountered during this run and their latest lookup results appear here.",
+  "收到消息时才查找对应的 Claude、Codex 或 OpenCode 会话：飞书按群公告，Slack 线程和 Telegram 话题按本地绑定。这里保留最近 1,000 个路由会话及最后一次查找结果，重启后仍可查看。": "Claude, Codex, or OpenCode sessions are looked up when a message arrives: Feishu uses group announcements, while Slack threads and Telegram topics use local bindings. The latest 1,000 routed sessions and their last lookup results are retained across restarts.",
   "新对话会按说明使用{p0}": "New conversations will use {p0} as instructed",
   "无法保存 {p0} 配置": "Cannot save {p0} configuration",
   "无法保存默认通知渠道：{p0}": "Cannot save default notification channel: {p0}",
