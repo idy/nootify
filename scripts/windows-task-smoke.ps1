@@ -10,9 +10,15 @@ if ($env:OS -ne 'Windows_NT' -or $env:GITHUB_ACTIONS -cne 'true' -or !$env:RUNNE
 }
 $env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules')
 
+function Resolve-NodePath {
+    # Application discovery can return every PATH match. Passing Source[] to a string
+    # parameter joins the paths, producing one invalid Windows path with multiple drive colons.
+    return @(Get-Command node.exe -CommandType Application -ErrorAction Stop)[0].Source
+}
+
 $repository = Split-Path -Parent $PSScriptRoot
 $serviceScript = (Resolve-Path -LiteralPath (Join-Path $repository 'windows\service.ps1')).Path
-$node = (Get-Command node.exe -CommandType Application -ErrorAction Stop).Source
+$node = Resolve-NodePath
 $powerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 if (![IO.Path]::IsPathRooted($env:RUNNER_TEMP)) { throw 'RUNNER_TEMP must be an absolute path' }
 $runnerTemp = (Resolve-Path -LiteralPath $env:RUNNER_TEMP).Path
@@ -299,6 +305,47 @@ const server = http.createServer((req, res) => {
 server.listen(Number(args[3]), '127.0.0.1', () => console.log('Task fixture listening.'));
 '@
         [IO.File]::WriteAllText($server, $fixtureSource.Replace('__FIXTURE_ID__', $fixtureId))
+    }
+    Test-Step 'Node discovery selects the first executable when PATH has multiple matches' {
+        $firstRuntime = Join-Path $fixtureDir 'first Node runtime'
+        $secondRuntime = Join-Path $fixtureDir 'second Node runtime'
+        $savedPath = $env:PATH
+        try {
+            foreach ($directory in @($firstRuntime, $secondRuntime)) {
+                $null = New-Item -ItemType Directory -Path $directory
+                # Discovery only: these empty executables are never launched.
+                [IO.File]::WriteAllText((Join-Path $directory 'node.exe'), '')
+            }
+            $env:PATH = $firstRuntime + [IO.Path]::PathSeparator + $secondRuntime
+            $resolved = Resolve-NodePath
+            if ($resolved -isnot [string] -or $resolved -cne (Join-Path $firstRuntime 'node.exe')) {
+                throw 'Node discovery must return one path to the first executable, not join multiple PATH matches'
+            }
+        } finally {
+            $env:PATH = $savedPath
+            foreach ($directory in @($firstRuntime, $secondRuntime)) {
+                if (Test-Path -LiteralPath $directory) { Remove-Item -LiteralPath $directory -Recurse -Force }
+            }
+        }
+    }
+    Test-Step 'Invocation paths are individual absolute filesystem paths' {
+        $paths = [ordered]@{ PowerShell = $powerShell; Script = $serviceScript; NodePath = $node; ServerPath = $server
+            StateDir = $stateDir; McpConfig = $mcpConfig; WorkingDirectory = $fixtureDir; RunnerTemp = $runnerTemp }
+        foreach ($field in $paths.Keys) {
+            $path = $paths[$field]
+            $diagnostic = [ordered]@{ label = 'invocation-path'; phase = $phase; field = $field; value = $path
+                type = $(if ($null -eq $path) { 'null' } else { $path.GetType().FullName }); full_path = $null; error = $null }
+            try {
+                if ($path -isnot [string]) { throw 'Expected one path string' }
+                if (![IO.Path]::IsPathRooted($path)) { throw 'Expected an absolute path' }
+                $diagnostic.full_path = [IO.Path]::GetFullPath($path)
+            } catch {
+                $diagnostic.error = $_.Exception.Message
+                throw "Invalid probe invocation path ${field}: $($_.Exception.Message)"
+            } finally { Save-Observation $diagnostic }
+        }
+        # Only source/runtime/fixture paths, never application configuration contents.
+        Save-Observation ([ordered]@{ label = 'invocation-command'; phase = $phase; executable = $powerShell; arguments = (Service-Arguments 'Install') })
     }
     Test-Step 'Install starts the exact interactive unelevated task' {
         Invoke-Service 'Install' 'install'
