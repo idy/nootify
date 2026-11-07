@@ -80,7 +80,7 @@ svg { flex: none; }
 .sidebar, .view, .list-filters { scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
 .sidebar > .nav, .sidebar > .subnav, .sidebar-foot { flex: none; }
 .brand-row { position: sticky; top: 0; z-index: 3; display: flex; flex: none; align-items: center; height: var(--titlebar-height); margin: 0 -10px; padding: 0 19px; background: var(--sidebar); user-select: none; }
-:root[data-nootify-desktop="macos"] .brand-row { padding-left: 96px; }
+:root[data-nootify-window-controls="macos"] .brand-row { padding-left: 96px; }
 .brand { display: flex; align-items: center; gap: 9px; height: 36px; font-size: 15px; font-weight: 600; letter-spacing: -.2px; }
 .brand svg { width: 17px; height: 17px; fill: var(--text); }
 .nav { display: flex; flex-direction: column; gap: 16px; margin-top: 10px; }
