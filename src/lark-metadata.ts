@@ -218,8 +218,8 @@ export async function readAnnouncement(api: LarkApi, chatId: string, signal = Ab
   } while (pageToken);
   return { kind: 'docx', revision: metadata.revision_id, content: blocks, path: docxPath };
 }
-export async function ensureAnnouncement(api: LarkApi, binding: RemoteBinding): Promise<void> {
-  const announcement = await readAnnouncement(api, binding.chat_id);
+export async function ensureAnnouncement(api: LarkApi, binding: RemoteBinding, signal?: AbortSignal): Promise<void> {
+  const announcement = await readAnnouncement(api, binding.chat_id, signal);
   const token = bindingToken(binding);
   if (bindingTokens(announcement.content).length) { assertMetadata(announcement.content, binding); return; }
   if (announcement.kind === 'doc') {
@@ -228,14 +228,14 @@ export async function ensureAnnouncement(api: LarkApi, binding: RemoteBinding): 
         elements: [{ type: 'textRun', textRun: { text: token, style: {} } }], style: {},
       } }] }), location: { zoneId: '0', index: 0, endOfZone: true },
     } };
-    await api.request('PATCH', announcement.path, { revision: String(announcement.revision), requests: [JSON.stringify(operation)] });
+    await requestLark(api, 'PATCH', announcement.path, { revision: String(announcement.revision), requests: [JSON.stringify(operation)] }, signal);
   } else {
     const query = new URLSearchParams({ revision_id: String(announcement.revision), client_token: randomUUID() });
-    await api.request('POST', `${announcement.path}/blocks/${encodeURIComponent(binding.chat_id)}/children?${query}`, {
+    await requestLark(api, 'POST', `${announcement.path}/blocks/${encodeURIComponent(binding.chat_id)}/children?${query}`, {
       children: [{ block_type: 2, text: { elements: [{ text_run: { content: token } }] } }],
-    });
+    }, signal);
   }
-  assertMetadata((await readAnnouncement(api, binding.chat_id)).content, binding);
+  assertMetadata((await readAnnouncement(api, binding.chat_id, signal)).content, binding);
 }
 export async function readRemoteBinding(api: LarkApi, binding: RemoteBinding): Promise<unknown> {
   if (!binding.registration_message_id) return (await readAnnouncement(api, binding.chat_id)).content;

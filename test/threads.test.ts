@@ -36,6 +36,20 @@ async function stateDir(t: TestContext): Promise<string> {
   return dir;
 }
 
+test('incomplete or cyclic group listings never create a potentially duplicate group', async t => {
+  const state = await State.open(await stateDir(t)); state.settings.lark_recipient_open_id = 'ou_owner';
+  for (const mode of ['missing-token', 'repeated-token', 'truncated'] as const) {
+    const feishu = fakeFeishu(); let pages = 0;
+    const api: LarkApi = { ...feishu.api, async request<T>(method: 'GET' | 'POST' | 'PATCH', path: string, body?: unknown): Promise<T> {
+      if (method === 'GET' && path.startsWith('/open-apis/im/v1/chats?')) return { items: [], has_more: true,
+        ...(mode === 'missing-token' ? {} : { page_token: mode === 'repeated-token' ? 'same-token' : `page-${++pages}` }) } as T;
+      return feishu.api.request<T>(method, path, body);
+    } };
+    await assert.rejects(new LarkThreads(state, api).open('codex', 'thread-1', 'Task'), /group.*deferred/);
+    assert.equal(feishu.creates().length, 0);
+  }
+});
+
 test('a session gets one group: created once, reused afterwards, routed by its announcement token', async t => {
   const dir = await stateDir(t);
   const state = await State.open(dir);
