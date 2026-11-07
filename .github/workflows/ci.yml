@@ -28,6 +28,8 @@ jobs:
     timeout-minutes: 60
     env:
       TAURI_ENV_TARGET_TRIPLE: ${{ matrix.target }}
+      NOOTIFY_INSTALLER_HOOK_DIAGNOSTICS: '1'
+      NOOTIFY_INSTALLER_HOOK_LOG: '${{ github.workspace }}\.cache\windows-install-smoke\nootify-installer-hook.log'
     steps:
       - uses: actions/checkout@v7
         with:
@@ -59,6 +61,22 @@ jobs:
           key: ${{ matrix.target }}
 
       - run: npm ci
+
+      - name: Probe native Windows installer hooks
+        if: runner.os == 'Windows'
+        timeout-minutes: 5
+        shell: powershell
+        run: .\scripts\windows-installer-hook-smoke.ps1
+
+      - name: Upload Windows installer hook diagnostics
+        if: runner.os == 'Windows' && always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-installer-hook-diagnostics
+          path: .cache/windows-installer-hook-smoke/
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Run tests with deadlines and JUnit output
         timeout-minutes: 10
         run: npm test

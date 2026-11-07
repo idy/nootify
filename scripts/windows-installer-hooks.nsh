@@ -7,12 +7,38 @@
 ;
 ; Only the bundled CLI determines task/process ownership. Never use taskkill by
 ; image name, delete another installation's task, or continue after a stop error.
+; Opt-in native CI diagnostics; never log environment values.
+!ifndef NOOTIFY_INSTALLER_HOOK_DIAGNOSTICS
+!if "$%NOOTIFY_INSTALLER_HOOK_DIAGNOSTICS%" == "1"
+  !define NOOTIFY_INSTALLER_HOOK_DIAGNOSTICS
+!endif
+!endif
+!ifdef NOOTIFY_INSTALLER_HOOK_DIAGNOSTICS
+!ifndef NOOTIFY_INSTALLER_HOOK_LOG
+!if "$%NOOTIFY_INSTALLER_HOOK_LOG%" != ""
+  !define NOOTIFY_INSTALLER_HOOK_LOG "$%NOOTIFY_INSTALLER_HOOK_LOG%"
+!else
+  !define NOOTIFY_INSTALLER_HOOK_LOG "$EXEDIR\nootify-installer-hook.log"
+!endif
+!endif
+!endif
+!macro NootifyInstallerTrace TEXT
+!ifdef NOOTIFY_INSTALLER_HOOK_DIAGNOSTICS
+  Push $R9
+  FileOpen $R9 "${NOOTIFY_INSTALLER_HOOK_LOG}" a
+  FileWrite $R9 "${TEXT}$\r$\n"
+  FileClose $R9
+  Pop $R9
+!endif
+!macroend
+
 ; Clear only this installer's process environment, before Node parses its options.
 ; Delete without reading/truncating the value. ERROR_ENVVAR_NOT_FOUND is already safe.
 !macro NootifyClearNodeVariable NAME
   Push $1
   System::Call 'kernel32::SetEnvironmentVariableW(w "${NAME}", p 0) i.r0 ?e'
   Pop $1
+  !insertmacro NootifyInstallerTrace "clear ${NAME}: result=$0 error=$1"
   ${If} $0 = 0
   ${AndIf} $1 != 203
     DetailPrint "Unable to clear ${NAME} for Nootify service management."
@@ -39,8 +65,10 @@
     !insertmacro NootifyClearNodeVariable NODE_ICU_DATA
     ; The CLI allows 150 seconds for serialized service management. Give it
     ; time to report failure itself before aborting replacement/deletion.
+    !insertmacro NootifyInstallerTrace "manage ${COMMAND}: invoking CLI"
     nsExec::ExecToLog /TIMEOUT=160000 '"$INSTDIR\node.exe" "$INSTDIR\service\dist\src\cli.js" ${COMMAND}'
     Pop $0
+    !insertmacro NootifyInstallerTrace "manage ${COMMAND}: result=$0"
     ${If} $0 != 0
       DetailPrint "Nootify ${COMMAND} failed ($0). Installed files have not been replaced or removed."
       SetErrorLevel 1
