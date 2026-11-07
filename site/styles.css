@@ -89,6 +89,8 @@ h1 { font-size: clamp(38px, 4.2vw, 60px); line-height: 1.09; letter-spacing: -.0
 .questions summary { padding: 17px 0; cursor: pointer; font-size: 16px; font-weight: 650; }
 .questions details:first-child summary { padding-top: 0; }
 .questions details p { margin: 0 0 22px; color: var(--idy-muted); font-size: 14px; }
+.community-section { padding-block: 36px 60px; border-top: 1px solid var(--idy-line); }
+.community-section > p { max-width: 64ch; margin-block: 18px 24px; color: var(--idy-muted); }
 .product-name, .idy-footer .idy-home { font-family: var(--idy-heading); }
 .conversation figcaption, .conversation-heading p, .client-name, .receipt, .release-stage, .release-file { font-family: var(--idy-small); }
 /* Keep the native selects usable in the single row when scripts are unavailable. */
