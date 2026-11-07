@@ -13,13 +13,18 @@ export interface EmbeddedTailscaleClient {
 }
 /** Ambient credentials, control servers and system-daemon configuration must never enroll this node. */
 export function embeddedEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  return Object.fromEntries(['HOME', 'TMPDIR', 'PATH', 'LANG', 'LC_ALL', 'SYSTEMROOT'].flatMap(key => env[key] ? [[key, env[key]!]] : []));
+  const allowed = new Set(['HOME', 'TMPDIR', 'PATH', 'LANG', 'LC_ALL', 'SYSTEMROOT', 'SYSTEMDRIVE', 'WINDIR', 'USERPROFILE', 'LOCALAPPDATA', 'APPDATA', 'TEMP', 'TMP']);
+  return Object.fromEntries(Object.entries(env).filter(([key, value]) => allowed.has(key.toUpperCase()) && value));
+}
+export function embeddedBinaryCandidates(platform: NodeJS.Platform = process.platform, arch = process.arch): string[] {
+  const cpu = arch === 'arm64' ? 'aarch64' : arch === 'x64' ? 'x86_64' : arch;
+  const target = platform === 'win32' ? `${cpu}-pc-windows-msvc` : platform === 'darwin' ? `${cpu}-apple-darwin` : `${cpu}-unknown-linux-gnu`;
+  const extension = platform === 'win32' ? '.exe' : '';
+  return [join(dirname(process.execPath), `nootify-tsnet${extension}`),
+    fileURLToPath(new URL(`../../src-tauri/binaries/nootify-tsnet-${target}${extension}`, import.meta.url))];
 }
 async function helperBinary(): Promise<string> {
-  const candidates = process.env.NOOTIFY_TSNET_BIN ? [resolve(process.env.NOOTIFY_TSNET_BIN)] : [
-    join(dirname(process.execPath), 'nootify-tsnet'),
-    fileURLToPath(new URL('../../src-tauri/binaries/nootify-tsnet-aarch64-apple-darwin', import.meta.url)),
-  ];
+  const candidates = process.env.NOOTIFY_TSNET_BIN ? [resolve(process.env.NOOTIFY_TSNET_BIN)] : embeddedBinaryCandidates();
   for (const binary of candidates) {
     try { await access(binary, constants.X_OK); return binary; } catch { /* Never fall back to the system Tailscale executable. */ }
   }
@@ -39,18 +44,18 @@ export class TsnetClient implements EmbeddedTailscaleClient {
   private current?: ProcessState;
   private startup?: Promise<void>;
   private sequence = 0;
-  constructor(private readonly directory: string, private readonly binary?: string) { this.directory = resolve(directory); }
+  constructor(private readonly directory: string, private readonly binary?: string | { file: string; args: string[] }) { this.directory = resolve(directory); }
   async start(target: string, exited: (error?: string) => void): Promise<void> {
     if (this.current) { await this.startup; return; }
-    const binary = this.binary ?? await helperBinary();
+    const command = typeof this.binary === 'object' ? this.binary : { file: this.binary ?? await helperBinary(), args: [] };
     try {
       await mkdir(this.directory, { recursive: true, mode: 0o700 });
       const directory = await lstat(this.directory);
       if (!directory.isDirectory() || directory.isSymbolicLink()) throw new Error('unsafe directory');
       await chmod(this.directory, 0o700);
     } catch { throw new Error('state_unavailable'); }
-    const child = spawn(binary, ['--state-dir', this.directory, '--target', target, '--hostname', 'nootify'], {
-      stdio: ['pipe', 'pipe', 'pipe'], env: embeddedEnvironment(process.env),
+    const child = spawn(command.file, [...command.args, '--state-dir', this.directory, '--target', target, '--hostname', 'nootify'], {
+      stdio: ['pipe', 'pipe', 'pipe'], env: embeddedEnvironment(process.env), windowsHide: true,
     });
     let closed!: () => void;
     const run: ProcessState = { child, pending: new Map(), stopped: false, closed: new Promise(resolve => { closed = resolve; }) };

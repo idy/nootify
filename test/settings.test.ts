@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import childProcess, { type ExecFileException } from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+import { assertMode } from './platform-fixtures.js';
 import { once } from 'node:events';
 import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import type { AddressInfo } from 'node:net';
@@ -104,7 +107,7 @@ test('a device login shows the code, keeps the token private and refreshes after
   assert.deepEqual(auth.login(), { status: 'idle' });
   assert.deepEqual(await auth.account(), { signedIn: true, login: 'octo' });
   assert.equal((await State.open(dir)).settings.github_token, github.token);
-  assert.equal((await stat(join(dir, 'state.sqlite'))).mode & 0o777, 0o600);
+  await assertMode(join(dir, 'state.sqlite'), 0o600);
   assert.deepEqual(reports.map(record => record.status), ['github_login']);
   assert.ok(!JSON.stringify(reports).includes(github.token));
 });
@@ -207,7 +210,7 @@ test('Feishu credentials are verified before they replace the running bot', asyn
   assert.equal(configured.length, 2, 'an explicit save retains the secret and reconnects even unchanged credentials');
   await assert.rejects(settings.saveLark('cli_fedcba9876543210', ''), /App Secret/, 'another app never inherits this secret');
   assert.equal((await State.open(dir)).settings.lark_app_secret, 'right-secret');
-  assert.equal((await stat(join(dir, 'state.sqlite'))).mode & 0o777, 0o600);
+  await assertMode(join(dir, 'state.sqlite'), 0o600);
 });
 
 test('Feishu requires both credentials before Settings can report a connection', async t => {
@@ -380,6 +383,32 @@ test('an unreadable MCP file leaves saved credentials in place when clearing', a
   assert.equal(state.settings.lark_app_secret, 'saved-secret');
 });
 
+test('Windows reveal accepts Explorer handoff exit 1 and still reports launch failures', async t => {
+  const f = await harness(t);
+  const settings = new SettingsService({ state: f.state, lark: f.lark, pulls: f.pulls, agents: f.agents,
+    github: new GitHubAuth(f.state, () => {}, () => {}, 'client-1') });
+  let failure: ExecFileException | null = null;
+  const commands: { file: string; args: string[]; options: unknown }[] = [];
+  const exec = (file: string, args: string[], options: unknown, callback: (error: ExecFileException | null, stdout: string, stderr: string) => void) => {
+    commands.push({ file, args, options });
+    queueMicrotask(() => callback(failure, '', ''));
+    return {};
+  };
+  t.mock.property(childProcess, 'execFile', exec as unknown as typeof childProcess.execFile);
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  t.mock.property(process, 'platform', 'win32');
+  await settings.reveal();
+  failure = Object.assign(new Error('Explorer handed the selection to the shell'), { code: 1 });
+  await settings.reveal();
+  for (const outcome of [{ code: 2 }, { code: 'ENOENT' }, { code: 1, killed: true }, { code: 1, signal: 'SIGTERM' as const }]) {
+    failure = Object.assign(new Error('Reveal failed'), outcome);
+    await assert.rejects(settings.reveal(), error => error === failure);
+  }
+  assert.deepEqual(commands[0], { file: join(process.env.SystemRoot ?? 'C:\\Windows', 'explorer.exe'),
+    args: ['/select,', join(f.dir, 'exports')], options: { windowsHide: true } });
+});
+
 test('an export keeps its secrets in a private file and keeps only the newest ten', async t => {
   const { lark, state, settings, revealed } = await harness(t);
   await assert.doesNotReject(settings.reveal());
@@ -389,8 +418,8 @@ test('an export keeps its secrets in a private file and keeps only the newest te
   state.backends.set('opencode', { url: 'http://127.0.0.1:4096', password: 'backend-secret' });
   const { path, summary } = await settings.exportConfig();
   assert.ok(!(await readFile(path, 'utf8')).includes('gho_stays-here'), 'the GitHub sign-in is not part of an export');
-  assert.equal((await stat(path)).mode & 0o777, 0o600);
-  assert.equal((await stat(dirname(path))).mode & 0o777, 0o700);
+  await assertMode(path, 0o600);
+  await assertMode(dirname(path), 0o700);
   const file = JSON.parse(await readFile(path, 'utf8'));
   assert.deepEqual([file.format, file.version], ['nootify-config', 1]);
   assert.deepEqual(file.lark, { app_id: appId, app_secret: 'export-secret', recipient_open_id: 'ou_owner', connection_type: 'bot' });
@@ -427,9 +456,9 @@ test('an exported file restores another installation, after a preview that chang
   assert.deepEqual(reopened.settings, { lark_recipient_open_id: 'ou_owner', lark_app_id: appId, lark_app_secret: 'export-secret', lark_connection_type: 'bot' });
   assert.equal(reopened.backends.get('opencode')?.password, 'backend-secret');
   assert.deepEqual(JSON.parse(await readFile(join(target.dir, 'pulls.config.json'), 'utf8')), { ownedOwners: ['acme'] });
-  assert.equal((await stat(join(target.dir, 'pulls.config.json'))).mode & 0o777, 0o600);
+  await assertMode(join(target.dir, 'pulls.config.json'), 0o600);
   assert.deepEqual(await target.pulls.preferences(), { config: { ownedOwners: ['acme'] }, follow: [{ repository: 'acme/widgets', follow: true }] });
-  assert.equal((await stat(join(target.dir, 'repo-preferences.json'))).mode & 0o777, 0o600);
+  await assertMode(join(target.dir, 'repo-preferences.json'), 0o600);
 });
 
 test('Trae and WorkBuddy agent choices survive configuration export and import', async t => {

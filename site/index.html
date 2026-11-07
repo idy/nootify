@@ -6,9 +6,9 @@
   <meta name="color-scheme" content="light dark">
   <meta name="theme-color" content="#f7f9fc">
   <title>Nootify — your coding session, one reply away</title>
-  <meta name="description" content="Follow your coding sessions in Feishu and send replies back to Claude Code, Codex, and OpenCode on your Mac. Nootify also keeps your GitHub pull requests in view.">
+  <meta name="description" content="Follow your coding sessions in Feishu and send replies back to Claude Code, Codex, and OpenCode on Windows or macOS. Nootify also keeps your GitHub pull requests in view.">
   <meta property="og:title" content="Nootify — your coding session, one reply away">
-  <meta property="og:description" content="Agent progress in Feishu. Replies back to your existing session. A native macOS app for keeping development conversations close.">
+  <meta property="og:description" content="Agent progress in Feishu. Replies back to your existing session. A native Windows and macOS app for keeping development conversations close.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://nootify.idy.dev/">
   <link rel="canonical" href="https://nootify.idy.dev/">
@@ -56,12 +56,13 @@
       <div class="hero-copy">
         <div class="product-name"><span class="app-icon"><img src="brand.svg" width="40" height="40" alt=""></span><span>Nootify</span></div>
         <h1 id="hero-title" data-i18n-html="heroTitle">Your coding session.<br>One reply away.</h1>
-        <p class="hero-description" data-i18n="heroDescription">Follow Claude Code, Codex, and OpenCode from Feishu. Get progress in a conversation’s own group, then send your reply back to the existing session on your Mac.</p>
+        <p class="hero-description" data-i18n="heroDescription">Follow Claude Code, Codex, and OpenCode from Feishu. Get progress in a conversation’s own group, then send your reply back to the existing session on your computer.</p>
         <div class="hero-actions">
           <a class="button primary" data-download href="https://github.com/idy/nootify/releases">Browse releases</a>
+          <a class="text-link" data-download-other href="https://github.com/idy/nootify/releases">Windows downloads</a>
           <a class="text-link" href="#get-started" data-i18n="setupGuide">See how to get started</a>
         </div>
-        <p class="platform-note" data-i18n="platforms">Apple Silicon Macs, macOS 13.5 or later.</p>
+        <p class="platform-note" data-i18n="platforms">Windows 10/11 x64, or Apple Silicon Macs with macOS 13.5+.</p>
       </div>
       <figure class="conversation" aria-labelledby="conversation-title">
         <div class="conversation-heading">
@@ -74,26 +75,26 @@
           <div class="message reply-message"><span class="sender" data-i18n="you">You</span><p data-i18n="sampleReply">Check the empty state too.</p></div>
           <div class="receipt"><span aria-hidden="true">↳</span><p data-i18n="sampleReceipt">Your reply goes back to the same local session.</p></div>
         </div>
-        <figcaption data-i18n="sampleNote">An example conversation. Your Mac, agent session, and configured Feishu bot need to be running.</figcaption>
+        <figcaption data-i18n="sampleNote">An example conversation. Your computer, agent session, and configured Feishu bot need to be running.</figcaption>
       </figure>
     </section>
 
     <section class="features-section wrap" id="how-it-works" aria-labelledby="features-title">
-      <div class="section-heading"><h2 id="features-title" data-i18n-html="featuresTitle">Keep the context.<br>Carry on the conversation.</h2><p data-i18n="featuresIntro">Nootify connects the work already happening on your Mac with the place you check for updates.</p></div>
+      <div class="section-heading"><h2 id="features-title" data-i18n-html="featuresTitle">Keep the context.<br>Carry on the conversation.</h2><p data-i18n="featuresIntro">Nootify connects the work already happening on your computer with the place you check for updates.</p></div>
       <dl class="features-list">
         <div><dt data-i18n="groupsTitle">One conversation, its own group.</dt><dd data-i18n="groupsDescription">Agents post progress, blockers, and results to a dedicated Feishu group. The session name stays with each update, so parallel tasks are easy to tell apart.</dd></div>
         <div><dt data-i18n="repliesTitle">Reply to the session you started.</dt><dd data-i18n="repliesDescription">Replies are routed to the matching Claude Code, Codex, or OpenCode session. Nootify uses existing clients and preserves their conversation context.</dd></div>
         <div><dt data-i18n="pullsTitle">See which PR needs attention.</dt><dd data-i18n="pullsDescription">Keep your repositories’ pull requests and upstream contributions in separate queues. Check reviews, CI failures, and merge conflicts without changing anything on GitHub.</dd></div>
-        <div><dt data-i18n="localTitle">At home in your menu bar.</dt><dd data-i18n="localDescription">A native macOS window and menu-bar controls sit above an independent local service. Closing the window keeps the service available; progress and routing logs remain easy to inspect.</dd></div>
+        <div><dt data-i18n="localTitle">At home in your system tray.</dt><dd data-i18n="localDescription">A native window and system-tray controls sit above an independent local service. Closing the window keeps the service available; progress and routing logs remain easy to inspect.</dd></div>
       </dl>
     </section>
 
     <section class="setup-section wrap" id="get-started" aria-labelledby="setup-title">
-      <div class="section-heading"><h2 id="setup-title" data-i18n-html="setupTitle">A small app.<br>A shorter feedback loop.</h2><p data-i18n="setupIntro">The macOS app includes its service and Node.js runtime. You bring your coding client and a Feishu bot.</p></div>
+      <div class="section-heading"><h2 id="setup-title" data-i18n-html="setupTitle">A small app.<br>A shorter feedback loop.</h2><p data-i18n="setupIntro">The Windows and macOS apps include their service and Node.js runtime. You bring your coding client and a Feishu bot.</p></div>
       <ol class="setup-steps">
-        <li><h3 data-i18n="installTitle">Install on your Mac.</h3><p data-i18n="installDescription">Download the DMG, drag Nootify into Applications, then open it from there. On a new installation, the app installs and starts its background service.</p></li>
+        <li><h3 data-i18n="installTitle">Install on your computer.</h3><p data-i18n="installDescription">On Windows, run the x64 installer. On macOS, drag Nootify from the DMG into Applications. The first launch installs and starts your background service.</p></li>
         <li><h3 data-i18n="connectTitle">Connect Feishu and your clients.</h3><p data-i18n="connectDescription">Configure a Feishu bot and its chat permissions, then enable the clients you use on the Agents page. Follow the setup guide for credentials, trusted senders, and client connections.</p></li>
-        <li><h3 data-i18n="conversationStepTitle">Start a conversation.</h3><p data-i18n="conversationStepDescription">New agent conversations receive instructions to open a Feishu group and post updates. Reply in that group to continue the matching session on your Mac.</p></li>
+        <li><h3 data-i18n="conversationStepTitle">Start a conversation.</h3><p data-i18n="conversationStepDescription">New agent conversations receive instructions to open a Feishu group and post updates. Reply in that group to continue the matching session on your computer.</p></li>
       </ol>
       <a class="text-link" href="https://github.com/idy/nootify#agents-and-feishu-updates" data-i18n="fullSetup">Read the complete setup guide</a>
     </section>
@@ -101,14 +102,15 @@
     <section class="download-section wrap" id="download" aria-labelledby="download-title">
       <div class="download-copy">
         <h2 id="download-title" data-i18n="downloadTitle">Bring your sessions along.</h2>
-        <p data-i18n="downloadDescription">The current macOS distribution is for Apple Silicon. Version and installer links below are loaded directly from GitHub Releases.</p>
-        <p class="signing-note" data-i18n="signingNote">Public builds are ad-hoc signed and not notarized. Review the release notes and macOS Privacy & Security guidance before your first launch.</p>
+        <p data-i18n="downloadDescription">Installers are available for Windows x64 and macOS Apple Silicon. Version and available installer links below are loaded directly from GitHub Releases.</p>
+        <p class="signing-note" data-i18n="signingNote">macOS builds are ad-hoc signed and not notarized. Windows installers are not code-signed. Review the release notes and system guidance before your first installation.</p>
       </div>
       <div class="release-panel">
         <p class="release-stage" data-release-stage>GitHub Releases</p>
         <p class="release-version" data-release-version hidden></p>
         <p class="release-file" data-release-file hidden></p>
         <a class="button primary" data-download href="https://github.com/idy/nootify/releases">Browse releases</a>
+        <a class="text-link" data-download-other href="https://github.com/idy/nootify/releases">Windows downloads</a>
         <a class="text-link" data-release-link href="https://github.com/idy/nootify/releases" data-i18n="releaseNotes">Release notes and all downloads</a>
         <p class="release-status" data-release-status role="status" aria-live="polite">Checking the latest release…</p>
         <noscript><p>JavaScript is off. Open GitHub Releases for the latest installer.</p></noscript>
@@ -119,9 +121,9 @@
       <h2 id="questions-title" data-i18n="questionsTitle">A few things to know.</h2>
       <div class="questions">
         <details><summary data-i18n="modelQuestion">Does Nootify run a model for me?</summary><p data-i18n="modelAnswer">No. It connects to the Claude Code, Codex, or OpenCode client you already run. It does not call a model API or replace your coding agent.</p></details>
-        <details><summary data-i18n="offlineQuestion">Can I reply while my Mac is offline?</summary><p data-i18n="offlineAnswer">The local service and the target session must be available. Nootify does not revive archived or inactive sessions, and a delivered message does not automatically approve a permission request.</p></details>
-        <details><summary data-i18n="dataQuestion">Where does the data go?</summary><p data-i18n="dataAnswer">Progress updates and replies travel through your Feishu group. Service state, routing information, and credentials are stored locally on your Mac. The public website does not connect to your local service.</p></details>
-        <details><summary data-i18n="quitQuestion">What happens when I close the app?</summary><p data-i18n="quitAnswer">Closing the window hides it. Quitting the desktop app leaves the independent background service running. Service controls in the menu bar let you manage it separately.</p></details>
+        <details><summary data-i18n="offlineQuestion">Can I reply while my computer is offline?</summary><p data-i18n="offlineAnswer">The local service and the target session must be available. Nootify does not revive archived or inactive sessions, and a delivered message does not automatically approve a permission request.</p></details>
+        <details><summary data-i18n="dataQuestion">Where does the data go?</summary><p data-i18n="dataAnswer">Progress updates and replies travel through your Feishu group. Service state, routing information, and credentials are stored locally on your computer. The public website does not connect to your local service.</p></details>
+        <details><summary data-i18n="quitQuestion">What happens when I close the app?</summary><p data-i18n="quitAnswer">Closing the window hides it. Quitting the desktop app leaves the independent background service running. Service controls in the system tray let you manage it separately.</p></details>
       </div>
     </section>
   </main>

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { setImmediate as nextTurn } from 'node:timers/promises';
+import { setImmediate as nextTurn, setTimeout as delay } from 'node:timers/promises';
 import { test, type TestContext } from 'node:test';
 import { createTelegramTransport, type TelegramTransportOptions } from '../src/telegram.js';
 import type { ChatMessage, TelegramConfig } from '../src/chat-transport.js';
@@ -20,8 +20,13 @@ function gate<T>() {
   return { promise, resolve, reject };
 }
 async function until(predicate: () => boolean): Promise<void> {
-  for (let attempt = 0; attempt < 100; attempt++) { if (predicate()) return; await nextTurn(); }
-  assert.fail('The expected fixture operation did not occur.');
+  const deadline = performance.now() + 2000;
+  do {
+    if (predicate()) return;
+    // setImmediate can spin through 100 turns before a Windows timer is due.
+    await delay(1);
+  } while (performance.now() < deadline);
+  assert.fail('The expected fixture operation did not occur within two seconds.');
 }
 function message(update_id: number, overrides: Record<string, unknown> = {}, thread = 51) {
   return { update_id, message: { message_id: update_id + 1000, from: human, chat, message_thread_id: thread, is_topic_message: true, text: `command ${update_id}`, ...overrides } };
@@ -319,7 +324,7 @@ test('Telegram request deadlines abort hung fetches and expose only safe errors'
   assert.ok(signal?.aborted);
   const waiting = gate<void>(); let enteredWait = false; const statuses: string[] = [];
   const { transport, calls } = await fixture(t, undefined, {
-    pollTimeoutMs: 2, wait: () => { enteredWait = true; return waiting.promise; },
+    pollTimeoutMs: 40, wait: () => { enteredWait = true; return waiting.promise; },
   });
   await transport.start(async () => {}, status => statuses.push(status));
   await until(() => enteredWait);

@@ -2,17 +2,27 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test, type TestContext } from 'node:test';
 import { LarkHistoryBuffer, type LarkHistoryEntry, type LarkHistoryMessage } from '../src/lark-history-buffer.js';
+import { assertMode } from './platform-fixtures.js';
 
 const START = 1_700_000_000_000;
-async function directory(t: TestContext): Promise<string> {
+type Cleanup = () => Promise<void>;
+async function directory(t: TestContext, cleanups: Cleanup[] = []): Promise<string> {
   const path = await mkdtemp(join(tmpdir(), 'nootify-history-buffer-'));
-  t.after(() => rm(path, { recursive: true, force: true }));
+  t.after(async () => {
+    // After-hooks run FIFO and stop on error; close every handle before Windows
+    // attempts to remove its files, even when another resource's cleanup fails.
+    const results = await Promise.allSettled(cleanups.map(async close => close()));
+    try {
+      const errors = results.filter(result => result.status === 'rejected').map(result => result.reason);
+      if (errors.length) throw new AggregateError(errors, 'History fixture cleanup failed');
+    } finally { await rm(path, { recursive: true, force: true }); }
+  });
   return path;
 }
 const message = (id: string, time: number, content = id): LarkHistoryMessage => ({
@@ -21,8 +31,8 @@ const message = (id: string, time: number, content = id): LarkHistoryMessage => 
 });
 const entry = (id: string, time: number, cursorId = 'chat', dispatch = true): LarkHistoryEntry => ({ cursor_id: cursorId, item: message(id, time), dispatch });
 async function open(t: TestContext): Promise<{ path: string; buffer: LarkHistoryBuffer; file: string }> {
-  const path = await directory(t); const buffer = await LarkHistoryBuffer.open(path);
-  t.after(() => buffer.close());
+  const cleanups: Cleanup[] = []; const path = await directory(t, cleanups);
+  const buffer = await LarkHistoryBuffer.open(path); cleanups.push(() => buffer.close());
   const files = await readdir(path); assert.equal(files.length, 1);
   return { path, buffer, file: join(path, files[0]) };
 }
@@ -122,13 +132,14 @@ test('keyset reads remain incremental when later provider pages append newer mes
 });
 
 test('spools use unique private files, in-memory journals and idempotent close removes only its own file', async t => {
-  const path = await directory(t); const first = await LarkHistoryBuffer.open(path); const second = await LarkHistoryBuffer.open(path);
-  t.after(() => first.close()); t.after(() => second.close());
+  const cleanups: Cleanup[] = []; const path = await directory(t, cleanups);
+  const first = await LarkHistoryBuffer.open(path); cleanups.push(() => first.close());
+  const second = await LarkHistoryBuffer.open(path); cleanups.push(() => second.close());
   const files = await readdir(path); assert.equal(files.length, 2);
-  assert.equal((await stat(path)).mode & 0o777, 0o700);
+  await assertMode(path, 0o700);
   for (const file of files) {
     assert.match(file, new RegExp(`^\\.poll-history-${process.pid}-[0-9a-f-]{36}\\.sqlite$`));
-    assert.equal((await stat(join(path, file))).mode & 0o777, 0o600);
+    await assertMode(join(path, file), 0o600);
   }
   first.append([entry('first', START)]); second.append([entry('second', START)]);
   assert.deepEqual((await readdir(path)).sort(), files.sort(), 'scratch operations should not leave WAL or journal files');
@@ -201,12 +212,12 @@ test('invalid page limits, cursors and provider times fail with scratch cleanup'
 });
 
 test('orphan cleanup removes only strict regular spool files owned by provably dead processes', async t => {
-  const path = await directory(t);
+  const cleanups: Cleanup[] = []; const path = await directory(t, cleanups);
   const dead = spawn(process.execPath, ['-e', 'process.exit(0)'], { cwd: path, env: {}, stdio: 'ignore' });
   const [exitCode] = await once(dead, 'close'); assert.equal(exitCode, 0); assert.ok(dead.pid);
   assert.throws(() => process.kill(dead.pid!, 0), { code: 'ESRCH' });
   const live = spawn(process.execPath, ['-e', "process.stdout.write('ready'); setInterval(() => {}, 1000)"], { cwd: path, env: {}, stdio: ['ignore', 'pipe', 'ignore'] });
-  t.after(async () => { if (live.exitCode === null && live.signalCode === null) { const closed = once(live, 'close'); live.kill('SIGKILL'); await closed; } });
+  cleanups.push(async () => { if (live.exitCode === null && live.signalCode === null) { const closed = once(live, 'close'); live.kill('SIGKILL'); await closed; } });
   await once(live.stdout!, 'data'); assert.ok(live.pid);
   const deadName = `.poll-history-${dead.pid}-${randomUUID()}.sqlite`;
   const liveName = `.poll-history-${live.pid}-${randomUUID()}.sqlite`;
@@ -214,7 +225,8 @@ test('orphan cleanup removes only strict regular spool files owned by provably d
   const unrelated = ['state.sqlite', '.poll-history-not-a-pid.sqlite', `.poll-history-${dead.pid}-not-a-uuid.sqlite`, `${deadName}-wal`, `.poll-history-0-${randomUUID()}.sqlite`];
   for (const name of [deadName, liveName, currentName, ...unrelated]) await writeFile(join(path, name), 'fixture scratch data', { mode: 0o600 });
   await utimes(join(path, liveName), new Date(0), new Date(0)); await utimes(join(path, currentName), new Date(0), new Date(0));
-  const linkName = `.poll-history-${dead.pid}-${randomUUID()}.sqlite`; await symlink(join(path, 'state.sqlite'), join(path, linkName));
+  const linkName = `.poll-history-${dead.pid}-${randomUUID()}.sqlite`;
+  await symlink(process.platform === 'win32' ? path : join(path, 'state.sqlite'), join(path, linkName), process.platform === 'win32' ? 'junction' : 'file');
   const folderName = `.poll-history-${dead.pid}-${randomUUID()}.sqlite`;
   await mkdir(join(path, folderName));
   await LarkHistoryBuffer.cleanupOrphans(path);

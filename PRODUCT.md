@@ -1,14 +1,14 @@
 # Nootify product context
 
-Nootify is a macOS companion for local coding-agent conversations. A per-user TypeScript service bridges Feishu, Slack, and Telegram messages to existing agent sessions and tracks GitHub pull requests. The desktop window and tray manage this service; the service does not create or unarchive agent sessions.
+Nootify is a Windows and macOS companion for local coding-agent conversations. A per-user TypeScript service bridges Feishu, Slack, and Telegram messages to existing agent sessions and tracks GitHub pull requests. The desktop window and tray manage this service; the service does not create or unarchive agent sessions.
 
 ## Audience and operating scene
 
-The owner configures notification channels and trusted recipients on their Mac, then follows agent progress and replies through messaging apps. Settings are an Operate surface: quick, familiar controls and an accurate explanation of connection, permissions, and routing matter more than visual expression.
+The owner configures notification channels and trusted recipients on their computer, then follows agent progress and replies through messaging apps. Settings are an Operate surface: quick, familiar controls and an accurate explanation of connection, permissions, and routing matter more than visual expression.
 
 ## Existing commitments
 
-Preserve the application’s penguin identity, local system typography, compact neutral settings, blue action color, and system light/dark appearance. Support Simplified Chinese and English. Configuration edits, secret reveal, and contact directories remain local to the Mac; tailnet access does not grant those capabilities.
+Preserve the application’s penguin identity, local system typography, compact neutral settings, blue action color, and system light/dark appearance. Support Simplified Chinese and English. Configuration edits, secret reveal, and contact directories remain local to the computer; tailnet access does not grant those capabilities.
 
 ## Feishu recipient selection
 

@@ -3,13 +3,25 @@
 const { t } = IdySite;
 let currentRelease;
 let releaseFailed = false;
+const windows = /win/i.test(navigator.userAgentData?.platform || navigator.platform || navigator.userAgent || "");
+const platforms = {
+  mac: { installer: /^Nootify_.+_(?:aarch64|arm64)\.dmg$/i, download: "downloadMac", browse: "macDownloads", missing: "installerMissing" },
+  windows: { installer: /^Nootify_.+_x64-setup\.exe$/i, download: "downloadWindows", browse: "windowsDownloads", missing: "windowsInstallerMissing" },
+};
 
 function renderRelease() {
-  const installer = currentRelease && IdySite.asset(currentRelease, /^Nootify_.+_(?:aarch64|arm64)\.dmg$/i);
+  const platform = windows ? platforms.windows : platforms.mac;
+  const other = windows ? platforms.mac : platforms.windows;
+  const installer = currentRelease && IdySite.asset(currentRelease, platform.installer);
+  const otherInstaller = currentRelease && IdySite.asset(currentRelease, other.installer);
   const releaseUrl = currentRelease?.html_url || "https://github.com/idy/nootify/releases";
   for (const link of document.querySelectorAll("[data-download]")) {
     link.href = installer ? installer.browser_download_url : releaseUrl;
-    link.textContent = t(installer ? "downloadMac" : "browseReleases");
+    link.textContent = t(installer ? platform.download : "browseReleases");
+  }
+  for (const link of document.querySelectorAll("[data-download-other]")) {
+    link.href = otherInstaller ? otherInstaller.browser_download_url : releaseUrl;
+    link.textContent = t(otherInstaller ? other.download : other.browse);
   }
   for (const link of document.querySelectorAll("[data-release-link]")) link.href = releaseUrl;
   for (const node of document.querySelectorAll("[data-release-stage]")) {
@@ -25,7 +37,7 @@ function renderRelease() {
   }
   for (const node of document.querySelectorAll("[data-release-status]")) {
     node.textContent = t(releaseFailed ? "releaseUnavailable" : currentRelease
-      ? (installer ? "releaseReady" : "installerMissing") : "loadingRelease");
+      ? (installer ? "releaseReady" : platform.missing) : "loadingRelease");
   }
 }
 

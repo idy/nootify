@@ -1,13 +1,19 @@
 import { fileURLToPath } from 'node:url';
 import type { ChatDelivery } from './chat-transport.js';
 import type { LarkDelivery } from './types.js';
+import { shellCommand, shellForClient, shellQuote } from './shell.js';
 
 export interface ForwardingOptions { port?: number; command?: string[] }
-const quote = (value: string): string => `'${value.replace(/'/g, `'"'"'`)}'`;
-const cli = (command?: string[]): string => (command ?? [process.execPath, fileURLToPath(new URL('./cli.js', import.meta.url))]).map(quote).join(' ');
+function commands(adapter: string, platform: NodeJS.Platform, command?: string[]) {
+  const shell = shellForClient(adapter, platform);
+  return {
+    base: shellCommand(command ?? [process.execPath, fileURLToPath(new URL('./cli.js', import.meta.url))], platform, false, shell),
+    quote: (value: string): string => shellQuote(value, platform, false, shell),
+  };
+}
 
-export function forwardedLarkMessage(delivery: LarkDelivery, content: string, stateDir: string, port = 9417, command?: string[]): string {
-  const base = cli(command);
+export function forwardedLarkMessage(delivery: LarkDelivery, content: string, stateDir: string, port = 9417, command?: string[], platform: NodeJS.Platform = process.platform): string {
+  const { base, quote } = commands(delivery.adapter, platform, command);
   const context = `--state-dir ${quote(stateDir)} --port ${port} --message-id ${quote(delivery.message_id)}`;
   return [
     '【来自飞书用户的消息】',
@@ -26,9 +32,9 @@ export function forwardedLarkMessage(delivery: LarkDelivery, content: string, st
   ].join('\n');
 }
 
-export function forwardedChatMessage(delivery: ChatDelivery, content: string, directory: string, port = 9417, command?: string[]): string {
+export function forwardedChatMessage(delivery: ChatDelivery, content: string, directory: string, port = 9417, command?: string[], platform: NodeJS.Platform = process.platform): string {
   const name = delivery.channel === 'slack' ? 'Slack' : 'Telegram';
-  const base = cli(command);
+  const { base, quote } = commands(delivery.adapter, platform, command);
   const args = `--state-dir ${quote(directory)} --port ${port} --message-id ${quote(delivery.id)}`;
   return [
     `【来自${name}用户的消息】`,

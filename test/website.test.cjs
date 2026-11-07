@@ -17,9 +17,9 @@ function release({ prerelease = false, assets } = {}) {
 }
 const response = (body, status = 200) => ({ ok: status < 400, status, json: async () => body });
 
-async function render(fetcher) {
+async function render(fetcher, platform = "MacIntel") {
   const fields = {};
-  for (const name of ["download", "release-link", "release-stage", "release-version", "release-file", "release-status"]) {
+  for (const name of ["download", "download-other", "release-link", "release-stage", "release-version", "release-file", "release-status"]) {
     fields[`[data-${name}]`] = Array.from({ length: name === "download" ? 2 : 1 }, () => ({ href: `${repo}/releases`, textContent: "", hidden: false }));
   }
   const textNodes = [];
@@ -45,7 +45,7 @@ async function render(fetcher) {
       addEventListener(type, callback) { listeners.set(type, [...(listeners.get(type) || []), callback]); },
       dispatchEvent(event) { for (const callback of listeners.get(event.type) || []) callback(event); },
     },
-    navigator: { languages: ["en-US"] },
+    navigator: { languages: ["en-US"], platform },
     localStorage: { getItem: () => null, setItem() {} },
     matchMedia: () => ({ matches: false, addEventListener() {} }),
     addEventListener: (type, callback) => { events[type] = callback; },
@@ -148,4 +148,41 @@ test("header navigation and repository action have bilingual accessible labels",
   assert.ok(navigation.every(node => node.getAttribute("aria-label") === "主导航"));
   page.language("en");
   assert.equal(star.getAttribute("aria-label"), "Star Nootify on GitHub (opens in a new tab)");
+});
+
+test("Windows selects the x64 installer, with Apple Silicon still directly available", async () => {
+  const selected = release();
+  const exe = { name: "Nootify_2.0.0_x64-setup.exe", state: "uploaded", size: 12000000,
+    browser_download_url: `${repo}/releases/download/v2.0.0/Nootify_2.0.0_x64-setup.exe` };
+  selected.assets.push({ ...exe, name: "Nootify_2.0.0_arm64-setup.exe" },
+    { ...exe, name: "Nootify_2.0.0_x64-setup.exe.zip" }, exe);
+  const page = await render(async () => response(selected), "Win32");
+  assert.equal(page.node("download").href, exe.browser_download_url);
+  assert.equal(page.node("download").textContent, "Download for Windows x64");
+  assert.equal(page.node("download-other").href, selected.assets[2].browser_download_url);
+  assert.match(page.node("release-file").textContent, /x64-setup\.exe \(12\.0 MB\)/);
+  page.language("zh");
+  assert.equal(page.node("download").textContent, "下载 Windows x64 版");
+  assert.equal(page.node("download-other").textContent, "下载 Apple Silicon 版");
+});
+
+test("a missing Windows installer never silently downloads a Mac installer", async () => {
+  const selected = release();
+  const page = await render(async () => response(selected), "Win32");
+  assert.equal(page.node("download").href, selected.html_url);
+  assert.equal(page.node("download").textContent, "Browse releases");
+  assert.match(page.node("release-status").textContent, /no Windows x64 installer/);
+  assert.equal(page.node("release-file").hidden, true);
+  assert.equal(page.node("download-other").href, selected.assets[2].browser_download_url);
+});
+
+test("Mac visitors can directly select a verified Windows installer", async () => {
+  const selected = release();
+  const exe = { name: "Nootify_2.0.0_x64-setup.exe", state: "uploaded", size: 12000000,
+    browser_download_url: `${repo}/releases/download/v2.0.0/Nootify_2.0.0_x64-setup.exe` };
+  selected.assets.push(exe);
+  const page = await render(async () => response(selected));
+  assert.equal(page.node("download").href, selected.assets[2].browser_download_url);
+  assert.equal(page.node("download-other").href, exe.browser_download_url);
+  assert.equal(page.node("download-other").textContent, "Download for Windows x64");
 });

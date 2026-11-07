@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { createServer as createHttpServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -18,10 +18,11 @@ import { ApiError, assertMetadata, bindingToken, ensureAnnouncement, ensureBindi
 import type { LarkApi } from '../src/lark-metadata.js';
 import type { RemoteBinding, ServiceModule } from '../src/types.js';
 import type { SessionCatalog } from '../src/local-sessions.js';
+import { assertMode, inboxPath } from './platform-fixtures.js';
 
 function catalogFor(state: State): SessionCatalog {
   return {
-    async inspect(id) { const session = state.sessions.get(id); return session && { ...session, availability: 'active' as const }; },
+    async inspect(id) { const session = state.sessions.get(id); return session && { ...session, availability: 'active' as const, runtime_pid: process.pid }; },
   };
 }
 
@@ -39,7 +40,7 @@ async function temporary(t: TestContext): Promise<string> {
   t.after(() => rm(dir, { recursive: true, force: true })); return dir;
 }
 async function inbox(t: TestContext, dir: string): Promise<{ path: string; messages: string[] }> {
-  const path = join(dir, 'inbox.sock');
+  const path = inboxPath(dir);
   const messages: string[] = [];
   const server = createServer(socket => { socket.setEncoding('utf8'); socket.on('data', data => messages.push(data.toString())); socket.on('end', () => socket.end()); });
   server.listen(path); await once(server, 'listening'); t.after(() => server.close()); return { path, messages };
@@ -122,13 +123,13 @@ test('private state persists registrations across restarts and omits credentials
   assert.equal(reopened.token, state.token);
   assert.ok(!JSON.stringify(reopened.publicSessions()).includes('private-test-token'));
   assert.ok(!JSON.stringify(reopened.publicSessions()).includes('socket_path'));
-  assert.equal((await stat(join(dir, 'state.sqlite'))).mode & 0o777, 0o600);
-  assert.equal((await stat(join(dir, 'auth-token'))).mode & 0o777, 0o600);
+  await assertMode(join(dir, 'state.sqlite'), 0o600);
+  await assertMode(join(dir, 'auth-token'), 0o600);
 });
 
 test('inbox frames carry the real registered token without asserting a permission mode', async t => {
   const dir = await temporary(t); const target = await inbox(t, dir);
-  assert.deepEqual(await writeInbox(target.path, 'marker', 'test-token'), { status: 'socket_written' });
+  assert.deepEqual(await writeInbox(target.path, 'marker', 'test-token', 5000, process.pid), { status: 'socket_written' });
   const frames = target.messages.join('').trim().split('\n').map(line => JSON.parse(line) as Record<string, unknown>);
   assert.deepEqual(frames[0], { type: 'auth', token: 'test-token' });
   assert.deepEqual(frames[1], { type: 'user', message: { role: 'user', content: 'marker' } });
@@ -174,7 +175,10 @@ test('HTTP host protects APIs, serves health, supports unrelated modules and typ
   assert.deepEqual(await client.listSessions(), []);
   assert.equal((await client.sendMessage(binding.session_id, 'typed client marker')).status, 'socket_written');
   assert.equal((await client.listSessions())[0].session_id, binding.session_id);
-  assert.ok(!JSON.stringify(await client.listSessions()).includes('private-test-token'));
+  const observed = JSON.stringify(await client.listSessions());
+  for (const privateField of ['private-test-token', 'socket_path', 'socket_token', 'runtime_pid']) assert.ok(!observed.includes(privateField));
+  const persisted = JSON.stringify([...(await State.open(dir)).sessions.values()]);
+  assert.ok(!persisted.includes('runtime_pid'), 'runtime PIDs are transient delivery metadata');
   assert.match(target.messages.join(''), /typed client marker/);
   assert.deepEqual(await (await fetch(baseUrl + '/v1/example', { headers: { authorization: `Bearer ${state.token}` } })).json(), { value: 42 });
 });

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -120,10 +121,12 @@ func TestPrepareStateDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer lock.Close()
-	for path, want := range map[string]os.FileMode{root: 0700, file: 0600, filepath.Join(root, stateLockName): 0600} {
-		stat, err := os.Stat(path)
-		if err != nil || stat.Mode().Perm() != want {
-			t.Fatalf("permissions %s: %v, %v", path, stat, err)
+	if runtime.GOOS != "windows" {
+		for path, want := range map[string]os.FileMode{root: 0700, file: 0600, filepath.Join(root, stateLockName): 0600} {
+			stat, err := os.Stat(path)
+			if err != nil || stat.Mode().Perm() != want {
+				t.Fatalf("permissions %s: %v, %v", path, stat, err)
+			}
 		}
 	}
 	data, err := os.ReadFile(file)
@@ -133,6 +136,9 @@ func TestPrepareStateDir(t *testing.T) {
 }
 
 func TestPrepareStateDirRejectsLinksWithoutChangingTargets(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows link and DACL invariants are covered by state_windows_test.go")
+	}
 	for _, kind := range []string{"root-symlink", "root-symlink-slash", "directory-symlink", "file-symlink", "hardlink", "lock-symlink", "lock-hardlink"} {
 		t.Run(kind, func(t *testing.T) {
 			base := t.TempDir()
@@ -290,5 +296,63 @@ func TestPrivateEnvironmentDisablesAmbientAuth(t *testing.T) {
 	}
 	if os.Getenv("NOOTIFY_UNRELATED") != "preserved" {
 		t.Fatal("unrelated environment was modified")
+	}
+}
+
+func TestPrivateEnvironmentClearsWindowsMixedCaseValuesAndCaches(t *testing.T) {
+	for _, entry := range os.Environ() {
+		name, value, _ := strings.Cut(entry, "=")
+		canonical := strings.ToUpper(name)
+		if strings.HasPrefix(canonical, "TS_") || strings.HasPrefix(canonical, "TSNET_") || strings.HasPrefix(canonical, "TAILSCALE_") {
+			envknob.SetenvForTest(t, name, value)
+			if canonical != name {
+				envknob.SetenvForTest(t, canonical, os.Getenv(canonical))
+			}
+		}
+	}
+	variables := []struct{ name, canonical string }{
+		{"ts_authkey", "TS_AUTHKEY"},
+		{"Ts_Client_Secret", "TS_CLIENT_SECRET"},
+		{"tAiLsCaLe_TeSt_ToKeN", "TAILSCALE_TEST_TOKEN"},
+	}
+	var cached []func() string
+	for _, variable := range variables {
+		envknob.SetenvForTest(t, variable.canonical, "cached-credential")
+		canonicalCache := envknob.RegisterString(variable.canonical)
+		// Recreate the OS entry with mixed spelling while leaving the uppercase
+		// initialization cache populated, independent of Windows name retention.
+		if err := os.Unsetenv(variable.canonical); err != nil {
+			t.Fatal(err)
+		}
+		envknob.SetenvForTest(t, variable.name, "ambient-credential")
+		cached = append(cached, canonicalCache, envknob.RegisterString(variable.name))
+	}
+	envknob.SetenvForTest(t, "TSNET_FORCE_LOGIN", "true")
+	force := envknob.RegisterBool("TSNET_FORCE_LOGIN")
+	if err := os.Unsetenv("TSNET_FORCE_LOGIN"); err != nil {
+		t.Fatal(err)
+	}
+	envknob.SetenvForTest(t, "tsnet_force_login", "true")
+	mixedForce := envknob.RegisterBool("tsnet_force_login")
+	t.Setenv("NOOTIFY_UNRELATED", "preserved")
+	// Exercise Windows normalization on every host, including case-sensitive Unix.
+	privateEnvironmentForOS("windows")
+	for _, variable := range append(variables, struct{ name, canonical string }{"tsnet_force_login", "TSNET_FORCE_LOGIN"}) {
+		for _, name := range []string{variable.name, variable.canonical} {
+			if _, exists := os.LookupEnv(name); exists {
+				t.Errorf("ambient Windows variable remains: %s", name)
+			}
+		}
+	}
+	for _, value := range cached {
+		if value() != "" {
+			t.Error("mixed-case or canonical envknob string cache remains populated")
+		}
+	}
+	if force() || mixedForce() {
+		t.Error("mixed-case or canonical forced-login cache remains enabled")
+	}
+	if os.Getenv("NOOTIFY_UNRELATED") != "preserved" {
+		t.Error("unrelated environment was modified")
 	}
 }

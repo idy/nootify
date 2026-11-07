@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -358,6 +359,9 @@ func TestServiceIdleProcessStdinShutdown(t *testing.T) {
 	}
 	for _, reason := range []string{"stdin-eof", "sigterm"} {
 		t.Run(reason, func(t *testing.T) {
+			if runtime.GOOS == "windows" && reason == "sigterm" {
+				t.Skip("Windows stops redirected helpers by closing stdin; Process.Signal does not support SIGTERM")
+			}
 			executable, err := os.Executable()
 			if err != nil {
 				t.Fatal(err)

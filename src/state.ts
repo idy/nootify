@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
+import { serviceStateDir } from './runtime-paths.js';
 import { join } from 'node:path';
 import type { Adapter, BackendConnection, LarkBinding, LarkDelivery, LarkPollCursor, LarkPollReceipt, PublicSession, SessionRecord, StoredInboxMessage } from './types.js';
 import { HttpError, isAdapter, larkPollCursorKey, larkPollReceiptKey } from './types.js';
@@ -59,7 +59,7 @@ function encode(entries: Iterable<readonly [string, unknown]>): Map<string, stri
   return rows;
 }
 const decode = <T>(rows: Map<string, string>): T[] => [...rows.values()].map(value => JSON.parse(value) as T);
-export const defaultStateDir = () => join(homedir(), '.local/state/nootify');
+export const defaultStateDir = () => serviceStateDir();
 export class State {
   readonly sessions = new Map<string, SessionRecord>();
   readonly bindings = new Map<string, LarkBinding>();

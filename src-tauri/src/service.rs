@@ -1,9 +1,6 @@
 use std::{
-    ffi::{CString, OsString},
-    fs, io,
+    fs,
     io::Read,
-    net::{SocketAddr, TcpStream},
-    os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
     sync::mpsc,
@@ -11,14 +8,32 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(target_os = "macos")]
+use std::{
+    ffi::{CString, OsString},
+    io,
+    net::{SocketAddr, TcpStream},
+    os::unix::ffi::OsStrExt,
+};
+
+#[cfg(target_os = "macos")]
+pub use LaunchAgent as BackgroundService;
+#[cfg(target_os = "windows")]
+mod windows;
+#[cfg(target_os = "windows")]
+pub use windows::BackgroundService;
+
 use reqwest::{blocking::Client, redirect::Policy};
 use serde::Deserialize;
 
 pub const SERVICE_URL: &str = "http://127.0.0.1:9417/";
+#[cfg(target_os = "macos")]
 const SERVICE_ADDR: ([u8; 4], u16) = ([127, 0, 0, 1], 9417);
+#[cfg(target_os = "macos")]
 pub const LABEL: &str = "dev.idy.nootify.service";
 const HEALTH_LIMIT: u64 = 64 * 1024;
 /// The installer itself waits up to about 21 s for the new job's health check.
+#[cfg(target_os = "macos")]
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(60);
 const OUTPUT_LIMIT: usize = 64 * 1024;
 
@@ -105,10 +120,17 @@ impl BundledService {
         let exe = std::env::current_exe()
             .and_then(fs::canonicalize)
             .map_err(|error| format!("Cannot locate the Nootify executable: {error}"))?;
+        if cfg!(all(target_os = "windows", dev)) {
+            return Ok(None);
+        }
         let Some(bundled) = Self::locate(&exe) else {
             return Ok(None);
         };
-        let tailscale = bundled.node.with_file_name("nootify-tsnet");
+        let tailscale = bundled.node.with_file_name(if cfg!(target_os = "windows") {
+            "nootify-tsnet.exe"
+        } else {
+            "nootify-tsnet"
+        });
         for path in [&bundled.node, &bundled.cli, &tailscale] {
             if !path.is_file() {
                 return Err(format!("This app bundle has no {}", path.display()));
@@ -117,6 +139,16 @@ impl BundledService {
         Ok(Some(bundled))
     }
 
+    #[cfg(target_os = "windows")]
+    fn locate(exe: &Path) -> Option<Self> {
+        let directory = exe.parent()?;
+        Some(Self {
+            node: directory.join("node.exe"),
+            cli: directory.join("service/dist/src/cli.js"),
+        })
+    }
+
+    #[cfg(target_os = "macos")]
     fn locate(exe: &Path) -> Option<Self> {
         let macos = exe.parent().filter(|dir| dir.ends_with("Contents/MacOS"))?;
         let contents = macos.parent()?;
@@ -146,12 +178,14 @@ impl BundledService {
     }
 }
 
+#[cfg(target_os = "macos")]
 pub struct LaunchAgent {
     uid: u32,
     home: PathBuf,
     plist: PathBuf,
 }
 
+#[cfg(target_os = "macos")]
 impl LaunchAgent {
     pub fn new(home: PathBuf) -> Self {
         Self {
@@ -162,6 +196,10 @@ impl LaunchAgent {
                 .join(format!("{LABEL}.plist")),
             home,
         }
+    }
+
+    pub fn installed(&self) -> bool {
+        self.plist_present()
     }
 
     /// Anything at the plist path counts, even a dangling link or an unreadable entry: it is never rewritten.
@@ -280,6 +318,7 @@ impl LaunchAgent {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn operation_args(action: JobAction, loaded: bool, uid: u32, plist: &Path) -> Vec<OsString> {
     if !loaded {
         return vec![
@@ -296,6 +335,7 @@ fn operation_args(action: JobAction, loaded: bool, uid: u32, plist: &Path) -> Ve
     args
 }
 
+#[cfg(target_os = "macos")]
 fn install_args(cli: &Path, mcp_config: Option<&Path>) -> Vec<OsString> {
     let mut args = vec![cli.into(), "launchd-install".into()];
     if let Some(config) = mcp_config {
@@ -324,6 +364,7 @@ fn installer_error(output: &CommandOutput) -> String {
 }
 
 /// The executable a LaunchAgent plist runs (`ProgramArguments[0]`), if it names one.
+#[cfg(target_os = "macos")]
 fn plist_program(plist: &Path) -> Result<Option<PathBuf>, String> {
     let output = Command::new("/usr/bin/plutil")
         .args(["-extract", "ProgramArguments.0", "raw", "-o", "-"])
@@ -338,10 +379,12 @@ fn plist_program(plist: &Path) -> Result<Option<PathBuf>, String> {
     Ok((!value.is_empty()).then(|| PathBuf::from(std::ffi::OsStr::from_bytes(value))))
 }
 
+#[cfg(target_os = "macos")]
 fn port_in_use(address: SocketAddr) -> bool {
     TcpStream::connect_timeout(&address, Duration::from_millis(500)).is_ok()
 }
 
+#[cfg(target_os = "macos")]
 fn same_file(a: &Path, b: &Path) -> bool {
     match (fs::canonicalize(a), fs::canonicalize(b)) {
         (Ok(a), Ok(b)) => a == b,
@@ -349,6 +392,7 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn read_only_volume(path: &Path) -> bool {
     let Ok(path) = CString::new(path.as_os_str().as_bytes()) else {
         return false;
@@ -369,6 +413,11 @@ pub struct CommandOutput {
 
 /// Runs a child to completion on the calling thread, killing it after `timeout`.
 pub fn run_with_timeout(mut command: Command, timeout: Duration) -> Result<CommandOutput, String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: background controls never flash a console.
+    }
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -420,7 +469,7 @@ fn drain(pipe: Option<impl Read + Send + 'static>) -> mpsc::Receiver<String> {
     receiver
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
 

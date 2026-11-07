@@ -1,6 +1,6 @@
 // Injected by the native shell into its trusted documents; never loaded by a browser.
 (() => {
-  const markDesktop = () => document.documentElement.setAttribute('data-nootify-desktop', '');
+  const markDesktop = () => document.documentElement.setAttribute('data-nootify-desktop', window.__NOOTIFY_PLATFORM__ || 'macos');
   if (document.documentElement) markDesktop();
   else document.addEventListener('DOMContentLoaded', markDesktop, { once: true });
 

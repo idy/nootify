@@ -40,7 +40,7 @@ colors:
   dark-check-line: "#55555e"
 typography:
   heading:
-    fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Helvetica Neue", sans-serif'
+    fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", "Helvetica Neue", sans-serif'
     fontSize: "16px"
     fontWeight: 600
   primary:

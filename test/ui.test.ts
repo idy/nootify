@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { request } from 'node:http';
-import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { test } from 'node:test';
 import { EventLog } from '../src/events.js';
 import { createServiceHost } from '../src/server.js';
+import { assertMode } from './platform-fixtures.js';
 
 test('logs persist bounded public fields and discard unknown credential fields', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'ws-logs-')); t.after(() => rm(dir, { recursive: true, force: true }));
@@ -21,7 +22,7 @@ test('logs persist bounded public fields and discard unknown credential fields',
   assert.ok(!JSON.stringify(entries).includes('secret-not-for-ui'));
   assert.ok(!JSON.stringify(entries).includes('fake-secret'));
   assert.equal(entries[0].reason, 'session_archived');
-  assert.equal((await stat(join(dir, 'events.ndjson'))).mode & 0o777, 0o600);
+  await assertMode(join(dir, 'events.ndjson'), 0o600);
 });
 
 test('read-only UI serves real logs while cross-site and unauthenticated control requests fail', async t => {

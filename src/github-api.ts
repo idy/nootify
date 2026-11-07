@@ -12,7 +12,7 @@ const DETAIL_FIELDS = `id state updatedAt mergeable reviewDecision
     __typename ... on CheckRun { status conclusion } ... on StatusContext { state }
   } } } } } }
   reviews(last: 30) { totalCount nodes { author { login } state submittedAt } }`;
-const expandHome = (path: string): string => path === '~' ? homedir() : path.startsWith('~/') ? join(homedir(), path.slice(2)) : path;
+const expandHome = (path: string): string => path === '~' ? homedir() : /^~[\\/]/.test(path) ? join(homedir(), path.slice(2)) : path;
 const isMissing = (error: unknown): boolean => (error as NodeJS.ErrnoException).code === 'ENOENT';
 
 export interface PullConfig {
@@ -109,7 +109,7 @@ export class GitHubCommands {
     this.signal.throwIfAborted();
     return new Promise((accept, reject) => {
       const child = execFile(file, args, {
-        cwd: this.directory, encoding: 'utf8', timeout, maxBuffer: 16 * 1024 * 1024, signal: this.signal, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+        cwd: this.directory, encoding: 'utf8', timeout, maxBuffer: 16 * 1024 * 1024, signal: this.signal, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }, windowsHide: true,
       }, (error, stdout, stderr) => {
         if (error) { Object.assign(error, { stdout, stderr }); reject(error); }
         else accept(stdout);

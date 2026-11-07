@@ -302,13 +302,23 @@ test('actual ambiguous or acknowledged input is terminal for polling and remains
 });
 
 test('abrupt restart during a >2000 topic backlog never replays accepted, last-batch or pending commands', { timeout: 120_000 }, async t => {
-  const f = await fixture(t); const count = 2_107; const acceptedBeforeCrash: number[] = []; const acceptedAfterRestart: number[] = [];
+  const f = await fixture(t); const count = 2_107; const previouslyAccepted = 2_000;
+  const acceptedBeforeCrash: number[] = []; const acceptedAfterRestart: number[] = [];
   const entered = gate(); const release = gate(); const abort = new AbortController();
   await f.receiver.pollOnce(); // Persist activation before the simulated offline backlog arrives.
   const root = message('om_old_root', START - 60_000, 'oc_bound', { thread_id: 'omt_backlog', sender: { sender_type: 'app', id_type: 'app_id', id: 'cli_fixture' } });
   const backlog = Array.from({ length: count }, (_, index) => message(`om_backlog_${String(index).padStart(5, '0')}`, START + index + 1, 'oc_bound', {
     thread_id: 'omt_backlog', root_id: root.message_id, body: { content: JSON.stringify({ text: `command-${String(index).padStart(5, '0')}` }) },
   }));
+  // Seed only the already-accepted ledger, without poll receipts. Repeating 4,000 FULL-sync
+  // delivery commits for setup exceeds the Windows deadline. The poller still stages and
+  // checkpoints all 2,107 messages; real deliveries below exercise eviction and the crash boundary.
+  for (const item of backlog.slice(0, previouslyAccepted)) f.state.deliveries.set(item.message_id, {
+    message_id: item.message_id, chat_id: item.chat_id, sender_open_id: OWNER, thread_id: item.thread_id,
+    session_id: 'fixture-session', session_name: 'Fixture target', adapter: 'codex', created_at: new Date(START).toISOString(),
+    transport_status: 'input_accepted', replies: [],
+  });
+  await f.state.save();
   f.model.rows.set('chat:oc_bound', [root]); f.model.rows.set('thread:omt_backlog', [root, ...backlog]); f.advance(10_000);
   const old = realDelivery(f, f.state, async content => {
     const index = Number(/command-(\d{5})/.exec(content)?.[1]); assert.ok(Number.isInteger(index));
@@ -318,10 +328,13 @@ test('abrupt restart during a >2000 topic backlog never replays accepted, last-b
   const running = old.receiver.pollOnce(abort.signal).then(value => ({ value }), error => ({ error }));
   f.cleanups.push(async () => { abort.abort(); release.resolve(); await running; });
   await Promise.race([entered.promise, running.then(result => { if ('error' in result) throw result.error; throw new Error('Old receiver finished before the abrupt snapshot'); })]);
-  assert.equal(acceptedBeforeCrash.length, 2_053);
+  assert.deepEqual(acceptedBeforeCrash, Array.from({ length: 2_053 - previouslyAccepted }, (_, offset) => offset + previouslyAccepted),
+    'the seeded accepted prefix must not be submitted again while the uncheckpointed tail uses real delivery');
   const snapshot = await State.open(f.directory); const threadId = larkPollCursorKey(topic('oc_bound', 'omt_backlog', root.message_id));
   assert.equal(snapshot.larkPollCursors.get(threadId)!.through, START + 2_050, 'only the last fully checkpointed provider-time prefix may advance before interruption');
   assert.equal(snapshot.larkPollReceipts(threadId).size, 2_050, 'completed IDs are checkpointed in bounded batches before interruption');
+  assert.deepEqual([...snapshot.deliveries.keys()], backlog.slice(2_054 - previouslyAccepted, 2_054).map(item => item.message_id),
+    'real pending/accepted saves evict the oldest seeded entries and retain exactly the latest 2000 commands');
   assert.equal(snapshot.deliveries.has(backlog[0].message_id), false, 'the oldest accepted command has already left the bounded ledger');
   assert.equal(snapshot.hasLarkPollReceipt(threadId, backlog[0].message_id), true);
   for (const index of [2_050, 2_051, 2_052]) {
@@ -334,7 +347,9 @@ test('abrupt restart during a >2000 topic backlog never replays accepted, last-b
   });
   assert.equal(await fresh.receiver.pollOnce(), true);
   assert.deepEqual(acceptedAfterRestart, Array.from({ length: count - 2_054 }, (_, offset) => offset + 2_054));
-  assert.equal(new Set([...acceptedBeforeCrash, ...acceptedAfterRestart]).size, acceptedBeforeCrash.length + acceptedAfterRestart.length);
+  const allAccepted = [...Array.from({ length: previouslyAccepted }, (_, index) => index), ...acceptedBeforeCrash, ...acceptedAfterRestart];
+  assert.equal(allAccepted.length, count - 1, 'every command except the interrupted pending submission was accepted once');
+  assert.equal(new Set(allAccepted).size, allAccepted.length);
   assert.equal(snapshot.larkDelivery(backlog[2_053].message_id)!.transport_status, 'pending', 'unknown pending submission must not be replayed');
   const durable = await State.open(f.directory);
   assert.equal(durable.larkPollCursors.get(threadId)!.through, START + count);

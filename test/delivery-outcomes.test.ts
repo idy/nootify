@@ -12,6 +12,7 @@ import { LarkService } from '../src/lark.js';
 import type { LarkApi } from '../src/lark-metadata.js';
 import { SessionsService, writeInbox } from '../src/sessions.js';
 import { State } from '../src/state.js';
+import { inboxPath } from './platform-fixtures.js';
 import { RetryableDeliveryError, SessionUnavailable, UnconfirmedDeliveryError, type Adapter, type LarkDelivery } from '../src/types.js';
 
 const id = 'outcome-fixture';
@@ -78,25 +79,45 @@ test('read-only RPC response timeouts are retryable while disconnected unsent tu
   assert.equal(f.requests.length, 1, 'an unsent mutation must not enter the socket');
 });
 
-test('a native inbox that receives the full frame without EOF produces one unconfirmed submission', async t => {
-  const f = await fixture(t); const path = join(f.directory, 'inbox.sock');
+test('native inbox delivery without a peer EOF is never automatically replayed', async t => {
+  const f = await fixture(t); const path = inboxPath(f.directory);
   const sockets = new Set<Socket>(); const frames: { type: string; message?: { content: string } }[] = [];
+  let received!: () => void; let receiptTimeout: NodeJS.Timeout | undefined;
+  const inputReceived = new Promise<void>(resolve => { received = resolve; });
   const server = createServer({ allowHalfOpen: true }, socket => {
     sockets.add(socket); socket.once('close', () => sockets.delete(socket)); socket.on('error', () => {});
     let data = '';
     socket.setEncoding('utf8'); socket.on('data', chunk => {
       data += chunk;
-      for (;;) { const end = data.indexOf('\n'); if (end < 0) break; frames.push(JSON.parse(data.slice(0, end))); data = data.slice(end + 1); }
+      for (;;) {
+        const end = data.indexOf('\n'); if (end < 0) break;
+        const frame = JSON.parse(data.slice(0, end)); frames.push(frame); data = data.slice(end + 1);
+        if (frame.type === 'user') received();
+      }
     });
   });
   server.listen(path); await once(server, 'listening');
-  t.after(async () => { for (const socket of sockets) socket.destroy(); await new Promise<void>(resolve => server.close(() => resolve())); });
-  t.mock.method(f.sessions, 'send', async (_id: string, text: string) => writeInbox(path, text, undefined, 20));
-  assert.equal(await f.lark.enqueue(payload()), true);
-  assert.equal(await f.lark.enqueue(payload()), true);
-  assert.equal(frames.filter(frame => frame.type === 'user').length, 1);
-  assert.match(frames.find(frame => frame.type === 'user')!.message!.content, /run this command once/);
-  assert.equal(f.state.larkDelivery('om_once')!.transport_status, 'delivery_unconfirmed');
+  try {
+    t.mock.method(f.sessions, 'send', async (_id: string, text: string) => writeInbox(path, text, undefined, process.platform === 'win32' ? 5000 : 20, process.pid));
+    assert.equal(await f.lark.enqueue(payload()), true);
+    assert.equal(await f.lark.enqueue(payload()), true);
+    const expectedStatus = process.platform === 'win32' ? 'socket_written' : 'delivery_unconfirmed';
+    const failure = [...f.reports].reverse().find(record => record.status === 'delivery_unconfirmed' || record.status === 'delivery_failed')?.error;
+    assert.equal(f.state.larkDelivery('om_once')!.transport_status, expectedStatus,
+      typeof failure === 'string' ? failure : 'Native fixture did not reach its expected transport boundary');
+    await Promise.race([inputReceived, new Promise<never>((_, reject) => {
+      receiptTimeout = setTimeout(() => reject(new Error('The native fixture did not receive input')), 5000).unref();
+    })]);
+    assert.equal(frames.filter(frame => frame.type === 'user').length, 1);
+    assert.match(frames.find(frame => frame.type === 'user')!.message!.content, /run this command once/);
+    // Unix waits for peer EOF; the Windows writer completes at the authenticated
+    // write. Both outcomes are terminal and must not cause a second submission.
+    assert.equal(f.state.larkDelivery('om_once')!.transport_status, expectedStatus);
+  } finally {
+    clearTimeout(receiptTimeout);
+    for (const socket of sockets) socket.destroy();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
 });
 
 test('positively identified pre-input failures retry without losing the original context', async t => {

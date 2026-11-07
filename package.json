@@ -1,9 +1,9 @@
 {
   "name": "nootify",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "private": true,
   "type": "module",
-  "description": "Routes Feishu, Slack and Telegram replies to local coding-agent sessions and tracks pull requests, with a macOS tray app",
+  "description": "Routes Feishu, Slack and Telegram replies to local coding-agent sessions and tracks pull requests, with a Windows and macOS tray app",
   "exports": {
     ".": {
       "types": "./dist/src/client.d.ts",
@@ -16,14 +16,14 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test dist/test/*.test.js scripts/*.test.mjs",
+    "test": "npm run build && node scripts/test.mjs",
     "start": "node dist/src/server.js",
     "cli": "node dist/src/cli.js",
     "tauri": "tauri",
     "tailscale:build": "node scripts/build-tsnet.mjs",
     "desktop:dev": "npm run tailscale:build && node scripts/desktop.mjs dev",
     "desktop:stage": "npm run build && node scripts/stage-service.mjs",
-    "desktop:build": "node scripts/desktop.mjs build --bundles app,dmg"
+    "desktop:build": "node scripts/desktop.mjs build"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "1.76.0",

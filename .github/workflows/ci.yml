@@ -14,8 +14,20 @@ concurrency:
 
 jobs:
   test:
-    runs-on: macos-latest
-    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+            bundles: app
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundles: nsis
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      TAURI_ENV_TARGET_TRIPLE: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -23,7 +35,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 24.22.2
           cache: npm
 
       - uses: actions/setup-go@v6
@@ -39,31 +51,130 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal --component clippy,rustfmt
           rustup default stable
+          rustup target add ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          key: ${{ matrix.target }}
 
       - run: npm ci
-      - run: npm test
+
+      - name: Probe native Windows installer hooks
+        if: runner.os == 'Windows'
+        timeout-minutes: 5
+        shell: powershell
+        run: .\scripts\windows-installer-hook-smoke.ps1
+
+      - name: Upload Windows installer hook diagnostics
+        if: runner.os == 'Windows' && always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-installer-hook-diagnostics
+          path: .cache/windows-installer-hook-smoke/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Run tests with deadlines and JUnit output
+        timeout-minutes: 10
+        run: npm test
+      - name: Upload unit test report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: unit-tests-${{ matrix.target }}
+          path: .cache/test-results.xml
+          if-no-files-found: ignore
+          retention-days: 7
+      - run: npm run check
+
+      # Fail on real Task Scheduler lifecycle issues before staging or native builds.
+      - name: Probe the real Windows service task lifecycle
+        if: runner.os == 'Windows'
+        timeout-minutes: 5
+        shell: powershell
+        run: .\scripts\windows-task-smoke.ps1
+
+      - name: Upload Windows task lifecycle diagnostics
+        if: runner.os == 'Windows' && always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-task-lifecycle-diagnostics
+          path: |
+            .cache/windows-task-smoke/diagnostics.json
+            .cache/windows-task-smoke/*.stdout.log
+            .cache/windows-task-smoke/*.stderr.log
+            .cache/windows-task-smoke/fixture-stdout.log
+            .cache/windows-task-smoke/fixture-stderr.log
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: cargo fmt
         working-directory: src-tauri
         run: cargo fmt --check
 
-      # Real staging (as release builds do) instead of build.rs placeholders, so a broken
-      # stage script or lockfile fails here rather than at release time.
+      # Real staging validates the pinned runtime, PE/Mach-O architecture,
+      # Windows task resources, production lockfile, and embedded tsnet build.
       - name: Cache the Node.js runtime download
         uses: actions/cache@v6
         with:
           path: .cache/node
-          key: node-runtime-${{ hashFiles('scripts/stage-service.mjs') }}
+          key: node-runtime-${{ matrix.target }}-${{ hashFiles('scripts/build-targets.mjs', 'scripts/stage-service.mjs') }}
       - name: Stage the service, Node.js and embedded Tailscale
         run: node scripts/stage-service.mjs
 
       - name: cargo clippy
         working-directory: src-tauri
-        run: cargo clippy --features custom-protocol -- -D warnings
+        run: cargo clippy --target ${{ matrix.target }} --all-targets --features custom-protocol -- -D warnings
       - name: cargo test
         working-directory: src-tauri
-        run: cargo test --features custom-protocol
+        run: cargo test --target ${{ matrix.target }} --features custom-protocol
+
+      # CI has no release signing key. Build the actual app/NSIS payload so
+      # installer hooks, ICO, sidecar layout and platform config are validated.
+      - name: Build desktop bundle without updater signing
+        run: npm run desktop:build -- --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --config src-tauri/tauri.ci.conf.json --no-sign --ci
+
+      - name: Preserve current Windows installer
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $null = New-Item -ItemType Directory -Force .cache/windows-current-installer
+          Copy-Item "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/Nootify_${version}_x64-setup.exe" .cache/windows-current-installer/
+
+      # Same sources, older package version: exercise a real cross-version /UPDATE
+      # without depending on an existing Windows release or any signing secret.
+      - name: Build baseline Windows installer fixture
+        if: runner.os == 'Windows'
+        run: npm run desktop:build -- --target ${{ matrix.target }} --bundles nsis --config src-tauri/tauri.install-baseline.conf.json --no-sign --ci
+
+      - name: Test Windows installation, upgrade and uninstall
+        if: runner.os == 'Windows'
+        timeout-minutes: 12
+        shell: powershell
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $bundles = 'src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis'
+          .\scripts\windows-install-smoke.ps1 `
+            -Installer (Join-Path '.cache/windows-current-installer' "Nootify_${version}_x64-setup.exe") `
+            -BaselineInstaller (Join-Path $bundles 'Nootify_0.0.0_x64-setup.exe') `
+            -Version $version
+
+      - name: Upload Windows installation diagnostics
+        if: runner.os == 'Windows' && always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-installation-diagnostics
+          path: .cache/windows-install-smoke/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload unsigned Windows installer
+        if: runner.os == 'Windows' && always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nootify-windows-x64-installer
+          path: .cache/windows-current-installer/*.exe
+          if-no-files-found: ignore
+          retention-days: 7

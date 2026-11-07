@@ -1,5 +1,5 @@
 //! Opt-in native runtime check: `nootify --smoke-test`.
-//! Run after quitting other desktop instances. No launchd operations are performed, and neither
+//! Run after quitting other desktop instances. No background-service operations are performed, and neither
 //! the service installer nor an update check or install ever runs: their workers are not started.
 use std::{
     process::Command,
@@ -16,7 +16,7 @@ use crate::{
     is_fallback, is_service_ui,
     language::{Locale, Preference, Text},
     language_view, open_settings, render_health, render_install, restore_window,
-    service::{check_health, health_client, BundledService, LaunchAgent},
+    service::{check_health, health_client, BackgroundService, BundledService},
     update::{Phase, Status, UpdateView},
     NativeState, TrayItems, MAIN_WINDOW, TRAY_ID,
 };
@@ -44,7 +44,7 @@ pub fn is_preview(url: &tauri::Url) -> bool {
 
 struct Report {
     online: bool,
-    plist_present: bool,
+    service_installed: bool,
     bundled_node: Option<String>,
     updater_ready: bool,
     titlebar_preview: bool,
@@ -55,35 +55,45 @@ pub fn run(app: AppHandle, items: TrayItems) {
         let result = exercise(&app, &items);
         match result {
             Ok(report) => {
-                println!(
-                    "{}",
-                    json!({
-                        "ok": true,
-                        "tray_present": true,
-                        "close_hides_without_destroying": true,
-                        "restore_visible_and_focused": true,
-                        "single_instance_restores_window": true,
-                        "bundled_fallback": true,
-                        "fallback_ipc_denied": true,
-                        "language_bridge_and_reload": true,
-                        "language_smoke_persistence_isolated": true,
-                        "daemon_healthy": report.online,
-                        "live_ui_restored": report.online,
-                        "remote_ipc_denied": report.online,
-                        "page_update_bridge": report.online,
-                        "titlebar_preview": report.titlebar_preview,
-                        "launch_agent_plist_present": report.plist_present,
-                        "service_install_enabled": !report.plist_present,
-                        "bundled_node": report.bundled_node,
-                        "updater_ready": report.updater_ready,
-                        "update_menu_rendered": true,
-                        "tray_inline_update_progress": true,
-                        "tray_settings_navigation": report.online,
-                        "daemon_control_invoked": false,
-                        "service_install_invoked": false,
-                        "update_install_invoked": false
-                    })
-                );
+                let mut result = json!({
+                    "ok": true,
+                    "platform": std::env::consts::OS,
+                    "language_initialization_backend": if cfg!(target_os = "windows") { "webview2" } else { "webkit" },
+                    "tray_present": true,
+                    "close_hides_without_destroying": true,
+                    "restore_visible_and_focused": true,
+                    "single_instance_restores_window": true,
+                    "bundled_fallback": true,
+                    "fallback_ipc_denied": true,
+                    "language_bridge_and_reload": true,
+                    "language_smoke_persistence_isolated": true,
+                    "daemon_healthy": report.online,
+                    "live_ui_restored": report.online,
+                    "remote_ipc_denied": report.online,
+                    "page_update_bridge": report.online,
+                    "titlebar_preview": report.titlebar_preview,
+                    "background_service_installed": report.service_installed,
+                    "service_install_enabled": !report.service_installed,
+                    "bundled_node": report.bundled_node,
+                    "updater_ready": report.updater_ready,
+                    "update_menu_rendered": true,
+                    "tray_inline_update_progress": true,
+                    "tray_settings_navigation": report.online,
+                    "daemon_control_invoked": false,
+                    "service_install_invoked": false,
+                    "update_install_invoked": false
+                });
+                // Retain the existing macOS report field for native smoke consumers.
+                #[cfg(target_os = "macos")]
+                {
+                    result["launch_agent_plist_present"] = json!(report.service_installed);
+                }
+                #[cfg(target_os = "windows")]
+                {
+                    result["language_document_start_probe"] =
+                        json!("DOMContentLoaded before native replay");
+                }
+                println!("{result}");
                 app.exit(0);
             }
             Err(error) => {
@@ -106,20 +116,20 @@ pub fn run(app: AppHandle, items: TrayItems) {
 /// The bundle's runtime, updater configuration and tray items, without installing anything.
 fn exercise_bundle(app: &AppHandle, items: &TrayItems) -> Result<Report, String> {
     let home = app.path().home_dir().map_err(|error| error.to_string())?;
-    // Only stats the plist path; nothing under ~/Library/LaunchAgents is written or loaded.
-    let plist_present = LaunchAgent::new(home).plist_present();
-    render_install(app, items, plist_present);
+    // Only inspect registration; no launchd job or Windows startup registration is changed.
+    let service_installed = BackgroundService::new(home).installed();
+    render_install(app, items, service_installed);
     let locale = language_view(app).locale;
     wait_for(
-        "Install Background Service is enabled exactly when no plist exists",
+        "Install Background Service is enabled exactly when no service is installed",
         || {
-            items.install.is_enabled().ok() == Some(!plist_present)
+            items.install.is_enabled().ok() == Some(!service_installed)
                 && items.install.text().ok().as_deref() == Some(locale.text(Text::InstallService))
         },
     )?;
 
-    // Inside an app bundle the runtime must start under the bundle's signature (V8 needs the JIT
-    // entitlement); `--version` starts no service. Development builds have no bundle to check.
+    // `--version` starts no service. On macOS it also checks the bundle's JIT entitlement;
+    // Windows validates the packaged node.exe. Development builds have no bundle to check.
     let bundled = BundledService::current()?;
     let bundled_node = bundled
         .as_ref()
@@ -186,7 +196,7 @@ fn exercise_bundle(app: &AppHandle, items: &TrayItems) -> Result<Report, String>
     )?;
     Ok(Report {
         online: false,
-        plist_present,
+        service_installed,
         bundled_node,
         updater_ready,
         titlebar_preview: false,
@@ -306,7 +316,7 @@ fn exercise(app: &AppHandle, items: &TrayItems) -> Result<Report, String> {
     Ok(report)
 }
 
-/// An opt-in, debug-only pause for an external driver to inspect the actual macOS menu.
+/// An opt-in, debug-only pause for an external driver to inspect the actual native tray menu.
 /// Appearance applies to this test process only, without changing the user's system settings.
 fn capture_tray(app: &AppHandle, items: &TrayItems) -> Result<(), String> {
     if !cfg!(debug_assertions) {
@@ -384,8 +394,13 @@ fn check_titlebar_preview(window: &WebviewWindow, url: tauri::Url) -> Result<(),
     window
         .eval("window.__nootifySmokeUpdateButton = document.querySelector('#update-action');")
         .map_err(|error| error.to_string())?;
+    let title_row_layout = if cfg!(target_os = "macos") {
+        "!document.querySelector('#update-action').hidden && document.querySelector('.titlebar').getBoundingClientRect().height === 52 && document.querySelector('#logs-view').getBoundingClientRect().top === 52"
+    } else {
+        "(() => { const header = document.querySelector('.titlebar').getBoundingClientRect(); return !document.querySelector('#update-action').hidden && header.height > 0 && document.querySelector('#logs-view').getBoundingClientRect().top >= header.bottom; })()"
+    };
     wait_for("update action is in the title row", || {
-        evaluate(window, "!document.querySelector('#update-action').hidden && document.querySelector('.titlebar').getBoundingClientRect().height === 52 && document.querySelector('#logs-view').getBoundingClientRect().top === 52").unwrap_or(false)
+        evaluate(window, title_row_layout).unwrap_or(false)
     })?;
     let before = window
         .state::<NativeState>()
@@ -418,11 +433,15 @@ fn check_titlebar_preview(window: &WebviewWindow, url: tauri::Url) -> Result<(),
     window
         .set_size(tauri::LogicalSize::new(640.0, 420.0))
         .map_err(|error| error.to_string())?;
+    let compact_layout = if cfg!(target_os = "macos") {
+        "(() => { const header = document.querySelector('.titlebar').getBoundingClientRect(); const brand = document.querySelector('.brand').getBoundingClientRect(); const status = document.querySelector('#update-action'); return innerWidth === 640 && header.y === 0 && header.height === 52 && brand.x >= 90 && Math.abs(brand.y + brand.height / 2 - 26) < 1 && status === window.__nootifySmokeUpdateButton && status.tagName === 'BUTTON' && ['Downloading 42%', '下载中 42%'].includes(status.textContent.trim()) && status.getBoundingClientRect().height === 28 && status.getBoundingClientRect().width === (document.documentElement.lang === 'en' ? 164 : 136) && !status.hidden && !document.querySelector('.titlebar progress') && document.documentElement.scrollWidth === innerWidth; })()"
+    } else {
+        // Windows retains its native caption buttons; do not require the macOS traffic-light inset.
+        "(() => { const header = document.querySelector('.titlebar').getBoundingClientRect(); const status = document.querySelector('#update-action'); const rect = status.getBoundingClientRect(); return header.y === 0 && header.height > 0 && status === window.__nootifySmokeUpdateButton && status.tagName === 'BUTTON' && ['Downloading 42%', '下载中 42%'].includes(status.textContent.trim()) && rect.width > 0 && rect.left >= 0 && rect.right <= innerWidth && !status.hidden && !document.querySelector('.titlebar progress') && document.documentElement.scrollWidth === innerWidth; })()"
+    };
     wait_for(
         "compact desktop titlebar keeps progress and content aligned",
-        || {
-            evaluate(window, "(() => { const header = document.querySelector('.titlebar').getBoundingClientRect(); const brand = document.querySelector('.brand').getBoundingClientRect(); const status = document.querySelector('#update-action'); return innerWidth === 640 && header.y === 0 && header.height === 52 && brand.x >= 90 && Math.abs(brand.y + brand.height / 2 - 26) < 1 && status === window.__nootifySmokeUpdateButton && status.tagName === 'BUTTON' && ['Downloading 42%', '下载中 42%'].includes(status.textContent.trim()) && status.getBoundingClientRect().height === 28 && status.getBoundingClientRect().width === (document.documentElement.lang === 'en' ? 164 : 136) && !status.hidden && !document.querySelector('.titlebar progress') && document.documentElement.scrollWidth === innerWidth; })()").unwrap_or(false)
-        },
+        || evaluate(window, compact_layout).unwrap_or(false),
     )?;
     // Optional bounded pause lets an external native driver capture and drag this settled window.
     if let Ok(milliseconds) = std::env::var("NOOTIFY_SMOKE_CAPTURE_DELAY_MS")
@@ -454,7 +473,7 @@ fn wait_for_live_ui(window: &WebviewWindow) -> Result<(), String> {
             .unwrap()
             .as_ref()
             .is_some_and(is_service_ui);
-        // Also checks, in WebKit itself, that log rows share one height and sidebar footer lines one gap.
+        // Also checks in the live webview that log rows share one height and footer lines one gap.
         loaded && evaluate(window, "(() => { const one = values => new Set(values.map(Math.round)).size === 1; const rows = [...document.querySelectorAll('#logs-table .row')].map(row => row.getBoundingClientRect().height); const lines = [...document.querySelectorAll('.sidebar-foot .status-line')].filter(line => line.offsetParent).map(line => line.getBoundingClientRect()); const gaps = lines.slice(1).map((line, index) => line.top - lines[index].bottom); return rows.length > 1 && one(rows) && gaps.length > 1 && one(gaps) && ['Live', '实时更新'].includes(document.querySelector('#connection')?.textContent) && document.querySelector('#error')?.hidden === true; })()").unwrap_or(false)
     })
 }
@@ -474,6 +493,72 @@ fn evaluate_value(window: &WebviewWindow, expression: &str) -> Result<String, St
         .recv_timeout(Duration::from_secs(2))
         .map_err(|error| error.to_string())?;
     Ok(result)
+}
+
+const LANGUAGE_SNAPSHOT: &str =
+    "window.__nootifySmokeDocumentLanguage = JSON.stringify(window.__NOOTIFY_LANGUAGE__);";
+const CSP_PROBE: &str = "window.__nootifySmokeCsp = []; document.addEventListener('securitypolicyviolation', event => { window.__nootifySmokeCsp.push({directive:event.effectiveDirective,uri:event.blockedURI}); });";
+
+#[cfg(target_os = "macos")]
+fn install_language_probe(window: &WebviewWindow) -> Result<(), String> {
+    let source = format!("{LANGUAGE_SNAPSHOT}{CSP_PROBE}");
+    // A probe after the production WKUserScripts observes state before page JS or native replay.
+    window
+        .with_webview(move |platform| {
+            use objc2::{MainThreadMarker, MainThreadOnly};
+            use objc2_foundation::NSString;
+            use objc2_web_kit::{WKUserContentController, WKUserScript, WKUserScriptInjectionTime};
+            let mtm = MainThreadMarker::new().expect("main thread");
+            // SAFETY: Tauri supplies Wry's live controller on the owning main thread.
+            unsafe {
+                let controller = &*platform.controller().cast::<WKUserContentController>();
+                let script = WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
+                    WKUserScript::alloc(mtm),
+                    &NSString::from_str(&source),
+                    WKUserScriptInjectionTime::AtDocumentStart,
+                    true,
+                );
+                controller.addUserScript(&script);
+            }
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn install_language_probe(window: &WebviewWindow) -> Result<(), String> {
+    use webview2_com::AddScriptToExecuteOnDocumentCreatedCompletedHandler;
+    use windows::core::HSTRING;
+
+    // WebView2 does not guarantee the order of document-created scripts. Capture at DOMContentLoaded,
+    // after all initialization scripts and before Tauri's Finished page-load language replay.
+    let source = format!(
+        "{CSP_PROBE}document.addEventListener('DOMContentLoaded', () => {{ {LANGUAGE_SNAPSHOT} }}, {{ once: true }});"
+    );
+    let (sender, receiver) = mpsc::sync_channel(1);
+    window
+        .with_webview(move |platform| {
+            let completed = sender.clone();
+            // SAFETY: Tauri provides the live WebView2 controller on its owning UI thread.
+            let result = unsafe {
+                (|| -> windows::core::Result<()> {
+                    let webview = platform.controller().CoreWebView2()?;
+                    let callback = AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(
+                        Box::new(move |result, _| {
+                            let _ = completed.try_send(result.map_err(|error| error.to_string()));
+                            Ok(())
+                        }),
+                    );
+                    webview.AddScriptToExecuteOnDocumentCreated(&HSTRING::from(source), &callback)
+                })()
+            };
+            if let Err(error) = result {
+                let _ = sender.try_send(Err(error.to_string()));
+            }
+        })
+        .map_err(|error| error.to_string())?;
+    receiver
+        .recv_timeout(Duration::from_secs(5))
+        .map_err(|error| format!("WebView2 language probe registration: {error}"))?
 }
 
 /// Exercises the real navigation policy, immediate native relabeling, the CSP-locked fallback,
@@ -505,24 +590,11 @@ fn check_language_bridge(window: &WebviewWindow, items: &TrayItems) -> Result<()
             },
         )?;
     }
-    // A probe after the production initialization scripts observes state before page JS or replay.
-    window.with_webview(|platform| {
-        use objc2::{MainThreadMarker, MainThreadOnly};
-        use objc2_foundation::NSString;
-        use objc2_web_kit::{WKUserContentController, WKUserScript, WKUserScriptInjectionTime};
-        let mtm = MainThreadMarker::new().expect("main thread");
-        // SAFETY: Tauri supplies Wry's live controller on the owning main thread.
-        unsafe {
-            let controller = &*platform.controller().cast::<WKUserContentController>();
-            let script = WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
-                WKUserScript::alloc(mtm),
-                &NSString::from_str("window.__nootifySmokeDocumentLanguage = JSON.stringify(window.__NOOTIFY_LANGUAGE__); window.__nootifySmokeCsp = []; document.addEventListener('securitypolicyviolation', event => { window.__nootifySmokeCsp.push({directive:event.effectiveDirective,uri:event.blockedURI}); });"),
-                WKUserScriptInjectionTime::AtDocumentStart,
-                true,
-            );
-            controller.addUserScript(&script);
-        }
-    }).map_err(|error| error.to_string())?;
+    #[cfg(target_os = "windows")]
+    wait_for("WebView2 language registration has completed", || {
+        crate::language::initialization_ready(window)
+    })?;
+    install_language_probe(window)?;
     window
         .eval("location.reload()")
         .map_err(|error| error.to_string())?;
@@ -543,7 +615,7 @@ fn check_language_bridge(window: &WebviewWindow, items: &TrayItems) -> Result<()
     Ok(())
 }
 
-/// In WebKit itself: pushed state reaches a listener under the page's CSP, and an update request
+/// In the native webview: pushed state reaches a listener under the page's CSP, and an update request
 /// reaches the navigation policy and leaves the page in place. No worker runs to act on it.
 fn check_update_bridge(window: &WebviewWindow) -> Result<(), String> {
     window
