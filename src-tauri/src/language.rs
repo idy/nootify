@@ -555,7 +555,6 @@ catalog! {
     InstallVersion => ("Install Update {version}", "安装更新 {version}"),
     UpdateDetails => ("Update Details…", "更新详情…"),
     SoftwareUpdates => ("Software Updates", "软件更新"),
-    UpdateVersion => ("Update {version}", "更新 {version}"),
     CheckingUpdate => ("Checking for updates…", "检查更新中…"),
     UpdateAvailable => ("Update available: {version}", "可更新至 {version}"),
     UpToDate => ("Up to date: {version}", "已是最新 {version}"),
