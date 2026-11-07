@@ -84,8 +84,13 @@ export async function conversationDirectories(sources: ConversationSources = def
   return { directories: [...grouped.values()], warnings: found.warnings };
 }
 
-async function entries(directory: string): Promise<Dirent[]> {
-  try { return await readdir(directory, { withFileTypes: true }); } catch (error) { if (isMissing(error)) return []; throw error; }
+async function entries(directory: string, incomplete?: () => void): Promise<Dirent[]> {
+  try { return await readdir(directory, { withFileTypes: true }); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOTDIR') incomplete?.();
+    if (isMissing(error)) return [];
+    throw error;
+  }
 }
 async function metadata(file: string): Promise<{ value: Record<string, unknown>; modified: number } | undefined> {
   const info = await stat(file);
@@ -105,12 +110,12 @@ function linkedPull(value: unknown): GitHubPullReference | undefined {
 interface DesktopEntry { session: ConversationSession; cliIds: string[]; authoritativePulls: boolean }
 async function desktopSessions(roots: string[], incomplete: () => void): Promise<DesktopEntry[]> {
   const found = new Map<string, DesktopEntry>();
-  for (const root of roots) for (const account of await entries(root)) {
+  for (const root of roots) for (const account of await entries(root, incomplete)) {
     if (!account.isDirectory()) continue;
-    for (const profile of await entries(join(root, account.name))) {
+    for (const profile of await entries(join(root, account.name), incomplete)) {
       if (!profile.isDirectory()) continue;
       const directory = join(root, account.name, profile.name);
-      for (const file of await entries(directory)) {
+      for (const file of await entries(directory, incomplete)) {
         if (!/^local_[A-Za-z0-9_-]+\.json$/.test(file.name)) continue;
         if (!file.isFile()) { incomplete(); continue; }
         const data = await metadata(join(directory, file.name));
@@ -197,6 +202,8 @@ async function claudeSessions(root: string, desktop: Map<string, DesktopEntry>, 
     for (const file of await entries(join(root, 'projects', project.name))) {
       if (!file.isFile() || !file.name.endsWith('.jsonl')) continue;
       const id = file.name.slice(0, -6);
+      // Legacy sidechains use agent-* filenames, not standalone runtime session IDs.
+      if (!includeTranscripts && /^agent-/i.test(id)) continue;
       const mapped = desktop.get(id);
       // Desktop's persisted prs[] wins over historical link events, including an explicitly empty list after unlinking.
       if (mapped && (mapped.authoritativePulls || !includeTranscripts)) continue;

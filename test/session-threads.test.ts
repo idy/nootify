@@ -79,6 +79,54 @@ test('a failed Desktop catalog defers CLI aliases until identities can be read a
   assert.equal(reports.length, 0);
 });
 
+test('legacy and nested sidechain transcripts are excluded while an absent Desktop installation permits its parent CLI session', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'nootify-cli-sidechains-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const state = await State.open(join(root, 'state'));
+  const files = Object.fromEntries(['claude', 'codex', 'opencode', 'trae', 'workbuddy'].map(agent => [agent, join(root, agent, 'rules.md')])) as Record<AgentId, string>;
+  const agents = new AgentPrompts({ stateDir: state.directory, port: 9417, files }); await agents.set('claude', true);
+  const parent = '12345678-1234-4234-8234-123456789abc';
+  const project = join(root, 'claude/projects/project'); await mkdir(project, { recursive: true });
+  for (const id of [parent, 'agent-a1b2c3d4', 'AGENT-b1c2d3e4']) {
+    await writeFile(join(project, `${id}.jsonl`), JSON.stringify({ type: 'user', sessionId: parent, isSidechain: id !== parent }) + '\n');
+  }
+  const nested = join(project, parent, 'subagents'); await mkdir(nested, { recursive: true });
+  await writeFile(join(nested, 'agent-nested.jsonl'), JSON.stringify({ sessionId: parent, isSidechain: true }));
+  const reports: Record<string, unknown>[] = [];
+  const discover = sessionThreadDiscovery(agents, state, record => reports.push(record), {
+    claudeDir: join(root, 'claude'), desktopRoots: [join(root, 'not-installed')],
+  });
+  assert.deepEqual((await collect(discover)).map(item => [item.adapter, item.session_id]), [['claude-code', parent]]);
+  assert.equal(reports.length, 0);
+});
+
+for (const obstruction of ['catalog-root', 'catalog-parent'] as const) {
+  test(`a file at the Desktop ${obstruction} defers CLI enrollment until directory recovery`, async t => {
+    const root = await mkdtemp(join(tmpdir(), 'nootify-desktop-nondirectory-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const state = await State.open(join(root, 'state'));
+    const files = Object.fromEntries(['claude', 'codex', 'opencode', 'trae', 'workbuddy'].map(agent => [agent, join(root, agent, 'rules.md')])) as Record<AgentId, string>;
+    const agents = new AgentPrompts({ stateDir: state.directory, port: 9417, files }); await agents.set('claude', true);
+    const healthy = join(root, 'healthy/account/profile'); await mkdir(healthy, { recursive: true });
+    await writeFile(join(healthy, 'local_active.json'), JSON.stringify({ sessionId: 'local_active', cliSessionId: 'cli_active', isArchived: false }));
+    const blocked = join(root, 'blocked'); await writeFile(blocked, 'not a directory');
+    const catalog = obstruction === 'catalog-root' ? blocked : join(blocked, 'sessions');
+    const project = join(root, 'claude/projects/project'); await mkdir(project, { recursive: true });
+    for (const id of ['cli_active', 'cli_archived', 'standalone']) await writeFile(join(project, `${id}.jsonl`), '{}\n');
+    const reports: Record<string, unknown>[] = [];
+    const discover = sessionThreadDiscovery(agents, state, record => reports.push(record), {
+      claudeDir: join(root, 'claude'), desktopRoots: [join(root, 'healthy'), catalog, join(root, 'not-installed')],
+    });
+    assert.deepEqual((await collect(discover)).map(item => [item.adapter, item.session_id]), [['claude-desktop', 'local_active']]);
+    assert.equal(reports.length, 1); assert.match(String(reports[0].error), /Desktop session metadata is incomplete/);
+    await rm(blocked); const recovered = join(catalog, 'account/profile'); await mkdir(recovered, { recursive: true });
+    await writeFile(join(recovered, 'local_archived.json'), JSON.stringify({ sessionId: 'local_archived', cliSessionId: 'cli_archived', isArchived: true }));
+    reports.length = 0;
+    assert.deepEqual((await collect(discover)).map(item => item.session_id).sort(), ['local_active', 'standalone']);
+    assert.equal(reports.length, 0);
+  });
+}
+
 for (const corruption of ['truncated', 'oversized', 'wrong-identity', 'non-file'] as const) {
   test(`a partial Desktop catalog with ${corruption} metadata preserves known Desktop sessions and defers CLI aliases`, async t => {
     const root = await mkdtemp(join(tmpdir(), 'nootify-partial-desktop-'));
