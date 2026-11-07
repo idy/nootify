@@ -8,8 +8,10 @@ Name "Nootify installer hook probe"
 OutFile "${PROBE_OUTPUT}"
 !include "LogicLib.nsh"
 !include "FileFunc.nsh"
-!define NOOTIFY_INSTALLER_HOOK_DIAGNOSTICS
-!define NOOTIFY_INSTALLER_HOOK_LOG "$EXEDIR\nootify-installer-hook.log"
+!ifndef PROBE_NO_DIAGNOSTICS
+  !define NOOTIFY_INSTALLER_HOOK_DIAGNOSTICS
+  !define NOOTIFY_INSTALLER_HOOK_LOG "$EXEDIR\nootify-installer-hook.log"
+!endif
 !include "windows-installer-hooks.nsh"
 Var UpdateMode
 

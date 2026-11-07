@@ -28,8 +28,6 @@ jobs:
     timeout-minutes: 60
     env:
       TAURI_ENV_TARGET_TRIPLE: ${{ matrix.target }}
-      NOOTIFY_INSTALLER_HOOK_DIAGNOSTICS: '1'
-      NOOTIFY_INSTALLER_HOOK_LOG: '${{ github.workspace }}\.cache\windows-install-smoke\nootify-installer-hook.log'
     steps:
       - uses: actions/checkout@v7
         with:

@@ -80,12 +80,16 @@ function Save-NativeTrace([string]$Directory, [string]$Label) {
         }
     }
 }
-function Invoke-Hook([string]$Executable, [string]$Arguments, [string]$Directory, [string]$Label, [hashtable]$Values, [string]$Hook, [int]$Mode) {
+function Invoke-Hook([string]$Executable, [string]$Arguments, [string]$Directory, [string]$Label, [hashtable]$Values, [string]$Hook, [int]$Mode, [bool]$Diagnostics) {
     try { Run-Native $Executable $Arguments $Label $Values }
     finally { Save-NativeTrace $Directory $Label }
     $state = Read-SafeLog (Join-Path $Directory 'probe-state.log')
     if (!$state.Contains("PASS $Hook mode=$Mode registers stack")) { throw "$Label did not preserve registers/stack or finish its hook" }
     $trace = Read-SafeLog (Join-Path $Directory 'nootify-installer-hook.log')
+    if (!$Diagnostics) {
+        if ($trace) { throw "$Label unexpectedly enabled production diagnostics" }
+        return
+    }
     foreach ($name in $startupVariables) {
         if (!$trace.Contains("clear ${name}: result=")) { throw "$Label lost an environment API diagnostic" }
     }
@@ -122,10 +126,7 @@ try {
         (Test-Path -LiteralPath (Join-Path $_.DirectoryName 'Plugins\x86-unicode\nsExec.dll') -PathType Leaf)
     })
     if ($compilers.Count -ne 1) { throw "Expected exactly one pinned NSIS root compiler, found $($compilers.Count)" }
-    $phase = 'compile native probe'
-    $installer = Join-Path $fixture 'hook-probe.exe'
-    $arguments = '/V4 ' + (Quote-Argument ("/DPROBE_OUTPUT=$installer")) + ' ' + (Quote-Argument (Join-Path $PSScriptRoot 'windows-installer-hook-smoke.nsi'))
-    Run-Native $compilers[0].FullName $arguments 'compile'
+    $compiler = $compilers[0].FullName
     $cliSource = @'
 'use strict';
 const fs = require('node:fs');
@@ -141,53 +142,62 @@ for (const name of ['NODE_OPTIONS', 'NODE_PATH', 'NODE_EXTRA_CA_CERTS', 'NODE_IC
 fs.appendFileSync(path.resolve(__dirname, '../../..', 'calls.jsonl'), JSON.stringify({ command, clean }) + '\n');
 if (Object.values(clean).some(value => !value)) { process.exitCode = 10; }
 '@
-    foreach ($poisoned in @($false, $true)) {
-        foreach ($mode in @(0, 1)) {
-            $label = $(if ($poisoned) { 'poisoned' } else { 'clean' }) + "-mode-$mode"
-            $phase = $label
-            $caseDir = Join-Path $fixture $label
-            $payload = Join-Path $caseDir 'payload'
-            $cliDir = Join-Path $payload 'service\dist\src'
-            $null = New-Item -ItemType Directory -Path $cliDir
-            Copy-Item -LiteralPath $node -Destination (Join-Path $payload 'node.exe')
-            Copy-Item -LiteralPath $installer -Destination (Join-Path $caseDir 'hook-probe.exe')
-            [IO.File]::WriteAllText((Join-Path $cliDir 'cli.js'), $cliSource)
-            $values = @{}
-            if ($poisoned) {
-                $missing = Join-Path $caseDir 'nootify-hook-missing-preload.cjs'
-                $values = @{
-                    NODE_OPTIONS = '--require="' + $missing.Replace('\', '/') + '"'
-                    NODE_PATH = (Join-Path $caseDir 'missing-node-modules')
-                    NODE_EXTRA_CA_CERTS = (Join-Path $caseDir 'missing-ca.pem')
-                    NODE_ICU_DATA = (Join-Path $caseDir 'missing-icu')
+    foreach ($diagnostics in @($true, $false)) {
+        $variant = $(if ($diagnostics) { 'diagnostic' } else { 'production' })
+        $phase = "compile $variant probe"
+        $installer = Join-Path $fixture "$variant-hook-probe.exe"
+        $arguments = '/V4 ' + (Quote-Argument ("/DPROBE_OUTPUT=$installer")) +
+            $(if (!$diagnostics) { ' /DPROBE_NO_DIAGNOSTICS' } else { '' }) + ' ' +
+            (Quote-Argument (Join-Path $PSScriptRoot 'windows-installer-hook-smoke.nsi'))
+        Run-Native $compiler $arguments "compile-$variant" @{ NOOTIFY_INSTALLER_HOOK_DIAGNOSTICS = '0' }
+        foreach ($poisoned in @($false, $true)) {
+            foreach ($mode in @(0, 1)) {
+                $label = $variant + '-' + $(if ($poisoned) { 'poisoned' } else { 'clean' }) + "-mode-$mode"
+                $phase = $label
+                $caseDir = Join-Path $fixture $label
+                $payload = Join-Path $caseDir 'payload'
+                $cliDir = Join-Path $payload 'service\dist\src'
+                $null = New-Item -ItemType Directory -Path $cliDir
+                Copy-Item -LiteralPath $node -Destination (Join-Path $payload 'node.exe')
+                Copy-Item -LiteralPath $installer -Destination (Join-Path $caseDir 'hook-probe.exe')
+                [IO.File]::WriteAllText((Join-Path $cliDir 'cli.js'), $cliSource)
+                $values = @{}
+                if ($poisoned) {
+                    $missing = Join-Path $caseDir 'nootify-hook-missing-preload.cjs'
+                    $values = @{
+                        NODE_OPTIONS = '--require="' + $missing.Replace('\', '/') + '"'
+                        NODE_PATH = (Join-Path $caseDir 'missing-node-modules')
+                        NODE_EXTRA_CA_CERTS = (Join-Path $caseDir 'missing-ca.pem')
+                        NODE_ICU_DATA = (Join-Path $caseDir 'missing-icu')
+                    }
+                    # Prove the inherited preload alone would prevent Node from starting. The other
+                    # fixture values stay out of the control so an ICU startup failure cannot mask it.
+                    Run-Native (Join-Path $payload 'node.exe') '-e "process.exit(0)"' "$label-control" @{ NODE_OPTIONS = $values.NODE_OPTIONS } 1
+                    $control = Read-SafeLog (Join-Path $outputDir "$label-control.stderr.log")
+                    if ($control -notmatch 'MODULE_NOT_FOUND' -or $control -notmatch 'nootify-hook-missing-preload\.cjs') {
+                        throw 'Missing-preload negative control did not reject startup as expected'
+                    }
                 }
-                # Prove the inherited preload alone would prevent Node from starting. The other
-                # fixture values stay out of the control so an ICU startup failure cannot mask it.
-                Run-Native (Join-Path $payload 'node.exe') '-e "process.exit(0)"' "$label-control" @{ NODE_OPTIONS = $values.NODE_OPTIONS } 1
-                $control = Read-SafeLog (Join-Path $outputDir "$label-control.stderr.log")
-                if ($control -notmatch 'MODULE_NOT_FOUND' -or $control -notmatch 'nootify-hook-missing-preload\.cjs') {
-                    throw 'Missing-preload negative control did not reject startup as expected'
+                $switches = '/S' + $(if ($mode -eq 1) { ' /UPDATE' } else { '' })
+                Invoke-Hook (Join-Path $caseDir 'hook-probe.exe') $switches $caseDir "$label-install" $values 'NSIS_HOOK_PREINSTALL' $mode $diagnostics
+                # NSIS _?= must be last and unquoted (even with spaces). It prevents the
+                # normal temporary uninstaller handoff, making this retained process synchronous.
+                Invoke-Hook (Join-Path $payload 'uninstall.exe') "$switches _?=$payload" $payload "$label-uninstall" $values 'NSIS_HOOK_PREUNINSTALL' $mode $diagnostics
+                $callText = Read-SafeLog (Join-Path $payload 'calls.jsonl')
+                [IO.File]::WriteAllText((Join-Path $outputDir "$label.calls.jsonl"), $callText)
+                $calls = @($callText -split '\r?\n' | Where-Object { $_ } | ForEach-Object { $_ | ConvertFrom-Json })
+                $uninstallCommand = $(if ($mode -eq 1) { 'service-stop' } else { 'service-uninstall' })
+                if ($calls.Count -ne 2 -or $calls[0].command -cne 'service-stop' -or $calls[1].command -cne $uninstallCommand) {
+                    throw "$label recorded unexpected CLI commands"
                 }
-            }
-            $switches = '/S' + $(if ($mode -eq 1) { ' /UPDATE' } else { '' })
-            Invoke-Hook (Join-Path $caseDir 'hook-probe.exe') $switches $caseDir "$label-install" $values 'NSIS_HOOK_PREINSTALL' $mode
-            # NSIS _?= must be last and unquoted (even with spaces). It prevents the
-            # normal temporary uninstaller handoff, making this retained process synchronous.
-            Invoke-Hook (Join-Path $payload 'uninstall.exe') "$switches _?=$payload" $payload "$label-uninstall" $values 'NSIS_HOOK_PREUNINSTALL' $mode
-            $callText = Read-SafeLog (Join-Path $payload 'calls.jsonl')
-            [IO.File]::WriteAllText((Join-Path $outputDir "$label.calls.jsonl"), $callText)
-            $calls = @($callText -split '\r?\n' | Where-Object { $_ } | ForEach-Object { $_ | ConvertFrom-Json })
-            $uninstallCommand = $(if ($mode -eq 1) { 'service-stop' } else { 'service-uninstall' })
-            if ($calls.Count -ne 2 -or $calls[0].command -cne 'service-stop' -or $calls[1].command -cne $uninstallCommand) {
-                throw "$label recorded unexpected CLI commands"
-            }
-            foreach ($call in $calls) {
-                foreach ($name in $startupVariables) {
-                    if ($call.clean.$name -ne $true) { throw "$label inherited a Node startup variable" }
+                foreach ($call in $calls) {
+                    foreach ($name in $startupVariables) {
+                        if ($call.clean.$name -ne $true) { throw "$label inherited a Node startup variable" }
+                    }
                 }
+                $results.Add(@{ case = $label; diagnostics = $diagnostics; result = 'passed'; install = 'service-stop'; uninstall = $uninstallCommand })
+                Write-Host "Windows installer hook smoke: $label passed"
             }
-            $results.Add(@{ case = $label; result = 'passed'; install = 'service-stop'; uninstall = $uninstallCommand })
-            Write-Host "Windows installer hook smoke: $label passed"
         }
     }
 } catch {
@@ -200,4 +210,4 @@ if (Object.values(clean).some(value => !value)) { process.exitCode = 10; }
         ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $outputDir 'diagnostics.json') -Encoding UTF8
 }
 if ($failure) { throw "Windows installer hook probe failed: $failure. See .cache/windows-installer-hook-smoke native traces." }
-Write-Host 'Native Windows installer/uninstaller hook probe passed all four environment/update cases.'
+Write-Host 'Native Windows installer/uninstaller hook probe passed all eight production/diagnostic environment/update cases.'
