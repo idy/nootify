@@ -132,6 +132,7 @@ class FakeTransport implements ChatTransport {
   sent: { text: string; reply?: string }[] = [];
   async start(receive: (message: ChatMessage) => Promise<void>, status: (status: 'ready') => void) { this.receive = receive; status('ready'); }
   async stop() {}
+  async react(): Promise<void> {}
   async openThread(): Promise<ChatLocation> { return { chat_id: 'fixture-room', thread_id: String(++this.opened) }; }
   async send(_location: ChatLocation, text: string, reply?: string) { this.sent.push({ text, reply }); return { message_id: `sent-${this.sent.length}` }; }
 }

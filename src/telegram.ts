@@ -11,7 +11,7 @@ export interface TelegramTransportOptions {
 }
 
 type Status = 'ready' | 'reconnecting' | 'failed';
-type Method = 'getMe' | 'getChat' | 'getChatMember' | 'getChatAdministrators' | 'getWebhookInfo' | 'createForumTopic' | 'sendMessage' | 'getUpdates';
+type Method = 'getMe' | 'getChat' | 'getChatMember' | 'getChatAdministrators' | 'getWebhookInfo' | 'createForumTopic' | 'sendMessage' | 'setMessageReaction' | 'getUpdates';
 type JsonObject = Record<string, unknown>;
 function object(value: unknown): JsonObject | undefined {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : undefined;
@@ -232,6 +232,14 @@ class TelegramTransport implements ChatTransport {
       messageId = sentId;
     }
     return { message_id: messageId };
+  }
+  async react(location: ChatLocation, messageId: string): Promise<void> {
+    const target = id(messageId);
+    if (location.chat_id !== this.config.chat_id || !id(location.thread_id) || !target) throw new TelegramError('Invalid Telegram reaction destination.');
+    const result = await this.request('setMessageReaction', {
+      chat_id: this.config.chat_id, message_id: Number(target), reaction: [{ type: 'emoji', emoji: '🥰' }],
+    }, this.run?.controller.signal);
+    if (result !== true) throw new TelegramError('Telegram returned an invalid reaction receipt.');
   }
 }
 

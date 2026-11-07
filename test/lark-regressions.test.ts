@@ -44,6 +44,7 @@ async function fixture(t: TestContext, bindings = ['oc_bound'], providerClock = 
       calls.push({ url, mono: clock.mono, epoch: clock.epoch });
       const override = await model.hook?.(url); if (override !== undefined) return override as T;
       if (url.pathname === '/open-apis/bot/v3/info') return {} as T;
+      if (url.pathname.endsWith('/reactions')) return { reaction_id: 'reaction-received' } as T;
       if (url.pathname === '/open-apis/im/v1/chats') {
         const offset = Number(query.get('page_token') ?? 0); const size = model.groupPageSize;
         return { items: model.chats.slice(offset, offset + size).map(chat_id => ({ chat_id })), has_more: model.chats.length > offset + size,

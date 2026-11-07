@@ -35,6 +35,7 @@ async function fixture(t: TestContext) {
     paths.push(path);
     const url = new URL(path, 'https://open.feishu.cn'); const query = url.searchParams;
     if (url.pathname === '/open-apis/bot/v3/info') return {} as T;
+    if (url.pathname.endsWith('/reactions')) return { reaction_id: 'reaction-received' } as T;
     if (url.pathname === '/open-apis/im/v1/chats') return { items: model.chats } as T;
     if (url.pathname.endsWith('/announcement')) {
       const chatId = url.pathname.split('/').at(-2)!;

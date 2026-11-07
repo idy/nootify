@@ -47,6 +47,7 @@ async function inbox(t: TestContext, dir: string): Promise<{ path: string; messa
 }
 function announcementApi(): LarkApi {
   return apiFrom(async (_method, path) => {
+    if (path.endsWith('/reactions')) return { reaction_id: 'reaction-received' };
     assert.ok(path.includes('/announcement'), 'Routing must read the group announcement');
     return { revision: '1', content: marker };
   });

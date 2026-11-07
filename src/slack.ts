@@ -15,7 +15,7 @@ const MAX_TEXT = 128_000;
 const TIMESTAMP = /^\d{1,16}\.\d{6}$/;
 
 type Json = Record<string, unknown>;
-type Method = 'auth.test' | 'conversations.info' | 'conversations.list' | 'conversations.members' | 'users.info' | 'apps.connections.open' | 'chat.postMessage';
+type Method = 'auth.test' | 'conversations.info' | 'conversations.list' | 'conversations.members' | 'users.info' | 'apps.connections.open' | 'chat.postMessage' | 'reactions.add';
 type Status = Parameters<ChatTransport['start']>[1];
 
 /** Small injectable boundary; production always uses fetch and ws with the options below. */
@@ -114,6 +114,7 @@ class SlackApi {
     let result: unknown;
     try { result = await response.json(); }
     catch { throw apiFailure(method); }
+    if (object(result) && method === 'reactions.add' && result.ok === false && result.error === 'already_reacted') return { ok: true };
     if (!object(result) || result.ok !== true) throw apiFailure(method, object(result) ? result.error : undefined);
     return result;
   }
@@ -225,6 +226,14 @@ class SlackTransport implements ChatTransport {
     // Slack has no nested replies: replyTo never replaces the root thread_ts.
     for (const chunk of plainChunks(text)) result = await this.post(chunk, location.thread_id, signal);
     return result;
+  }
+
+  async react(location: ChatLocation, messageId: string): Promise<void> {
+    if (this.stopped) throw new SlackError('Slack transport is stopped.');
+    if (location.chat_id !== this.config.channel_id || !timestamp(location.thread_id) || !timestamp(messageId)) {
+      throw new SlackError('Slack reaction location is invalid.');
+    }
+    await this.api.request('reactions.add', { channel: this.config.channel_id, timestamp: messageId, name: 'sparkling_heart' }, this.operations.signal);
   }
 
   private checkText(text: string): void {

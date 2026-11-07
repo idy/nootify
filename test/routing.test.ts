@@ -66,8 +66,12 @@ test('announcement routing needs no manual group mapping and logs archive, local
   state.bindings.set('oc_registration', { chat_id: 'oc_registration', session_id: 'local_old', sender_open_id: 'ou_allowed' });
   let local: LocalSession | undefined = { session_id: id, host_id: hostname(), adapter: 'claude-desktop', session_name: 'Discovered', availability: 'active', socket_path: socket, runtime_pid: process.pid };
   const catalog: SessionCatalog = { async inspect(target) { return target === local?.session_id ? local : undefined; } };
-  let announcement = marker;
-  const api: LarkApi = { appId: 'cli_test', async request<T>(_method: string, path: string): Promise<T> {
+  let announcement = marker; const reactions: string[] = [];
+  const api: LarkApi = { appId: 'cli_test', async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+    if (path.endsWith('/reactions')) {
+      assert.equal(method, 'POST'); assert.deepEqual(body, { reaction_type: { emoji_type: 'FINGERHEART' } });
+      reactions.push(path); return { reaction_id: 'reaction-received' } as T;
+    }
     assert.ok(path.endsWith('/oc_new/announcement'));
     return { revision: '1', content: announcement } as T;
   } };
@@ -89,6 +93,7 @@ test('announcement routing needs no manual group mapping and logs archive, local
   announcement = 'No routing information'; service.enqueue(event(5)); await service.drain();
   assert.equal(logs.at(-1)?.reason, 'missing_announcement');
   assert.equal(received.length, writes);
+  assert.deepEqual(reactions, ['/open-apis/im/v1/messages/om_1/reactions']);
   assert.equal(state.sessions.size, 0);
   assert.equal(state.bindings.has('oc_new'), false);
 });
