@@ -5,7 +5,7 @@ import { once } from 'node:events';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -13,6 +13,7 @@ import { main } from '../src/cli.js';
 import { conversationSessions } from '../src/conversations.js';
 import { checkSocket, isNamedPipe } from '../src/inbox.js';
 import { LocalSessions } from '../src/local-sessions.js';
+import { inboxEnvironment, windowsInboxCommand, windowsInboxScript } from '../src/native-transport.js';
 import { desktopSessionRoots, isAbsolutePath, serviceStateDir } from '../src/runtime-paths.js';
 import { SERVICE_ACTIONS, serviceEnvironment, windowsPowerShell, windowsServiceArgs, windowsServiceScript } from '../src/service.js';
 import { SessionsService, writeInbox } from '../src/sessions.js';
@@ -110,6 +111,25 @@ test('generated commands quote Windows paths for PowerShell, and retain POSIX qu
   assert.equal(shellQuote("/O'Brien/state", 'linux'), `'/O'"'"'Brien/state'`);
 });
 
+test('hidden Windows PowerShell reads one-shot stdin and returns a fixed pre-delivery parse failure', { skip: process.platform !== 'win32', timeout: 20_000 }, async t => {
+  const command = windowsInboxCommand();
+  const child = spawn(command.file, command.args, {
+    windowsHide: true, env: inboxEnvironment(process.env), cwd: dirname(windowsInboxScript()), stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  const deadline = setTimeout(() => child.kill(), 15_000).unref();
+  t.after(() => { clearTimeout(deadline); child.kill(); });
+  child.stdin.on('error', () => {});
+  const closed = once(child, 'close');
+  let output = ''; let stderrBytes = 0;
+  child.stdout.setEncoding('utf8'); child.stdout.on('data', chunk => { output += chunk; });
+  child.stderr.on('data', chunk => { stderrBytes += chunk.length; });
+  child.stdin.end('{"frames":"private-parse-test 你好 🌍"'); // Deliberately incomplete JSON; never valid pipe input.
+  const [code] = await closed;
+  assert.equal(code, 1);
+  assert.ok(/^\{"error":"inbox_startup_failed"\}\r?\n$/.test(output), 'only the fixed pre-delivery error may reach stdout');
+  assert.equal(stderrBytes, 0, 'malformed stdin must not appear in raw PowerShell errors');
+});
+
 test('Windows named pipes deliver authenticated Unicode frames after checking the connected server', { skip: process.platform !== 'win32', timeout: 30_000 }, async t => {
   const pipe = `\\\\.\\pipe\\nootify-test-${randomUUID()}`;
   let frames = ''; let delivered!: () => void;
@@ -146,7 +166,8 @@ test('Windows rejects a claimed pipe with zero token/message bytes even when the
   const state = await State.open(join(directory, 'private'));
   state.sessions.set('claimed', { session_id: 'claimed', adapter: 'claude-code', host_id: 'local', session_name: 'Claimed', socket_path: pipe, socket_token: 'must-not-leak-token' });
   const sessions = new SessionsService(state, catalog);
-  await assert.rejects(sessions.send('claimed', 'must-not-leak-message', 'claude-code'), /Windows inbox authentication or write failed/);
+  await assert.rejects(sessions.send('claimed', 'must-not-leak-message', 'claude-code'),
+    { name: 'UnconfirmedDeliveryError', message: 'Windows inbox authentication or write failed' });
   await closed;
   assert.equal(connections, 1, 'verification and write must share one connection'); assert.equal(bytes, 0);
   const observed = JSON.stringify((await sessions.handle({ method: 'GET', path: '/v1/sessions', body: undefined }))?.body);

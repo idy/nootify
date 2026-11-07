@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { assertMode } from './platform-fixtures.js';
 import { test, type TestContext } from 'node:test';
@@ -165,8 +165,8 @@ test('Nootify-specific rule file overrides select explicit Trae and WorkBuddy ta
   assert.deepEqual(promptTargets({ NOOTIFY_TRAE_RULES_FILE: '/custom/trae/nootify.md' }).trae, ['/custom/trae/nootify.md']);
   const defaults = promptTargets({}).trae;
   assert.equal(defaults.length, 2);
-  assert.match(defaults[0], /\/\.trae\/user_rules\/nootify\.md$/);
-  assert.match(defaults[1], /\/\.trae-cn\/user_rules\/nootify\.md$/);
+  assert.equal(defaults[0], join(homedir(), '.trae', 'user_rules', 'nootify.md'));
+  assert.equal(defaults[1], join(homedir(), '.trae-cn', 'user_rules', 'nootify.md'));
 });
 
 test('Trae enables both editions before installation and refreshes/removes both without restarting the service', async t => {

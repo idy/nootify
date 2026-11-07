@@ -29,11 +29,35 @@ namespace Nootify {
         [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool ConvertStringSecurityDescriptorToSecurityDescriptor(string sddl, uint revision, out IntPtr descriptor, IntPtr size);
         [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool ConvertSidToStringSid(IntPtr sid, out IntPtr value);
         [DllImport("advapi32.dll")] static extern uint GetSecurityInfo(IntPtr handle, int kind, uint info, out IntPtr owner, out IntPtr group, out IntPtr dacl, out IntPtr sacl, out IntPtr descriptor);
+        [DllImport("kernel32.dll", SetLastError = true)] static extern bool ReadProcessMemory(IntPtr process, IntPtr address, [Out] byte[] data, UIntPtr size, out UIntPtr read);
+        // MSRC documents the fixed, read-only user mapping and stable field offsets:
+        // https://www.microsoft.com/en-us/msrc/blog/2022/04/randomizing-the-kuser_shared_data-structure-on-windows
+        // The WDK KUSER_SHARED_DATA layout places BootId at 0x2C4 and documents it as
+        // the boot sequence incremented by the loader, not a wall-clock boot estimate.
+        // https://learn.microsoft.com/windows-hardware/drivers/ddi/ntddk/ns-ntddk-kuser_shared_data
+        static uint? BootSequenceFromData(byte[] data) {
+            if (data == null || data.Length != 0x2C8) return null;
+            ushort architecture = BitConverter.ToUInt16(data, 0x26A);
+            if ((architecture != 0 && architecture != 9 && architecture != 12) ||
+                BitConverter.ToUInt32(data, 0x26C) != 10 || BitConverter.ToUInt32(data, 0x270) != 0 ||
+                BitConverter.ToUInt32(data, 0x260) < 10240) return null;
+            return BitConverter.ToUInt32(data, 0x2C4);
+        }
+        public static uint? ReadBootSequence() {
+            if (Environment.OSVersion.Platform != PlatformID.Win32NT) return null;
+            var data = new byte[0x2C8]; UIntPtr read;
+            // Reading our own documented shared mapping needs no process discovery or privilege.
+            if (!ReadProcessMemory(new IntPtr(-1), new IntPtr(0x7FFE0000), data, new UIntPtr((uint)data.Length), out read) ||
+                read.ToUInt64() != (ulong)data.Length) return null;
+            return BootSequenceFromData(data);
+        }
         IntPtr handle;
-        ServiceJob(IntPtr value) { handle = value; }
+        readonly string name, completionPath;
+        ServiceJob(IntPtr value, string jobName, string receiptPath) { handle = value; name = jobName; completionPath = receiptPath; }
         internal IntPtr Handle { get { if (handle == IntPtr.Zero) throw new ObjectDisposedException("ServiceJob"); return handle; } }
         static void Check(bool success) { if (!success) throw new Win32Exception(Marshal.GetLastWin32Error()); }
-        public static ServiceJob Create(string name, string sid) {
+        public static ServiceJob Create(string name, string sid) { return Create(name, sid, null); }
+        public static ServiceJob Create(string name, string sid, string completionPath) {
             IntPtr descriptor = IntPtr.Zero;
             try {
                 Check(ConvertStringSecurityDescriptorToSecurityDescriptor("O:" + sid + "D:P(A;;GA;;;" + sid + ")(A;;GA;;;SY)", 1, out descriptor, IntPtr.Zero));
@@ -41,7 +65,7 @@ namespace Nootify {
                 IntPtr value = CreateJobObject(ref attributes, name);
                 int error = Marshal.GetLastWin32Error();
                 if (value == IntPtr.Zero) throw new Win32Exception(error);
-                var job = new ServiceJob(value);
+                var job = new ServiceJob(value, name, completionPath);
                 try {
                     // Never reconnect to, change limits on, or terminate a pre-existing job.
                     if (error == 183) throw new InvalidOperationException("Refusing an existing service job name");
@@ -51,14 +75,18 @@ namespace Nootify {
                 } catch { job.Dispose(); throw; }
             } finally { if (descriptor != IntPtr.Zero) LocalFree(descriptor); }
         }
-        public static ServiceJob Open(string name, string sid) {
+        public static ServiceJob Open(string name, string sid) { return Open(name, sid, null); }
+        public static ServiceJob Open(string name, string sid, string completionPath) {
             IntPtr value = OpenJobObject(0x2000C, false, name); // READ_CONTROL | JOB_OBJECT_QUERY | JOB_OBJECT_TERMINATE; no assignment rights.
             if (value == IntPtr.Zero) {
                 int error = Marshal.GetLastWin32Error();
-                if (error == 2) return null; // A job is destroyed only after its last handle closes AND all processes exit.
+                // A temporary object's name disappears at handle count zero, before its
+                // final kernel references necessarily disappear. Absence is NOT a drain.
+                // https://learn.microsoft.com/windows-hardware/drivers/kernel/life-cycle-of-an-object
+                if (error == 2) return null;
                 throw new Win32Exception(error);
             }
-            var job = new ServiceJob(value);
+            var job = new ServiceJob(value, name, completionPath);
             IntPtr descriptor = IntPtr.Zero, text = IntPtr.Zero;
             try {
                 IntPtr owner, group, dacl, sacl;
@@ -85,6 +113,20 @@ namespace Nootify {
             while (ActiveProcesses != 0) {
                 if (watch.ElapsedMilliseconds >= milliseconds) throw new TimeoutException("Timed out waiting for the Nootify job to release its files");
                 System.Threading.Thread.Sleep((int)Math.Max(1, Math.Min(25, milliseconds - watch.ElapsedMilliseconds)));
+            }
+            // Only an authoritative empty job may publish a receipt. Its unpredictable
+            // per-run identity cannot certify another run, even if the host finishes late.
+            // Keep this handle open until publication completes; closing it alone proves nothing.
+            if (completionPath != null) {
+                string temporary = completionPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                try {
+                    File.WriteAllText(temporary, name);
+                    try { File.Move(temporary, completionPath); }
+                    catch (IOException) {
+                        // Management and a normally exiting host may both finish this run.
+                        if (!String.Equals(File.ReadAllText(completionPath), name, StringComparison.Ordinal)) throw;
+                    }
+                } finally { File.Delete(temporary); }
             }
         }
         public void Dispose() { if (handle != IntPtr.Zero) { CloseHandle(handle); handle = IntPtr.Zero; } }

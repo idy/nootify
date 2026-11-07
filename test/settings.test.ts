@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import childProcess, { type ExecFileException } from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
 import { assertMode } from './platform-fixtures.js';
 import { once } from 'node:events';
 import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
@@ -379,6 +381,32 @@ test('an unreadable MCP file leaves saved credentials in place when clearing', a
   await settings.saveLark(appId, 'saved-secret');
   await assert.rejects(settings.clearLark());
   assert.equal(state.settings.lark_app_secret, 'saved-secret');
+});
+
+test('Windows reveal accepts Explorer handoff exit 1 and still reports launch failures', async t => {
+  const f = await harness(t);
+  const settings = new SettingsService({ state: f.state, lark: f.lark, pulls: f.pulls, agents: f.agents,
+    github: new GitHubAuth(f.state, () => {}, () => {}, 'client-1') });
+  let failure: ExecFileException | null = null;
+  const commands: { file: string; args: string[]; options: unknown }[] = [];
+  const exec = (file: string, args: string[], options: unknown, callback: (error: ExecFileException | null, stdout: string, stderr: string) => void) => {
+    commands.push({ file, args, options });
+    queueMicrotask(() => callback(failure, '', ''));
+    return {};
+  };
+  t.mock.property(childProcess, 'execFile', exec as unknown as typeof childProcess.execFile);
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  t.mock.property(process, 'platform', 'win32');
+  await settings.reveal();
+  failure = Object.assign(new Error('Explorer handed the selection to the shell'), { code: 1 });
+  await settings.reveal();
+  for (const outcome of [{ code: 2 }, { code: 'ENOENT' }, { code: 1, killed: true }, { code: 1, signal: 'SIGTERM' as const }]) {
+    failure = Object.assign(new Error('Reveal failed'), outcome);
+    await assert.rejects(settings.reveal(), error => error === failure);
+  }
+  assert.deepEqual(commands[0], { file: join(process.env.SystemRoot ?? 'C:\\Windows', 'explorer.exe'),
+    args: ['/select,', join(f.dir, 'exports')], options: { windowsHide: true } });
 });
 
 test('an export keeps its secrets in a private file and keeps only the newest ten', async t => {

@@ -30,18 +30,25 @@ export async function writeWindowsInbox(request: InboxWrite, runtime: NativeRunt
     const child = spawn(command.file, command.args, {
       stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: inboxEnvironment(process.env), cwd: dirname(windowsInboxScript()),
     });
-    let ready = false; let dispatched = false; let written = false; let settled = false; let buffer = ''; let bytes = 0;
-    const fail = (message = 'Windows inbox authentication or write failed') => {
+    let ready = false; let dispatched = false; let written = false; let startupFailed = false; let settled = false; let buffer = ''; let bytes = 0;
+    const fail = (message = 'Windows inbox authentication or write failed', retryable = !dispatched) => {
       if (settled) return;
-      // Startup failed before any request was sent: retry is safe. Once the native
-      // writer has the request, its byte progress is unknown, so never resubmit blindly.
-      const error = dispatched ? new UnconfirmedDeliveryError(message) : new RetryableDeliveryError(message);
+      // After submission, a missing readiness/result frame cannot prove that no
+      // external bytes were written. Only an explicit pre-delivery failure is safe to retry.
+      const error = retryable ? new RetryableDeliveryError(message) : new UnconfirmedDeliveryError(message);
       settled = true; clearTimeout(timer); child.stdin.destroy(); child.kill(); reject(error);
     };
     let timer = setTimeout(() => fail('Inbox helper startup timed out'), runtime.startupTimeout ?? 15_000).unref();
     child.stderr.resume(); // Raw native errors must never expose payloads, paths, PIDs or token details.
     child.stdin.on('error', () => fail());
     child.on('error', () => fail());
+    child.once('spawn', () => {
+      if (settled) return;
+      // One private request + EOF: redirected PowerShell input must never depend
+      // on the parent receiving readiness before it closes the input stream.
+      dispatched = true;
+      child.stdin.end(JSON.stringify(request) + '\n');
+    });
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', (chunk: string) => {
       if (settled) return;
@@ -51,13 +58,13 @@ export async function writeWindowsInbox(request: InboxWrite, runtime: NativeRunt
         const end = buffer.indexOf('\n'); if (end < 0) return;
         const line = buffer.slice(0, end); buffer = buffer.slice(end + 1);
         try {
-          const reply = JSON.parse(line) as { ready?: unknown; status?: unknown };
-          if (!ready && reply?.ready === true) {
+          const reply = JSON.parse(line) as { ready?: unknown; status?: unknown; error?: unknown };
+          if (startupFailed) { fail(); return; }
+          if (!ready && reply?.error === 'inbox_startup_failed' && Object.keys(reply).length === 1) startupFailed = true;
+          else if (!ready && reply?.ready === true) {
             ready = true; clearTimeout(timer);
             // Startup/compilation and the whole connect/verify/write exchange each have a deadline.
             timer = setTimeout(() => fail('Inbox socket write timed out'), request.timeout + 1000).unref();
-            dispatched = true;
-            child.stdin.end(JSON.stringify(request) + '\n');
           } else if (ready && !written && reply?.status === 'socket_written') written = true;
           else { fail(); return; }
         } catch { fail(); return; }
@@ -65,6 +72,7 @@ export async function writeWindowsInbox(request: InboxWrite, runtime: NativeRunt
     });
     child.once('close', code => {
       if (settled) return;
+      if (code === 1 && startupFailed && !buffer.trim()) { fail(undefined, true); return; }
       if (code !== 0 || !ready || !written || buffer.trim()) { fail(); return; }
       settled = true; clearTimeout(timer); resolve({ status: 'socket_written' });
     });

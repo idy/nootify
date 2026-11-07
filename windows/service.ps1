@@ -76,19 +76,29 @@ function Assert-PortFree {
     catch { throw "Port $Port is already occupied; stop the existing service before installing or starting Nootify" }
     finally { $listener.Stop() }
 }
-function Prepare-State {
-    $null = [IO.Directory]::CreateDirectory($StateDir)
-    $directory = Get-Item -LiteralPath $StateDir -Force
-    if (($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Refusing a redirected service state directory' }
-    $acl = New-Object Security.AccessControl.DirectorySecurity
+function Protect-StateItem([IO.FileSystemInfo]$Item) {
+    # Replacing only the parent ACL leaves explicit/protected child grants readable
+    # through Windows bypass-traverse privilege. Repair every existing entry too.
+    if (($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Refusing redirected service state entries' }
+    $isDirectory = $Item -is [IO.DirectoryInfo]
+    if ($isDirectory) { $acl = New-Object Security.AccessControl.DirectorySecurity; $inheritance = 'ContainerInherit, ObjectInherit' }
+    else { $acl = New-Object Security.AccessControl.FileSecurity; $inheritance = 'None' }
     $acl.SetAccessRuleProtection($true, $false)
     $sid = New-Object Security.Principal.SecurityIdentifier($ownerSid)
     $acl.SetOwner($sid)
     foreach ($identity in @($sid, (New-Object Security.Principal.SecurityIdentifier('S-1-5-18')))) {
-        $rule = New-Object Security.AccessControl.FileSystemAccessRule($identity, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow')
+        $rule = New-Object Security.AccessControl.FileSystemAccessRule($identity, 'FullControl', $inheritance, 'None', 'Allow')
         $null = $acl.AddAccessRule($rule)
     }
-    Set-Acl -LiteralPath $StateDir -AclObject $acl
+    Set-Acl -LiteralPath $Item.FullName -AclObject $acl
+    if ($isDirectory) {
+        # Traverse only after protecting this directory, never through a reparse point.
+        foreach ($child in $Item.GetFileSystemInfos()) { Protect-StateItem $child }
+    }
+}
+function Prepare-State {
+    $null = [IO.Directory]::CreateDirectory($StateDir)
+    Protect-StateItem (Get-Item -LiteralPath $StateDir -Force)
 }
 function New-ServiceTask {
     $record = [ordered]@{ version = 1; sid = $ownerSid; script = $scriptPath; node = $NodePath; server = $ServerPath; state = $StateDir; port = $Port; mcp = $McpConfig }
@@ -123,10 +133,17 @@ function New-ServiceTask {
     return $scheduler.GetFolder('\').RegisterTaskDefinition($taskName, $definition, 2, $ownerSid, $null, 3, $null)
 }
 function Import-ServiceRunner {
+    # Use the verified entry script path: extracted function scriptblocks have no PSScriptRoot.
     # Only System.dll/mscorlib types are used, including on Windows PowerShell 5.1.
-    if (!('Nootify.ServiceJob' -as [type])) { Add-Type -Path (Join-Path $PSScriptRoot 'service-runner.cs') }
+    if (!('Nootify.ServiceJob' -as [type])) { Add-Type -LiteralPath (Join-Path (Split-Path -Parent (Full-Path $scriptPath)) 'service-runner.cs') }
 }
-function Open-OwnedJob([bool]$TaskActive) {
+function Get-BootSequence { return [Nootify.ServiceJob]::ReadBootSequence() }
+function Job-CompletionPath([string]$Name) {
+    $prefix = "Global\Nootify.Service.Job.$ownerSid."
+    if ($Name -cnotmatch ('^' + [regex]::Escape($prefix) + '[0-9a-f]{32}$')) { throw 'Cannot verify the Nootify job identity' }
+    return Join-Path (Split-Path -Parent $runtimePath) ('windows-job-' + $Name.Substring($prefix.Length) + '.complete')
+}
+function Read-OwnedRuntime([bool]$TaskActive) {
     try { $runtime = [IO.File]::ReadAllText($runtimePath) | ConvertFrom-Json }
     catch [IO.FileNotFoundException] {
         if ($TaskActive) { throw 'Cannot verify the active Nootify task job: its runtime record is missing' }
@@ -139,38 +156,74 @@ function Open-OwnedJob([bool]$TaskActive) {
     # Private state plus the exact installation/SID and an unpredictable per-run name bind
     # this handle to our job. Never fall back to a PID tree, a fixed job name, or an outer job.
     $prefix = "Global\Nootify.Service.Job.$ownerSid."
-    if ($runtime.version -ne 2 -or $runtime.sid -ne $ownerSid -or !(Same-Path $runtime.script $scriptPath) -or $runtime.job -cnotmatch ('^' + [regex]::Escape($prefix) + '[0-9a-f]{32}$')) {
+    if (($runtime.version -ne 2 -and $runtime.version -ne 3) -or $runtime.sid -ne $ownerSid -or !(Same-Path $runtime.script $scriptPath) -or $runtime.job -cnotmatch ('^' + [regex]::Escape($prefix) + '[0-9a-f]{32}$')) {
         throw 'Cannot verify the Nootify job runtime record'
     }
-    return [Nootify.ServiceJob]::Open([string]$runtime.job, $ownerSid)
+    if ($runtime.version -eq 3 -and $null -ne $runtime.boot) {
+        [uint32]$boot = 0
+        if (!([uint32]::TryParse([string]$runtime.boot, [ref]$boot))) { throw 'Cannot verify the Nootify kernel boot sequence' }
+    }
+    return $runtime
+}
+function Open-OwnedJob([bool]$TaskActive) {
+    $runtime = Read-OwnedRuntime $TaskActive
+    if (!$runtime) { return $null }
+    $completionPath = Job-CompletionPath ([string]$runtime.job)
+    $job = [Nootify.ServiceJob]::Open([string]$runtime.job, $ownerSid, $completionPath)
+    if ($job) { return $job } # A live job always requires its own authoritative drain.
+    if ($runtime.version -eq 3 -and $null -ne $runtime.boot) {
+        $currentBoot = Get-BootSequence
+        if ($null -ne $currentBoot -and [uint32]$runtime.boot -ne [uint32]$currentBoot) { return $null }
+    }
+    # A changed kernel boot sequence independently excludes this old run's processes.
+    # Equal/unknown sequences never prove exit, including hibernation or Fast Startup
+    # with a restored kernel image. Otherwise require a receipt after ActiveProcesses==0.
+    # A missing name alone only proves that the last job handle closed.
+    try { $completed = [IO.File]::ReadAllText($completionPath) }
+    catch [IO.FileNotFoundException] { $completed = $null }
+    catch [IO.DirectoryNotFoundException] { $completed = $null }
+    if ($completed -cne [string]$runtime.job) {
+        throw "Cannot verify Nootify shutdown: the job name is missing without a matching completion receipt or changed kernel boot sequence. Use Windows Restart and retry. If this record has no readable boot evidence, Restart alone cannot clear it: deliberately remove or repair '$runtimePath' after the restart, preserving the other private settings."
+    }
+    return $null
+}
+function Remove-JobRuntime {
+    $runtime = Read-OwnedRuntime $false
+    if ($runtime) {
+        $completionPath = Job-CompletionPath ([string]$runtime.job)
+        # Remove the runtime identity first: interruption may leave an unused receipt,
+        # but must never discard a receipt that a retained runtime still needs.
+        Remove-Item -LiteralPath $runtimePath -ErrorAction Stop
+        Remove-Item -LiteralPath $completionPath -ErrorAction SilentlyContinue
+    }
 }
 function Publish-Job([string]$Name) {
     $temporary = $runtimePath + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
     try {
-        [IO.File]::WriteAllText($temporary, (@{ version = 2; sid = $ownerSid; script = $scriptPath; job = $Name } | ConvertTo-Json -Compress))
+        [IO.File]::WriteAllText($temporary, (@{ version = 3; sid = $ownerSid; script = $scriptPath; job = $Name; boot = (Get-BootSequence) } | ConvertTo-Json -Compress))
         [IO.File]::Move($temporary, $runtimePath) # Same-directory atomic publication, before any Node creation.
     } finally { Remove-Item -LiteralPath $temporary -ErrorAction SilentlyContinue }
 }
 function Stop-OwnedTask($Task) {
-    $null = Assert-Owned $Task
+    if ($Task) { $null = Assert-Owned $Task }
     Import-ServiceRunner
     $watch = [Diagnostics.Stopwatch]::StartNew()
     $creationLock = $null; $job = $null
     # Prevent logon/restart policy from starting another instance after the empty check.
-    # Start re-enables this same task; upgrades retain its definition and private data.
-    $Task.Enabled = $false
+    # A deleted registration can still have a live job; its private runtime must be checked.
+    if ($Task) { $Task.Enabled = $false }
     try {
         $creationLock = Enter-Lock $creationLockName ([Math]::Max(0, 30000 - [int]$watch.ElapsedMilliseconds))
-        $job = Open-OwnedJob ($Task.GetInstances(0).Count -gt 0)
-        if ($Task.GetInstances(0).Count -gt 0) { $Task.Stop(0) }
+        $job = Open-OwnedJob ($Task -and $Task.GetInstances(0).Count -gt 0)
+        if ($Task -and $Task.GetInstances(0).Count -gt 0) { $Task.Stop(0) }
         # Retaining the handle defeats KILL_ON_JOB_CLOSE, so terminate explicitly and
         # query kernel membership until empty, including helpers spawned during Stop.
         if ($job) { $job.TerminateAndWait([Math]::Max(0, 30000 - [int]$watch.ElapsedMilliseconds)) }
-        while ($Task.GetInstances(0).Count -ne 0) {
+        while ($Task -and $Task.GetInstances(0).Count -ne 0) {
             if ($watch.ElapsedMilliseconds -ge 30000) { throw 'Timed out waiting for the Nootify task to stop' }
             Start-Sleep -Milliseconds 50
         }
-        Remove-Item -LiteralPath $runtimePath -ErrorAction SilentlyContinue
+        Remove-JobRuntime
     } finally {
         if ($job) { $job.Dispose() }
         if ($creationLock) { $creationLock.ReleaseMutex(); $creationLock.Dispose() }
@@ -225,11 +278,13 @@ function Run-Service {
             $record = Assert-Owned $task
             if ($record.mcp -cne $McpConfig) { throw 'Run arguments do not match the registered task' }
             if (!$task.Enabled) { return 0 }
+            # Failure leaves Node uncreated and reports a failed Run. Keep the logon
+            # trigger enabled so a later full Restart can supply changed boot evidence.
             $previous = Open-OwnedJob $false
             if ($previous) { try { $previous.TerminateAndWait(20000) } finally { $previous.Dispose() } }
-            Remove-Item -LiteralPath $runtimePath -ErrorAction SilentlyContinue
+            Remove-JobRuntime
             $name = "Global\Nootify.Service.Job.$ownerSid." + [guid]::NewGuid().ToString('N')
-            $job = [Nootify.ServiceJob]::Create($name, $ownerSid)
+            $job = [Nootify.ServiceJob]::Create($name, $ownerSid, (Job-CompletionPath $name))
             Publish-Job $name
             $runner = [Nootify.ServiceRunner]::new($job, $NodePath, [string[]]$arguments, $StateDir)
             $runner.Resume()
@@ -244,8 +299,9 @@ function Run-Service {
         } finally {
             if ($job) { $job.Dispose() }
             if ($creationLock) { $creationLock.ReleaseMutex(); $creationLock.Dispose() }
-            # Keep the job identity for Stop/restart, even after a failed startup or an
-            # abrupt host exit. Only a successful management drain removes the record.
+            # A successful drain publishes a private receipt before closing the job.
+            # Keep the identity for Stop/restart. After abrupt exit, a vanished name
+            # requires that receipt or independent proof of a changed kernel boot.
             $runLock.ReleaseMutex(); $runLock.Dispose()
         }
     }
@@ -279,9 +335,9 @@ try {
         if (!$task) { throw 'Nootify is not installed; use service-install' }
         if ($Action -eq 'Restart') { Stop-OwnedTask $task }
         Start-OwnedTask $task
-    } elseif ($task) {
+    } else {
         Stop-OwnedTask $task
-        if ($Action -eq 'Uninstall') { $scheduler.GetFolder('\').DeleteTask($taskName, 0) }
+        if ($task -and $Action -eq 'Uninstall') { $scheduler.GetFolder('\').DeleteTask($taskName, 0) }
     }
     $status = @{ Install = 'installed'; Start = 'started'; Restart = 'restarted'; Stop = 'stopped'; Uninstall = 'uninstalled' }[$Action]
     @{ installed = [bool]($task -and $Action -ne 'Uninstall'); status = $status; task = $taskName } | ConvertTo-Json -Compress

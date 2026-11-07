@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, type ExecFileException } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { chmod, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -545,7 +545,14 @@ export class SettingsService {
 }
 const showInFinder = async (path: string): Promise<void> => {
   const exec = promisify(execFile);
-  if (process.platform === 'win32') await exec(join(process.env.SystemRoot ?? 'C:\\Windows', 'explorer.exe'), ['/select,', path], { windowsHide: true });
-  else if (process.platform === 'darwin') await exec('/usr/bin/open', ['-R', path]);
+  if (process.platform === 'win32') {
+    try { await exec(join(process.env.SystemRoot ?? 'C:\\Windows', 'explorer.exe'), ['/select,', path], { windowsHide: true }); }
+    catch (error) {
+      // Explorer may exit 1 after handing the selection to the existing shell.
+      // Spawn failures, signals and other exit codes still indicate a failed request.
+      const failure = error as ExecFileException;
+      if (failure.code !== 1 || failure.killed || failure.signal) throw error;
+    }
+  } else if (process.platform === 'darwin') await exec('/usr/bin/open', ['-R', path]);
   else await exec('xdg-open', [(await stat(path)).isDirectory() ? path : dirname(path)]);
 };

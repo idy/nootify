@@ -82,7 +82,7 @@ test('notices reproduce shipped license files and fall back to SPDX texts of dec
     assert.ok(notices.includes([
       'npm package: @scope/no-file 3.0.0', 'License: MIT', 'Source: https://www.npmjs.com/package/@scope/no-file/v/3.0.0', 'Author: Jane <jane@example.com>',
       `No license file comes with this package; its declared license follows, from the SPDX License List ${SPDX_LICENSE_LIST}.`,
-      '', `--- MIT (SPDX License List ${SPDX_LICENSE_LIST}) ---`, '', spdxMit.trimEnd(),
+      '', `--- MIT (SPDX License List ${SPDX_LICENSE_LIST}) ---`, '', spdxMit.replace(/\r\n?/g, '\n').trimEnd(),
     ].join('\n')));
     assert.ok(!notices.includes('\r') && !notices.includes(dir) && !notices.includes('not a license') && notices.endsWith('\n'));
     assert.equal(await renderNotices('aarch64-apple-darwin', [...crates].reverse(), [...packages].reverse()), notices);
