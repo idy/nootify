@@ -79,6 +79,40 @@ test('a failed Desktop catalog defers CLI aliases until identities can be read a
   assert.equal(reports.length, 0);
 });
 
+for (const corruption of ['truncated', 'oversized', 'wrong-identity', 'non-file'] as const) {
+  test(`a partial Desktop catalog with ${corruption} metadata preserves known Desktop sessions and defers CLI aliases`, async t => {
+    const root = await mkdtemp(join(tmpdir(), 'nootify-partial-desktop-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const state = await State.open(join(root, 'state'));
+    const files = Object.fromEntries(['claude', 'codex', 'opencode', 'trae', 'workbuddy'].map(agent => [agent, join(root, agent, 'rules.md')])) as Record<AgentId, string>;
+    const agents = new AgentPrompts({ stateDir: state.directory, port: 9417, files }); await agents.set('claude', true);
+    const desktop = join(root, 'desktop/account/profile'); await mkdir(desktop, { recursive: true });
+    await writeFile(join(desktop, 'local_active.json'), JSON.stringify({ sessionId: 'local_active', cliSessionId: 'cli_active', isArchived: false }));
+    const archived = { sessionId: 'local_archived', cliSessionId: 'cli_archived', isArchived: true };
+    const broken = corruption === 'truncated' ? JSON.stringify(archived).slice(0, -1)
+      : corruption === 'oversized' ? JSON.stringify({ ...archived, padding: 'x'.repeat(1024 * 1024) })
+      : JSON.stringify({ ...archived, sessionId: 'local_mismatch' });
+    const file = join(desktop, 'local_archived.json');
+    if (corruption === 'non-file') await mkdir(file);
+    else await writeFile(file, broken);
+    const projects = join(root, 'claude/projects/project'); await mkdir(projects, { recursive: true });
+    for (const id of ['cli_active', 'cli_archived', 'standalone']) await writeFile(join(projects, `${id}.jsonl`), '{}\n');
+    const reports: Record<string, unknown>[] = [];
+    const discover = sessionThreadDiscovery(agents, state, record => reports.push(record), {
+      claudeDir: join(root, 'claude'), desktopRoots: [join(root, 'desktop')],
+    });
+    assert.deepEqual((await collect(discover)).map(item => [item.adapter, item.session_id]), [['claude-desktop', 'local_active']]);
+    assert.equal(reports.length, 1);
+    assert.match(String(reports[0].error), /Claude Desktop session metadata is incomplete/);
+    await rm(file, { recursive: true });
+    await writeFile(file, JSON.stringify(archived)); reports.length = 0;
+    const recovered = await collect(discover);
+    assert.deepEqual(recovered.map(item => item.session_id).sort(), ['local_active', 'standalone']);
+    assert.equal(recovered.find(item => item.session_id === 'local_active')?.adapter, 'claude-desktop');
+    assert.equal(reports.length, 0);
+  });
+}
+
 for (const agent of ['opencode', 'trae'] as const) {
   test(`disabling ${agent} during discovery stops its remaining native or cooperative candidates`, async t => {
     const root = await mkdtemp(join(tmpdir(), 'nootify-enrollment-change-'));

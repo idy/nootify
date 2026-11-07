@@ -52,7 +52,11 @@ export async function conversationSessions(sources: ConversationSources = defaul
     try { return await read(); } catch (error) { failed?.(); warnings.push(`${name} session metadata could not be read: ${(error as Error).message}`); return []; }
   };
   let desktopReadable = true;
-  const desktop = await collect('Claude Desktop', () => desktopSessions(sources.desktopRoots ?? []), () => { desktopReadable = false; });
+  const incompleteDesktop = () => {
+    if (desktopReadable) warnings.push('Claude Desktop session metadata is incomplete; some identities could not be verified');
+    desktopReadable = false;
+  };
+  const desktop = await collect('Claude Desktop', () => desktopSessions(sources.desktopRoots ?? [], incompleteDesktop), () => { desktopReadable = false; });
   const cliIds = new Map(desktop.flatMap(entry => entry.cliIds.map(id => [id, entry] as const)));
   const [claude, codex, opencode] = await Promise.all([
     // Backfill must not mistake Desktop aliases for standalone CLI identities after a catalog failure.
@@ -99,7 +103,7 @@ function linkedPull(value: unknown): GitHubPullReference | undefined {
       ? parseGitHubPull(`https://github.com/${entry.repo ?? entry.prRepository}/pull/${entry.prNumber}`) : undefined);
 }
 interface DesktopEntry { session: ConversationSession; cliIds: string[]; authoritativePulls: boolean }
-async function desktopSessions(roots: string[]): Promise<DesktopEntry[]> {
+async function desktopSessions(roots: string[], incomplete: () => void): Promise<DesktopEntry[]> {
   const found = new Map<string, DesktopEntry>();
   for (const root of roots) for (const account of await entries(root)) {
     if (!account.isDirectory()) continue;
@@ -107,9 +111,12 @@ async function desktopSessions(roots: string[]): Promise<DesktopEntry[]> {
       if (!profile.isDirectory()) continue;
       const directory = join(root, account.name, profile.name);
       for (const file of await entries(directory)) {
-        if (!file.isFile() || !/^local_[A-Za-z0-9_-]+\.json$/.test(file.name)) continue;
+        if (!/^local_[A-Za-z0-9_-]+\.json$/.test(file.name)) continue;
+        if (!file.isFile()) { incomplete(); continue; }
         const data = await metadata(join(directory, file.name));
-        if (!data || typeof data.value.sessionId !== 'string' || data.value.sessionId !== file.name.slice(0, -5)) continue;
+        if (!data || typeof data.value.sessionId !== 'string' || data.value.sessionId !== file.name.slice(0, -5)) {
+          incomplete(); continue;
+        }
         const value = data.value;
         const directories = [...new Set([value.cwd, value.worktreePath, value.originCwd,
           ...(Array.isArray(value.gitAnchors) ? value.gitAnchors.map(anchor => object(anchor)?.gitRoot) : [])].map(path).filter((item): item is string => !!item))];
@@ -126,7 +133,7 @@ async function desktopSessions(roots: string[]): Promise<DesktopEntry[]> {
         found.set(session.id, { session,
           cliIds: [value.cliSessionId, ...(Array.isArray(value.priorCliSessionIds) ? value.priorCliSessionIds : [])].filter((id): id is string => typeof id === 'string'),
           authoritativePulls: Array.isArray(value.prs) });
-        if (found.size >= MAX_SESSIONS) return [...found.values()];
+        if (found.size >= MAX_SESSIONS) { incomplete(); return [...found.values()]; }
       }
     }
   }
