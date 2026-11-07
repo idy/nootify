@@ -8,15 +8,20 @@
 ; Only the bundled CLI determines task/process ownership. Never use taskkill by
 ; image name, delete another installation's task, or continue after a stop error.
 ; Clear only this installer's process environment, before Node parses its options.
-; An empty value avoids reading/truncating an inherited value and is safe if absent.
+; Delete without reading/truncating the value. ERROR_ENVVAR_NOT_FOUND is already safe.
 !macro NootifyClearNodeVariable NAME
-  System::Call 'kernel32::SetEnvironmentVariableW(w "${NAME}", w "") i.r0'
+  Push $1
+  System::Call 'kernel32::SetEnvironmentVariableW(w "${NAME}", p 0) i.r0 ?e'
+  Pop $1
   ${If} $0 = 0
+  ${AndIf} $1 != 203
     DetailPrint "Unable to clear ${NAME} for Nootify service management."
+    Pop $1
     Pop $0
     SetErrorLevel 1
     Abort "Unable to prepare Nootify's service environment. Installed files have not been replaced or removed."
   ${EndIf}
+  Pop $1
 !macroend
 
 !macro NootifyManageInstalledService COMMAND
