@@ -193,6 +193,28 @@ test('Windows native peer policy rejects foreign SIDs including reused expected 
   assert.match(stdout, /Windows inbox peer policy tests passed/);
 });
 
+test('the actual service status entry point runs hidden without an attached console', { skip: process.platform !== 'win32', timeout: 20_000 }, async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'nootify-hidden-service-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const child = spawn(windowsPowerShell(), windowsServiceArgs('status', { stateDir: join(directory, 'private-state'), port: 9517 }), {
+    windowsHide: true, detached: true, env: serviceEnvironment(process.env), stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const deadline = setTimeout(() => child.kill(), 15_000).unref();
+  t.after(() => { clearTimeout(deadline); child.kill(); });
+  const closed = once(child, 'close');
+  let output = ''; let errors = '';
+  child.stdout.setEncoding('utf8'); child.stdout.on('data', data => { output += data; });
+  child.stderr.setEncoding('utf8'); child.stderr.on('data', data => { errors += data; });
+  const [code] = await closed;
+  if (code === 1 && /^Refusing (?:an unrelated Scheduled Task|to control a Scheduled Task)/.test(errors)) {
+    assert.equal(output, '', 'an installed task from another location remains untouched');
+  } else {
+    assert.equal(code, 0, 'hidden service status must reach its management logic');
+    assert.equal(typeof JSON.parse(output).installed, 'boolean');
+    assert.equal(errors, '');
+  }
+});
+
 test('PowerShell ownership, task configuration, idempotence and nested job tests', { skip: process.platform !== 'win32' }, async () => {
   const { stdout } = await exec(windowsPowerShell(), ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
     fileURLToPath(new URL('../../windows/service.test.ps1', import.meta.url)), '-NodePath', process.execPath], { windowsHide: true, timeout: 60_000 });

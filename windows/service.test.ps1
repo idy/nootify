@@ -9,6 +9,16 @@ function Must-Fail([scriptblock]$Code, [string]$Message) {
     try { $null = & $Code } catch { $failed = $true }
     Assert $failed $Message
 }
+function Close-FixtureJob($Job) {
+    try { $Job.TerminateAndWait(5000) }
+    catch {
+        $failure = $_.Exception
+        while ($failure.InnerException) { $failure = $failure.InnerException }
+        # Runner.Dispose owns this same handle and may already have closed it.
+        # Teardown must not mask the original failure or claim a production drain.
+        if ($failure -isnot [ObjectDisposedException]) { throw }
+    } finally { $Job.Dispose() }
+}
 function Wait-File([string]$Path) {
     $watch = [Diagnostics.Stopwatch]::StartNew()
     while (!(Test-Path -LiteralPath $Path)) {
@@ -160,6 +170,14 @@ Assert ($null -ne ('Nootify.ServiceJob' -as [type])) 'Expected the actual servic
 $bootSequence = Get-BootSequence
 Assert ($null -ne $bootSequence) 'Windows 10+ must expose the documented shared kernel boot sequence'
 Assert ((Get-BootSequence) -eq $bootSequence) 'The kernel boot sequence must remain stable within this running Windows session'
+$terminalSession = Get-TerminalSessionId
+Assert ($null -ne $terminalSession -and $terminalSession -eq [Diagnostics.Process]::GetCurrentProcess().SessionId) 'Terminal identity must come from the current process'
+Assert (!(Test-TerminalSessionEnded ([uint32]$terminalSession))) 'The current session, including noninteractive session zero, must not prove termination'
+$sessionPolicy = [Nootify.ServiceJob].GetMethod('SessionQueryProvesExit', [Reflection.BindingFlags]'Static,NonPublic')
+Assert ([bool]$sessionPolicy.Invoke($null, [object[]]@([uint32]1, $false, [int]7022))) 'Explicit session-not-found is independent logoff evidence'
+foreach ($query in @(@([uint32]0, $false, [int]7022), @([uint32]1, $true, [int]7022), @([uint32]1, $false, [int]5), @([uint32]1, $false, [int]1722), @([uint32]1, $false, [int]0))) {
+    Assert (!([bool]$sessionPolicy.Invoke($null, [object[]]$query))) 'Present sessions, session zero, access denied and unavailable queries must not prove exit'
+}
 $bootParser = [Nootify.ServiceJob].GetMethod('BootSequenceFromData', [Reflection.BindingFlags]'Static,NonPublic')
 function Parse-TestBootData([byte[]]$Data) { return $bootParser.Invoke($null, [object[]](,$Data)) }
 $sharedData = New-Object byte[] 0x2C8
@@ -194,7 +212,8 @@ try {
     Must-Fail { Stop-OwnedTask $null } 'A deleted registration must not hide an unverified runtime job'
     Assert (Test-Path -LiteralPath $runtimePath) 'An absent registration must retain unverified runtime evidence'
     $runtimeRecord = Read-OwnedRuntime $false
-    Assert ($runtimeRecord.version -eq 3 -and $runtimeRecord.boot -eq $bootSequence) 'Publication must capture kernel boot identity before Node creation'
+    Assert ($runtimeRecord.version -eq 4 -and $runtimeRecord.boot -eq $bootSequence) 'Publication must capture kernel boot identity before Node creation'
+    Assert ($runtimeRecord.terminal_session -eq (Get-TerminalSessionId)) 'Publication must capture the first child process terminal session'
     $runtimeText = [IO.File]::ReadAllText($runtimePath)
     $bootReader = ${function:Get-BootSequence}
     function Get-BootSequence { return $script:testBoot }
@@ -228,6 +247,34 @@ try {
         Assert ($null -eq (Open-OwnedJob $false)) 'Boot counter wrap still changes the boot identity'
     } finally {
         ${function:Get-BootSequence} = $bootReader
+        [IO.File]::WriteAllText($runtimePath, $runtimeText)
+    }
+    $sessionTest = ${function:Test-TerminalSessionEnded}
+    function Test-TerminalSessionEnded([uint32]$SessionId) { $script:queriedSession = $SessionId; return $script:sessionDeleted }
+    try {
+        $runtimeRecord = $runtimeText | ConvertFrom-Json
+        $runtimeRecord.terminal_session = [uint32]77
+        [IO.File]::WriteAllText($runtimePath, ($runtimeRecord | ConvertTo-Json -Compress))
+        $script:sessionDeleted = $false
+        Must-Fail { Open-OwnedJob $false } 'A preserved or reused terminal session must not certify shutdown'
+        $script:sessionDeleted = $true
+        Assert ($null -eq (Open-OwnedJob $false)) 'Explicit old-session deletion must recover within the same boot'
+        Assert ($script:queriedSession -eq 77) 'Recovery must query the saved original session, not the new caller session'
+        foreach ($missing in @($null, [uint32]0)) {
+            $runtimeRecord.terminal_session = $missing
+            [IO.File]::WriteAllText($runtimePath, ($runtimeRecord | ConvertTo-Json -Compress))
+            Must-Fail { Open-OwnedJob $false } 'Missing metadata and noninteractive session zero must not infer logoff'
+        }
+        foreach ($invalidSession in @(-1, 4294967296, 'not-a-session')) {
+            $runtimeRecord.terminal_session = $invalidSession
+            [IO.File]::WriteAllText($runtimePath, ($runtimeRecord | ConvertTo-Json -Compress))
+            Must-Fail { Open-OwnedJob $false } 'Invalid terminal metadata must never certify a drain'
+        }
+        $runtimeRecord.version = 3; $runtimeRecord.terminal_session = [uint32]77
+        [IO.File]::WriteAllText($runtimePath, ($runtimeRecord | ConvertTo-Json -Compress))
+        Must-Fail { Open-OwnedJob $false } 'Legacy metadata must not infer session teardown'
+    } finally {
+        ${function:Test-TerminalSessionEnded} = $sessionTest
         [IO.File]::WriteAllText($runtimePath, $runtimeText)
     }
     Remove-Item -LiteralPath $runtimePath # Fixture repair only: this synthetic run never created a process.
@@ -343,7 +390,14 @@ setInterval(()=>{},1000);
     }
     $pids = [IO.File]::ReadAllText($pidsPath) | ConvertFrom-Json
     $processes = @($pids | ForEach-Object { $process = [Diagnostics.Process]::GetProcessById([int]$_); $null = $process.Handle; $process })
-    $runner.Dispose(); $runner = $null
+    # Invoke the actual native window callback for this owned fixture only; never
+    # broadcast logoff or sign out the CI runner. This covers a retained terminal ID.
+    $notifications = [Nootify.ServiceRunner].GetField('sessionEnd', [Reflection.BindingFlags]'Instance,NonPublic').GetValue($runner)
+    $notify = $notifications.GetType().GetMethod('HandleMessage', [Reflection.BindingFlags]'Instance,NonPublic')
+    $null = $notify.Invoke($notifications, [object[]]@([IntPtr]::Zero, [uint32]0x11, [UIntPtr]::Zero, [IntPtr]::Zero))
+    Assert ($job.ActiveProcesses -eq 0) 'Session-end notification must authoritatively drain Node and its helper'
+    Assert ([IO.File]::ReadAllText($completionPath) -ceq $name) 'The callback must certify its exact run before host exit, even when the terminal ID is retained'
+    $runner.Dispose(); $runner = $null; $job = $null
     foreach ($process in $processes) { Assert ($process.WaitForExit(5000)) 'Node and helper must both leave the job'; $process.Dispose() }
     Assert ([IO.File]::ReadAllText($completionPath) -ceq $name) 'Normal runner disposal must leave independently verifiable completion evidence'
     Assert ([IO.File]::ReadAllText((Join-Path $directory 'stdout.log')).Contains('stdout marker')) 'Expected private stdout log'
@@ -374,7 +428,7 @@ setInterval(()=>{},1000);
     @{ record = $record; runtimePath = $runtimePath; creationLockName = $creationLockName; runLockName = $runLockName; enabledPath = $enabledPath; releasePath = $releasePath; readyPath = $readyPath } |
         ConvertTo-Json -Depth 5 -Compress | Set-Content -LiteralPath $configPath -Encoding UTF8
     [IO.File]::WriteAllText($harness, @'
-param($ServiceScript, $ConfigPath, [ValidateSet('Barrier', 'Direct')][string]$Mode = 'Barrier')
+param($ServiceScript, $ConfigPath, [ValidateSet('Barrier', 'Direct')][string]$Mode = 'Barrier', [uint32]$ExpiredSessionId = 0)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
 $config = [IO.File]::ReadAllText($ConfigPath) | ConvertFrom-Json
@@ -387,6 +441,10 @@ $tokens = $null; $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($ServiceScript, [ref]$tokens, [ref]$errors)
 foreach ($statement in $ast.EndBlock.Statements) {
     if ($statement -is [Management.Automation.Language.FunctionDefinitionAst]) { . ([scriptblock]::Create($statement.Extent.Text)) }
+}
+# Only this WTS boundary is injected to model completed logoff without signing out the CI runner.
+if ($ExpiredSessionId -ne 0) {
+    function Test-TerminalSessionEnded([uint32]$SessionId) { return $SessionId -eq $ExpiredSessionId }
 }
 # Run-Service must import the real helper through the extracted production function.
 $entry = [pscustomobject]@{ Type = 0; Path = $powerShell; Arguments = (Run-Arguments $record); WorkingDirectory = $StateDir }
@@ -497,16 +555,25 @@ catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
     Assert ($startup.ExitCode -ne 0) 'An unverified prior crash must fail automatic restart explicitly'
     Assert $task.Enabled 'A failed Run must leave the logon trigger enabled for automatic recovery after a full Restart'
     $recoveryError = [IO.File]::ReadAllText((Join-Path $directory 'recovery.stderr'))
-    Assert ($recoveryError.Contains('Use Windows Restart and retry') -and $recoveryError.Contains('no readable boot evidence')) 'Recovery must distinguish automatic recovery after Restart from legacy/unreadable boot repair'
+    Assert ($recoveryError.Contains('Sign out and sign back in') -and $recoveryError.Contains('no readable boot evidence')) 'Recovery must distinguish verified session or boot recovery from legacy/unreadable metadata repair'
     Assert ([IO.File]::ReadAllText($runtimePath) -ceq $crashRecord) 'A failed restart must retain the previous run identity'
-    # Model a subsequent full Windows Restart at the boot-reader boundary. Only this
-    # changed kernel sequence, not Scheduler zero or retained fixture PIDs, permits recovery.
-    $bootReader = ${function:Get-BootSequence}
-    $script:testBoot = [uint32]0; if ($crashRuntime.boot -eq 0) { $script:testBoot = [uint32]1 }
-    function Get-BootSequence { return $script:testBoot }
-    try { Stop-OwnedTask $task } finally { ${function:Get-BootSequence} = $bootReader }
-    Assert (!(Test-Path -LiteralPath $runtimePath)) 'A changed verified kernel boot sequence must recover the old runtime automatically'
-    Assert (Test-Path -LiteralPath (Join-Path $StateDir 'state.json')) 'Cross-boot recovery must preserve private settings'
+    # Model sign-out/sign-in within this same boot using only the WTS absence boundary.
+    # The native job/Node path stays real; no reboot or manual runtime deletion is used.
+    $startup.Dispose(); $startup = $null
+    $crashRuntime.terminal_session = [uint32]77
+    [IO.File]::WriteAllText($runtimePath, ($crashRuntime | ConvertTo-Json -Compress))
+    Remove-Item -LiteralPath $pidsPath
+    $startup = Start-Process -FilePath $powerShell -ArgumentList ($hostArguments + ' -Mode Direct -ExpiredSessionId 77') -PassThru -WindowStyle Hidden -RedirectStandardOutput (Join-Path $directory 'relogin.stdout') -RedirectStandardError (Join-Path $directory 'relogin.stderr')
+    $null = $startup.Handle; $task.Process = $startup
+    Wait-File $pidsPath
+    $reloginRuntime = [IO.File]::ReadAllText($runtimePath) | ConvertFrom-Json
+    Assert ($reloginRuntime.job -cne $crashRuntime.job) 'A completed old terminal session must permit a fresh owned job'
+    Assert ($reloginRuntime.boot -eq $crashRuntime.boot) 'Sign-in recovery must work without changing the kernel boot sequence'
+    Stop-OwnedTask $task
+    Assert ($task.Job.ActiveProcesses -eq 0) 'The recovered daemon must retain authoritative shutdown'
+    $task.Job.Dispose(); $task.Job = $null
+    Assert (!(Test-Path -LiteralPath $runtimePath)) 'A recovered daemon must retire runtime only after a verified stop'
+    Assert (Test-Path -LiteralPath (Join-Path $StateDir 'state.json')) 'Same-boot session recovery must preserve private settings'
     $startup.Dispose(); $startup = $null
     foreach ($process in $crashProcesses) { $process.Dispose() }; $crashProcesses = @()
     $task.Enabled = $false
@@ -606,17 +673,21 @@ public static class NootifyJobTest {
     Stop-OwnedTask $task # The retained real handle permits a fresh authoritative query on retry.
     $job.Dispose(); $job = $null
     [IO.File]::Move($copiedNode, (Join-Path $directory 'replaced-node.exe'))
+} catch {
+    [Console]::Error.WriteLine('Service fixture failure: ' + $_.Exception.Message)
+    [Console]::Error.WriteLine($_.ScriptStackTrace)
+    throw
 } finally {
     if ($startup) { if (!$startup.HasExited) { $startup.Kill(); $null = $startup.WaitForExit(5000) }; $startup.Dispose() }
     foreach ($process in $crashProcesses) {
         if (!$process.HasExited) { $process.Kill(); $null = $process.WaitForExit(5000) }
         $process.Dispose()
     }
-    if ($task.Job) { try { $task.Job.TerminateAndWait(5000) } finally { $task.Job.Dispose() } }
+    if ($task.Job) { Close-FixtureJob $task.Job }
     if ($runner) { $runner.Dispose() }
-    if ($job) { try { $job.TerminateAndWait(5000) } finally { $job.Dispose() } }
+    if ($job) { Close-FixtureJob $job }
     if ($unrelated) { $unrelated.Dispose() }
-    elseif ($unrelatedJob) { try { $unrelatedJob.TerminateAndWait(5000) } finally { $unrelatedJob.Dispose() } }
+    elseif ($unrelatedJob) { Close-FixtureJob $unrelatedJob }
     if (Test-Path -LiteralPath $runtimePath) {
         # Fixture teardown does not claim a production stop or discard real service state.
         # It may encounter the intentionally unverified crash record after an assertion fails.

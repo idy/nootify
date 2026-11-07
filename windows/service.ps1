@@ -12,7 +12,11 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
 # Load only this host's built-in modules, not PowerShell 7 modules inherited by 5.1.
 $env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules')
-[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+# CREATE_NO_WINDOW has redirected handles but no console code page to configure.
+$utf8 = [Text.UTF8Encoding]::new($false)
+$stdoutWriter = [IO.StreamWriter]::new([Console]::OpenStandardOutput(), $utf8)
+$stderrWriter = [IO.StreamWriter]::new([Console]::OpenStandardError(), $utf8)
+$stdoutWriter.AutoFlush = $true; $stderrWriter.AutoFlush = $true
 $ownerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $taskName = "Nootify.Service.$ownerSid"
 $descriptionPrefix = 'Nootify per-user service v1: '
@@ -140,6 +144,8 @@ function Import-ServiceRunner {
     if (!('Nootify.ServiceJob' -as [type])) { Add-Type -LiteralPath (Join-Path (Split-Path -Parent (Full-Path $scriptPath)) 'service-runner.cs') }
 }
 function Get-BootSequence { return [Nootify.ServiceJob]::ReadBootSequence() }
+function Get-TerminalSessionId { return [Nootify.ServiceJob]::ReadTerminalSessionId() }
+function Test-TerminalSessionEnded([uint32]$SessionId) { return [Nootify.ServiceJob]::TerminalSessionEnded($SessionId) }
 function Job-CompletionPath([string]$Name) {
     $prefix = "Global\Nootify.Service.Job.$ownerSid."
     if ($Name -cnotmatch ('^' + [regex]::Escape($prefix) + '[0-9a-f]{32}$')) { throw 'Cannot verify the Nootify job identity' }
@@ -158,12 +164,16 @@ function Read-OwnedRuntime([bool]$TaskActive) {
     # Private state plus the exact installation/SID and an unpredictable per-run name bind
     # this handle to our job. Never fall back to a PID tree, a fixed job name, or an outer job.
     $prefix = "Global\Nootify.Service.Job.$ownerSid."
-    if (($runtime.version -ne 2 -and $runtime.version -ne 3) -or $runtime.sid -ne $ownerSid -or !(Same-Path $runtime.script $scriptPath) -or $runtime.job -cnotmatch ('^' + [regex]::Escape($prefix) + '[0-9a-f]{32}$')) {
+    if ($runtime.version -notin @(2, 3, 4) -or $runtime.sid -ne $ownerSid -or !(Same-Path $runtime.script $scriptPath) -or $runtime.job -cnotmatch ('^' + [regex]::Escape($prefix) + '[0-9a-f]{32}$')) {
         throw 'Cannot verify the Nootify job runtime record'
     }
-    if ($runtime.version -eq 3 -and $null -ne $runtime.boot) {
+    if ($runtime.version -ge 3 -and $null -ne $runtime.boot) {
         [uint32]$boot = 0
         if (!([uint32]::TryParse([string]$runtime.boot, [ref]$boot))) { throw 'Cannot verify the Nootify kernel boot sequence' }
+    }
+    if ($runtime.version -eq 4 -and $null -ne $runtime.terminal_session) {
+        [uint32]$terminal = 0
+        if (!([uint32]::TryParse([string]$runtime.terminal_session, [ref]$terminal))) { throw 'Cannot verify the Nootify terminal session' }
     }
     return $runtime
 }
@@ -173,19 +183,22 @@ function Open-OwnedJob([bool]$TaskActive) {
     $completionPath = Job-CompletionPath ([string]$runtime.job)
     $job = [Nootify.ServiceJob]::Open([string]$runtime.job, $ownerSid, $completionPath)
     if ($job) { return $job } # A live job always requires its own authoritative drain.
-    if ($runtime.version -eq 3 -and $null -ne $runtime.boot) {
+    if ($runtime.version -ge 3 -and $null -ne $runtime.boot) {
         $currentBoot = Get-BootSequence
         if ($null -ne $currentBoot -and [uint32]$runtime.boot -ne [uint32]$currentBoot) { return $null }
     }
-    # A changed kernel boot sequence independently excludes this old run's processes.
-    # Equal/unknown sequences never prove exit, including hibernation or Fast Startup
-    # with a restored kernel image. Otherwise require a receipt after ActiveProcesses==0.
+    if ($runtime.version -eq 4 -and $null -ne $runtime.terminal_session -and [uint32]$runtime.terminal_session -ne 0) {
+        if (Test-TerminalSessionEnded ([uint32]$runtime.terminal_session)) { return $null }
+    }
+    # A changed boot or explicit deletion of the original terminal session excludes
+    # every old member. Present/reused session IDs, denied queries and other errors
+    # never prove exit. Otherwise require a receipt after ActiveProcesses==0.
     # A missing name alone only proves that the last job handle closed.
     try { $completed = [IO.File]::ReadAllText($completionPath) }
     catch [IO.FileNotFoundException] { $completed = $null }
     catch [IO.DirectoryNotFoundException] { $completed = $null }
     if ($completed -cne [string]$runtime.job) {
-        throw "Cannot verify Nootify shutdown: the job name is missing without a matching completion receipt or changed kernel boot sequence. Use Windows Restart and retry. If this record has no readable boot evidence, Restart alone cannot clear it: deliberately remove or repair '$runtimePath' after the restart, preserving the other private settings."
+        throw "Cannot verify Nootify shutdown: the missing job has no completion receipt, deleted terminal session or changed kernel boot sequence. Sign out and sign back in, or use Windows Restart and retry. Preserved or reused session IDs cannot certify shutdown. If this record has no readable boot evidence, Restart alone cannot clear it: deliberately remove or repair '$runtimePath' after the restart, preserving the other private settings."
     }
     return $null
 }
@@ -202,7 +215,9 @@ function Remove-JobRuntime {
 function Publish-Job([string]$Name) {
     $temporary = $runtimePath + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
     try {
-        [IO.File]::WriteAllText($temporary, (@{ version = 3; sid = $ownerSid; script = $scriptPath; job = $Name; boot = (Get-BootSequence) } | ConvertTo-Json -Compress))
+        # CreateProcess inherits handles and therefore runs Node in this same terminal
+        # session. The first atomic assignment binds every future job member to it.
+        [IO.File]::WriteAllText($temporary, (@{ version = 4; sid = $ownerSid; script = $scriptPath; job = $Name; boot = (Get-BootSequence); terminal_session = (Get-TerminalSessionId) } | ConvertTo-Json -Compress))
         [IO.File]::Move($temporary, $runtimePath) # Same-directory atomic publication, before any Node creation.
     } finally { Remove-Item -LiteralPath $temporary -ErrorAction SilentlyContinue }
 }
@@ -281,7 +296,7 @@ function Run-Service {
             if ($record.mcp -cne $McpConfig) { throw 'Run arguments do not match the registered task' }
             if (!$task.Enabled) { return 0 }
             # Failure leaves Node uncreated and reports a failed Run. Keep the logon
-            # trigger enabled so a later full Restart can supply changed boot evidence.
+            # trigger enabled so a later sign-in or Restart can supply independent evidence.
             $previous = Open-OwnedJob $false
             if ($previous) { try { $previous.TerminateAndWait(20000) } finally { $previous.Dispose() } }
             Remove-JobRuntime
@@ -303,7 +318,7 @@ function Run-Service {
             if ($creationLock) { $creationLock.ReleaseMutex(); $creationLock.Dispose() }
             # A successful drain publishes a private receipt before closing the job.
             # Keep the identity for Stop/restart. After abrupt exit, a vanished name
-            # requires that receipt or independent proof of a changed kernel boot.
+            # requires that receipt, a changed boot or verified terminal-session deletion.
             $runLock.ReleaseMutex(); $runLock.Dispose()
         }
     }
@@ -322,7 +337,7 @@ try {
     if ($Action -ne 'Status') { $operationLock = Enter-Lock "Global\Nootify.Service.Management.$ownerSid" 60000 }
     $task = Get-Task
     if ($task) { $record = Assert-Owned $task }
-    if ($Action -eq 'Status') { @{ installed = [bool]$task } | ConvertTo-Json -Compress; exit 0 }
+    if ($Action -eq 'Status') { $stdoutWriter.WriteLine((@{ installed = [bool]$task } | ConvertTo-Json -Compress)); exit 0 }
     if ($Action -eq 'Install') {
         if ($task) {
             if ($McpConfig -and !(Same-Path $record.mcp $McpConfig)) { throw 'The installed task uses another MCP config; uninstall it before changing its configuration' }
@@ -342,12 +357,12 @@ try {
         if ($task -and $Action -eq 'Uninstall') { $scheduler.GetFolder('\').DeleteTask($taskName, 0) }
     }
     $status = @{ Install = 'installed'; Start = 'started'; Restart = 'restarted'; Stop = 'stopped'; Uninstall = 'uninstalled' }[$Action]
-    @{ installed = [bool]($task -and $Action -ne 'Uninstall'); status = $status; task = $taskName } | ConvertTo-Json -Compress
+    $stdoutWriter.WriteLine((@{ installed = [bool]($task -and $Action -ne 'Uninstall'); status = $status; task = $taskName } | ConvertTo-Json -Compress))
 } catch {
     if ($Action -eq 'Run' -and (Test-Path -LiteralPath $StateDir -PathType Container)) {
         try { [IO.File]::AppendAllText((Join-Path $StateDir 'stderr.log'), "Scheduled Task: $($_.Exception.Message)`r`n") } catch { }
     }
-    [Console]::Error.WriteLine($_.Exception.Message)
+    $stderrWriter.WriteLine($_.Exception.Message)
     exit 1
 } finally {
     if ($operationLock) { $operationLock.ReleaseMutex(); $operationLock.Dispose() }

@@ -51,6 +51,36 @@ namespace Nootify {
                 read.ToUInt64() != (ulong)data.Length) return null;
             return BootSequenceFromData(data);
         }
+        [DllImport("kernel32.dll")] static extern uint GetCurrentProcessId();
+        [DllImport("kernel32.dll", SetLastError = true)] static extern bool ProcessIdToSessionId(uint process, out uint session);
+        [DllImport("wtsapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool WTSQuerySessionInformation(IntPtr server, uint session, int info, out IntPtr data, out uint size);
+        [DllImport("wtsapi32.dll")] static extern void WTSFreeMemory(IntPtr data);
+        public static uint? ReadTerminalSessionId() {
+            if (Environment.OSVersion.Platform != PlatformID.Win32NT) return null;
+            uint session;
+            return ProcessIdToSessionId(GetCurrentProcessId(), out session) ? (uint?)session : null;
+        }
+        static bool SessionQueryProvesExit(uint session, bool found, int error) {
+            // Session 0 is not an interactive session. Every error except explicit
+            // ERROR_CTX_WINSTATION_NOT_FOUND is unknown, not evidence of logoff.
+            return session != 0 && !found && error == 7022;
+        }
+        public static bool TerminalSessionEnded(uint session) {
+            if (session == 0 || Environment.OSVersion.Platform != PlatformID.Win32NT) return false;
+            IntPtr data = IntPtr.Zero; uint size;
+            try {
+                bool found = WTSQuerySessionInformation(IntPtr.Zero, session, 8, out data, out size); // WTSConnectState; any returned state still means present.
+                int error = Marshal.GetLastWin32Error();
+                // All job members share the first assigned process's terminal session.
+                // Logoff ends its processes before deleting that session. Do not infer
+                // this from a changed logon token, a timestamp, or enumeration absence.
+                // https://learn.microsoft.com/windows/win32/api/jobapi2/nf-jobapi2-createjobobjectw
+                // https://learn.microsoft.com/windows-server/administration/windows-commands/logoff
+                return SessionQueryProvesExit(session, found, error);
+            } catch (DllNotFoundException) { return false; }
+            catch (EntryPointNotFoundException) { return false; }
+            finally { if (data != IntPtr.Zero) WTSFreeMemory(data); }
+        }
         IntPtr handle;
         readonly string name, completionPath;
         ServiceJob(IntPtr value, string jobName, string receiptPath) { handle = value; name = jobName; completionPath = receiptPath; }
@@ -129,7 +159,81 @@ namespace Nootify {
                 } finally { File.Delete(temporary); }
             }
         }
+        internal ServiceJob OpenForSessionEnd() {
+            using (var identity = System.Security.Principal.WindowsIdentity.GetCurrent()) {
+                return Open(name, identity.User.Value, completionPath);
+            }
+        }
         public void Dispose() { if (handle != IntPtr.Zero) { CloseHandle(handle); handle = IntPtr.Zero; } }
+    }
+
+    // A hidden top-level window in the existing task host receives session-end
+    // broadcasts even without a console. Message-only windows do not receive them.
+    // No extra process, elevation, or machine-wide service is involved.
+    sealed class SessionEndNotifications : IDisposable {
+        [UnmanagedFunctionPointer(CallingConvention.Winapi)] delegate IntPtr WindowProcedure(IntPtr window, uint message, UIntPtr wparam, IntPtr lparam);
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] struct WINDOW_CLASS {
+            public uint style; public IntPtr procedure; public int classExtra, windowExtra;
+            public IntPtr instance, icon, cursor, background; public string menu, name;
+        }
+        [StructLayout(LayoutKind.Sequential)] struct MESSAGE {
+            public IntPtr window; public uint message; public UIntPtr wparam; public IntPtr lparam;
+            public uint time; public int x, y; public uint reserved;
+        }
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr GetModuleHandle(string name);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern ushort RegisterClass(ref WINDOW_CLASS definition);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool UnregisterClass(string name, IntPtr instance);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr CreateWindowEx(uint extended, string name, string title, uint style, int x, int y, int width, int height, IntPtr parent, IntPtr menu, IntPtr instance, IntPtr parameter);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetMessage(out MESSAGE message, IntPtr window, uint first, uint last);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr DispatchMessage(ref MESSAGE message);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr DefWindowProc(IntPtr window, uint message, UIntPtr wparam, IntPtr lparam);
+        [DllImport("user32.dll")] static extern bool DestroyWindow(IntPtr window);
+        [DllImport("user32.dll")] static extern bool PostMessage(IntPtr window, uint message, UIntPtr wparam, IntPtr lparam);
+        [DllImport("user32.dll")] static extern void PostQuitMessage(int code);
+        readonly Action ending;
+        readonly WindowProcedure procedure;
+        readonly System.Threading.Thread thread;
+        readonly System.Threading.ManualResetEvent ready = new System.Threading.ManualResetEvent(false);
+        IntPtr window;
+        int stopping;
+        public SessionEndNotifications(Action callback) {
+            ending = callback; procedure = HandleMessage;
+            thread = new System.Threading.Thread(Run) { IsBackground = true, Name = "Nootify session end" };
+            thread.Start(); ready.WaitOne(1000);
+        }
+        IntPtr HandleMessage(IntPtr value, uint message, UIntPtr wparam, IntPtr lparam) {
+            if (message == 0x11 || (message == 0x16 && wparam != UIntPtr.Zero)) {
+                // Never block/cancel sign-out on a failed drain. Failure writes no receipt.
+                try { ending(); } catch { }
+                return new IntPtr(1);
+            }
+            if (message == 0x10) { DestroyWindow(value); return IntPtr.Zero; }
+            if (message == 0x02) { PostQuitMessage(0); return IntPtr.Zero; }
+            return DefWindowProc(value, message, wparam, lparam);
+        }
+        void Run() {
+            string name = "Nootify.Service.Session." + Guid.NewGuid().ToString("N");
+            IntPtr instance = IntPtr.Zero; ushort atom = 0;
+            try {
+                instance = GetModuleHandle(null);
+                var definition = new WINDOW_CLASS { name = name, instance = instance, procedure = Marshal.GetFunctionPointerForDelegate(procedure) };
+                atom = RegisterClass(ref definition); if (atom == 0) return;
+                window = CreateWindowEx(0, name, "Nootify service session", 0, 0, 0, 0, 0, IntPtr.Zero, IntPtr.Zero, instance, IntPtr.Zero);
+                ready.Set(); if (window == IntPtr.Zero || System.Threading.Interlocked.CompareExchange(ref stopping, 0, 0) != 0) return;
+                MESSAGE message;
+                while (GetMessage(out message, IntPtr.Zero, 0, 0) > 0) DispatchMessage(ref message);
+            } catch { /* If notifications are unavailable, recovery still requires independent proof. */ }
+            finally {
+                ready.Set(); if (window != IntPtr.Zero) DestroyWindow(window);
+                window = IntPtr.Zero; if (atom != 0) UnregisterClass(name, instance);
+            }
+        }
+        public void Dispose() {
+            System.Threading.Interlocked.Exchange(ref stopping, 1);
+            IntPtr value = System.Threading.Interlocked.CompareExchange(ref window, IntPtr.Zero, IntPtr.Zero);
+            if (value != IntPtr.Zero) PostMessage(value, 0x10, UIntPtr.Zero, IntPtr.Zero);
+            if (thread.Join(1000)) ready.Dispose();
+        }
     }
 
     public sealed class ServiceRunner : IDisposable {
@@ -151,6 +255,7 @@ namespace Nootify {
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr CreateFile(string name, uint access, uint share, ref SECURITY_ATTRIBUTES attributes, uint creation, uint flags, IntPtr template);
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool CreateProcess(string application, StringBuilder command, IntPtr processAttributes, IntPtr threadAttributes, bool inherit, uint flags, IntPtr environment, string directory, ref STARTUPINFOEX startup, out PROCESS_INFORMATION process);
         ServiceJob job;
+        SessionEndNotifications sessionEnd;
         IntPtr process, thread;
         public uint ProcessId { get; private set; }
         static void Check(bool success) { if (!success) throw new Win32Exception(Marshal.GetLastWin32Error()); }
@@ -197,6 +302,17 @@ namespace Nootify {
                 if (output != IntPtr.Zero) CloseHandle(output);
                 if (error != IntPtr.Zero) CloseHandle(error);
             }
+            // Install notifications only after atomic assignment. An end-session
+            // callback can then drain the suspended root without certifying an empty
+            // job that the constructor might subsequently populate.
+            sessionEnd = new SessionEndNotifications(PrepareForSessionEnd);
+        }
+        void PrepareForSessionEnd() {
+            var owned = job; if (owned == null) return;
+            // A separate handle keeps callbacks independent of normal runner disposal.
+            using (var closing = owned.OpenForSessionEnd()) {
+                if (closing != null) closing.TerminateAndWait(2000);
+            }
         }
         public void Resume() {
             if (ResumeThread(thread) == UInt32.MaxValue) throw new Win32Exception(Marshal.GetLastWin32Error());
@@ -210,6 +326,7 @@ namespace Nootify {
             try { if (job != null) job.TerminateAndWait(20000); }
             finally {
                 if (job != null) { job.Dispose(); job = null; }
+                if (sessionEnd != null) { sessionEnd.Dispose(); sessionEnd = null; }
                 if (thread != IntPtr.Zero) { CloseHandle(thread); thread = IntPtr.Zero; }
                 if (process != IntPtr.Zero) { CloseHandle(process); process = IntPtr.Zero; }
             }
