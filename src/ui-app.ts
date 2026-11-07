@@ -1754,7 +1754,9 @@ for (const group of document.querySelectorAll<HTMLElement>('.titlebar-search')) 
     toggle.focus();
   });
   group.addEventListener('focusout', event => {
-    if (event.relatedTarget && group.contains(event.relatedTarget as Node)) return;
+    // Safari blurs the input without focusing a clicked button; let that click toggle the current state.
+    // Outside pointer interactions are dismissed by the document's pointerdown handler.
+    if (!event.relatedTarget || group.contains(event.relatedTarget as Node)) return;
     group.removeAttribute('data-open');
     toggle.setAttribute('aria-expanded', 'false');
   });
