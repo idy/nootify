@@ -379,7 +379,11 @@ function renderPulls(): void {
   renderTabs('pull-tabs', pullTabs.map(([value, label]) => [value, label, counts[value as keyof typeof counts]]), state.pullFilter, value => {
     state.pullFilter = value; renderPulls();
   });
-  $('pull-sort').textContent = state.pullSort === 'asc' ? t('最久未更新在前') : t('最近更新在前');
+  const sortLabel = state.pullSort === 'asc' ? t('最久未更新在前') : t('最近更新在前');
+  $('pull-sort-label').textContent = sortLabel;
+  $('pull-sort').title = `${t('切换排序方向')} · ${sortLabel}`;
+  $('pull-sort').setAttribute('aria-label', sortLabel);
+  $('pull-sort-icon').setAttribute('d', state.pullSort === 'asc' ? 'M8 13V3m-4 4 4-4 4 4' : 'M8 3v10m-4-4 4 4 4-4');
   $('pull-title').textContent = upstream ? t('我们提交给上游的 PR') : t('提交到我们仓库的 PR');
   $('pull-sub').textContent = upstream ? t('会话关联的上游 PR，以及会话仓库中的上游贡献') : t('来自会话关联的 PR 和仓库订阅，所有作者的 Open 与草稿');
   const hidden = data?.hidden?.[upstream ? 'upstream' : 'internal'] ?? 0;
@@ -1261,6 +1265,34 @@ function renderUpdate(): void {
 }
 
 // ---- Chrome, loading and events ----
+function closeTitlebarSearches(): void {
+  for (const group of document.querySelectorAll<HTMLElement>('.titlebar-search')) {
+    group.removeAttribute('data-open');
+    group.querySelector('.search-toggle')!.setAttribute('aria-expanded', 'false');
+  }
+}
+function focusTitlebarSearch(id: string): void {
+  const input = field(id);
+  const group = input.closest<HTMLElement>('.titlebar-search')!;
+  const toggle = group.querySelector<HTMLButtonElement>('.search-toggle')!;
+  closeTitlebarSearches();
+  if (getComputedStyle(toggle).display !== 'none') {
+    group.setAttribute('data-open', '');
+    toggle.setAttribute('aria-expanded', 'true');
+  }
+  input.focus();
+}
+function renderSearchToggles(): void {
+  for (const group of document.querySelectorAll<HTMLElement>('.titlebar-search')) {
+    const input = group.querySelector<HTMLInputElement>('input')!;
+    const toggle = group.querySelector<HTMLButtonElement>('.search-toggle')!;
+    const query = input.value.trim();
+    const label = input.getAttribute('aria-label')!;
+    group.classList.toggle('has-query', !!query);
+    toggle.title = query ? `${label}: ${query}` : label;
+    toggle.setAttribute('aria-label', toggle.title);
+  }
+}
 function revealActiveNavigation(): void {
   if (document.documentElement.hasAttribute('data-nootify-desktop') || !matchMedia('(max-width: 760px)').matches) return;
   const active = document.querySelector<HTMLElement>('.sidebar .nav-item[aria-current="page"]');
@@ -1270,9 +1302,21 @@ function revealActiveNavigation(): void {
   const track = navigation.getBoundingClientRect();
   navigation.scrollLeft += item.left - track.left - (navigation.clientWidth - item.width) / 2;
 }
+function renderPauseButton(): void {
+  const label = state.paused ? t('继续') : t('暂停');
+  $('pause-label').textContent = label;
+  $('pause').title = label;
+  $('pause').setAttribute('aria-label', label);
+  $('pause').setAttribute('aria-pressed', String(state.paused));
+  $('pause-icon').setAttribute('d', state.paused ? 'M5 3.5 12 8l-7 4.5z' : 'M5.5 3v10M10.5 3v10');
+}
 function renderChrome(): void {
   const meta = views[state.view];
-  $('pause').textContent = state.paused ? t('继续') : t('暂停');
+  $('logs-actions').hidden = state.view !== 'logs';
+  $('pull-actions').hidden = !isPullView(state.view);
+  $('repo-actions').hidden = state.view !== 'repos';
+  renderPauseButton();
+  renderSearchToggles();
   $('connection').textContent = state.connected ? t('实时更新') : state.connectionError ? t('连接中断') : t('正在连接');
   if (state.connectionError) $('error').textContent = t('无法连接本机服务：{p0}。正在自动重试。', { p0: state.connectionError });
   $('crumb-group').textContent = meta.group; $('crumb-page').textContent = meta.title;
@@ -1362,6 +1406,7 @@ async function refreshNow(): Promise<void> {
 }
 
 window.addEventListener('hashchange', () => {
+  closeTitlebarSearches();
   state.view = viewFromHash();
   if (state.view !== 'settings-lark') { showLarkSecret(false); if (state.recipientPicker) closeRecipientPicker(); }
   for (const channel of chatChannels) if (state.view !== `settings-${channel}`) {
@@ -1694,14 +1739,36 @@ $('import-apply').addEventListener('click', () => {
   });
 });
 $('refresh').addEventListener('click', () => { void refreshNow(); });
+for (const group of document.querySelectorAll<HTMLElement>('.titlebar-search')) {
+  const toggle = group.querySelector<HTMLButtonElement>('.search-toggle')!;
+  const input = group.querySelector<HTMLInputElement>('input')!;
+  toggle.addEventListener('click', () => {
+    if (group.hasAttribute('data-open')) closeTitlebarSearches();
+    else focusTitlebarSearch(input.id);
+  });
+  input.addEventListener('input', renderSearchToggles);
+  group.addEventListener('keydown', event => {
+    if (event.key !== 'Escape' || !group.hasAttribute('data-open')) return;
+    event.preventDefault();
+    closeTitlebarSearches();
+    toggle.focus();
+  });
+  group.addEventListener('focusout', event => {
+    if (event.relatedTarget && group.contains(event.relatedTarget as Node)) return;
+    group.removeAttribute('data-open');
+    toggle.setAttribute('aria-expanded', 'false');
+  });
+}
+document.addEventListener('pointerdown', event => {
+  if (event.target instanceof Element && !event.target.closest('.titlebar-search')) closeTitlebarSearches();
+});
 $('search').addEventListener('input', () => renderLogs(true));
 $('pull-search').addEventListener('input', () => renderPulls());
 $('repo-search').addEventListener('input', () => renderRepos());
 $('pull-sort').addEventListener('click', () => { state.pullSort = state.pullSort === 'asc' ? 'desc' : 'asc'; renderPulls(); });
 $('pause').addEventListener('click', () => {
   state.paused = !state.paused;
-  $('pause').textContent = state.paused ? t('继续') : t('暂停');
-  $('pause').setAttribute('aria-pressed', String(state.paused));
+  renderPauseButton();
   if (!state.paused) renderLogs(true);
 });
 $('export').addEventListener('click', () => {
@@ -1714,9 +1781,13 @@ document.addEventListener('keydown', event => {
   if (state.recipientPicker && event.key === '/' && !['INPUT', 'TEXTAREA'].includes((event.target as HTMLElement).tagName)) { event.preventDefault(); field('recipient-search').focus(); return; }
   if (event.key !== '/' || ['INPUT', 'TEXTAREA', 'SELECT'].includes((event.target as HTMLElement).tagName)) return;
   event.preventDefault();
-  if (isPullView(state.view)) $('pull-search').focus();
-  else if (state.view === 'repos') $('repo-search').focus();
-  else { if (state.view !== 'logs') location.hash = views.logs.hash; $('search').focus(); }
+  if (isPullView(state.view)) focusTitlebarSearch('pull-search');
+  else if (state.view === 'repos') focusTitlebarSearch('repo-search');
+  else if (state.view === 'logs') focusTitlebarSearch('search');
+  else {
+    window.addEventListener('hashchange', () => focusTitlebarSearch('search'), { once: true });
+    location.hash = views.logs.hash;
+  }
 });
 
 function renderLanguage(): void {
