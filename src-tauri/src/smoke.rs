@@ -151,7 +151,7 @@ fn exercise_bundle(app: &AppHandle, items: &TrayItems) -> Result<Report, String>
     let menu = &items.update;
     let current = app.package_info().version.to_string();
     let install_title = locale.format(Text::InstallVersion, &[("version", "v0.0.0-smoke")]);
-    let update_title = locale.format(Text::UpdateVersion, &[("version", "v0.0.0-smoke")]);
+    let update_title = locale.text(Text::SoftwareUpdates);
     let progress_title = Status::Downloading(Some(42)).text(locale);
     if menu.install_shown() || !menu.check.is_enabled().unwrap_or(false) {
         return Err("Update items are not in their initial state".into());
@@ -163,11 +163,17 @@ fn exercise_bundle(app: &AppHandle, items: &TrayItems) -> Result<Report, String>
         false,
     );
     wait_for(
-        "available update stays reachable inside the native submenu",
+        "available update is directly installable from the tray's top level",
         || {
             menu.install_shown()
+                && menu.install.is_enabled().unwrap_or(false)
                 && menu.install.text().ok().as_deref() == Some(install_title.as_str())
-                && menu.menu.text().ok().as_deref() == Some(update_title.as_str())
+                && menu.menu.text().ok().as_deref() == Some(update_title)
+                && menu.menu.items().is_ok_and(|items| {
+                    items
+                        .iter()
+                        .all(|item| item.id().as_ref() != crate::update::INSTALL_ID)
+                })
         },
     )?;
     menu.render(
@@ -179,7 +185,7 @@ fn exercise_bundle(app: &AppHandle, items: &TrayItems) -> Result<Report, String>
     wait_for(
         "tray shows inline progress and blocks duplicate update actions",
         || {
-            menu.menu.text().ok().as_deref() == Some(progress_title.as_str())
+            menu.install.text().ok().as_deref() == Some(progress_title.as_str())
                 && menu.install_shown()
                 && !menu.check.is_enabled().unwrap_or(true)
                 && !menu.install.is_enabled().unwrap_or(true)
@@ -461,7 +467,18 @@ fn check_titlebar_preview(window: &WebviewWindow, url: tauri::Url) -> Result<(),
         .map_err(|error| error.to_string())?;
     wait_for("titlebar status opens update details", || {
         evaluate(window, "location.hash === '#/settings/about' && document.querySelector('#update-status').textContent.includes('42%')").unwrap_or(false)
-    })
+    })?;
+    update.phase = Phase::Current;
+    update.version = None;
+    window
+        .eval(update.script())
+        .map_err(|error| error.to_string())?;
+    wait_for(
+        "up-to-date result clears the title row and keeps manual checks in About",
+        || {
+            evaluate(window, "document.querySelector('#titlebar-update').hidden && !document.querySelector('#about-update-action').hidden && !document.querySelector('#about-update-action').disabled").unwrap_or(false)
+        },
+    )
 }
 
 fn wait_for_live_ui(window: &WebviewWindow) -> Result<(), String> {

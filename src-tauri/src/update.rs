@@ -3,6 +3,8 @@
 //! same state. The page receives it as a DOM event and asks for an action by navigating to
 //! `nootify://update/…`, which the window's policy cancels, so it never needs IPC.
 use std::{
+    collections::hash_map::RandomState,
+    hash::BuildHasher,
     sync::{
         mpsc::{Receiver, RecvTimeoutError},
         Arc, Mutex,
@@ -13,7 +15,7 @@ use std::{
 
 use serde::Serialize;
 use tauri::{
-    menu::{MenuItem, Submenu},
+    menu::{Menu, MenuItem, Submenu},
     AppHandle, Manager, Url, Wry,
 };
 use tauri_plugin_updater::{Update, UpdaterExt};
@@ -27,7 +29,11 @@ use crate::{
 pub const CHECK_ID: &str = "check_update";
 pub const INSTALL_ID: &str = "install_update";
 const FIRST_CHECK: Duration = Duration::from_secs(30);
+const FIRST_CHECK_JITTER: Duration = Duration::from_secs(15);
 const CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+const CHECK_JITTER: Duration = Duration::from_secs(30 * 60);
+const RETRY_INTERVAL: Duration = Duration::from_secs(15 * 60);
+const RETRY_JITTER: Duration = Duration::from_secs(5 * 60);
 /// Re-read the wall clock at least this often, so the interval also elapses while the Mac sleeps.
 const TICK: Duration = Duration::from_secs(60);
 const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
@@ -164,6 +170,7 @@ struct MenuState {
 
 #[derive(Clone)]
 pub struct UpdateMenu {
+    tray: Menu<Wry>,
     pub menu: Submenu<Wry>,
     pub status: MenuItem<Wry>,
     pub check: MenuItem<Wry>,
@@ -174,6 +181,7 @@ pub struct UpdateMenu {
 
 impl UpdateMenu {
     pub fn new(
+        tray: Menu<Wry>,
         menu: Submenu<Wry>,
         status: MenuItem<Wry>,
         check: MenuItem<Wry>,
@@ -182,6 +190,7 @@ impl UpdateMenu {
         current: String,
     ) -> Self {
         Self {
+            tray,
             menu,
             status,
             check,
@@ -216,14 +225,7 @@ impl UpdateMenu {
 
     fn apply(&self, locale: Locale, state: &MenuState) {
         let status = state.status.text(locale);
-        let title = if state.busy {
-            menu_text(&status)
-        } else if let Some(version) = &state.available {
-            locale.format(Text::UpdateVersion, &[("version", &tag(version))])
-        } else {
-            locale.text(Text::SoftwareUpdates).into()
-        };
-        let _ = self.menu.set_text(title);
+        let _ = self.menu.set_text(locale.text(Text::SoftwareUpdates));
         let _ = self.status.set_text(menu_text(&status));
         let _ = self.check.set_text(locale.text(Text::CheckUpdate));
         let _ = self.about.set_text(locale.text(Text::UpdateDetails));
@@ -231,19 +233,22 @@ impl UpdateMenu {
         let _ = self.install.set_enabled(!state.busy);
         match &state.available {
             Some(version) => {
-                let _ = self
-                    .install
-                    .set_text(locale.format(Text::InstallVersion, &[("version", &tag(version))]));
+                let title = if state.busy {
+                    menu_text(&status)
+                } else {
+                    locale.format(Text::InstallVersion, &[("version", &tag(version))])
+                };
+                let _ = self.install.set_text(title);
                 if !self.install_shown() {
-                    if let Some(index) = self.position(CHECK_ID) {
-                        let _ = self.menu.insert(&self.install, index + 1);
+                    if let Some(index) = self.position("updates") {
+                        let _ = self.tray.insert(&self.install, index);
                     }
                 }
             }
             None => {
                 let _ = self.install.set_text(locale.text(Text::InstallUpdate));
                 if self.install_shown() {
-                    let _ = self.menu.remove(&self.install);
+                    let _ = self.tray.remove(&self.install);
                 }
             }
         }
@@ -254,7 +259,7 @@ impl UpdateMenu {
     }
 
     fn position(&self, id: &str) -> Option<usize> {
-        self.menu
+        self.tray
             .items()
             .ok()?
             .iter()
@@ -306,28 +311,71 @@ struct Worker {
     checked_at: Option<u64>,
 }
 
+/// Wall-clock deadlines include sleep time. Each new deadline gets independent jitter so
+/// machines launched together do not keep checking GitHub together on subsequent intervals.
+struct CheckSchedule {
+    next: SystemTime,
+    delay: Duration,
+}
+
+impl CheckSchedule {
+    fn new(now: SystemTime, base: Duration, spread: Duration) -> Self {
+        // The standard library seeds each RandomState independently; no extra RNG is needed
+        // for timing jitter. This value is never used for security-sensitive randomness.
+        let delay = jittered(base, spread, RandomState::new().hash_one(()));
+        Self {
+            next: now + delay,
+            delay,
+        }
+    }
+
+    fn after_check(now: SystemTime, succeeded: bool) -> Self {
+        if succeeded {
+            Self::new(now, CHECK_INTERVAL, CHECK_JITTER)
+        } else {
+            Self::new(now, RETRY_INTERVAL, RETRY_JITTER)
+        }
+    }
+
+    fn remaining(&mut self, now: SystemTime) -> Duration {
+        let remaining = until(now, self.next);
+        if remaining > self.delay {
+            // A backwards clock adjustment must not postpone checks indefinitely.
+            self.next = now + self.delay;
+            self.delay
+        } else {
+            remaining
+        }
+    }
+}
+
+fn jittered(base: Duration, spread: Duration, sample: u64) -> Duration {
+    let spread_ms = spread.as_millis() as u64;
+    base - spread + Duration::from_millis(sample % (2 * spread_ms + 1))
+}
+
 impl Worker {
     fn run(mut self, requests: Receiver<UpdateRequest>) {
         // Development builds have no app bundle to replace; they check only when asked.
-        let mut next_check = (!cfg!(dev)).then(|| SystemTime::now() + FIRST_CHECK);
+        let mut next_check = (!cfg!(dev))
+            .then(|| CheckSchedule::new(SystemTime::now(), FIRST_CHECK, FIRST_CHECK_JITTER));
         loop {
             let now = SystemTime::now();
-            let wait = next_check.map_or(TICK, |next| until(now, next).min(TICK));
+            let wait = next_check
+                .as_mut()
+                .map_or(TICK, |next| next.remaining(now).min(TICK));
             match requests.recv_timeout(wait) {
                 Ok(UpdateRequest::Check) => {
-                    self.check();
-                    next_check = next_check.map(|_| SystemTime::now() + CHECK_INTERVAL);
+                    let succeeded = self.check();
+                    next_check = next_check
+                        .map(|_| CheckSchedule::after_check(SystemTime::now(), succeeded));
                 }
                 Ok(UpdateRequest::Install) => self.install(),
                 Err(RecvTimeoutError::Timeout) => {
-                    if let Some(next) = next_check {
-                        let now = SystemTime::now();
-                        if until(now, next).is_zero() {
-                            self.check();
-                            next_check = Some(SystemTime::now() + CHECK_INTERVAL);
-                        } else if until(now, next) > CHECK_INTERVAL {
-                            // The clock moved backwards; do not wait longer than one interval.
-                            next_check = Some(now + CHECK_INTERVAL);
+                    if let Some(next) = &mut next_check {
+                        if next.remaining(SystemTime::now()).is_zero() {
+                            let succeeded = self.check();
+                            *next = CheckSchedule::after_check(SystemTime::now(), succeeded);
                         }
                     }
                 }
@@ -350,7 +398,7 @@ impl Worker {
         }
     }
 
-    fn check(&mut self) {
+    fn check(&mut self) -> bool {
         self.show(Status::Checking, true);
         publish(&self.app, &self.view(Phase::Checking));
         let result = self
@@ -366,12 +414,14 @@ impl Worker {
                 self.checked_at = Some(now_ms());
                 self.show(status, false);
                 publish(&self.app, &self.view(Phase::Available));
+                true
             }
             Ok(None) => {
                 self.pending = None;
                 self.checked_at = Some(now_ms());
                 self.show(Status::Current(self.current.clone()), false);
                 publish(&self.app, &self.view(Phase::Current));
+                true
             }
             // A previously found update stays installable.
             Err(error) => {
@@ -386,6 +436,7 @@ impl Worker {
                     ..self.view(phase)
                 };
                 publish(&self.app, &view);
+                false
             }
         }
     }
@@ -559,6 +610,60 @@ mod tests {
     fn versions_are_shown_with_one_v_prefix() {
         assert_eq!(tag("0.2.0"), "v0.2.0");
         assert_eq!(tag("v0.2.0"), "v0.2.0");
+    }
+
+    #[test]
+    fn jitter_bounds_cover_startup_regular_checks_and_retries() {
+        for (base, spread) in [
+            (FIRST_CHECK, FIRST_CHECK_JITTER),
+            (CHECK_INTERVAL, CHECK_JITTER),
+            (RETRY_INTERVAL, RETRY_JITTER),
+        ] {
+            let width = 2 * spread.as_millis() as u64 + 1;
+            assert_eq!(jittered(base, spread, 0), base - spread);
+            assert_eq!(jittered(base, spread, width - 1), base + spread);
+            assert_eq!(jittered(base, spread, width), base - spread);
+            for sample in [1, width / 2, u64::MAX] {
+                let delay = jittered(base, spread, sample);
+                assert!(delay >= base - spread && delay <= base + spread);
+            }
+        }
+    }
+
+    #[test]
+    fn failed_checks_retry_soon_and_success_restores_the_regular_interval() {
+        let now = SystemTime::now();
+        for (succeeded, base, spread) in [
+            (false, RETRY_INTERVAL, RETRY_JITTER),
+            (true, CHECK_INTERVAL, CHECK_JITTER),
+        ] {
+            let mut schedule = CheckSchedule::after_check(now, succeeded);
+            let delay = schedule.remaining(now);
+            assert!(delay >= base - spread && delay <= base + spread);
+            assert!(!schedule
+                .remaining(now + delay - Duration::from_millis(1))
+                .is_zero());
+            assert!(schedule.remaining(now + delay).is_zero());
+        }
+    }
+
+    #[test]
+    fn checks_are_due_after_sleep_without_waiting_another_interval() {
+        let now = SystemTime::now();
+        let mut schedule = CheckSchedule::new(now, CHECK_INTERVAL, CHECK_JITTER);
+        assert!(schedule
+            .remaining(now + CHECK_INTERVAL + CHECK_JITTER)
+            .is_zero());
+    }
+
+    #[test]
+    fn backwards_clock_changes_rebase_to_one_scheduled_delay() {
+        let now = SystemTime::now();
+        let mut schedule = CheckSchedule::new(now, RETRY_INTERVAL, RETRY_JITTER);
+        let delay = schedule.delay;
+        let earlier = now - Duration::from_secs(24 * 60 * 60);
+        assert_eq!(schedule.remaining(earlier), delay);
+        assert!(schedule.remaining(earlier + delay).is_zero());
     }
 
     #[test]
