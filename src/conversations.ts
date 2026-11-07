@@ -136,8 +136,10 @@ interface DesktopEntry { session: ConversationSession; cliIds: string[]; authori
 async function desktopSessions(roots: string[], incomplete: () => void): Promise<DesktopEntry[]> {
   const found = new Map<string, DesktopEntry>();
   for (const root of roots) for (const account of await entries(root, incomplete)) {
+    if (account.isSymbolicLink()) { incomplete(); continue; }
     if (!account.isDirectory()) continue;
     for (const profile of await entries(join(root, account.name), incomplete)) {
+      if (profile.isSymbolicLink()) { incomplete(); continue; }
       if (!profile.isDirectory()) continue;
       const directory = join(root, account.name, profile.name);
       for (const file of await entries(directory, incomplete)) {

@@ -199,6 +199,36 @@ for (const broken of [false, true]) {
   });
 }
 
+for (const level of ['account', 'profile'] as const) for (const broken of [false, true]) {
+  test(`${broken ? 'broken' : 'readable'} Desktop ${level} redirects defer CLI aliases without hiding verified sessions`, async t => {
+    const root = await mkdtemp(join(tmpdir(), 'nootify-desktop-child-redirect-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const state = await State.open(join(root, 'state'));
+    const files = Object.fromEntries(['claude', 'codex', 'opencode', 'trae', 'workbuddy'].map(agent => [agent, join(root, agent, 'rules.md')])) as Record<AgentId, string>;
+    const agents = new AgentPrompts({ stateDir: state.directory, port: 9417, files }); await agents.set('claude', true);
+    const catalog = join(root, 'desktop'); const healthy = join(catalog, 'account/profile'); await mkdir(healthy, { recursive: true });
+    await writeFile(join(healthy, 'local_active.json'), JSON.stringify({ sessionId: 'local_active', cliSessionId: 'cli_active', isArchived: false }));
+    const archived = { sessionId: 'local_archived', cliSessionId: 'cli_archived', isArchived: true };
+    const target = join(root, 'target'); const targetProfile = level === 'account' ? join(target, 'profile') : target;
+    await mkdir(targetProfile, { recursive: true }); await writeFile(join(targetProfile, 'local_archived.json'), JSON.stringify(archived));
+    const redirected = level === 'account' ? join(catalog, 'redirected-account') : join(catalog, 'account/redirected-profile');
+    await symlink(target, redirected, process.platform === 'win32' ? 'junction' : 'dir');
+    if (broken) await rm(target, { recursive: true });
+    const project = join(root, 'claude/projects/project'); await mkdir(project, { recursive: true });
+    for (const id of ['cli_active', 'cli_archived', 'standalone']) await writeFile(join(project, `${id}.jsonl`), '{}\n');
+    const reports: Record<string, unknown>[] = [];
+    const discover = sessionThreadDiscovery(agents, state, record => reports.push(record), { claudeDir: join(root, 'claude'), desktopRoots: [catalog] });
+    assert.deepEqual((await collect(discover)).map(item => [item.adapter, item.session_id]), [['claude-desktop', 'local_active']]);
+    assert.equal(reports.length, 1); assert.match(String(reports[0].error), /Desktop session metadata is incomplete/);
+    await rm(redirected, { recursive: true, force: true });
+    const restored = level === 'account' ? join(redirected, 'profile') : redirected;
+    await mkdir(restored, { recursive: true }); await writeFile(join(restored, 'local_archived.json'), JSON.stringify(archived));
+    reports.length = 0;
+    assert.deepEqual((await collect(discover)).map(item => item.session_id).sort(), ['local_active', 'standalone']);
+    assert.equal(reports.length, 0);
+  });
+}
+
 for (const corruption of ['truncated', 'oversized', 'wrong-identity', 'non-file'] as const) {
   test(`a partial Desktop catalog with ${corruption} metadata preserves known Desktop sessions and defers CLI aliases`, async t => {
     const root = await mkdtemp(join(tmpdir(), 'nootify-partial-desktop-'));
