@@ -206,7 +206,7 @@ function Assert-Running {
             if (!(Same-Path $process.MainModule.FileName $node)) { $process.Dispose(); throw 'Fixture health PID is not the expected Node executable' }
             $fixtureProcesses.Add($process)
         }
-        if ($health -and $value.state -eq 4 -and $value.enabled -eq $true -and $value.instances_count -eq 1) {
+        if ($health -and $value.state -eq 4 -and $value.enabled -eq $true -and $value.running_tasks_exact_path_count -eq 1) {
             Save-Observation $value
             return [int]$health.pid
         }
@@ -228,8 +228,8 @@ function Assert-Drained([bool]$TaskRemains) {
         # Unknown/denied queries remain null. A missing registration has no GetInstances count.
         # Source Stop/Uninstall's kernel job drain plus retained process handles certify shutdown.
         if ($value.task_present -eq $TaskRemains -and $value.port_free -and !$value.fixture_healthy -and !$value.runtime_present -and
-            ($null -eq $value.running_tasks_exact_path_count -or $value.running_tasks_exact_path_count -eq 0) -and
-            (!$TaskRemains -or ($value.enabled -eq $false -and $value.state -eq 1 -and $null -ne $value.instances_count -and $value.instances_count -eq 0))) {
+            ($null -ne $value.running_tasks_exact_path_count -and $value.running_tasks_exact_path_count -eq 0) -and
+            (!$TaskRemains -or ($value.enabled -eq $false -and $value.state -eq 1))) {
             Save-Observation $value
             return
         }

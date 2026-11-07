@@ -53,6 +53,21 @@ function Get-Task {
         throw
     }
 }
+function Get-TaskInstanceCount {
+    # GetInstances(0) can omit this hidden task even while Scheduler reports Running.
+    # Use the API with an explicit TASK_ENUM_HIDDEN flag, then select the exact root path.
+    $running = $scheduler.GetRunningTasks(1)
+    $total = $running.Count
+    if ($null -eq $total -or $total -lt 0) { throw 'Cannot verify running Scheduled Task instances' }
+    $expectedPath = '\' + $taskName
+    $count = 0
+    for ($index = 1; $index -le $total; $index++) {
+        $path = [string]$running.Item($index).Path
+        if (!$path) { throw 'Cannot verify a running Scheduled Task path' }
+        if ([string]::Equals($path, $expectedPath, [StringComparison]::OrdinalIgnoreCase)) { $count++ }
+    }
+    return $count
+}
 function Assert-Owned($Task) {
     $definition = $Task.Definition
     $description = [string]$definition.RegistrationInfo.Description
@@ -231,12 +246,12 @@ function Stop-OwnedTask($Task) {
     if ($Task) { $Task.Enabled = $false }
     try {
         $creationLock = Enter-Lock $creationLockName ([Math]::Max(0, 30000 - [int]$watch.ElapsedMilliseconds))
-        $job = Open-OwnedJob ($Task -and $Task.GetInstances(0).Count -gt 0)
-        if ($Task -and $Task.GetInstances(0).Count -gt 0) { $Task.Stop(0) }
+        $job = Open-OwnedJob ($Task -and (Get-TaskInstanceCount) -gt 0)
+        if ($Task -and (Get-TaskInstanceCount) -gt 0) { $Task.Stop(0) }
         # Retaining the handle defeats KILL_ON_JOB_CLOSE, so terminate explicitly and
         # query kernel membership until empty, including helpers spawned during Stop.
         if ($job) { $job.TerminateAndWait([Math]::Max(0, 30000 - [int]$watch.ElapsedMilliseconds)) }
-        while ($Task -and $Task.GetInstances(0).Count -ne 0) {
+        while ($Task -and (Get-TaskInstanceCount) -ne 0) {
             if ($watch.ElapsedMilliseconds -ge 30000) { throw 'Timed out waiting for the Nootify task to stop' }
             Start-Sleep -Milliseconds 50
         }
@@ -249,7 +264,7 @@ function Stop-OwnedTask($Task) {
 function Start-OwnedTask($Task) {
     $null = Assert-Owned $Task
     $Task.Enabled = $true
-    if ($Task.GetInstances(0).Count -eq 0) {
+    if ((Get-TaskInstanceCount) -eq 0) {
         Assert-PortFree
         $null = $Task.Run($null)
     }
@@ -257,7 +272,7 @@ function Start-OwnedTask($Task) {
     do {
         try {
             $response = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/health" -TimeoutSec 1 -MaximumRedirection 0
-            if ($response.service -eq 'nootify' -and $Task.GetInstances(0).Count -gt 0) { return }
+            if ($response.service -eq 'nootify' -and (Get-TaskInstanceCount) -gt 0) { return }
         } catch { }
         Start-Sleep -Milliseconds 150
     } while ([DateTime]::UtcNow -lt $until)

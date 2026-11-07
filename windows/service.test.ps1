@@ -72,6 +72,18 @@ function Close-FixtureJob($Job) {
         if ($failure -isnot [ObjectDisposedException]) { throw }
     } finally { $Job.Dispose() }
 }
+function New-FixtureRunningTasks {
+    $owned = if ($task.LegacyInstancesOmitted) { $task.Instances } else { $task.GetInstances(0).Count }
+    $collection = [pscustomobject]@{ Count = $owned + 2; Owned = $owned; TaskPath = ('\' + $taskName) }
+    $collection | Add-Member ScriptMethod Item {
+        param($Index)
+        Assert ($Index -ge 1 -and $Index -le $this.Count) 'COM instances are one-based'
+        if ($Index -le $this.Owned) { return [pscustomobject]@{ Path = $this.TaskPath } }
+        if ($Index -eq $this.Owned + 1) { return [pscustomobject]@{ Path = ('\OtherFolder' + $this.TaskPath) } }
+        return [pscustomobject]@{ Path = '\Unrelated.Task' }
+    }
+    return $collection
+}
 function Wait-File([string]$Path) {
     $watch = [Diagnostics.Stopwatch]::StartNew()
     while (!(Test-Path -LiteralPath $Path)) {
@@ -134,8 +146,11 @@ $actions = [pscustomobject]@{ Count = 1; Entry = $entry }
 $actions | Add-Member ScriptMethod Item { param($Index); Assert ($Index -eq 1) 'COM actions are one-based'; return $this.Entry }
 $principal = [pscustomobject]@{ UserId = $ownerSid; LogonType = 3; RunLevel = 0 }
 $definition = [pscustomobject]@{ RegistrationInfo = [pscustomobject]@{ Description = $descriptionPrefix + ($record | ConvertTo-Json -Compress) }; Actions = $actions; Principal = $principal }
-$task = [pscustomobject]@{ Definition = $definition; Enabled = $true; Starts = 0; Stops = 0; Instances = 1 }
-$task | Add-Member ScriptMethod GetInstances { param($Flags); return [pscustomobject]@{ Count = $this.Instances } }
+$task = [pscustomobject]@{ Definition = $definition; Enabled = $true; Starts = 0; Stops = 0; Instances = 1; LegacyInstancesOmitted = $false }
+$task | Add-Member ScriptMethod GetInstances { param($Flags); return [pscustomobject]@{ Count = $(if ($this.LegacyInstancesOmitted) { 0 } else { $this.Instances }) } }
+$runningTasksBoundary = { param($Flags); Assert ($Flags -eq 1) 'Running task enumeration must include hidden tasks'; return (New-FixtureRunningTasks) }
+$scheduler = [pscustomobject]@{}
+$scheduler | Add-Member ScriptMethod GetRunningTasks $runningTasksBoundary
 $task | Add-Member ScriptMethod Run { param($Args); $this.Starts++; $this.Instances = 1 }
 $task | Add-Member ScriptMethod Stop { param($Flags); $this.Stops++; $this.Instances = 0 }
 $null = Assert-Owned $task
@@ -165,8 +180,14 @@ $definition.RegistrationInfo.Description = $descriptionPrefix + ($record | Conve
 function Invoke-RestMethod { param($Uri, $TimeoutSec, $MaximumRedirection); return [pscustomobject]@{ service = 'nootify' } }
 $realPortCheck = ${function:Assert-PortFree}
 function Assert-PortFree { throw 'Already-running Start must not bind its port' }
+$task.LegacyInstancesOmitted = $true
+Assert ($task.GetInstances(0).Count -eq 0 -and (Get-TaskInstanceCount) -eq 1) 'The hidden instance must remain visible even when GetInstances omits it'
 Start-OwnedTask $task
 Assert ($task.Starts -eq 0) 'Repeated starts must not create another process'
+$task.LegacyInstancesOmitted = $false
+$scheduler | Add-Member ScriptMethod GetRunningTasks { param($Flags); throw [UnauthorizedAccessException]::new('Fixture hidden enumeration denial') } -Force
+Must-Fail { Get-TaskInstanceCount } 'Denied instance enumeration must not be treated as zero running tasks'
+$scheduler | Add-Member ScriptMethod GetRunningTasks $runningTasksBoundary -Force
 ${function:Assert-PortFree} = $realPortCheck
 $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
 $listener.Start(); $Port = $listener.LocalEndpoint.Port
@@ -225,6 +246,7 @@ $folder | Add-Member ScriptMethod RegisterTaskDefinition {
     $this.Registered = $true; return $task
 }
 $scheduler = [pscustomobject]@{ Definition = $newDefinition; Folder = $folder }
+$scheduler | Add-Member ScriptMethod GetRunningTasks $runningTasksBoundary
 $scheduler | Add-Member ScriptMethod NewTask { param($Flags); return $this.Definition }
 $scheduler | Add-Member ScriptMethod GetFolder { param($Path); return $this.Folder }
 $null = New-ServiceTask

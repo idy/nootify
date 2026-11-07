@@ -50,6 +50,19 @@ function Get-TestTask {
         throw
     }
 }
+function Get-TestInstanceCount {
+    $running = $scheduler.GetRunningTasks(1) # TASK_ENUM_HIDDEN
+    $total = $running.Count
+    if ($null -eq $total -or $total -lt 0) { throw 'Cannot query hidden running task instances' }
+    $count = 0
+    $expectedPath = '\' + $taskName
+    for ($index = 1; $index -le $total; $index++) {
+        $path = [string]$running.Item($index).Path
+        if (!$path) { throw 'Running task path is unavailable' }
+        if ([string]::Equals($path, $expectedPath, [StringComparison]::OrdinalIgnoreCase)) { $count++ }
+    }
+    return $count
+}
 function Get-TestApps {
     return @(Get-CimInstance Win32_Process -Filter "Name = 'Nootify.exe'" | Where-Object {
         $_.ExecutablePath -and (Same-Path $_.ExecutablePath $app)
@@ -158,7 +171,7 @@ function Assert-RunningTask {
     Wait-Until 'exactly one running user task' {
         $candidate = Get-TestTask
         if (!$candidate) { throw 'The installed task is not registered yet' }
-        $count = $candidate.GetInstances(0).Count
+        $count = Get-TestInstanceCount
         if ($count -ne 1) { throw "Expected one instance; visible=$count; state=$($candidate.State); lastResult=$($candidate.LastTaskResult)" }
         $ready.Task = $candidate
         return $true
