@@ -4,7 +4,7 @@ import { homedir } from 'node:os';
 import { isAbsolute, join, resolve, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { installLaunchd, launchdLabel } from './launchd.js';
+import { assertInstallPort, installLaunchd, launchdLabel } from './launchd.js';
 import { defaultStateDir } from './state.js';
 
 const exec = promisify(execFile);
@@ -13,8 +13,35 @@ export type ServiceAction = typeof SERVICE_ACTIONS[number];
 export interface ServiceOptions { stateDir?: string; port: number; mcpConfig?: string }
 export interface ServiceResult { installed: boolean; status?: string; task?: string; plist?: string }
 export type ServiceExecutor = (file: string, args: string[], options?: ExecFileOptions) => Promise<{ stdout: string }>;
-interface ServiceRuntime { execute?: ServiceExecutor; home?: string; platform?: NodeJS.Platform; uid?: number }
+interface ServiceRuntime { execute?: ServiceExecutor; home?: string; platform?: NodeJS.Platform; uid?: number; shutdownTimeout?: number }
 const executeService: ServiceExecutor = (file, args, options) => exec(file, args, { ...options, encoding: 'utf8' });
+
+interface LaunchdProcess { pid: number; started: string }
+async function launchdProcess(pid: number, run: ServiceExecutor): Promise<LaunchdProcess | undefined> {
+  try {
+    const { stdout } = await run('/bin/ps', ['-p', String(pid), '-o', 'lstart='], {
+      timeout: 1000, maxBuffer: 4096, env: { ...process.env, LC_ALL: 'C' },
+    });
+    const started = stdout.trim();
+    if (!started || started.includes('\n')) throw new Error('Missing process start time');
+    return { pid, started };
+  } catch {
+    // A failed/empty ps query is not exit evidence. Only ESRCH proves absence.
+    try { process.kill(pid, 0); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ESRCH') return undefined;
+    }
+    throw new Error('Cannot verify the Nootify process identity; the LaunchAgent plist was retained');
+  }
+}
+
+async function waitForLaunchdExit(identity: LaunchdProcess, run: ServiceExecutor, timeout: number): Promise<void> {
+  const deadline = performance.now() + timeout;
+  while ((await launchdProcess(identity.pid, run))?.started === identity.started) {
+    if (performance.now() >= deadline) throw new Error('The Nootify process has not finished shutting down; the LaunchAgent plist was retained');
+    // A reused PID with a different start time belongs to another process; never signal it.
+    await new Promise(resolveWait => setTimeout(resolveWait, Math.min(100, Math.max(1, deadline - performance.now()))));
+  }
+}
 
 /** Legacy launchd-install is unchanged; the new management commands only control this exact install. */
 export function assertLaunchdOwnership(value: unknown, options: ServiceOptions): void {
@@ -78,13 +105,23 @@ export async function manageService(action: ServiceAction, options: ServiceOptio
     throw new Error('Nootify is not installed; use service-install');
   }
   const target = `gui/${uid}/${launchdLabel}`;
-  let loaded = true;
-  try { await run('launchctl', ['print', target]); } catch { loaded = false; }
+  let loaded = true; let job = '';
+  try { job = (await run('launchctl', ['print', target])).stdout; } catch { loaded = false; }
   if (action === 'start' || action === 'restart') {
-    if (!loaded) await run('launchctl', ['bootstrap', `gui/${uid}`, plist]);
+    if (!loaded) {
+      await assertInstallPort(options.port, false);
+      await run('launchctl', ['bootstrap', `gui/${uid}`, plist]);
+    }
     await run('launchctl', ['kickstart', ...(action === 'restart' && loaded ? ['-k'] : []), target]);
   } else {
-    if (loaded) await run('launchctl', ['bootout', target]);
+    if (loaded) {
+      const match = /^\s*pid\s*=\s*(\S+)\s*$/m.exec(job);
+      const pid = match ? Number(match[1]) : undefined;
+      if (pid !== undefined && (!Number.isSafeInteger(pid) || pid <= 0)) throw new Error('Cannot verify the Nootify launchd process ID');
+      const identity = pid === undefined ? undefined : await launchdProcess(pid, run);
+      await run('launchctl', ['bootout', target]);
+      if (identity) await waitForLaunchdExit(identity, run, runtime.shutdownTimeout ?? 30_000);
+    }
     if (action === 'uninstall') await unlink(plist);
   }
   return { installed: action !== 'uninstall', status: action === 'start' ? 'started' : action === 'restart' ? 'restarted' : action === 'stop' ? 'stopped' : 'uninstalled', plist };
