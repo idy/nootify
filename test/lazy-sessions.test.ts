@@ -15,6 +15,8 @@ import { ExternalSessions } from '../src/external-sessions.js';
 import { createServiceHost } from '../src/server.js';
 import { EventLog } from '../src/events.js';
 import { parseAnnouncement } from '../src/lark-metadata.js';
+import { StateDatabase } from '../src/state-database.js';
+import { SessionUnavailable, type PublicSession } from '../src/types.js';
 
 async function stateFor(t: TestContext): Promise<State> {
   const dir = await mkdtemp(join(tmpdir(), 'ws-lazy-'));
@@ -40,6 +42,88 @@ test('repeated UI snapshots and session lists perform zero client lookups', asyn
   const known = (await sessions.handle({ method: 'GET', path: '/v1/sessions', body: undefined }))!.body as { adapter: string; availability: string }[];
   assert.equal(known.length, 1); assert.equal(known[0].adapter, 'codex'); assert.equal(known[0].availability, 'missing');
   assert.equal(otherLookups, 1);
+});
+
+test('routing observations survive service recreation and SQLite reopen without querying clients', async t => {
+  const state = await stateFor(t); let archived = false; let sends = 0;
+  const sessions = new SessionsService(state, { async inspect() { assert.fail('Must not inspect Claude'); } }, undefined, {
+    async resolve(id, adapter) {
+      if (id === 'missing') return;
+      return { info: { session_id: id, adapter, host_id: 'local-host', session_name: `${adapter} task`, availability: archived ? 'archived' : 'active' },
+        async send() { sends++; return { status: 'input_accepted' }; } };
+    }, close() {},
+  });
+  await sessions.send('shared-id', 'first', 'codex');
+  await sessions.send('shared-id', 'second', 'opencode');
+  archived = true;
+  await assert.rejects(sessions.send('shared-id', 'archived', 'codex'), /session_archived/);
+  await assert.rejects(sessions.send('missing', 'missing', 'codex'), /session_not_local/);
+  const request = { method: 'GET', path: '/v1/sessions', body: undefined };
+  const original = (await sessions.handle(request))!.body as PublicSession[];
+  assert.deepEqual(original.map(session => [session.session_id, session.adapter, session.availability, session.last_result]), [
+    ['missing', 'codex', 'missing', 'session_not_local'],
+    ['shared-id', 'codex', 'archived', 'session_archived'],
+    ['shared-id', 'opencode', 'active', 'input_accepted'],
+  ]);
+  assert.ok(original.every(session => Number.isFinite(Date.parse(session.last_seen!))));
+  assert.equal(sends, 2);
+  assert.deepEqual(await new SessionsService(state).handle(request), { body: original });
+  const reopened = await State.open(state.directory);
+  const restoredHistory = original.map(session => session.availability === 'active' ? { ...session, availability: 'unknown' as const } : session);
+  const restored = new SessionsService(reopened, { async inspect() { assert.fail('UI must not inspect clients'); } }, undefined,
+    { async resolve() { assert.fail('UI must not query backends'); }, close() {} });
+  assert.deepEqual(await restored.handle(request), { body: restoredHistory });
+  assert.equal(restored.sessionName('shared-id', 'codex'), 'codex task');
+  assert.equal(reopened.sessions.size, 0, 'Observations must not create registered delivery targets');
+  const server = createServiceHost([restored], reopened.token, await EventLog.open(reopened.directory));
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const snapshot = await (await fetch(url + '/ui/api/snapshot')).json() as { sessions: PublicSession[] };
+  assert.deepEqual(snapshot.sessions, restoredHistory);
+  await assert.rejects(restored.send('shared-id', 'check again', 'codex'), /UI must not query backends/);
+});
+
+test('routing-history persistence failures preserve accepted input and the original delivery error', async t => {
+  const state = await stateFor(t); const reports: Record<string, unknown>[] = []; let sends = 0;
+  const sessions = new SessionsService(state, { async inspect() { assert.fail('Must not inspect Claude'); } }, record => reports.push(record), {
+    async resolve(id, adapter) {
+      if (id === 'missing') return;
+      return { info: { session_id: id, adapter, host_id: 'local-host', session_name: 'Accepted task', availability: 'active' },
+        async send() { sends++; return { status: 'input_accepted' }; } };
+    }, close() {},
+  });
+  const write = t.mock.method(StateDatabase.prototype, 'write', async () => { throw new Error('Injected history write failure'); });
+  assert.deepEqual(await sessions.send('accepted', 'hello', 'codex'), { status: 'input_accepted' });
+  await assert.rejects(sessions.send('missing', 'hello', 'codex'), (error: unknown) => error instanceof SessionUnavailable && error.reason === 'session_not_local');
+  assert.equal(sends, 1);
+  assert.equal(reports.length, 2);
+  assert.ok(reports.every(record => record.reason === 'session_history_save_failed' && record.error === 'Injected history write failure'));
+  assert.equal((await State.open(state.directory)).sessionObservations.size, 0);
+  write.mock.restore();
+  await state.save();
+  assert.equal((await State.open(state.directory)).sessionObservations.size, 2, 'A later successful save can retain the in-memory history');
+});
+
+test('routing observations retain the latest 1,000 sessions in recency order across restarts', async t => {
+  const state = await stateFor(t);
+  for (let index = 0; index < 1000; index++) state.sessionObservations.set(`codex:thread-${index}`, {
+    session_id: `thread-${index}`, adapter: 'codex', host_id: 'local-host', session_name: `Task ${index}`,
+    availability: 'active', last_seen: '2026-11-07T00:00:00.000Z', last_result: 'input_accepted',
+  });
+  await state.save();
+  const sessions = new SessionsService(state, undefined, undefined, {
+    async resolve(id, adapter) { return { info: { session_id: id, adapter, host_id: 'local-host', session_name: 'Updated task', availability: 'active' },
+      async send() { return { status: 'input_accepted' }; } }; }, close() {},
+  });
+  await sessions.send('thread-0', 'most recent', 'codex');
+  await sessions.send('thread-new', 'new', 'codex');
+  const restored = new SessionsService(await State.open(state.directory));
+  const list = (await restored.handle({ method: 'GET', path: '/v1/sessions', body: undefined }))!.body as PublicSession[];
+  assert.equal(list.length, 1000);
+  assert.deepEqual(list.slice(0, 2).map(session => session.session_id), ['thread-new', 'thread-0']);
+  assert.equal(list.at(-1)!.session_id, 'thread-2');
+  assert.ok(list.every(session => session.session_id !== 'thread-1'));
 });
 
 test('provider-labeled announcements select Codex or OpenCode without assuming Claude', () => {
