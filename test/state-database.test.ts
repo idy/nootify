@@ -246,6 +246,27 @@ test('evicting the oldest record and appending one leaves all surviving rows unt
   assert.deepEqual([...(await State.open(path)).sessions.keys()], ['three', 'four', 'five']);
 });
 
+test('concurrent fresh openers share one complete private authentication token and clean temporary files', async t => {
+  const path = await directory(t);
+  const states = await Promise.all(Array.from({ length: 40 }, () => State.open(path)));
+  assert.equal(new Set(states.map(state => state.token)).size, 1);
+  assert.match(states[0].token, /^[a-f0-9]{64}$/);
+  assert.equal(await readFile(join(path, 'auth-token'), 'utf8'), states[0].token);
+  await assertMode(join(path, 'auth-token'), 0o600);
+  assert.ok(!(await readdir(path)).some(file => file.startsWith('.auth-token-')));
+  assert.equal((await State.open(path)).token, states[0].token);
+});
+
+test('an existing malformed authentication file is rejected without replacing it', async t => {
+  for (const token of ['', 'incomplete', 'z'.repeat(64)]) {
+    const path = await directory(t);
+    await writeFile(join(path, 'auth-token'), token, { mode: 0o600 });
+    await assert.rejects(State.open(path), /Invalid private service authentication file/);
+    assert.equal(await readFile(join(path, 'auth-token'), 'utf8'), token);
+    assert.ok(!(await readdir(path)).some(file => file.startsWith('.auth-token-')));
+  }
+});
+
 test('concurrent openers migrate once, and unrelated updates from a stale instance do not erase newer rows', async t => {
   const path = await directory(t); await writeLegacy(path, { version: 1, sessions: [], lark_bindings: [], settings: { github_token: 'old' } });
   const [first, second] = await Promise.all([State.open(path), State.open(path)]);

@@ -31,7 +31,7 @@ fs.rm = async (path, options) => {
   // SQLite's Windows file handle prevents unlinking an open database. Emulate
   // that on every platform so the teardown ordering is covered on macOS too.
   const locked = [...databases.values()].includes(path);
-  if (locked || process.argv[2] === 'assertion') {
+  if (locked || (process.argv[2] === 'assertion' && options?.recursive)) {
     console.error('simulated Windows EPERM during fixture cleanup');
     throw Object.assign(new Error('EPERM: cannot remove the SQLite fixture'), { code: 'EPERM' });
   }

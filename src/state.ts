@@ -1,5 +1,5 @@
-import { randomBytes } from 'node:crypto';
-import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { randomBytes, randomUUID } from 'node:crypto';
+import { chmod, link, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { serviceStateDir } from './runtime-paths.js';
 import { join } from 'node:path';
 import type { Adapter, BackendConnection, LarkBinding, LarkDelivery, LarkPollCursor, LarkPollReceipt, PublicSession, SessionRecord, StoredInboxMessage } from './types.js';
@@ -80,9 +80,20 @@ export class State {
     await mkdir(directory, { recursive: true, mode: 0o700 });
     await chmod(directory, 0o700);
     const tokenPath = join(directory, 'auth-token');
-    try { await writeFile(tokenPath, randomBytes(32).toString('hex'), { flag: 'wx', mode: 0o600 }); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
-    const token = (await readFile(tokenPath, 'utf8')).trim();
+    let contents: string;
+    try { contents = await readFile(tokenPath, 'utf8'); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      const temporary = join(directory, `.auth-token-${randomUUID()}`);
+      try {
+        await writeFile(temporary, randomBytes(32).toString('hex'), { flag: 'wx', mode: 0o600 });
+        // Publish a complete file without replacing another opener's token (also atomic on NTFS).
+        try { await link(temporary, tokenPath); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+      } finally { await rm(temporary, { force: true }); }
+      contents = await readFile(tokenPath, 'utf8');
+    }
+    const token = contents.trim();
     if (!/^[a-f0-9]{64}$/.test(token)) throw new Error('Invalid private service authentication file');
     const state = new State(directory, token);
     state.database = await StateDatabase.open(directory, async () => {
