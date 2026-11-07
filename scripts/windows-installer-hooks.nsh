@@ -7,6 +7,18 @@
 ;
 ; Only the bundled CLI determines task/process ownership. Never use taskkill by
 ; image name, delete another installation's task, or continue after a stop error.
+; Clear only this installer's process environment, before Node parses its options.
+; An empty value avoids reading/truncating an inherited value and is safe if absent.
+!macro NootifyClearNodeVariable NAME
+  System::Call 'kernel32::SetEnvironmentVariableW(w "${NAME}", w "") i.r0'
+  ${If} $0 = 0
+    DetailPrint "Unable to clear ${NAME} for Nootify service management."
+    Pop $0
+    SetErrorLevel 1
+    Abort "Unable to prepare Nootify's service environment. Installed files have not been replaced or removed."
+  ${EndIf}
+!macroend
+
 !macro NootifyManageInstalledService COMMAND
   ${If} ${FileExists} "$INSTDIR\node.exe"
   ${OrIf} ${FileExists} "$INSTDIR\service\dist\src\cli.js"
@@ -16,6 +28,10 @@
       Abort "Nootify's installed service files are incomplete. Repair the installation before continuing."
     ${EndIf}
     Push $0
+    !insertmacro NootifyClearNodeVariable NODE_OPTIONS
+    !insertmacro NootifyClearNodeVariable NODE_PATH
+    !insertmacro NootifyClearNodeVariable NODE_EXTRA_CA_CERTS
+    !insertmacro NootifyClearNodeVariable NODE_ICU_DATA
     ; The CLI allows 150 seconds for serialized service management. Give it
     ; time to report failure itself before aborting replacement/deletion.
     nsExec::ExecToLog /TIMEOUT=160000 '"$INSTDIR\node.exe" "$INSTDIR\service\dist\src\cli.js" ${COMMAND}'

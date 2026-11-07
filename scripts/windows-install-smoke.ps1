@@ -128,7 +128,7 @@ function Test-Step([string]$Name, [scriptblock]$Check) {
         throw
     }
 }
-function Run-Native([string]$File, [string]$Arguments, [string]$Label) {
+function Run-Native([string]$File, [string]$Arguments, [string]$Label, [int]$ExpectedExitCode = 0) {
     $stdout = Join-Path $OutputDirectory "$Label.stdout.log"
     $stderr = Join-Path $OutputDirectory "$Label.stderr.log"
     $process = Start-Process -FilePath $File -ArgumentList $Arguments -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
@@ -138,8 +138,27 @@ function Run-Native([string]$File, [string]$Arguments, [string]$Label) {
         throw "$Label exceeded 180 seconds"
     }
     $process.WaitForExit()
-    if ($process.ExitCode -ne 0) { throw "$Label exited with $($process.ExitCode); inspect its captured logs" }
+    if ($process.ExitCode -ne $ExpectedExitCode) { throw "$Label exited with $($process.ExitCode), expected ${ExpectedExitCode}; inspect its captured logs" }
     return $stdout
+}
+function With-NodeStartupOptions([scriptblock]$Check) {
+    # Scoped process-only fixture, never a user/machine setting. Restore on failure too.
+    $missingPreload = Join-Path $OutputDirectory 'nootify-smoke-missing-preload.cjs'
+    if (Test-Path -LiteralPath $missingPreload) { throw 'Refusing an existing preload fixture path' }
+    $values = @{
+        NODE_OPTIONS = '--require="' + $missingPreload.Replace('\', '/') + '"'
+        NODE_PATH = (Join-Path $OutputDirectory 'missing-node-modules')
+    }
+    $saved = @{}
+    try {
+        foreach ($name in $values.Keys) {
+            $saved[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+            [Environment]::SetEnvironmentVariable($name, $values[$name], 'Process')
+        }
+        & $Check
+    } finally {
+        foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name], 'Process') }
+    }
 }
 function Invoke-Service([string]$Action) {
     $arguments = '"' + $cli + '" service-' + $Action
@@ -262,8 +281,17 @@ try {
         if ((Get-ServiceProcess).Id -ne $daemon.Id) { throw 'Reopening restarted the healthy daemon' }
         Stop-TestApps
     }
-    Test-Step 'Updater-mode upgrade replaces running files and relaunches the desktop' {
-        $null = Run-Native $Installer "/S /UPDATE /R /D=$installDir" 'upgrade-current'
+    Test-Step 'Installed Node rejects the inherited preload without installer sanitization' {
+        With-NodeStartupOptions {
+            $null = Run-Native $node '-e "process.exit(0)"' 'node-options-control' 1
+            $errorText = Get-Content -LiteralPath (Join-Path $OutputDirectory 'node-options-control.stderr.log') -Raw
+            if ($errorText -notmatch 'MODULE_NOT_FOUND' -or $errorText -notmatch 'nootify-smoke-missing-preload\.cjs') {
+                throw 'The Node startup control did not reject the missing preload fixture'
+            }
+        }
+    }
+    Test-Step 'Updater-mode upgrade ignores inherited Node options and relaunches the desktop' {
+        With-NodeStartupOptions { $null = Run-Native $Installer "/S /UPDATE /R /D=$installDir" 'upgrade-current' }
         Wait-Until 'upgraded app and daemon' { (Test-Health) -and @(Get-TestApps).Count -eq 1 }
         Assert-Installation $Version
         if (!$daemon.WaitForExit(10000)) { throw 'The old daemon survived replacement' }
@@ -287,8 +315,8 @@ try {
             Assert-RunningTask
         } finally { $browser.Dispose() }
     }
-    Test-Step 'Silent uninstall removes the real task and listener but keeps data' {
-        Uninstall-TestApp 'uninstall-current'
+    Test-Step 'Silent uninstall ignores inherited Node options and keeps private data' {
+        With-NodeStartupOptions { Uninstall-TestApp 'uninstall-current' }
         if ([IO.File]::ReadAllText((Join-Path $stateDir 'install-smoke-marker')) -cne $marker -or
             (Get-FileHash -LiteralPath (Join-Path $stateDir 'auth-token') -Algorithm SHA256).Hash -cne $tokenHash) { throw 'Uninstall removed private state' }
     }
