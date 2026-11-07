@@ -7,7 +7,7 @@
   document.addEventListener('mousedown', event => {
     if (event.button !== 0 || !(event.target instanceof Element)) return;
     if (!event.target.closest('.titlebar, .brand-row, .topbar')) return;
-    if (event.target.closest('a, button, input, select, textarea, [role="button"]')) return;
+    if (event.target.closest('a, button, input, select, textarea, label, [role="button"]')) return;
     event.preventDefault();
     location.href = `nootify://window/${event.detail === 2 ? 'zoom' : 'drag'}`;
   });
