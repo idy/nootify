@@ -611,7 +611,7 @@ catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
     $crashProcesses = @(([IO.File]::ReadAllText($pidsPath) | ConvertFrom-Json) | ForEach-Object { $process = [Diagnostics.Process]::GetProcessById([int]$_); $null = $process.Handle; $process })
     $crashProcesses[0].Kill()
     Assert ($startup.WaitForExit(10000)) 'The normal host must finish draining after root Node exits'
-    foreach ($process in $crashProcesses) { Assert ($process.WaitForExit(0)) 'Normal host cleanup must also drain its helper' }
+    foreach ($process in $crashProcesses) { Assert ($process.WaitForExit(5000)) 'The drained helper must signal its retained process handle' }
     foreach ($process in $crashProcesses) { $process.Dispose() }; $crashProcesses = @()
     Assert ([IO.File]::ReadAllText($normalCompletion) -ceq $normalRuntime.job) 'A normal host exit must leave a run-specific drain receipt'
     $startup.Dispose(); $startup = $null
@@ -709,7 +709,9 @@ catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
     $beforeStops = $task.Stops
     Stop-OwnedTask $null
     Assert ($job.ActiveProcesses -eq 0) 'A missing task registration must not leave the daemon alive'
-    Assert ($orphanProcess.WaitForExit(0)) 'The stopped orphan fixture must have exited'
+    # Kernel job accounting can reach zero before the retained process handle is
+    # observed as signaled. Wait for that notification without replacing the job proof.
+    Assert ($orphanProcess.WaitForExit(5000)) 'The drained orphan fixture must signal its process handle'
     Assert (!(Test-Path -LiteralPath $runtimePath)) 'An orphaned job must be verified empty before its runtime is removed'
     Assert ($task.Stops -eq $beforeStops) 'An absent registration must not control another task'
     Assert-FixtureMembers $unrelatedJob $unrelatedMembers $unrelatedMemberHandles 'After orphan Stop'
@@ -759,7 +761,7 @@ setInterval(() => {
     $task.Instances = 1
     Stop-OwnedTask $task
     Assert ($job.ActiveProcesses -eq 0) 'Authoritative membership must include helpers born during Stop'
-    Assert ($root.WaitForExit(0) -and $task.Helper.WaitForExit(0)) 'Stop must return only after Node/helper exit'
+    Assert ($root.WaitForExit(5000) -and $task.Helper.WaitForExit(5000)) 'The empty job must leave both retained process handles signaled'
     Assert-FixtureMembers $unrelatedJob $unrelatedMembers $unrelatedMemberHandles 'After late-helper Stop'
     $root.Dispose(); $task.Helper.Dispose()
     $runner.Dispose(); $runner = $null

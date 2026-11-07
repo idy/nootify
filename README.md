@@ -42,7 +42,7 @@ npm test
 npm run check
 ```
 
-`npm test` discovers test files without relying on shell glob expansion, sets a three-minute default test timeout, and writes `.cache/test-results.xml` in JUnit format. CI uploads that report for each platform and limits the test step to ten minutes as a separate guard against cleanup hooks that never finish. SQLite fixtures close databases and backend sockets before temporary-directory removal; bounded subprocess regressions cover Windows file locks and failed cleanup.
+`npm test` discovers test files without relying on shell glob expansion, sets a three-minute default test timeout, and writes `.cache/test-results.xml` in JUnit format. Windows runs test files serially to keep full-sync SQLite fixtures and native compiler children within the hosted runner's disk and CPU budget; concurrency inside individual tests is unchanged. CI uploads that report for each platform and limits the test step to ten minutes as a separate guard against cleanup hooks that never finish. SQLite fixtures close databases and backend sockets before temporary-directory removal; bounded subprocess regressions cover Windows file locks and failed cleanup.
 
 ## Tauri desktop application and system tray
 

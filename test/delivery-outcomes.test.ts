@@ -101,6 +101,10 @@ test('native inbox delivery without a peer EOF is never automatically replayed',
     t.mock.method(f.sessions, 'send', async (_id: string, text: string) => writeInbox(path, text, undefined, process.platform === 'win32' ? 5000 : 20, process.pid));
     assert.equal(await f.lark.enqueue(payload()), true);
     assert.equal(await f.lark.enqueue(payload()), true);
+    const expectedStatus = process.platform === 'win32' ? 'socket_written' : 'delivery_unconfirmed';
+    const failure = [...f.reports].reverse().find(record => record.status === 'delivery_unconfirmed' || record.status === 'delivery_failed')?.error;
+    assert.equal(f.state.larkDelivery('om_once')!.transport_status, expectedStatus,
+      typeof failure === 'string' ? failure : 'Native fixture did not reach its expected transport boundary');
     await Promise.race([inputReceived, new Promise<never>((_, reject) => {
       receiptTimeout = setTimeout(() => reject(new Error('The native fixture did not receive input')), 5000).unref();
     })]);
@@ -108,7 +112,7 @@ test('native inbox delivery without a peer EOF is never automatically replayed',
     assert.match(frames.find(frame => frame.type === 'user')!.message!.content, /run this command once/);
     // Unix waits for peer EOF; the Windows writer completes at the authenticated
     // write. Both outcomes are terminal and must not cause a second submission.
-    assert.equal(f.state.larkDelivery('om_once')!.transport_status, process.platform === 'win32' ? 'socket_written' : 'delivery_unconfirmed');
+    assert.equal(f.state.larkDelivery('om_once')!.transport_status, expectedStatus);
   } finally {
     clearTimeout(receiptTimeout);
     for (const socket of sockets) socket.destroy();

@@ -12,6 +12,9 @@ export function runTestFiles(tests, { timeout = DEFAULT_TEST_TIMEOUT, reportPath
   if (!tests.length) throw new Error('No tests found');
   if (!Number.isSafeInteger(timeout) || timeout < 1) throw new Error('Invalid test timeout');
   const args = ['--test', `--test-timeout=${timeout}`, '--test-reporter=spec', '--test-reporter-destination=stdout'];
+  // FULL-sync SQLite fixtures and native compiler children share the hosted Windows
+  // disk/CPU budget. Keep file-level work serial; tests retain their own concurrency.
+  if (process.platform === 'win32') args.push('--test-concurrency=1');
   if (reportPath) args.push('--test-reporter=junit', `--test-reporter-destination=${reportPath}`);
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT; // This is a new runner, even when exercised from a runner regression test.
