@@ -202,10 +202,12 @@ namespace Nootify {
             thread.Start(); ready.WaitOne(1000);
         }
         IntPtr HandleMessage(IntPtr value, uint message, UIntPtr wparam, IntPtr lparam) {
-            if (message == 0x11 || (message == 0x16 && wparam != UIntPtr.Zero)) {
-                // Never block/cancel sign-out on a failed drain. Failure writes no receipt.
-                try { ending(); } catch { }
-                return new IntPtr(1);
+            // WM_QUERYENDSESSION only asks permission; another application may still
+            // cancel it. Leave the running job untouched until Windows confirms the end.
+            if (message == 0x11) return new IntPtr(1);
+            if (message == 0x16) { // WM_ENDSESSION
+                if (wparam != UIntPtr.Zero) { try { ending(); } catch { } }
+                return IntPtr.Zero;
             }
             if (message == 0x10) { DestroyWindow(value); return IntPtr.Zero; }
             if (message == 0x02) { PostQuitMessage(0); return IntPtr.Zero; }

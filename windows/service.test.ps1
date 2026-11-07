@@ -414,8 +414,16 @@ setInterval(()=>{},1000);
     # broadcast logoff or sign out the CI runner. This covers a retained terminal ID.
     $notifications = [Nootify.ServiceRunner].GetField('sessionEnd', [Reflection.BindingFlags]'Instance,NonPublic').GetValue($runner)
     $notify = $notifications.GetType().GetMethod('HandleMessage', [Reflection.BindingFlags]'Instance,NonPublic')
-    $null = $notify.Invoke($notifications, [object[]]@([IntPtr]::Zero, [uint32]0x11, [UIntPtr]::Zero, [IntPtr]::Zero))
-    Assert ($job.ActiveProcesses -eq 0) 'Session-end notification must authoritatively drain Node and its helper'
+    $beforeQuery = $job.ActiveProcesses
+    Assert ($beforeQuery -gt 0) 'The session-end fixture must be running before the query'
+    $answer = $notify.Invoke($notifications, [object[]]@([IntPtr]::Zero, [uint32]0x11, [UIntPtr]::Zero, [IntPtr]::Zero))
+    Assert ($answer -eq [IntPtr]::new(1)) 'The session query must be acknowledged without stopping the service'
+    $null = $notify.Invoke($notifications, [object[]]@([IntPtr]::Zero, [uint32]0x16, [UIntPtr]::Zero, [IntPtr]::Zero))
+    Assert ($job.ActiveProcesses -eq $beforeQuery) 'A queried then canceled session end must leave the complete job running'
+    foreach ($process in $processes) { Assert (!$process.WaitForExit(0)) 'Canceling sign-out must preserve the actual fixture processes' }
+    Assert (!(Test-Path -LiteralPath $completionPath)) 'A canceled session end must not certify shutdown'
+    $null = $notify.Invoke($notifications, [object[]]@([IntPtr]::Zero, [uint32]0x16, [UIntPtr]::new(1), [IntPtr]::Zero))
+    Assert ($job.ActiveProcesses -eq 0) 'Confirmed session end must authoritatively drain Node and its helper'
     Assert ([IO.File]::ReadAllText($completionPath) -ceq $name) 'The callback must certify its exact run before host exit, even when the terminal ID is retained'
     $runner.Dispose(); $runner = $null; $job = $null
     foreach ($process in $processes) { Assert ($process.WaitForExit(5000)) 'Node and helper must both leave the job'; $process.Dispose() }
