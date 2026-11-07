@@ -180,8 +180,17 @@ export class ChatService<C extends ChatChannel> implements ServiceModule {
         delivery.transport_status = error instanceof SessionUnavailable ? 'ignored' : 'delivery_failed';
         this.report({ source: this.channel, status: delivery.transport_status, reason: error instanceof SessionUnavailable ? error.reason : 'delivery_failed', message_id: delivery.id, session_id: delivery.session_id });
       }
-      await this.state.save();
-      if (delivery.transport_status === 'socket_written' || delivery.transport_status === 'input_accepted' || delivery.transport_status === 'inbox_queued') this.report({ source: this.channel, status: delivery.transport_status, message_id: delivery.id, chat_id: delivery.chat_id, session_id: delivery.session_id });
+      try { await this.state.save(); }
+      finally {
+        if (delivery.transport_status === 'socket_written' || delivery.transport_status === 'input_accepted' || delivery.transport_status === 'inbox_queued') {
+          this.report({ source: this.channel, status: delivery.transport_status, message_id: delivery.id, chat_id: delivery.chat_id, session_id: delivery.session_id });
+          try { await transport.react(delivery, delivery.message_id); }
+          catch (error) {
+            this.report({ source: this.channel, status: 'reaction_failed', message_id: delivery.id, chat_id: delivery.chat_id, session_id: delivery.session_id,
+              error: error instanceof ChatTransportError ? error.message : `${providerName(this.channel)} reaction request failed.` });
+          }
+        }
+      }
     }).finally(() => { this.queued--; });
     this.pending = work.catch(() => { this.report({ source: this.channel, status: 'delivery_failed', reason: 'state_write_failed' }); });
     return this.pending;

@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { ChatService } from '../src/chat-service.js';
-import { type ChatLocation, type ChatMessage, type ChatTransport, type SlackConfig, type TelegramConfig } from '../src/chat-transport.js';
+import { ChatTransportError, type ChatLocation, type ChatMessage, type ChatTransport, type SlackConfig, type TelegramConfig } from '../src/chat-transport.js';
 import { NootifyClient } from '../src/client.js';
 import { EventLog } from '../src/events.js';
 import { GitHubAuth } from '../src/github-auth.js';
@@ -15,7 +15,7 @@ import { PullRequestsService } from '../src/github.js';
 import { createServiceHost } from '../src/server.js';
 import { SettingsService } from '../src/settings.js';
 import { State } from '../src/state.js';
-import { SessionUnavailable, type Adapter } from '../src/types.js';
+import { SessionUnavailable, UnconfirmedDeliveryError, type Adapter, type DeliveryResult } from '../src/types.js';
 import { failSettingsWriteBehindOlderSaves } from './state-failures.js';
 
 const slackConfig: SlackConfig = { bot_token: 'xoxb-secret', app_token: 'xapp-secret', channel_id: 'C123', user_id: 'U123' };
@@ -25,11 +25,13 @@ class FakeTransport implements ChatTransport {
   receive: (message: ChatMessage) => Promise<void> = async () => {};
   opened = 0; stopped = false;
   readonly sent: { location: ChatLocation; text: string; reply?: string }[] = [];
+  readonly reactions: { location: ChatLocation; message_id: string }[] = [];
   constructor(readonly identity: string, readonly room: string) {}
   async start(receive: (message: ChatMessage) => Promise<void>, status: (status: 'ready') => void): Promise<void> { this.receive = receive; status('ready'); }
   async stop(): Promise<void> { this.stopped = true; }
   async openThread(): Promise<ChatLocation> { return { chat_id: this.room, thread_id: String(++this.opened) }; }
   async send(location: ChatLocation, text: string, reply?: string) { this.sent.push({ location: { chat_id: location.chat_id, thread_id: location.thread_id }, text, reply }); return { message_id: `sent-${this.sent.length}` }; }
+  async react(location: ChatLocation, messageId: string): Promise<void> { this.reactions.push({ location: { chat_id: location.chat_id, thread_id: location.thread_id }, message_id: messageId }); }
 }
 async function fixture(t: TestContext) {
   const directory = await mkdtemp(join(tmpdir(), 'nootify-channels-'));
@@ -37,7 +39,7 @@ async function fixture(t: TestContext) {
   const state = await State.open(directory);
   const delivered: { id: string; content: string; adapter?: Adapter }[] = [];
   let unavailable = false;
-  const sessions = { send: async (id: string, content: string, adapter?: Adapter) => {
+  const sessions = { send: async (id: string, content: string, adapter?: Adapter): Promise<DeliveryResult> => {
     if (unavailable) throw new SessionUnavailable('session_archived');
     delivered.push({ id, content, adapter }); return { status: 'socket_written' as const };
   } };
@@ -151,6 +153,78 @@ test('only the trusted user and exact bound thread can reach the exact session',
   assert.match(f.delivered[0].content, /chat-ack/); assert.match(f.delivered[0].content, /chat-reply/);
   assert.ok(!f.delivered[0].content.includes(f.state.token));
 });
+
+for (const channel of ['slack', 'telegram'] as const) {
+  for (const status of ['socket_written', 'input_accepted', 'inbox_queued'] as const) {
+    test(`${channel}: ${status} input receives one reaction on its original message`, async t => {
+      const f = await fixture(t); const service = channel === 'slack' ? f.slack : f.telegram;
+      const config = channel === 'slack' ? slackConfig : telegramConfig;
+      await service.configure(config);
+      const thread = await service.open('codex', 'receipt-session', 'Task');
+      const location = { chat_id: thread.chat_id, thread_id: thread.thread_id! };
+      const transport = (channel === 'slack' ? f.slackTransports : f.telegramTransports)[0];
+      const send = t.mock.method(f.sessions, 'send', async () => { assert.equal(transport.reactions.length, 0); return { status }; });
+      const message = incoming(location, config.user_id, '42');
+      await transport.receive(message); await transport.receive(message);
+      assert.equal(send.mock.calls.length, 1);
+      assert.deepEqual(transport.reactions, [{ location, message_id: '42' }]);
+      const delivery = [...f.state.chatDeliveries.values()][0];
+      assert.equal(delivery.transport_status, status); assert.equal(delivery.acknowledged_at, undefined);
+      if (status === 'input_accepted') {
+        await service.stop();
+        const restoredTransport = new FakeTransport(transport.identity, transport.room);
+        const restarted = new ChatService(channel, await State.open(f.directory), f.sessions, async () => restoredTransport);
+        t.after(() => restarted.stop()); await restarted.start(); await restoredTransport.receive(message);
+        assert.equal(send.mock.calls.length, 1); assert.equal(restoredTransport.reactions.length, 0);
+      }
+    });
+  }
+  for (const error of [new SessionUnavailable('session_archived'), new UnconfirmedDeliveryError('outcome unknown'), new Error('delivery failed')]) {
+    test(`${channel}: input without a successful transport result receives no reaction: ${error.message}`, async t => {
+      const f = await fixture(t); const service = channel === 'slack' ? f.slack : f.telegram;
+      const config = channel === 'slack' ? slackConfig : telegramConfig;
+      await service.configure(config);
+      const thread = await service.open('codex', 'receipt-session', 'Task');
+      const transport = (channel === 'slack' ? f.slackTransports : f.telegramTransports)[0];
+      t.mock.method(f.sessions, 'send', async () => { throw error; });
+      await transport.receive(incoming({ chat_id: thread.chat_id, thread_id: thread.thread_id! }, config.user_id));
+      assert.equal(transport.reactions.length, 0);
+    });
+  }
+  for (const error of [new ChatTransportError('Reaction permission missing.'), new Error('raw token-bearing URL: secret')]) {
+    test(`${channel}: a reaction failure preserves delivery, deduplication and subsequent input: ${error.name}`, async t => {
+      const f = await fixture(t); const service = channel === 'slack' ? f.slack : f.telegram;
+      const config = channel === 'slack' ? slackConfig : telegramConfig;
+      await service.configure(config);
+      const thread = await service.open('codex', 'receipt-session', 'Task');
+      const transport = (channel === 'slack' ? f.slackTransports : f.telegramTransports)[0];
+      const reaction = t.mock.method(transport, 'react', async () => { throw error; });
+      const message = incoming({ chat_id: thread.chat_id, thread_id: thread.thread_id! }, config.user_id);
+      await transport.receive(message); await transport.receive(message);
+      assert.equal(f.delivered.length, 1); assert.equal(reaction.mock.calls.length, 1);
+      assert.equal([...f.state.chatDeliveries.values()][0].transport_status, 'socket_written');
+      assert.equal((await State.open(f.directory)).chatDeliveries.size, 1);
+      assert.ok(f.reports.some(record => record.source === channel && record.status === 'reaction_failed'));
+      assert.ok(!f.reports.some(record => record.status === 'delivery_failed'));
+      assert.ok(!JSON.stringify(f.reports).includes('secret'));
+      reaction.mock.restore();
+      await transport.receive({ ...message, message_id: '10' });
+      assert.equal(f.delivered.length, 2); assert.equal(transport.reactions.length, 1);
+    });
+  }
+  test(`${channel}: a status-save failure after delivery still adds a reaction without replaying input`, async t => {
+    const f = await fixture(t); const service = channel === 'slack' ? f.slack : f.telegram;
+    const config = channel === 'slack' ? slackConfig : telegramConfig;
+    await service.configure(config);
+    const thread = await service.open('codex', 'receipt-session', 'Task');
+    const transport = (channel === 'slack' ? f.slackTransports : f.telegramTransports)[0];
+    const save = f.state.save.bind(f.state); let writes = 0;
+    t.mock.method(f.state, 'save', async () => { if (++writes === 2) throw new Error('status save failed'); await save(); });
+    const message = incoming({ chat_id: thread.chat_id, thread_id: thread.thread_id! }, config.user_id);
+    await transport.receive(message); await transport.receive(message);
+    assert.equal(f.delivered.length, 1); assert.equal(transport.reactions.length, 1);
+  });
+}
 
 test('persisted deliveries deduplicate retries and reply to the original topic after restart', async t => {
   const f = await fixture(t); await f.telegram.configure(telegramConfig);

@@ -143,8 +143,9 @@ test('clear and stop reject late completions; repeated starts create one receive
 });
 
 test('configuration drains accepted messages on the old API and ignores late receiver input', async t => {
-  const reading = gate(); const requested = gate();
-  const api: LarkApi = { appId: firstBot.appId, async request<T>(): Promise<T> {
+  const reading = gate(); const requested = gate(); const reactions: string[] = [];
+  const api: LarkApi = { appId: firstBot.appId, async request<T>(_method: string, path: string): Promise<T> {
+    if (path.endsWith('/reactions')) { reactions.push(path); return { reaction_id: 'old-bot-reaction' } as T; }
     requested.resolve(); await reading.promise;
     return { revision: '1', content: `agent-session:v1:${hostname()}:codex:thread-test` } as T;
   } };
@@ -170,5 +171,6 @@ test('configuration drains accepted messages on the old API and ignores late rec
   assert.equal(send.mock.calls.length, 1);
   assert.equal(state.deliveries.has('om_late'), false);
   assert.equal(state.deliveries.get('om_accepted')?.transport_status, 'input_accepted');
+  assert.deepEqual(reactions, ['/open-apis/im/v1/messages/om_accepted/reactions']);
   assert.equal(lark.api?.appId, secondBot.appId);
 });

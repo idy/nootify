@@ -63,6 +63,7 @@ class Fixture {
         case 'users.info': return json({ ok: true, user: this.user });
         case 'apps.connections.open': return json({ ok: true, url: `wss://wss-primary.slack.com/link/?ticket=fixture-${++this.connections}` });
         case 'chat.postMessage': return json({ ok: true, channel: this.channel.id, ts: `1712320423.${String(++this.posts).padStart(6, '0')}`, message: { type: 'message', text: call.body.text } });
+        case 'reactions.add': return json({ ok: true });
         default: throw new Error('Unexpected fixture method');
       }
     },
@@ -296,6 +297,50 @@ test('outgoing failures are safe, are not retried, and cannot substitute another
   assert.equal(fixture.calls.filter(call => call.method === 'chat.postMessage').length, 1);
   fixture.override = call => call.method === 'chat.postMessage' ? json({ ok: true, channel: 'COTHER', ts: reply }) : undefined;
   await assert.rejects(value.openThread('session'), /invalid message receipt/);
+});
+
+test('Slack reacts to the original reply with a sparkling heart and treats an existing reaction as success', async t => {
+  const { value, fixture } = await transport(t);
+  const location = { chat_id: config.channel_id, thread_id: root };
+  await value.react(location, reply);
+  const call = fixture.calls.find(call => call.method === 'reactions.add')!;
+  assert.deepEqual(call.body, { channel: config.channel_id, timestamp: reply, name: 'sparkling_heart' });
+  assert.equal(call.init.method, 'POST');
+  assert.equal(new Headers(call.init.headers).get('authorization'), `Bearer ${config.bot_token}`);
+  fixture.override = call => call.method === 'reactions.add' ? json({ ok: false, error: 'already_reacted' }) : undefined;
+  await value.react(location, reply);
+  assert.equal(fixture.calls.filter(call => call.method === 'reactions.add').length, 2);
+});
+
+test('Slack rejects invalid reaction destinations and stopped transports without an API call', async t => {
+  const { value, fixture } = await transport(t); const count = fixture.calls.length;
+  await assert.rejects(value.react({ chat_id: 'COTHER', thread_id: root }, reply), /reaction location is invalid/);
+  await assert.rejects(value.react({ chat_id: config.channel_id, thread_id: 'invalid' }, reply), /reaction location is invalid/);
+  await assert.rejects(value.react({ chat_id: config.channel_id, thread_id: root }, 'invalid'), /reaction location is invalid/);
+  await value.stop();
+  await assert.rejects(value.react({ chat_id: config.channel_id, thread_id: root }, reply), /transport is stopped/);
+  assert.equal(fixture.calls.length, count);
+});
+
+test('Slack reaction failures are bounded, expose no credentials, and do not retry', async t => {
+  for (const kind of ['scope', 'network', 'timeout'] as const) await t.test(kind, async child => {
+    const { value, fixture } = await transport(child);
+    if (kind === 'timeout') timers(child);
+    fixture.override = call => {
+      if (call.method !== 'reactions.add') return;
+      if (kind === 'scope') return json({ ok: false, error: 'missing_scope', needed: config.bot_token });
+      if (kind === 'network') throw new Error(config.bot_token);
+      return new Promise<Response>(() => {});
+    };
+    const rejected = assert.rejects(value.react({ chat_id: config.channel_id, thread_id: root }, reply), error => {
+      assert.ok(!String(error).includes(config.bot_token) && !String(error).includes(config.app_token));
+      assert.match(String(error), kind === 'scope' ? /permissions/ : kind === 'timeout' ? /timed out/ : /reactions.add request failed/);
+      return true;
+    });
+    if (kind === 'timeout') { await nextTurn(); child.mock.timers.tick(15_000); }
+    await rejected;
+    assert.equal(fixture.calls.filter(call => call.method === 'reactions.add').length, 1);
+  });
 });
 
 test('Socket Mode acknowledges envelopes before dispatching and filters wrong senders, bots, edits and rooms', async t => {

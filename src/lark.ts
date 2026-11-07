@@ -8,7 +8,7 @@ import { forwardedLarkMessage, LarkReplies } from './lark-replies.js';
 import { LarkThreads } from './lark-threads.js';
 import { LarkThreadSync, type ThreadDiscovery } from './lark-thread-sync.js';
 import { registerPolledSession } from './polled-sessions.js';
-import { createLarkApi, ensureAnnouncement, ensureBindingMessage, readAnnouncement, parseAnnouncement, InvalidAnnouncement, larkActivationTime } from './lark-metadata.js';
+import { createLarkApi, ensureAnnouncement, ensureBindingMessage, readAnnouncement, parseAnnouncement, InvalidAnnouncement, larkActivationTime, requestLark } from './lark-metadata.js';
 import type { Credentials, LarkApi } from './lark-metadata.js';
 
 interface IncomingEvent {
@@ -211,6 +211,15 @@ export class LarkService implements ServiceModule {
       } finally {
         this.pending--;
         if (!handled) this.seen.delete(message_id);
+      }
+      if (delivered) {
+        try {
+          await requestLark(api, 'POST', `/open-apis/im/v1/messages/${encodeURIComponent(message_id)}/reactions`, {
+            reaction_type: { emoji_type: 'FINGERHEART' },
+          });
+        } catch (error) {
+          this.report({ ...context, status: 'reaction_failed', session_id, error: (error as Error).message });
+        }
       }
       return handled;
     });

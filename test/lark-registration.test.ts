@@ -122,7 +122,7 @@ function scopeApi(scopes = defaultScopes): LarkApi {
 test('readiness identifies actual messaging gaps without treating a connected bot as a complete setup', async () => {
   const setup = await inspectLarkSetup(scopeApi());
   assert.equal(setup.status, 'permissions-required'); assert.equal(setup.mention_only, true);
-  assert.deepEqual(setup.missing, ['im:chat.announcement:read', 'im:chat.announcement:write_only', 'im:message.history:readonly', 'im:message.group_msg']);
+  assert.deepEqual(setup.missing, ['im:chat.announcement:read', 'im:chat.announcement:write_only', 'im:message.history:readonly', 'im:message.reactions:write_only', 'im:message.group_msg']);
   assert.match(setup.permission!.qr, /^data:image\/png;base64,/);
   const url = new URL(setup.permission!.url); assert.equal(url.origin, 'https://open.feishu.cn'); assert.equal(url.pathname, `/app/${appId}/auth`);
   assert.deepEqual(url.searchParams.get('q')?.split(','), setup.missing);
@@ -130,7 +130,7 @@ test('readiness identifies actual messaging gaps without treating a connected bo
   assert.deepEqual(all, ready);
 });
 test('chat-list access is required even when all other messaging scopes are present', async () => {
-  const primaryScopes = ['im:chat:create', 'im:chat.announcement:read', 'im:chat.announcement:write_only', 'im:message:send_as_bot', 'im:message.history:readonly', 'im:message.group_msg'];
+  const primaryScopes = ['im:chat:create', 'im:chat.announcement:read', 'im:chat.announcement:write_only', 'im:message:send_as_bot', 'im:message.history:readonly', 'im:message.reactions:write_only', 'im:message.group_msg'];
   const missingList = await inspectLarkSetup(scopeApi(primaryScopes));
   assert.equal(missingList.status, 'permissions-required');
   assert.deepEqual(missingList.missing, ['im:chat:read']);
@@ -142,13 +142,24 @@ test('chat-list access is required even when all other messaging scopes are pres
 });
 
 test('history polling requires a history-read grant even when live messaging scopes are present', async () => {
-  const live = [...defaultScopes, 'im:chat.announcement:read', 'im:chat.announcement:write_only', 'im:message.group_msg'];
+  const live = [...defaultScopes, 'im:chat.announcement:read', 'im:chat.announcement:write_only', 'im:message.reactions:write_only', 'im:message.group_msg'];
   const missingHistory = await inspectLarkSetup(scopeApi(live));
   assert.equal(missingHistory.status, 'permissions-required');
   assert.deepEqual(missingHistory.missing, ['im:message.history:readonly']);
   assert.equal(missingHistory.mention_only, false);
   for (const grant of ['im:message.history:readonly', 'im:message:readonly', 'im:message']) {
     assert.deepEqual(await inspectLarkSetup(scopeApi([...live, grant])), ready);
+  }
+});
+
+test('routing receipts require reaction-write permission or the broader messaging grant', async () => {
+  const scopes = [...defaultScopes, 'im:chat.announcement:read', 'im:chat.announcement:write_only', 'im:message.history:readonly', 'im:message.group_msg'];
+  const setup = await inspectLarkSetup(scopeApi(scopes));
+  assert.equal(setup.status, 'permissions-required'); assert.equal(setup.mention_only, false);
+  assert.deepEqual(setup.missing, ['im:message.reactions:write_only']);
+  assert.equal(new URL(setup.permission!.url).searchParams.get('q'), 'im:message.reactions:write_only');
+  for (const grant of ['im:message.reactions:write_only', 'im:message']) {
+    assert.deepEqual(await inspectLarkSetup(scopeApi([...scopes, grant])), ready);
   }
 });
 

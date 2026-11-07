@@ -45,6 +45,7 @@ const requirements = [
   ['im:chat.announcement:write_only', 'im:chat'],
   ['im:message:send_as_bot', 'im:message'],
   ['im:message.history:readonly', 'im:message:readonly', 'im:message'],
+  ['im:message.reactions:write_only', 'im:message'],
   ['im:message.group_msg', 'im:message.group_msg:readonly', 'im:message.group_msg.include_bot:readonly'],
 ];
 /** Inspect only this app's own granted bot scopes; never enumerate the owner's other applications or contacts. */

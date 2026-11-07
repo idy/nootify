@@ -31,6 +31,8 @@ export interface ChatTransport {
   stop(): Promise<void>;
   openThread(title: string): Promise<ChatLocation>;
   send(location: ChatLocation, text: string, replyTo?: string): Promise<SentChatMessage>;
+  /** Add this provider's receipt reaction to the original incoming message. */
+  react(location: ChatLocation, messageId: string): Promise<void>;
 }
 export type ChatFactory<C extends ChatChannel> = (config: ChatConfigs[C]) => Promise<ChatTransport>;
 /** Only locally authored provider errors may cross the credential boundary into settings. */

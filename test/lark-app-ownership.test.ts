@@ -18,6 +18,7 @@ test('a known foreign-app group is rejected before allowed-sender fallback, whil
   const send = t.mock.method(sessions, 'send', async () => ({ status: 'input_accepted' as const }));
   const reads: string[] = []; const reports: Record<string, unknown>[] = [];
   const api: LarkApi = { appId: 'cli_current', async request<T>(_method: string, path: string): Promise<T> {
+    if (path.endsWith('/reactions')) return { reaction_id: 'reaction-received' } as T;
     reads.push(path);
     return { revision: '1', content: `agent-session:v1:${hostname()}:codex:current-session` } as T;
   } };

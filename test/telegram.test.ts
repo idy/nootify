@@ -52,6 +52,7 @@ async function fixture(t: TestContext, handler?: Handler, options: TelegramTrans
       case 'getWebhookInfo': return ok({ url: '' });
       case 'createForumTopic': return ok({ message_thread_id: 51, name: call.body.name });
       case 'sendMessage': return ok({ message_id: ++sent, chat, message_thread_id: call.body.message_thread_id });
+      case 'setMessageReaction': return ok(true);
       case 'getUpdates': return call.body.offset === -1 ? ok([]) : blocked(call.signal);
       default: throw new Error(`Unexpected fixture method ${method}`);
     }
@@ -161,6 +162,41 @@ test('Telegram sends plaintext chunks in the topic and validates immutable reply
   await assert.rejects(transport.send({ ...location, thread_id: '0' }, 'unthreaded'), /destination/);
   await assert.rejects(transport.send(location, ''), /contain text/);
   assert.equal(calls.length, count, 'invalid destinations and replies must not reach Telegram');
+});
+
+test('Telegram adds a smiling face with hearts to the original message rather than the forum topic root', async t => {
+  const { transport, calls } = await fixture(t);
+  await transport.react({ chat_id: config.chat_id, thread_id: '51' }, '2001');
+  const call = calls.find(call => call.method === 'setMessageReaction')!;
+  assert.deepEqual(call.body, { chat_id: config.chat_id, message_id: 2001, reaction: [{ type: 'emoji', emoji: '🥰' }] });
+  assert.equal(call.init.method, 'POST');
+  assert.equal(calls.filter(call => call.method === 'sendMessage').length, 0);
+});
+
+test('Telegram validates reaction destinations before making an API call', async t => {
+  const { transport, calls } = await fixture(t); const count = calls.length;
+  for (const [location, messageId] of [
+    [{ chat_id: '-100999', thread_id: '51' }, '2001'],
+    [{ chat_id: config.chat_id, thread_id: '0' }, '2001'],
+    [{ chat_id: config.chat_id, thread_id: '51' }, '9007199254740993'],
+    [{ chat_id: config.chat_id, thread_id: '51' }, 'not-an-id'],
+  ] as const) await assert.rejects(transport.react(location, messageId), /reaction destination/);
+  assert.equal(calls.length, count);
+});
+
+test('Telegram reaction failures are bounded, expose no credentials, and do not retry', async t => {
+  for (const kind of ['disabled', 'network', 'invalid', 'timeout'] as const) await t.test(kind, async child => {
+    const { transport, calls } = await fixture(child, call => {
+      if (call.method !== 'setMessageReaction') return;
+      if (kind === 'disabled') return failure(400, 'REACTION_INVALID');
+      if (kind === 'network') throw new Error(config.bot_token);
+      if (kind === 'invalid') return ok(false);
+      return blocked(call.signal);
+    }, { requestTimeoutMs: 20 });
+    await assert.rejects(transport.react({ chat_id: config.chat_id, thread_id: '51' }, '2001'), error => safeError(error,
+      kind === 'disabled' ? /failed \(400\)/ : kind === 'network' ? /network request failed/ : kind === 'invalid' ? /invalid reaction receipt/ : /timed out/));
+    assert.equal(calls.filter(call => call.method === 'setMessageReaction').length, 1);
+  });
 });
 
 test('Telegram skips the startup backlog and advances offsets across every ignored update', async t => {
