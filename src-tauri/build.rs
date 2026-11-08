@@ -15,14 +15,16 @@ fn main() {
     };
     let node = format!("binaries/node-{target}{extension}");
     let tsnet = format!("binaries/nootify-tsnet-{target}{extension}");
+    let core = format!("binaries/nootify-core-{target}{extension}");
     println!("cargo:rerun-if-changed=../package.json");
-    for binary in [&node, &tsnet] {
+    for binary in [&node, &tsnet, &core] {
         println!("cargo:rerun-if-changed={binary}");
     }
     println!("cargo:rerun-if-changed={SERVICE}");
     if std::env::var("PROFILE").as_deref() == Ok("release") {
         if !staged(Path::new(&node))
             || !staged(Path::new(&tsnet))
+            || !staged(Path::new(&core))
             || !Path::new(SERVICE).join("dist/src/server.js").is_file()
             || (target.contains("windows")
                 && [
@@ -40,7 +42,7 @@ fn main() {
     } else {
         // Inert placeholders let tests and editors compile without downloaded runtimes.
         fs::create_dir_all("binaries").expect("create binaries/");
-        for binary in [&node, &tsnet] {
+        for binary in [&node, &tsnet, &core] {
             let path = Path::new(binary);
             if !path.exists() {
                 fs::write(path, PLACEHOLDER).expect("write sidecar placeholder");

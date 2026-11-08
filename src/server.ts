@@ -7,7 +7,7 @@ import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { State } from './state.js';
 import { SessionsService } from './sessions.js';
-import { LarkService } from './lark.js';
+import { ProvidersService } from './providers.js';
 import { resolveCredentials } from './lark-metadata.js';
 import { HttpError, RetryableDeliveryError, UnconfirmedDeliveryError } from './types.js';
 import type { ServiceModule } from './types.js';
@@ -42,7 +42,7 @@ async function readBody(request: IncomingMessage): Promise<unknown> {
 export interface HostOptions {
   pulls?: PullsSource; tailnet?: TailnetAccess; via?: 'loopback' | 'tailnet';
   peerAddress?: (socket: Socket) => string | undefined;
-  agents?: AgentsSource; channel?: () => ChannelSummary | undefined; settings?: SettingsSource;
+  agents?: AgentsSource; channel?: () => ChannelSummary | undefined; settings?: SettingsSource; providers?: ProvidersService;
 }
 const loopback = /^(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/;
 function listen(server: Server, port: number, host: string): Promise<void> {
@@ -69,7 +69,7 @@ export function createServiceHost(modules: ServiceModule[], token: string, logs?
       if (request.headers.origin && request.headers.origin !== `http://${host}`) throw new HttpError(403, 'Cross-origin requests are not accepted');
       const url = new URL(request.url ?? '/', 'http://127.0.0.1');
       if (logs && await serveUi(request, response, url.pathname, { modules, logs, pulls: options.pulls, tailnetUrl: () => options.tailnet?.url(),
-        agents: options.agents, channel: options.channel, settings: options.settings, via: options.via ?? 'loopback' })) return;
+        agents: options.agents, channel: options.channel, settings: options.settings, providers: options.providers, via: options.via ?? 'loopback' })) return;
       if (request.headers.origin) throw new HttpError(403, 'Browser-origin requests are not accepted for control APIs');
       const statuses = () => modules.map(module => ({ name: module.name, status: module.status() }));
       if (request.method === 'GET' && url.pathname === '/health') { send(200, { ok: true, service: 'nootify', modules: statuses() }); return; }
@@ -111,7 +111,12 @@ export async function main(): Promise<void> {
   try {
     const state = await State.open(values['state-dir']);
     const logs = await EventLog.open(state.directory);
-    const report = (record: Record<string, unknown>) => { logs.report(record); };
+    let networkChanged: (ready: boolean) => void = () => {};
+    const report = (record: Record<string, unknown>) => {
+      logs.report(record);
+      if (record.status === 'tailnet_listening') networkChanged(true);
+      else if (record.status === 'tailnet_failed') networkChanged(false);
+    };
     const sessions = new SessionsService(state, undefined, report, undefined, { port });
     const resolved = await resolveCredentials(process.env, state.settings, values['mcp-config']);
     // Routine five-minute refreshes would push Feishu events out of the bounded log; record outcome changes only.
@@ -126,13 +131,16 @@ export async function main(): Promise<void> {
     const peers = new WeakMap<Socket, string>();
     const tailscale = new TailscaleService({ state, access: tailnet, client: tsnet, report, listen: () => listenTailnetProxy(tailnetServer, peers) });
     const agents = new AgentPrompts({ stateDir: state.directory, port, tailnetAddress: () => { const url = tailnet.url(); return url ? new URL(url).hostname : undefined; } }, report);
-    const lark = new LarkService(state, sessions, resolved?.credentials, report, undefined, port, undefined,
-      sessionThreadDiscovery(agents, state, report));
-    const modules: ServiceModule[] = [sessions, lark, pulls, agents];
+    const providers = new ProvidersService(state, sessions, resolved?.credentials, report, port, tsnet, undefined, sessionThreadDiscovery(agents, state, report));
+    networkChanged = ready => {
+      if (!ready) providers.networkDisconnected();
+      else void providers.syncNetwork().catch(error => logs.report({ source: 'providers', status: 'tailnet_publish_failed', error: (error as Error).message }));
+    };
+    const modules: ServiceModule[] = [sessions, providers, pulls, agents];
     const github = new GitHubAuth(state, report, () => pulls.refreshSoon());
-    const settings = new SettingsService({ state, lark, github, pulls, agents, tailscale, mcpConfig: values['mcp-config'], source: resolved?.source, report });
-    const channel = (): ChannelSummary => lark.channel();
-    const page = { pulls, tailnet, agents, channel, settings };
+    const settings = new SettingsService({ state, lark: providers, github, pulls, agents, tailscale, providers, mcpConfig: values['mcp-config'], source: resolved?.source, report });
+    const channel = (): ChannelSummary => providers.channel();
+    const page = { pulls, tailnet, agents, channel, settings, providers };
     const tailnetServer = createServiceHost(modules, state.token, logs, { ...page, via: 'tailnet', peerAddress: socket => peers.get(socket) });
     server.off('request', starting);
     createServiceHost(modules, state.token, logs, page, server);
@@ -140,9 +148,9 @@ export async function main(): Promise<void> {
     const stop = async () => {
       if (stopping) return;
       stopping = true;
-      await tailscale.stop();
       await settings.stop();
       for (const module of [...modules].reverse()) await module.stop?.();
+      await tailscale.stop();
       await logs.flush();
       await closeServer();
     };
@@ -151,6 +159,7 @@ export async function main(): Promise<void> {
     for (const module of modules) await module.start?.();
     // The embedded device owns tailnet port 80; its private backend preserves the original peer address.
     await tailscale.start();
+    await providers.syncNetwork().catch(error => report({ source: 'providers', status: 'tailnet_publish_failed', error: (error as Error).message }));
     process.once('SIGTERM', () => { void stop(); });
     process.once('SIGINT', () => { void stop(); });
   } catch (error) {

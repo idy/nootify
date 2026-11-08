@@ -36,7 +36,7 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "externalBin": ["binaries/node", "binaries/nootify-tsnet"],
+    "externalBin": ["binaries/node", "binaries/nootify-tsnet", "binaries/nootify-core"],
     "resources": {
       "resources/service/": "service/"
     },

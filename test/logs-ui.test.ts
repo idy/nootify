@@ -68,7 +68,8 @@ test('Logs separates event purpose from delivery outcome and keeps its controls 
   const agents = [['claude', 'Claude'], ['codex', 'Codex'], ['opencode', 'OpenCode'], ['trae', 'Trae'], ['workbuddy', 'WorkBuddy']].map(([agent, name]) => ({
     agent, name, file: `/fixture/${agent}/instructions`, injected: false, status: 'absent', block: `Feishu instructions for ${name}`,
   }));
-  let channel: { name: 'feishu'; configured: boolean; recipient?: string; groups: number } | undefined = { name: 'feishu', configured: true, recipient: 'ou_fixture', groups: 2 };
+  let providers: { id: string; name: string; type: string; enabled: boolean; status: string; error?: string }[] = [{ id: 'remote-1', name: 'Home Nootify', type: 'remote', enabled: true, status: 'connected' }];
+  let defaultProvider: string | undefined = 'remote-1';
   let editable = true;
   const agentWrites: { agent: string; enabled: boolean }[] = [];
   let reads = 0; let agentReads = 0;
@@ -88,8 +89,9 @@ test('Logs separates event purpose from delivery outcome and keeps its controls 
         return Response.json({ ok: true });
       }
       agentReads++;
-      return Response.json({ agents, editable, ...(channel ? { channel } : {}) });
+      return Response.json({ agents, editable });
     }
+    if (path === '/ui/api/providers') return Response.json({ node_id: 'fixture-node', providers, default_provider_id: defaultProvider, editable, remote: { enabled: false, listen: '127.0.0.1:9418', status: 'disabled', tls: false, token_set: false, peers: [] } });
     assert.fail(`Unexpected UI request: ${path}`);
   });
   const element = (id: string) => document.getElementById(id)! as unknown as HTMLElement;
@@ -226,20 +228,20 @@ test('Logs separates event purpose from delivery outcome and keeps its controls 
     assert.match(element('logs-view').querySelector('.hint')!.textContent!, /Sent does not mean read/);
   });
 
-  await t.test('Agents uses a fixed Feishu status card and keeps every agent adapter editable', async () => {
+  await t.test('Agents summarizes the default provider and keeps every agent adapter editable', async () => {
     location.hash = '#/agents'; window.dispatchEvent(new window.Event('hashchange'));
-    await until(() => document.querySelectorAll('#agent-rows .check').length === 5, 'Agent fixtures did not render');
-    assert.equal(element('channel-title').textContent, 'Feishu notifications');
-    assert.equal(element('channel-state').textContent, 'Configured');
-    assert.equal(element('channel-sub').textContent, 'Recipient ou_fixture · Groups bound: 2');
-    assert.equal(element('channel-settings').getAttribute('href'), '#/settings/lark');
-    assert.equal(element('channel-settings').textContent, 'Configure Feishu');
+    await until(() => document.querySelectorAll('#agent-rows .check').length === 5 && element('channel-state').textContent === 'Connected', 'Agent fixtures did not render');
+    assert.equal(element('channel-title').textContent, 'Message providers');
+    assert.equal(element('channel-state').textContent, 'Connected');
+    assert.equal(element('channel-sub').textContent, 'Default: Home Nootify · Remote Nootify');
+    assert.equal(element('channel-settings').getAttribute('href'), '#/providers');
+    assert.equal(element('channel-settings').textContent, 'Manage Providers');
     assert.equal(document.querySelector('#notification-channel, #channel-save, #agents-view select'), null);
     for (const agent of agents) {
       const before = agentReads;
       const checkbox = document.querySelector<HTMLInputElement>(`#agent-rows [data-key="${agent.agent}"]`)!;
       assert.equal(checkbox.disabled, false);
-      assert.equal(checkbox.getAttribute('aria-label'), `Add Feishu instructions to ${agent.name}`);
+      assert.equal(checkbox.getAttribute('aria-label'), `Add notification instructions to ${agent.name}`);
       checkbox.checked = true; checkbox.dispatchEvent(new window.Event('change'));
       await until(() => agentReads > before, `${agent.name} did not refresh after enabling`);
       await nextTurn();
@@ -248,30 +250,29 @@ test('Logs separates event purpose from delivery outcome and keeps its controls 
     }
     assert.match(element('agent-rows').textContent!, /The conversation must check for replies/);
     field('language').value = 'zh-CN'; field('language').dispatchEvent(new window.Event('change'));
-    assert.equal(element('channel-title').textContent, '飞书通知');
-    assert.equal(element('channel-state').textContent, '已配置');
-    assert.equal(element('channel-sub').textContent, '接收人 ou_fixture · 已绑定 2 个群');
-    assert.equal(element('channel-settings').textContent, '配置飞书');
+    assert.equal(element('channel-title').textContent, '消息接入');
+    assert.equal(element('channel-state').textContent, '已连接');
+    assert.equal(element('channel-sub').textContent, '默认：Home Nootify · 远程 Nootify');
+    assert.equal(element('channel-settings').textContent, '管理 Providers');
     field('language').value = 'en'; field('language').dispatchEvent(new window.Event('change'));
   });
 
-  await t.test('the Feishu card handles missing configuration, recipient, optional summary and read-only access', async () => {
+  await t.test('the provider summary handles missing defaults, disabled connections and read-only access', async () => {
     const refresh = async () => {
       const before = agentReads; element('refresh').click();
       await until(() => agentReads > before, 'Agent summary did not refresh');
       await nextTurn();
     };
-    channel = { name: 'feishu', configured: false, groups: 0 }; await refresh();
+    defaultProvider = undefined; await refresh();
     assert.equal(element('channel-state').textContent, 'Not configured');
-    assert.match(element('channel-sub').textContent!, /Add app credentials under Settings · Feishu/);
-    channel = { name: 'feishu', configured: true, groups: 0 }; await refresh();
-    assert.equal(element('channel-sub').textContent, 'Add a recipient under Settings · Feishu');
-    channel = undefined; await refresh();
-    assert.equal(element('channel-title').textContent, 'Feishu notifications');
+    assert.equal(element('channel-sub').textContent, 'Add a provider and set it as default in Providers.');
+    defaultProvider = 'remote-1'; providers[0].enabled = false; await refresh();
     assert.equal(element('channel-state').textContent, 'Disabled');
-    assert.equal(element('channel-sub').textContent, 'Feishu module is disabled');
-    assert.equal(element('channel-settings').getAttribute('href'), '#/settings/lark');
-    editable = false; channel = { name: 'feishu', configured: true, recipient: 'ou_fixture', groups: 2 }; await refresh();
+    providers = []; await refresh();
+    assert.equal(element('channel-title').textContent, 'Message providers');
+    assert.equal(element('channel-state').textContent, 'Not configured');
+    assert.equal(element('channel-settings').getAttribute('href'), '#/providers');
+    editable = false; await refresh();
     assert.equal(element('agents-banner').textContent, 'Agent instructions are read-only over Tailscale. Edit them on this Mac.');
     assert.ok([...document.querySelectorAll<HTMLInputElement>('#agent-rows .check')].every(checkbox => checkbox.disabled));
   });

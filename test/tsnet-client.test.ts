@@ -90,3 +90,46 @@ test('a missing embedded helper never starts an installed Tailscale client', asy
   const client=new TsnetClient(join(dir,'state'),join(dir,'missing-helper'));t.after(()=>client.stop());
   await assert.rejects(client.start('tcp://127.0.0.1:12345',()=>{}),/embedded_client_missing/);
 });
+
+test('TCP transport wrappers use flat RPC fields and preserve tunnel IDs separately from reply IDs', async t => {
+  const {client}=await fixture(t,`import {createInterface} from 'node:readline';
+const input=createInterface({input:process.stdin});const requests=[];
+input.on('line',line=>{const req=JSON.parse(line);requests.push(req);
+const result=req.method==='tunnel'?{id:'tunnel-1',address:'127.0.0.1:43210'}:req.method==='publish'?{port:req.port}:req.method==='status'?requests:{ok:true};
+setTimeout(()=>process.stdout.write(JSON.stringify({id:req.id,result})+'\\n'),req.method==='tunnel'?10:0);});
+input.on('close',()=>process.exit());`);
+  await client.start('tcp://127.0.0.1:12345',()=>{});
+  const [tunnel,publication]=await Promise.all([client.tunnel('[fd7a:115c:a1e0::2]:7443'),client.publish(7443,'127.0.0.1:54321')]);
+  assert.deepEqual(tunnel,{id:'tunnel-1',address:'127.0.0.1:43210'});
+  assert.deepEqual(publication,{port:7443});
+  assert.equal(await client.closeTunnel(tunnel.id),undefined);
+  assert.equal(await client.unpublish(publication.port),undefined);
+  assert.deepEqual(await client.status(),[
+    {id:1,method:'tunnel',address:'[fd7a:115c:a1e0::2]:7443'},
+    {id:2,method:'publish',port:7443,target:'127.0.0.1:54321'},
+    {id:3,method:'close_tunnel',tunnel_id:'tunnel-1'},
+    {id:4,method:'unpublish',port:7443},
+    {id:5,method:'status'},
+  ]);
+});
+
+test('TCP transport errors preserve fixed codes and redact arbitrary helper text', async t => {
+  const {client}=await fixture(t,`import {createInterface} from 'node:readline';const input=createInterface({input:process.stdin});
+input.on('line',line=>{const req=JSON.parse(line);const error=req.method==='tunnel'?'invalid_address':req.method==='publish'?'listener_failed':'private https://login.tailscale.com/a/Secret123';
+process.stdout.write(JSON.stringify({id:req.id,error})+'\\n');});input.on('close',()=>process.exit());`);
+  await client.start('tcp://127.0.0.1:12345',()=>{});
+  await assert.rejects(client.tunnel('localhost:7443'),{message:'invalid_address'});
+  await assert.rejects(client.publish(7443,'127.0.0.1:54321'),{message:'listener_failed'});
+  await assert.rejects(client.closeTunnel('1'),{message:'embedded_request_failed'});
+  await assert.rejects(client.unpublish(7443),{message:'embedded_request_failed'});
+});
+
+test('stop rejects outstanding TCP transport RPCs and later calls fail safely', async t => {
+  const {client}=await fixture(t,`process.stdin.resume();process.stdin.on('end',()=>process.exit());`);
+  await client.start('tcp://127.0.0.1:12345',()=>{});
+  const pending=[client.tunnel('node.tail.ts.net:7443'),client.publish(7443,'127.0.0.1:54321'),client.closeTunnel('1'),client.unpublish(7443)]
+    .map(request=>assert.rejects(request,{message:'embedded_client_stopped'}));
+  await client.stop();await Promise.all(pending);
+  await assert.rejects(client.tunnel('100.64.0.2:7443'),{message:'embedded_client_stopped'});
+  await assert.rejects(client.publish(7443,'127.0.0.1:54321'),{message:'embedded_client_stopped'});
+});

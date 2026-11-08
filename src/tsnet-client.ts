@@ -3,12 +3,19 @@ import { access, chmod, constants, lstat, mkdir } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+export interface EmbeddedTailscaleTunnel { id: string; address: string }
+export interface EmbeddedTailscalePublication { port: number }
+
 export interface EmbeddedTailscaleClient {
   start(target: string, exited: (error?: string) => void): Promise<void>;
   status(): Promise<unknown>;
   whois(ip: string): Promise<unknown>;
   login(): Promise<void>;
   logout(): Promise<void>;
+  tunnel?(address: string): Promise<EmbeddedTailscaleTunnel>;
+  closeTunnel?(tunnelId: string): Promise<void>;
+  publish?(port: number, target: string): Promise<EmbeddedTailscalePublication>;
+  unpublish?(port: number): Promise<void>;
   stop(): Promise<void>;
 }
 /** Ambient credentials, control servers and system-daemon configuration must never enroll this node. */
@@ -128,6 +135,14 @@ export class TsnetClient implements EmbeddedTailscaleClient {
   whois(ip: string): Promise<unknown> { return this.request('whois', { ip }); }
   async login(): Promise<void> { await this.request('login'); }
   async logout(): Promise<void> { await this.request('logout'); }
+  tunnel(address: string): Promise<EmbeddedTailscaleTunnel> {
+    return this.request('tunnel', { address }) as Promise<EmbeddedTailscaleTunnel>;
+  }
+  async closeTunnel(tunnelId: string): Promise<void> { await this.request('close_tunnel', { tunnel_id: tunnelId }); }
+  publish(port: number, target: string): Promise<EmbeddedTailscalePublication> {
+    return this.request('publish', { port, target }) as Promise<EmbeddedTailscalePublication>;
+  }
+  async unpublish(port: number): Promise<void> { await this.request('unpublish', { port }); }
   async stop(): Promise<void> {
     const run = this.current; if (!run) return;
     run.stopped = true;

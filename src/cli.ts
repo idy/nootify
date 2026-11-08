@@ -19,10 +19,10 @@ export async function main(argv = process.argv.slice(2), serviceManager = manage
     'chat-id': { type: 'string' }, 'sender-id': { type: 'string' }, pin: { type: 'boolean', default: false },
     metadata: { type: 'string', default: 'announcement' }, text: { type: 'string' }, help: { type: 'boolean', short: 'h' },
     url: { type: 'string' }, directory: { type: 'string' },
-    'message-id': { type: 'string' }, 'text-file': { type: 'string' }, channel: { type: 'string' },
+    'message-id': { type: 'string' }, 'message-ref': { type: 'string' }, 'provider-id': { type: 'string' }, 'text-file': { type: 'string' }, channel: { type: 'string' },
   } });
   const command = positionals[0];
-  if (values.help) { console.log('Usage: cli.js <service-install|service-start|service-restart|service-stop|service-uninstall|service-status|launchd-install|health|register|sessions|send|thread-open|thread-send|thread-receive|thread-ack|lark-bind|lark-ack|lark-reply|lark-recipient|backend-set> [options]'); return; }
+  if (values.help) { console.log('Usage: cli.js <service-install|service-start|service-restart|service-stop|service-uninstall|service-status|launchd-install|health|register|sessions|send|thread-open|thread-send|thread-delete|thread-receive|thread-ack|message-ack|message-reply|lark-bind|lark-ack|lark-reply|lark-recipient|backend-set> [options]'); return; }
   if (values.channel !== undefined && !isNotificationChannel(values.channel)) throw new Error('Only Feishu notifications are supported');
   const channel = isNotificationChannel(values.channel) ? values.channel : undefined;
   const adapter = values.adapter ?? 'claude-desktop';
@@ -88,7 +88,7 @@ export async function main(argv = process.argv.slice(2), serviceManager = manage
     case 'thread-open': {
       const target = threadTarget();
       const session_name = required('session-name');
-      try { result = await client.openThread({ ...target, session_name, ...(channel ? { channel } : {}) }); }
+      try { result = await client.openThread({ ...target, session_name, ...(channel ? { channel } : {}), ...(values['provider-id'] ? { provider_id: values['provider-id'] } : {}) }); }
       catch (error) {
         if (isPolledAdapter(target.adapter)) throw new Error(`${(error as Error).message}; retry thread-open with --agent ${target.adapter} --session-id ${target.session_id}`);
         throw error;
@@ -99,7 +99,23 @@ export async function main(argv = process.argv.slice(2), serviceManager = manage
       const target = threadTarget();
       const message = await readText();
       if (!message?.trim()) throw new Error('Provide --text or --text-file for the message');
-      result = await client.sendThread(target.session_id, message, target.adapter, channel); break;
+      result = await client.sendThread(target.session_id, message, target.adapter, channel, values['provider-id']); break;
+    }
+    case 'thread-delete': {
+      const target = threadTarget();
+      result = await client.deleteThread(target.session_id, target.adapter, values['provider-id']); break;
+    }
+    case 'message-ack':
+    case 'message-reply': {
+      const ref = values['message-ref'];
+      if (!ref) throw new Error('Missing --message-ref');
+      if (command === 'message-ack') result = await client.acknowledgeMessage(ref);
+      else {
+        const reply = await readText();
+        if (!reply?.trim()) throw new Error('Provide --text or --text-file for the reply');
+        result = await client.replyMessage(ref, reply);
+      }
+      break;
     }
     case 'thread-receive':
     case 'thread-ack': {

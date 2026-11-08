@@ -15,6 +15,7 @@ import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { buildTsnet } from './build-tsnet.mjs';
+import { buildCore } from './build-core.mjs';
 import { sha256, verifyExecutable, runNpm } from './bundle-utils.mjs';
 import { buildTarget, NODE_VERSION, nodeArchive, sidecarName, verifyNodeShasums } from './build-targets.mjs';
 import { thirdPartyNotices } from './third-party-notices.mjs';
@@ -32,8 +33,8 @@ const archive = nodeArchive(target);
 const distUrl = `https://nodejs.org/dist/${NODE_VERSION}/`;
 
 async function main() {
-  const [license, tailscale] = await Promise.all([stageNode(), buildTsnet(target)]);
-  const changed = await stageService(license, tailscale);
+  const [license, tailscale, core] = await Promise.all([stageNode(), buildTsnet(target), buildCore(target)]);
+  const changed = await stageService(license, tailscale, core);
   console.log(`stage-service: Node.js ${NODE_VERSION} sidecar ready; service ${changed ? 'staged' : 'unchanged'} in ${serviceDir}`);
 }
 
@@ -78,7 +79,7 @@ async function stageNode() {
   }
 }
 
-async function stageService(nodeLicense, tailscale) {
+async function stageService(nodeLicense, tailscale, core) {
   await mkdir(resourcesDir, { recursive: true });
   for (const entry of await readdir(resourcesDir)) {
     if (entry.startsWith('.service-')) await rm(join(resourcesDir, entry), { recursive: true, force: true });
@@ -110,12 +111,14 @@ async function stageService(nodeLicense, tailscale) {
     const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
     await writeFile(join(staging, 'package.json'), `${JSON.stringify({ name: pkg.name, version: pkg.version, private: true, type: 'module' }, null, 2)}\n`);
     await writeFile(join(staging, 'node-LICENSE'), nodeLicense);
-    const licenses = join(staging, 'tailscale-licenses');
-    await mkdir(licenses, { recursive: true });
-    await writeFile(join(licenses, 'dependencies.txt'), tailscale.modules);
-    for (const license of tailscale.licenses) {
-      const path = join(licenses, license.path); await mkdir(dirname(path), { recursive: true });
-      await writeFile(path, license.content);
+    for (const [name, component] of [['tailscale', tailscale], ['core', core]]) {
+      const licenses = join(staging, `${name}-licenses`);
+      await mkdir(licenses, { recursive: true });
+      await writeFile(join(licenses, 'dependencies.txt'), component.modules);
+      for (const license of component.licenses) {
+        const path = join(licenses, license.path); await mkdir(dirname(path), { recursive: true });
+        await writeFile(path, license.content);
+      }
     }
     await installProductionModules(join(staging, 'node_modules'));
     await writeFile(join(staging, 'third-party-notices.txt'), await thirdPartyNotices(target.triple, join(staging, 'node_modules')));

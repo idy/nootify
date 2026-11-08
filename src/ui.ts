@@ -6,6 +6,7 @@ import { AGENT_IDS, isAgent, type AgentId, type AgentPrompt } from './agents.js'
 import type { SettingsService } from './settings.js';
 import { HttpError, type ServiceModule } from './types.js';
 import { LarkPermissionRequiredError } from './lark-permissions.js';
+import type { ProvidersSource } from './providers.js';
 
 export interface PullsSource { snapshot(): PullSnapshot; refresh(): void; setChoice(repository: string, follow: boolean | null): Promise<RepositoryEntry> }
 export interface AgentsSource { list(): Promise<AgentPrompt[]>; set(agent: AgentId, enabled: boolean): Promise<AgentPrompt> }
@@ -13,7 +14,7 @@ export interface ChannelSummary { name: 'feishu'; configured: boolean; recipient
 export type SettingsSource = Pick<SettingsService, 'page' | 'github' | 'startGitHubLogin' | 'cancelGitHubLogin' | 'signOutGitHub' | 'saveLark' | 'clearLark' | 'larkSecret' | 'larkRegistration' | 'startLarkRegistration' | 'cancelLarkRegistration' | 'larkSetup' | 'larkRecipients' | 'setRecipient' | 'exportConfig' | 'previewImport' | 'importConfig' | 'reveal' | 'tailscale' | 'setTailscaleEnabled' | 'startTailscaleLogin' | 'cancelTailscaleLogin' | 'logoutTailscale'>;
 export interface UiContext {
   modules: ServiceModule[]; logs: EventLog; pulls?: PullsSource; tailnetUrl?: () => string | undefined;
-  agents?: AgentsSource; channel?: () => ChannelSummary | undefined; settings?: SettingsSource;
+  agents?: AgentsSource; channel?: () => ChannelSummary | undefined; settings?: SettingsSource; providers?: ProvidersSource;
   /** Tailscale can read public page data, but cannot retrieve secrets or change prompts/settings. */
   via?: 'loopback' | 'tailnet';
 }
@@ -104,6 +105,29 @@ async function settingsAction(request: IncomingMessage, path: string, settings: 
 }
 /** Read-only page data plus page actions: a background GitHub refresh, repository follow choices, and (on this Mac only) agent prompts and settings. */
 export async function serveUi(request: IncomingMessage, response: ServerResponse, path: string, context: UiContext): Promise<boolean> {
+  const providerRoute = path === '/ui/api/providers' || path === '/ui/api/settings/remote' || path === '/ui/api/settings/remote/secret';
+  if (providerRoute && (request.method === 'GET' || request.method === 'POST')) {
+    if (!context.providers) { request.resume(); json(response, 404, { error: 'Providers are not enabled' }); }
+    else if (request.method === 'POST' && (request.headers['x-nootify-ui'] !== '1' || context.via === 'tailnet')) {
+      request.resume(); json(response, 403, { error: 'Provider configuration can only be changed through the local UI' });
+    } else {
+      try {
+        const editable = context.via !== 'tailnet';
+        if (path.endsWith('/secret')) {
+          request.resume();
+          if (request.method !== 'POST') json(response, 405, { error: 'Secret reveal requires a local POST' });
+          else json(response, 200, await context.providers.remoteSecret());
+        } else if (path === '/ui/api/providers') {
+          const page = request.method === 'POST' ? await context.providers.action(await smallJson(request, 65536)) : await context.providers.page();
+          json(response, 200, { ...page, editable });
+        } else {
+          const page = request.method === 'POST' ? await context.providers.configureRemote(await smallJson(request, 65536)) : await context.providers.remote();
+          json(response, 200, { ...page, editable });
+        }
+      } catch (error) { const failure = settingsError(error); json(response, failure.status, failure); }
+    }
+    return true;
+  }
   if (request.method === 'POST' && path.startsWith('/ui/api/settings/')) {
     if (request.headers['x-nootify-ui'] !== '1') { request.resume(); json(response, 403, { error: 'Missing UI request header' }); }
     // Credentials and imports decide who can reach local sessions, so they are never accepted from another device.

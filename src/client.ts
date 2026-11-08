@@ -43,8 +43,17 @@ export class NootifyClient {
   larkBindings(): Promise<LarkBinding[]> { return this.request('GET', '/v1/lark/bindings'); }
   /** Find or create the session's Feishu group. */
   openThread(request: ThreadRequest): Promise<ThreadInfo> { return this.request('POST', '/v1/threads', request); }
-  sendThread(sessionId: string, text: string, adapter?: Adapter, channel?: NotificationChannel): Promise<ThreadMessage> {
-    return this.request('POST', `/v1/threads/${encodeURIComponent(sessionId)}/messages`, { text, adapter, channel });
+  sendThread(sessionId: string, text: string, adapter?: Adapter, channel?: NotificationChannel, providerId?: string): Promise<ThreadMessage> {
+    return this.request('POST', `/v1/threads/${encodeURIComponent(sessionId)}/messages`, { text, adapter, channel, ...(providerId ? { provider_id: providerId } : {}) });
+  }
+  deleteThread(sessionId: string, adapter: Adapter, providerId?: string): Promise<unknown> {
+    return this.request('DELETE', `/v1/threads/${encodeURIComponent(sessionId)}`, { adapter, ...(providerId ? { provider_id: providerId } : {}) });
+  }
+  acknowledgeMessage(messageRef: string): Promise<LarkReceipt> {
+    return this.request('POST', `/v1/provider-messages/${encodeURIComponent(messageRef)}/ack`, {});
+  }
+  replyMessage(messageRef: string, text: string): Promise<LarkReply> {
+    return this.request('POST', `/v1/provider-messages/${encodeURIComponent(messageRef)}/reply`, { text });
   }
   receiveThread(sessionId: string, adapter: PolledAdapter): Promise<SessionInbox> {
     return this.request('POST', `/v1/sessions/${encodeURIComponent(sessionId)}/inbox`, { adapter });

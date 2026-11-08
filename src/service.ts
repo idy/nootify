@@ -62,7 +62,7 @@ export const windowsPowerShell = (env: NodeJS.ProcessEnv = process.env): string 
 
 /** Task launches must not inherit shell-injected Node code or ambient provider accounts. */
 export function serviceEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  return Object.fromEntries(Object.entries(env).filter(([key]) => !/^(?:NODE_.*|LARK_.*|SLACK_.*|TELEGRAM_.*|GITHUB_.*|GH_.*|CODEX_APP_SERVER_.*|OPENCODE_SERVER_.*|TS_.*|TSNET_.*|TAILSCALE_.*|NOOTIFY_TSNET_BIN|NOOTIFY_GITHUB_CLIENT_ID)$/i.test(key)));
+  return Object.fromEntries(Object.entries(env).filter(([key]) => !/^(?:NODE_.*|LARK_.*|SLACK_.*|TELEGRAM_.*|GITHUB_.*|GH_.*|CODEX_APP_SERVER_.*|OPENCODE_SERVER_.*|TS_.*|TSNET_.*|TAILSCALE_.*|NOOTIFY_TSNET_BIN|NOOTIFY_CORE_BIN|NOOTIFY_GITHUB_CLIENT_ID)$/i.test(key)));
 }
 
 export function windowsServiceArgs(action: ServiceAction, options: ServiceOptions): string[] {

@@ -64,6 +64,8 @@ type forwarder struct {
 	listener  net.Listener
 	target    string
 	dial      func(context.Context, string, string) (net.Conn, error)
+	raw       bool // raw RPC transports never emit an HTTP PROXY preamble
+	slots     chan struct{}
 	listening atomic.Bool
 
 	mu          sync.Mutex
@@ -77,6 +79,7 @@ func newForwarder(listener net.Listener, target string) *forwarder {
 		listener:    listener,
 		target:      target,
 		dial:        dialer.DialContext,
+		slots:       make(chan struct{}, maxForwardConnections),
 		connections: make(map[net.Conn]struct{}),
 	}
 }
@@ -132,7 +135,7 @@ func (f *forwarder) serve(parent context.Context) error {
 	f.listening.Store(true)
 	f.mu.Unlock()
 
-	slots := make(chan struct{}, maxForwardConnections)
+	slots := f.slots
 	for {
 		conn, err := f.listener.Accept()
 		if err != nil {
@@ -161,26 +164,42 @@ func (f *forwarder) serve(parent context.Context) error {
 }
 
 func (f *forwarder) forward(ctx context.Context, peer net.Conn) {
-	header, err := proxyHeader(peer.RemoteAddr(), peer.LocalAddr())
-	if err != nil {
-		return
+	network := "tcp4"
+	var header string
+	if f.raw {
+		network = "tcp"
+	} else {
+		var err error
+		header, err = proxyHeader(peer.RemoteAddr(), peer.LocalAddr())
+		if err != nil {
+			return
+		}
 	}
-	backend, err := f.dial(ctx, "tcp4", f.target)
-	if err != nil {
+	// tsnet's Dial can wait for login or an offline peer. Bound the attempt,
+	// but keep the established stream alive for the lifetime of the listener.
+	dialCtx, cancel := context.WithTimeout(ctx, rpcTimeout)
+	backend, err := f.dial(dialCtx, network, f.target)
+	cancel()
+	if err != nil || backend == nil {
+		if backend != nil {
+			backend.Close()
+		}
 		return
 	}
 	if !f.track(backend) {
 		return
 	}
 	defer f.release(backend)
-	if err := backend.SetWriteDeadline(time.Now().Add(backendTimeout)); err != nil {
-		return
-	}
-	if n, err := io.WriteString(backend, header); err != nil || n != len(header) {
-		return
-	}
-	if err := backend.SetWriteDeadline(time.Time{}); err != nil {
-		return
+	if !f.raw {
+		if err := backend.SetWriteDeadline(time.Now().Add(backendTimeout)); err != nil {
+			return
+		}
+		if n, err := io.WriteString(backend, header); err != nil || n != len(header) {
+			return
+		}
+		if err := backend.SetWriteDeadline(time.Time{}); err != nil {
+			return
+		}
 	}
 	copyBoth(peer, backend)
 }

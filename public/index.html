@@ -10,10 +10,11 @@
       <p class="nav-label" data-i18n="消息桥接">消息桥接</p>
       <a class="nav-item" href="#/logs" data-view="logs"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 4.5h10M3 8h10M3 11.5h6"/></svg><span data-i18n="运行日志">运行日志</span><span class="nav-count" id="logs-count"></span></a>
       <a class="nav-item" href="#/sessions" data-view="sessions"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3.5h10a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H7.5L4.5 14v-2.5H3a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1z"/></svg><span data-i18n="路由会话">路由会话</span><span class="nav-count" id="session-count"></span></a>
+      <a class="nav-item" href="#/providers" data-view="providers"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2.5" width="4" height="4" rx="1"/><rect x="10" y="9.5" width="4" height="4" rx="1"/><path d="M6 4.5h4a2 2 0 0 1 2 2v3M4 6.5v3a2 2 0 0 0 2 2h4"/></svg><span>Providers</span><span class="nav-count" id="providers-count"></span></a>
       <a class="nav-item" href="#/agents" data-view="agents"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1.5"/><path d="M6.5 1.5V4M9.5 1.5V4M6.5 12v2.5M9.5 12v2.5M1.5 6.5H4M1.5 9.5H4M12 6.5h2.5M12 9.5h2.5"/></svg><span>Agents</span><span class="nav-count" id="agents-count"></span></a>
     </div>
     <div class="nav-group">
-      <p class="nav-label">GitHub</p>
+      <p class="nav-label">Repos</p>
       <a class="nav-item" href="#/pulls/internal" data-view="pulls-internal"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="4.5" cy="3.5" r="1.5"/><circle cx="4.5" cy="12.5" r="1.5"/><circle cx="11.5" cy="12.5" r="1.5"/><path d="M4.5 5v6M11.5 11V6.5a2 2 0 0 0-2-2H7m0 0 1.5-1.5M7 4.5 8.5 6"/></svg><span data-i18n="我们仓库的 PR">我们仓库的 PR</span><span class="nav-count" id="internal-count"></span></a>
       <a class="nav-item" href="#/pulls/upstream" data-view="pulls-upstream"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 13.5V4M4.5 7.5 8 4l3.5 3.5"/><path d="M3 2.5h10"/></svg><span data-i18n="提交上游的 PR">提交上游的 PR</span><span class="nav-count" id="upstream-count"></span></a>
       <a class="nav-item" href="#/repos" data-view="repos"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 2h8v9.5h-8A1.5 1.5 0 0 0 3 13V3.5A1.5 1.5 0 0 1 4.5 2z"/><path d="M3 13a1.5 1.5 0 0 0 1.5 1.5h8v-3"/></svg><span data-i18n="PR 订阅">PR 订阅</span><span class="nav-count" id="repos-count"></span></a>
@@ -27,7 +28,7 @@
   <nav class="subnav" id="settings-subnav" aria-label="设置页面" data-i18n-aria-label="设置页面" hidden>
     <a class="nav-item" href="#/settings/general" data-view="settings-general"><span data-i18n="通用">通用</span></a>
     <a class="nav-item" href="#/settings/github" data-view="settings-github"><span>GitHub</span></a>
-    <a class="nav-item" href="#/settings/lark" data-view="settings-lark"><span data-i18n="飞书">飞书</span></a>
+    <a class="nav-item" href="#/settings/remote" data-view="settings-remote"><span data-i18n="远程接入">远程接入</span></a>
     <a class="nav-item" href="#/settings/tailscale" data-view="settings-tailscale"><span>Tailscale</span></a>
     <a class="nav-item" href="#/settings/backup" data-view="settings-backup"><span data-i18n="导入导出">导入导出</span></a>
     <a class="nav-item" href="#/settings/about" data-view="settings-about"><span data-i18n="关于">关于</span><span class="update-dot" title="有新版本" data-i18n-title="有新版本" hidden></span></a>
@@ -66,11 +67,11 @@
   <section id="logs-view" class="view" aria-label="运行日志" data-i18n-aria-label="运行日志">
     <p class="hint" data-i18n="按消息方向和用途查看最近 1,000 条事件，最新在前。发送成功不代表已读，只有收到会话回执才确认接收。">按消息方向和用途查看最近 1,000 条事件，最新在前。发送成功不代表已读，只有收到会话回执才确认接收。</p>
     <div class="list-filters" id="outcome-tabs" role="group" aria-label="按事件用途筛选" data-i18n-aria-label="按事件用途筛选"></div>
-    <div class="group"><div class="rows" id="logs-table" role="list"></div><div id="empty" class="empty" hidden><strong data-i18n="没有匹配的日志">没有匹配的日志</strong><span data-i18n="换个筛选条件，或在飞书群里发一条消息。">换个筛选条件，或在飞书群里发一条消息。</span></div></div>
+    <div class="group"><div class="rows" id="logs-table" role="list"></div><div id="empty" class="empty" hidden><strong data-i18n="没有匹配的日志">没有匹配的日志</strong><span data-i18n="换个筛选条件，或通过已连接的 Provider 发一条消息。">换个筛选条件，或通过已连接的 Provider 发一条消息。</span></div></div>
   </section>
   <section id="sessions-view" class="view" aria-label="路由会话" hidden data-i18n-aria-label="路由会话">
-    <p class="hint" data-i18n="收到消息时才按飞书群公告查找对应的 Claude、Codex 或 OpenCode 会话。这里保留最近 1,000 个路由会话及最后一次查找结果，重启后仍可查看。">收到消息时才按飞书群公告查找对应的 Claude、Codex 或 OpenCode 会话。这里保留最近 1,000 个路由会话及最后一次查找结果，重启后仍可查看。</p>
-    <div class="group"><div class="rows" id="sessions-body" role="list"></div><div id="no-sessions" class="empty" hidden><strong data-i18n="还没有会话路由记录">还没有会话路由记录</strong><span data-i18n="绑定会话的飞书群收到消息后，这里会显示查找结果。">绑定会话的飞书群收到消息后，这里会显示查找结果。</span></div></div>
+    <p class="hint" data-i18n="收到消息后，Nootify 按 Provider 的会话绑定查找对应的 agent 会话。这里保留最近 1,000 个路由会话及最后一次查找结果，重启后仍可查看。">收到消息后，Nootify 按 Provider 的会话绑定查找对应的 agent 会话。这里保留最近 1,000 个路由会话及最后一次查找结果，重启后仍可查看。</p>
+    <div class="group"><div class="rows" id="sessions-body" role="list"></div><div id="no-sessions" class="empty" hidden><strong data-i18n="还没有会话路由记录">还没有会话路由记录</strong><span data-i18n="Provider 收到绑定会话的消息后，这里会显示查找结果。">Provider 收到绑定会话的消息后，这里会显示查找结果。</span></div></div>
   </section>
   <section id="pulls-view" class="view" aria-label="PR" hidden>
     <div id="pull-banner" class="banner" role="status" hidden></div>
@@ -82,12 +83,49 @@
     </div>
     <details class="warnings" id="pull-warnings" hidden><summary></summary><ul></ul></details>
   </section>
+  <section id="providers-view" class="view" aria-label="Providers" hidden>
+    <p class="hint" data-i18n="添加飞书或远程 Nootify 接入。新会话使用默认 Provider；已有会话保留原来的接入。">添加飞书或远程 Nootify 接入。新会话使用默认 Provider；已有会话保留原来的接入。</p>
+    <div id="providers-banner" class="banner" role="alert" hidden></div>
+    <div id="providers-readonly" class="banner note" role="status" hidden data-i18n="只能查看连接状态；请在运行 Nootify 的电脑上修改接入和密钥。">只能查看连接状态；请在运行 Nootify 的电脑上修改接入和密钥。</div>
+    <div class="group">
+      <div class="group-head"><div><div class="group-title">Providers</div><div id="providers-summary" class="group-sub" role="status" aria-live="polite"></div></div><div class="setting-actions provider-head-actions"><button type="button" id="providers-retry" class="text-button" data-i18n="重试" hidden>重试</button><button type="button" id="provider-add" class="text-button primary" data-i18n="添加 Provider" disabled>添加 Provider</button></div></div>
+      <div id="provider-rows" class="rows" role="list"></div>
+      <div id="providers-empty" class="empty" hidden><strong data-i18n="还没有 Provider">还没有 Provider</strong><span data-i18n="添加飞书应用，或连接另一台 Nootify。">添加飞书应用，或连接另一台 Nootify。</span></div>
+    </div>
+    <form id="provider-editor" class="group provider-editor" aria-labelledby="provider-editor-title" hidden>
+      <div class="group-head"><div><h2 id="provider-editor-title" class="group-title"></h2><div id="provider-editor-status" class="group-sub"></div></div></div>
+      <fieldset id="provider-fields" class="settings-fields" disabled>
+        <label class="setting setting-field-row"><span class="setting-main"><span class="setting-title" data-i18n="名称">名称</span></span><input id="provider-name" class="setting-field" type="text" maxlength="120" required autocomplete="off"></label>
+        <div class="setting setting-field-row"><label class="setting-main" for="provider-type"><span class="setting-title" data-i18n="接入类型">接入类型</span></label><select id="provider-type" class="setting-field"><option value="feishu" data-i18n="飞书">飞书</option><option value="remote" data-i18n="远程 Nootify">远程 Nootify</option></select></div>
+        <div class="setting setting-with-switch"><div class="setting-main"><label class="setting-title" for="provider-enabled" data-i18n="启用此 Provider">启用此 Provider</label></div><input id="provider-enabled" type="checkbox" role="switch" class="switch" checked></div>
+        <fieldset id="provider-feishu-fields" class="settings-fields">
+          <label class="setting setting-field-row"><span class="setting-main"><span class="setting-title">App ID</span></span><input id="provider-app-id" class="setting-field mono" type="text" placeholder="cli_…" autocomplete="off" spellcheck="false"></label>
+          <label class="setting setting-field-row"><span class="setting-main"><span class="setting-title">App Secret</span><span id="provider-secret-hint" class="setting-sub"></span></span><input id="provider-app-secret" class="setting-field mono" type="password" autocomplete="new-password" spellcheck="false" aria-describedby="provider-secret-hint"></label>
+          <label class="setting setting-field-row"><span class="setting-main"><span class="setting-title" data-i18n="接收人">接收人</span><span class="setting-sub" data-i18n="新群邀请的飞书用户，也是群里被信任的发送者">新群邀请的飞书用户，也是群里被信任的发送者</span></span><input id="provider-recipient" class="setting-field mono" type="text" placeholder="ou_…" autocomplete="off" spellcheck="false"></label>
+          <div class="setting"><a class="inline-link" href="#/settings/lark" data-i18n="个人 App 扫码配置（兼容入口）">个人 App 扫码配置（兼容入口）</a></div>
+        </fieldset>
+        <fieldset id="provider-remote-fields" class="settings-fields" hidden disabled>
+          <label class="setting setting-field-row"><span class="setting-main"><span class="setting-title" data-i18n="服务器地址">服务器地址</span><span class="setting-sub" data-i18n="远程 Nootify 的主机和端口，例如 nootify.example:9418。">远程 Nootify 的主机和端口，例如 nootify.example:9418。</span></span><input id="provider-address" class="setting-field mono" type="text" placeholder="host:9418" autocomplete="off" spellcheck="false"></label>
+          <label class="setting setting-field-row"><span class="setting-main"><span class="setting-title" data-i18n="访问令牌">访问令牌</span><span id="provider-token-hint" class="setting-sub"></span></span><input id="provider-token" class="setting-field mono" type="password" autocomplete="new-password" spellcheck="false" aria-describedby="provider-token-hint"></label>
+          <div class="setting setting-with-switch"><div class="setting-main"><label class="setting-title" for="provider-tls" data-i18n="使用 TLS">使用 TLS</label><div class="setting-sub" data-i18n="通过 TLS 验证远程服务器并加密连接。">通过 TLS 验证远程服务器并加密连接。</div></div><input id="provider-tls" type="checkbox" role="switch" class="switch" checked></div>
+          <label class="setting setting-field-row"><span class="setting-main"><span class="setting-title" data-i18n="TLS 服务器名称">TLS 服务器名称</span><span class="setting-sub" data-i18n="可选；留空使用服务器地址中的主机名。">可选；留空使用服务器地址中的主机名。</span></span><input id="provider-server-name" class="setting-field mono" type="text" autocomplete="off" spellcheck="false"></label>
+        </fieldset>
+      </fieldset>
+      <div id="provider-editor-error" class="form-error" role="alert" hidden></div>
+      <div class="setting provider-editor-foot"><span id="provider-editor-local" class="setting-sub" role="status"></span><div class="setting-actions"><button type="button" id="provider-cancel" class="text-button" data-i18n="取消">取消</button><button type="submit" id="provider-save" class="text-button primary" data-i18n="保存">保存</button></div></div>
+    </form>
+    <dialog id="provider-delete-dialog" class="recipient-dialog confirmation-dialog" aria-labelledby="provider-delete-title" aria-describedby="provider-delete-detail">
+      <div class="recipient-dialog-head"><div><h2 id="provider-delete-title" data-i18n="删除 Provider">删除 Provider</h2><p id="provider-delete-detail"></p></div></div>
+      <div id="provider-delete-error" class="form-error" role="alert" hidden></div>
+      <div class="recipient-dialog-foot"><button type="button" id="provider-delete-cancel" class="dialog-secondary" data-i18n="取消" autofocus>取消</button><button type="button" id="provider-delete-confirm" class="dialog-primary danger" data-i18n="删除">删除</button></div>
+    </dialog>
+  </section>
   <section id="agents-view" class="view" aria-label="Agents" hidden>
-    <p class="hint" data-i18n="勾选后，Nootify 会在该 agent 的全局提示词文件末尾写入飞书通知说明，只改动 nootify 标记之间的内容。之后的对话会各自使用一个飞书群来汇报进度，回复会转发回对应会话，会话标识保存在群公告中。每次修改前都会把原文件备份到 Nootify 的状态目录。">勾选后，Nootify 会在该 agent 的全局提示词文件末尾写入飞书通知说明，只改动 nootify 标记之间的内容。之后的对话会各自使用一个飞书群来汇报进度，回复会转发回对应会话，会话标识保存在群公告中。每次修改前都会把原文件备份到 Nootify 的状态目录。</p>
+    <p class="hint" data-i18n="勾选后，Nootify 会在该 agent 的全局提示词文件末尾写入通知说明，只改动 nootify 标记之间的内容。会话通过选定的 Provider 汇报进度，回复会转发回对应会话。每次修改前都会备份原文件。">勾选后，Nootify 会在该 agent 的全局提示词文件末尾写入通知说明，只改动 nootify 标记之间的内容。会话通过选定的 Provider 汇报进度，回复会转发回对应会话。每次修改前都会备份原文件。</p>
     <p class="hint" data-i18n="Trae 和 WorkBuddy 会在工作节点主动检查回复，无法自动唤醒空闲或已关闭的会话。">Trae 和 WorkBuddy 会在工作节点主动检查回复，无法自动唤醒空闲或已关闭的会话。</p>
     <div id="agents-banner" class="banner" role="alert" hidden></div>
     <div class="group">
-      <div class="group-head"><div><div class="group-title" id="channel-title" data-i18n="飞书通知">飞书通知</div><div class="group-sub" id="channel-sub"></div></div><div class="group-side" id="channel-side"><span id="channel-state"></span><a id="channel-settings" class="inline-link" href="#/settings/lark" data-i18n="配置飞书">配置飞书</a></div></div>
+      <div class="group-head"><div><div class="group-title" id="channel-title" data-i18n="消息接入">消息接入</div><div class="group-sub" id="channel-sub"></div></div><div class="group-side" id="channel-side"><span id="channel-state"></span><a id="channel-settings" class="inline-link" href="#/providers" data-i18n="管理 Providers">管理 Providers</a></div></div>
       <div class="rows" id="agent-rows" role="list"></div>
     </div>
   </section>
@@ -118,6 +156,27 @@
       </div>
       <p class="hint" data-i18n="在浏览器里输入验证码并授权后，这里会自动更新。令牌只保存在 Nootify 的状态目录（权限 0600），和终端里的 gh 互不影响，也不需要安装 gh。GitHub 没有私有仓库的只读授权，所以会申请 repo 和 read:org；Nootify 只发送只读查询。">在浏览器里输入验证码并授权后，这里会自动更新。令牌只保存在 Nootify 的状态目录（权限 0600），和终端里的 gh 互不影响，也不需要安装 gh。GitHub 没有私有仓库的只读授权，所以会申请 repo 和 read:org；Nootify 只发送只读查询。</p>
     </div>
+    <div data-panel="settings-remote" hidden>
+      <p class="hint" data-i18n="允许其他 Nootify 连接此节点。未匹配到本机会话的消息会独立发送给每个下游节点，各自确认接收。">允许其他 Nootify 连接此节点。未匹配到本机会话的消息会独立发送给每个下游节点，各自确认接收。</p>
+      <div id="remote-banner" class="banner" role="alert" hidden></div>
+      <div id="remote-readonly" class="banner note" role="status" hidden data-i18n="只能查看连接状态；请在运行 Nootify 的电脑上修改接入和密钥。">只能查看连接状态；请在运行 Nootify 的电脑上修改接入和密钥。</div>
+      <form id="remote-form" class="group" aria-labelledby="remote-title">
+        <div class="group-head"><div><h2 id="remote-title" class="group-title" data-i18n="远程接入">远程接入</h2><div id="remote-node" class="group-sub mono"></div></div><span id="remote-state" role="status"></span><button type="button" id="remote-retry" class="text-button" data-i18n="重试" hidden>重试</button></div>
+        <fieldset id="remote-fields" class="settings-fields" disabled>
+          <div class="setting setting-with-switch"><div class="setting-main"><label class="setting-title" for="remote-enabled" data-i18n="允许下游连接">允许下游连接</label></div><input id="remote-enabled" class="switch" type="checkbox" role="switch"></div>
+          <label class="setting setting-field-row"><span class="setting-main"><span class="setting-title" data-i18n="监听地址">监听地址</span></span><input id="remote-listen" class="setting-field mono" type="text" placeholder="127.0.0.1:9418" required autocomplete="off" spellcheck="false"></label>
+          <div class="setting setting-field-row"><label class="setting-main" for="remote-token"><span class="setting-title" data-i18n="访问令牌">访问令牌</span><span id="remote-token-hint" class="setting-sub"></span></label><div class="secret-field remote-secret"><input id="remote-token" class="setting-field mono" type="password" autocomplete="new-password" spellcheck="false" aria-describedby="remote-token-hint"><button type="button" id="remote-token-toggle" class="icon-button" aria-label="显示访问令牌" title="显示访问令牌" data-i18n-aria-label="显示访问令牌" data-i18n-title="显示访问令牌" aria-controls="remote-token" aria-pressed="false"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 8s2.25-4.5 6.5-4.5 6.5 4.5 6.5 4.5-2.25 4.5-6.5 4.5S1.5 8 1.5 8Z"/><circle cx="8" cy="8" r="2"/><path id="remote-token-slash" d="m2.5 2.5 11 11" hidden/></svg></button></div></div>
+          <div class="setting setting-with-switch"><div class="setting-main"><label class="setting-title" for="remote-tls" data-i18n="使用 TLS">使用 TLS</label><div class="setting-sub" data-i18n="公开监听地址必须配置 TLS 证书和私钥。">公开监听地址必须配置 TLS 证书和私钥。</div></div><input id="remote-tls" class="switch" type="checkbox" role="switch"></div>
+          <fieldset id="remote-tls-fields" class="settings-fields" hidden disabled>
+            <label class="setting setting-field-row"><span class="setting-main"><span class="setting-title" data-i18n="TLS 证书路径">TLS 证书路径</span></span><input id="remote-cert" class="setting-field mono" type="text" autocomplete="off" spellcheck="false"></label>
+            <label class="setting setting-field-row"><span class="setting-main"><span class="setting-title" data-i18n="TLS 私钥路径">TLS 私钥路径</span></span><input id="remote-key" class="setting-field mono" type="text" autocomplete="off" spellcheck="false"></label>
+            <div class="setting"><p id="remote-tls-hint" class="setting-sub"></p></div>
+          </fieldset>
+        </fieldset>
+        <div class="setting"><p id="remote-save-note" class="setting-sub" role="status" aria-live="polite"></p><div class="setting-actions"><button type="submit" id="remote-save" class="text-button primary" disabled data-i18n="保存">保存</button></div></div>
+      </form>
+      <div class="group remote-peers"><div class="group-head"><div><div class="group-title" data-i18n="下游节点">下游节点</div><div class="group-sub" data-i18n="待确认数量和最后回执按节点独立记录。">待确认数量和最后回执按节点独立记录。</div></div></div><div id="remote-peer-rows" class="rows" role="list"></div><div id="remote-peers-empty" class="empty"><strong data-i18n="暂无下游连接">暂无下游连接</strong><span data-i18n="在另一台 Nootify 的 Providers 中添加此节点的地址和令牌。">在另一台 Nootify 的 Providers 中添加此节点的地址和令牌。</span></div></div>
+    </div>
     <div data-panel="settings-lark" hidden>
       <div class="group">
         <div class="setting"><div class="setting-main"><div class="setting-title" id="lark-current-title" data-i18n="飞书连接">飞书连接</div><div class="setting-sub" id="lark-status"></div></div><span id="lark-state"></span></div>
@@ -133,7 +192,7 @@
         <label class="setting setting-field-row"><span class="setting-main"><span class="setting-title">App ID</span></span><input id="lark-app-id" class="setting-field mono" type="text" placeholder="cli_…" autocomplete="off" spellcheck="false"></label>
         <div class="setting setting-field-row"><label class="setting-main" for="lark-app-secret"><span class="setting-title">App Secret</span></label><div class="secret-field"><input id="lark-app-secret" class="setting-field mono" type="password" autocomplete="off" spellcheck="false" aria-describedby="lark-secret-hint" disabled><button type="button" id="lark-secret-toggle" class="icon-button" aria-label="显示 App Secret" title="显示 App Secret" data-i18n-aria-label="显示 App Secret" data-i18n-title="显示 App Secret" aria-controls="lark-app-secret" aria-pressed="false" disabled><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 8s2.25-4.5 6.5-4.5 6.5 4.5 6.5 4.5-2.25 4.5-6.5 4.5S1.5 8 1.5 8Z"/><circle cx="8" cy="8" r="2"/><path id="lark-secret-slash" d="m2.5 2.5 11 11" hidden/></svg></button></div></div>
         <div class="setting"><div class="setting-main"><div class="setting-sub" id="lark-secret-hint">保存前会先向飞书验证；点击眼睛可查看输入的密钥。</div></div><div class="setting-actions"><button type="button" id="lark-clear" class="text-button" hidden></button><button type="button" id="lark-save" class="text-button primary" data-i18n="验证并保存">验证并保存</button></div></div>
-        <div class="setting"><p class="setting-sub" data-i18n="每台电脑独立轮询各自会话群的历史消息，不会分摊消息。迁移同一会话时，请先停止旧电脑的飞书连接，避免重复投递。">每台电脑独立轮询各自会话群的历史消息，不会分摊消息。迁移同一会话时，请先停止旧电脑的飞书连接，避免重复投递。</p></div>
+        <div class="setting"><p class="setting-sub" data-i18n="飞书配置保存在各个 Provider 中。请到 Providers 管理接入和默认连接。">飞书配置保存在各个 Provider 中。请到 Providers 管理接入和默认连接。</p><a class="inline-link" href="#/providers" data-i18n="管理 Providers">管理 Providers</a></div>
         </div>
       </div>
       <div id="lark-setup" class="group" hidden>

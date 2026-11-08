@@ -1,0 +1,611 @@
+package main
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"sort"
+	"sync"
+)
+
+type Core struct {
+	store     *Store
+	ctx       context.Context
+	cancel    context.CancelFunc
+	mu        sync.Mutex
+	ops       sync.Mutex
+	providers map[string]Provider
+	statuses  map[string]string
+	subs      map[string]*Subscription
+	emit      func(string, any) error
+	server    *remoteServer
+	dialMu    sync.Mutex
+	dials     map[string]chan dialResult
+}
+
+func NewCore(parent context.Context, s *Store, emit func(string, any) error) (*Core, error) {
+	ctx, cancel := context.WithCancel(parent)
+	c := &Core{store: s, ctx: ctx, cancel: cancel, providers: map[string]Provider{}, statuses: map[string]string{}, subs: map[string]*Subscription{}, emit: emit, dials: map[string]chan dialResult{}}
+	err := s.Update(func(d *State) error {
+		for id, v := range d.Deliveries {
+			if v.Status == "pending" {
+				v.Status = "unconfirmed"
+				d.Deliveries[id] = v
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	return c, nil
+}
+func (c *Core) Start() error {
+	d := c.store.Snapshot()
+	for _, p := range d.Providers {
+		c.startProvider(p)
+	}
+	if d.Remote.Enabled {
+		return c.startServer(d.Remote)
+	}
+	return nil
+}
+func (c *Core) Close() {
+	c.cancel()
+	c.mu.Lock()
+	ps := c.providers
+	c.providers = map[string]Provider{}
+	sv := c.server
+	c.server = nil
+	for _, s := range c.subs {
+		s.cancel()
+	}
+	c.mu.Unlock()
+	if sv != nil {
+		sv.stop()
+	}
+	for _, p := range ps {
+		_ = p.Close()
+	}
+}
+func (c *Core) node() string { return c.store.Snapshot().NodeID }
+func (c *Core) normalize(s Session) Session {
+	if s.NodeID == "" {
+		s.NodeID = c.node()
+	}
+	return s
+}
+func (c *Core) log(status, pid, mid string) {
+	if c.emit != nil {
+		_ = c.emit("log", map[string]any{"status": status, "provider_id": pid, "message_id": mid})
+	}
+}
+func (c *Core) setStatus(id, status string) { c.mu.Lock(); c.statuses[id] = status; c.mu.Unlock() }
+func (c *Core) provider(id string) (Provider, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	p := c.providers[id]
+	if p == nil {
+		return nil, fault("unavailable", "provider is disabled, deleted, or unavailable")
+	}
+	return p, nil
+}
+func (c *Core) binding(pid string, s Session) (Binding, error) {
+	d := c.store.Snapshot()
+	b, ok := d.Bindings[s.key()]
+	if !ok || b.Deleted {
+		return b, fault("not_found", "notification session does not exist")
+	}
+	if pid != "" && pid != b.ProviderID {
+		return b, fault("conflict", "session is bound to a different provider")
+	}
+	return b, nil
+}
+func (c *Core) Ensure(ctx context.Context, pid string, s Session) (Binding, error) {
+	s = c.normalize(s)
+	if err := s.validate(); err != nil {
+		return Binding{}, err
+	}
+	c.ops.Lock()
+	defer c.ops.Unlock()
+	d := c.store.Snapshot()
+	b, exists := d.Bindings[s.key()]
+	if exists && b.Deleted && automaticEnsure(ctx) {
+		return b, fault("deleted", "automatic enrollment cannot reactivate a deleted session")
+	}
+	if exists && !b.Deleted {
+		if pid != "" && pid != b.ProviderID {
+			return b, fault("conflict", "session is bound to a different provider")
+		}
+		b.Created = false
+		return b, nil
+	}
+	if exists && b.DeletePending {
+		return b, fault("conflict", "session deletion must complete before reactivation")
+	}
+	if exists && b.ProviderID != "" {
+		if pid != "" && pid != b.ProviderID {
+			return b, fault("conflict", "reactivation must use the original provider")
+		}
+		pid = b.ProviderID
+	}
+	if pid == "" {
+		pid = d.DefaultProvider
+	}
+	p, err := c.provider(pid)
+	if err != nil {
+		return b, err
+	}
+	b, err = p.Ensure(ctx, s)
+	if err != nil {
+		return b, err
+	}
+	b.ProviderID = pid
+	b.Session = s
+	b.Created = true
+	b.Deleted = false
+	b.DeletePending = false
+	err = c.store.Update(func(d *State) error { d.Bindings[s.key()] = b; return nil })
+	return b, err
+}
+func (c *Core) GetMetadata(ctx context.Context, pid string, s Session) (map[string]any, error) {
+	s = c.normalize(s)
+	b, err := c.binding(pid, s)
+	if err != nil {
+		return nil, err
+	}
+	p, err := c.provider(b.ProviderID)
+	if err != nil {
+		return nil, err
+	}
+	return p.GetMetadata(ctx, b)
+}
+func (c *Core) SetMetadata(ctx context.Context, pid string, s Session, m map[string]any) (map[string]any, error) {
+	s = c.normalize(s)
+	c.ops.Lock()
+	defer c.ops.Unlock()
+	b, err := c.binding(pid, s)
+	if err != nil {
+		return nil, err
+	}
+	p, err := c.provider(b.ProviderID)
+	if err != nil {
+		return nil, err
+	}
+	v, err := p.SetMetadata(ctx, b, m)
+	if err != nil {
+		return nil, err
+	}
+	err = c.store.Update(func(d *State) error { b.Session.Metadata = v; d.Bindings[s.key()] = b; return nil })
+	return v, err
+}
+func (c *Core) Delete(ctx context.Context, pid string, s Session) error {
+	s = c.normalize(s)
+	if err := s.validate(); err != nil {
+		return err
+	}
+	c.ops.Lock()
+	defer c.ops.Unlock()
+	d := c.store.Snapshot()
+	b, ok := d.Bindings[s.key()]
+	if ok && pid != "" && b.ProviderID != pid {
+		return fault("conflict", "session is bound to a different provider")
+	}
+	if ok && b.Deleted && !b.DeletePending {
+		return nil
+	}
+	if !ok {
+		b = Binding{ProviderID: pid, Session: s, Deleted: true}
+		return c.store.Update(func(d *State) error { recordTombstone(d, b); return nil })
+	}
+	b.Deleted = true
+	b.DeletePending = true
+	if err := c.store.Update(func(d *State) error { recordTombstone(d, b); return nil }); err != nil {
+		return err
+	}
+	p, err := c.provider(b.ProviderID)
+	if err != nil {
+		return err
+	}
+	if err = p.Delete(ctx, b); err != nil {
+		return err
+	}
+	b.DeletePending = false
+	return c.store.Update(func(d *State) error { d.Bindings[s.key()] = b; return nil })
+}
+func (c *Core) operation(ctx context.Context, key string, input any, fn func() (SendResult, error)) (SendResult, error) {
+	c.ops.Lock()
+	defer c.ops.Unlock()
+	b, _ := json.Marshal(input)
+	h := sha256.Sum256(b)
+	finger := hex.EncodeToString(h[:])
+	if key != "" {
+		d := c.store.Snapshot()
+		if prev, ok := d.Operations[key]; ok {
+			if prev.Fingerprint != finger {
+				return SendResult{}, fault("conflict", "request ID was used for a different operation")
+			}
+			if prev.State != "complete" {
+				return SendResult{}, fault("unconfirmed", "previous send may have succeeded; automatic retry is unsafe")
+			}
+			var r SendResult
+			err := json.Unmarshal(prev.Result, &r)
+			return r, err
+		}
+		if err := c.store.Update(func(d *State) error { d.Operations[key] = Operation{State: "pending", Fingerprint: finger}; return nil }); err != nil {
+			return SendResult{}, err
+		}
+	}
+	r, err := fn()
+	if err != nil {
+		return r, err
+	}
+	err = c.store.Update(func(d *State) error {
+		remember(d, r.Message, "")
+		if key != "" {
+			raw, e := json.Marshal(r)
+			if e != nil {
+				return e
+			}
+			d.Operations[key] = Operation{State: "complete", Fingerprint: finger, Result: raw}
+		}
+		return nil
+	})
+	return r, err
+}
+func (c *Core) Send(ctx context.Context, pid string, s Session, content Content, request string) (SendResult, error) {
+	s = c.normalize(s)
+	if err := content.Validate(); err != nil {
+		return SendResult{}, err
+	}
+	b, err := c.binding(pid, s)
+	if err != nil {
+		return SendResult{}, err
+	}
+	p, err := c.provider(b.ProviderID)
+	if err != nil {
+		return SendResult{}, err
+	}
+	key := ""
+	if request != "" {
+		key = "send:" + s.key() + ":" + request
+	}
+	return c.operation(ctx, key, []any{s, content}, func() (SendResult, error) { return p.Send(ctx, b, content, request) })
+}
+func remember(d *State, m MessageRef, route string) {
+	k := m.key()
+	r := d.References[k]
+	r.Message = m
+	if route != "" && !contains(r.Routes, route) {
+		r.Routes = append(r.Routes, route)
+	}
+	d.References[k] = r
+}
+func (c *Core) Resolve(m *MessageRef, id string) (MessageRef, error) {
+	if m != nil {
+		if !m.valid() {
+			return MessageRef{}, fault("invalid_argument", "full message reference is required")
+		}
+		return *m, nil
+	}
+	var found *MessageRef
+	for _, v := range c.store.Snapshot().References {
+		if v.Message.MessageID == id {
+			if found != nil && found.key() != v.Message.key() {
+				return MessageRef{}, fault("ambiguous_message", "message ID exists on multiple providers; use the full reference")
+			}
+			cp := v.Message
+			found = &cp
+		}
+	}
+	if found == nil {
+		return MessageRef{}, fault("not_found", "message reference is not retained")
+	}
+	return *found, nil
+}
+func (c *Core) returnProvider(m MessageRef) (Provider, error) {
+	if m.OriginNodeID == c.node() {
+		return c.provider(m.ProviderID)
+	}
+	r, ok := c.store.Snapshot().References[m.key()]
+	if !ok {
+		return nil, fault("not_found", "message return route is not retained")
+	}
+	for _, id := range r.Routes {
+		p, err := c.provider(id)
+		if err == nil {
+			return p, nil
+		}
+	}
+	return nil, fault("unavailable", "message return route is unavailable")
+}
+func (c *Core) Reply(ctx context.Context, m MessageRef, content Content, request string) (SendResult, error) {
+	if !m.valid() {
+		return SendResult{}, fault("invalid_argument", "full message reference is required")
+	}
+	if err := content.Validate(); err != nil {
+		return SendResult{}, err
+	}
+	p, err := c.returnProvider(m)
+	if err != nil {
+		return SendResult{}, err
+	}
+	key := ""
+	if request != "" {
+		key = "reply:" + m.key() + ":" + request
+	}
+	return c.operation(ctx, key, []any{m, content}, func() (SendResult, error) { return p.Reply(ctx, m, content, request) })
+}
+func (c *Core) Ack(ctx context.Context, m MessageRef) (map[string]any, error) {
+	if !m.valid() {
+		return nil, fault("invalid_argument", "full message reference is required")
+	}
+	p, err := c.returnProvider(m)
+	if err != nil {
+		return nil, err
+	}
+	r := c.store.Snapshot().References[m.key()]
+	at := r.AcknowledgedAt
+	if at == "" {
+		if err = p.Ack(ctx, m); err != nil {
+			return nil, err
+		}
+		at = now()
+		err = c.store.Update(func(d *State) error {
+			remember(d, m, "")
+			r := d.References[m.key()]
+			r.AcknowledgedAt = at
+			d.References[m.key()] = r
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	return map[string]any{"status": "session_acknowledged", "message_id": m.MessageID, "acknowledged_at": at}, nil
+}
+func (c *Core) Ingest(ctx context.Context, e Event, route string) error {
+	if e.ID == "" || !e.Message.valid() {
+		return fault("invalid_argument", "invalid event identity")
+	}
+	if err := e.Session.validate(); err != nil {
+		return err
+	}
+	if err := e.Content.Validate(); err != nil {
+		return err
+	}
+	if len(e.Visited) > 16 || e.Hops > 16 {
+		return fault("invalid_argument", "invalid event route")
+	}
+	node := c.node()
+	var delivery *Delivery
+	var wake []string
+	err := c.store.Update(func(d *State) error {
+		remember(d, e.Message, route)
+		if record, ok := d.Events[e.ID]; ok {
+			if binding, bound := d.Bindings[record.Event.Session.key()]; bound && binding.Deleted {
+				return nil
+			}
+			if record.Outcome == "local" {
+				for id, v := range d.Deliveries {
+					if v.EventID == e.ID && v.Status == "retryable" {
+						v.Status = "pending"
+						v.Error = ""
+						v.Transport = ""
+						d.Deliveries[id] = v
+						delivery = &v
+						e = record.Event
+						break
+					}
+				}
+			}
+			return nil
+		}
+		if contains(e.Visited, node) || e.Hops == 0 {
+			d.Events[e.ID] = EventRecord{Event: e, Outcome: "loop_suppressed"}
+			return nil
+		}
+		e.Visited = append(append([]string{}, e.Visited...), node)
+		e.Hops--
+		record := EventRecord{Event: e}
+		b, bound := d.Bindings[e.Session.key()]
+		if bound && b.Deleted {
+			record.Outcome = "deleted"
+		} else if e.Session.NodeID == node {
+			record.Outcome = "local"
+			v := Delivery{ID: uid(), EventID: e.ID, Status: "pending"}
+			d.Deliveries[v.ID] = v
+			delivery = &v
+		} else {
+			record.Outcome = "broadcast"
+			for id, p := range d.Peers {
+				if contains(e.Visited, id) {
+					continue
+				}
+				if len(p.Pending) >= maxPending {
+					return fault("resource_exhausted", "downstream pending queue is full")
+				}
+				p.Pending = append(p.Pending, e.ID)
+				d.Peers[id] = p
+				wake = append(wake, id)
+			}
+		}
+		d.Events[e.ID] = record
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	for _, id := range wake {
+		c.wake(id)
+	}
+	if delivery != nil {
+		data := map[string]any{"delivery_id": delivery.ID, "session": e.Session, "message": e.Message, "content": e.Content, "text": e.Content.Plain(), "sender_id": e.SenderID, "chat_id": e.ChatID}
+		if c.emit == nil || c.emit("delivery", data) != nil {
+			_ = c.Complete(delivery.ID, "unconfirmed", "", "")
+		}
+	}
+	return nil
+}
+func (c *Core) Complete(id, status, transport, msg string) error {
+	switch status {
+	case "delivered", "retryable", "unconfirmed", "rejected":
+	default:
+		return fault("invalid_argument", "invalid delivery status")
+	}
+	return c.store.Update(func(d *State) error {
+		v, ok := d.Deliveries[id]
+		if !ok {
+			return fault("not_found", "delivery does not exist")
+		}
+		if v.Status != "pending" && v.Status != status {
+			return fault("conflict", "delivery already completed")
+		}
+		v.Status = status
+		v.Transport = transport
+		v.Error = msg
+		d.Deliveries[id] = v
+		return nil
+	})
+}
+
+type Subscription struct {
+	core    *Core
+	node    string
+	ctx     context.Context
+	cancel  context.CancelFunc
+	signal  chan struct{}
+	offered map[string]bool
+}
+
+func (c *Core) Subscribe(ctx context.Context, node, name string) (*Subscription, error) {
+	if node == "" || node == c.node() || len(node) > 128 || len(name) > 256 {
+		return nil, fault("invalid_argument", "invalid subscriber identity")
+	}
+	if err := c.store.Update(func(d *State) error {
+		p := d.Peers[node]
+		p.NodeID = node
+		p.Name = name
+		p.ConnectedAt = now()
+		if p.Pending == nil {
+			p.Pending = []string{}
+		}
+		d.Peers[node] = p
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	sctx, cancel := context.WithCancel(ctx)
+	s := &Subscription{core: c, node: node, ctx: sctx, cancel: cancel, signal: make(chan struct{}, 1), offered: map[string]bool{}}
+	c.mu.Lock()
+	if old := c.subs[node]; old != nil {
+		old.cancel()
+	}
+	c.subs[node] = s
+	c.mu.Unlock()
+	return s, nil
+}
+func (c *Core) wake(node string) {
+	c.mu.Lock()
+	s := c.subs[node]
+	c.mu.Unlock()
+	if s != nil {
+		select {
+		case s.signal <- struct{}{}:
+		default:
+		}
+	}
+}
+func (s *Subscription) Next() (Event, error) {
+	for {
+		d := s.core.store.Snapshot()
+		p := d.Peers[s.node]
+		for _, id := range p.Pending {
+			if !s.offered[id] {
+				r, ok := d.Events[id]
+				if !ok {
+					return Event{}, fmt.Errorf("pending event is missing")
+				}
+				s.offered[id] = true
+				return r.Event, nil
+			}
+		}
+		select {
+		case <-s.ctx.Done():
+			return Event{}, s.ctx.Err()
+		case <-s.signal:
+		}
+	}
+}
+func (s *Subscription) Confirm(id string) error {
+	return s.core.store.Update(func(d *State) error {
+		p, ok := d.Peers[s.node]
+		if !ok {
+			return fault("not_found", "subscriber does not exist")
+		}
+		for i, v := range p.Pending {
+			if v == id {
+				p.Pending = append(p.Pending[:i:i], p.Pending[i+1:]...)
+				p.LastAck = now()
+				d.Peers[s.node] = p
+				return nil
+			}
+		}
+		return nil
+	})
+}
+func (s *Subscription) Close() {
+	s.cancel()
+	s.core.mu.Lock()
+	if s.core.subs[s.node] == s {
+		delete(s.core.subs, s.node)
+	}
+	s.core.mu.Unlock()
+}
+func (c *Core) Status() map[string]any {
+	d := c.store.Snapshot()
+	ps := []ProviderSummary{}
+	c.mu.Lock()
+	for _, p := range d.Providers {
+		ps = append(ps, summary(p, c.statuses[p.ID]))
+	}
+	remoteStatus := "disabled"
+	if c.server != nil {
+		remoteStatus = "listening"
+	} else if d.Remote.Enabled {
+		remoteStatus = "failed"
+	}
+	c.mu.Unlock()
+	sort.Slice(ps, func(i, j int) bool { return ps[i].ID < ps[j].ID })
+	r := remoteSummary(d, remoteStatus)
+	c.mu.Lock()
+	for i := range r.Peers {
+		sub := c.subs[r.Peers[i].NodeID]
+		r.Peers[i].Connected = sub != nil && sub.ctx.Err() == nil
+	}
+	c.mu.Unlock()
+	return map[string]any{"node_id": d.NodeID, "providers": ps, "default_provider_id": d.DefaultProvider, "remote": r}
+}
+func summary(p ProviderConfig, status string) ProviderSummary {
+	if status == "" {
+		if p.Enabled {
+			status = "starting"
+		} else {
+			status = "disabled"
+		}
+	}
+	return ProviderSummary{ID: p.ID, Name: p.Name, Type: p.Type, Enabled: p.Enabled, Status: status, AppID: p.AppID, Recipient: p.Recipient, Address: p.Address, TLS: p.TLS, ServerName: p.ServerName, SecretSet: p.AppSecret != "", TokenSet: p.Token != ""}
+}
+func remoteSummary(d State, status string) RemoteSummary {
+	r := RemoteSummary{Enabled: d.Remote.Enabled, Listen: d.Remote.Listen, Status: status, TLS: d.Remote.CertFile != "", TokenSet: d.Remote.Token != "", CertFile: d.Remote.CertFile, KeyFile: d.Remote.KeyFile, Peers: []PeerSummary{}}
+	for _, p := range d.Peers {
+		r.Peers = append(r.Peers, PeerSummary{NodeID: p.NodeID, Name: p.Name, ConnectedAt: p.ConnectedAt, Pending: len(p.Pending), LastAck: p.LastAck})
+	}
+	sort.Slice(r.Peers, func(i, j int) bool { return r.Peers[i].NodeID < r.Peers[j].NodeID })
+	return r
+}
+
+var _ Router = (*Core)(nil)

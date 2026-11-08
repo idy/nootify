@@ -17,7 +17,7 @@ import { LarkService } from '../src/lark.js';
 import { LarkThreads } from '../src/lark-threads.js';
 import { createServiceHost, type HostOptions } from '../src/server.js';
 import { SessionsService } from '../src/sessions.js';
-import { SettingsService, type AgentControl, type LarkControl } from '../src/settings.js';
+import { SettingsService, type AgentControl, type LarkControl, type SettingsOptions } from '../src/settings.js';
 import { State } from '../src/state.js';
 import { DIRECTORY_FRESH_MS, LarkDirectoryCache } from '../src/lark-directory-cache.js';
 import type { TailnetAccess } from '../src/tailnet.js';
@@ -63,7 +63,7 @@ async function mcpFile(t: TestContext): Promise<string> {
   await writeFile(path, JSON.stringify({ mcpServers: { lark: { env: { LARK_APP_ID: 'cli_mcp', LARK_APP_SECRET: 'mcp-secret' } } } }));
   return path;
 }
-async function harness(t: TestContext, options: { env?: NodeJS.ProcessEnv; mcpConfig?: string; verify?: (credentials: Credentials) => Promise<void>; setAgent?: () => Promise<void> } = {}) {
+async function harness(t: TestContext, options: { env?: NodeJS.ProcessEnv; mcpConfig?: string; verify?: (credentials: Credentials) => Promise<void>; setAgent?: () => Promise<void>; providers?: SettingsOptions['providers'] } = {}) {
   const dir = await temporary(t);
   const state = await State.open(dir);
   const configured: (Credentials | undefined)[] = [];
@@ -77,7 +77,7 @@ async function harness(t: TestContext, options: { env?: NodeJS.ProcessEnv; mcpCo
   const pulls = new PullRequestsService(dir);
   const revealed: string[] = []; const reports: Record<string, unknown>[] = [];
   const settings = new SettingsService({ state, lark, pulls, agents, github: new GitHubAuth(state, () => {}, () => {}, 'client-1'), env: options.env ?? {}, mcpConfig: options.mcpConfig,
-    verify: options.verify ?? (async () => {}), reveal: async path => { revealed.push(path); }, report: record => reports.push(record) });
+    providers: options.providers, verify: options.verify ?? (async () => {}), reveal: async path => { revealed.push(path); }, report: record => reports.push(record) });
   return { dir, state, lark, pulls, agents, settings, configured, enabled, revealed, reports };
 }
 async function serve(t: TestContext, logs: EventLog, options: HostOptions): Promise<string> {
@@ -88,6 +88,34 @@ async function serve(t: TestContext, logs: EventLog, options: HostOptions): Prom
 }
 const action = (origin: string, path: string, body?: unknown, headers: Record<string, string> = { 'x-nootify-ui': '1' }) => fetch(origin + path,
   { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+
+test('provider configuration backups keep every secret on disk and restore without importing node identity', async t => {
+  const backup = { version: 1, providers: [{ id: 'remote-a', name: 'Office', type: 'remote', enabled: true,
+    address: 'office.example.ts.net:9418', token: 'private-remote-token' }], default_provider_id: 'remote-a',
+    remote: { enabled: false, listen: '127.0.0.1:9418', token: 'private-listener-token' } };
+  const source = await harness(t, { providers: { async exportConfig() { return backup; }, async importConfig() {}, async syncNetwork() {} } });
+  const exported = await source.settings.exportConfig();
+  assert.equal(exported.summary.provider_count, 1);
+  assert.ok(!JSON.stringify(exported).includes('private-remote-token'));
+  const document = JSON.parse(await readFile(exported.path, 'utf8')) as { providers: unknown };
+  assert.deepEqual(document.providers, backup);
+  let restored: unknown;
+  const target = await harness(t, { providers: { async exportConfig() { return {}; }, async importConfig(config) { restored = config; }, async syncNetwork() {} } });
+  const preview = await target.settings.previewImport(document);
+  assert.equal(preview.provider_count, 1); assert.ok(!JSON.stringify(preview).includes('private-listener-token'));
+  assert.equal(restored, undefined);
+  await target.settings.importConfig(document);
+  assert.deepEqual(restored, backup);
+});
+
+test('a rejected core configuration cannot partially import legacy settings', async t => {
+  const h = await harness(t, { providers: { async exportConfig() { return {}; }, async importConfig() { throw new Error('invalid provider credentials'); }, async syncNetwork() {} } });
+  await assert.rejects(h.settings.importConfig({ format: 'nootify-config', version: 1,
+    lark: { app_id: appId, app_secret: 'must-not-save' },
+    providers: { version: 1, providers: [{ id: 'bad', name: 'Bad', type: 'feishu' }] } }), /invalid provider credentials/);
+  assert.equal(h.state.settings.lark_app_id, undefined);
+  assert.equal(h.configured.length, 0);
+});
 
 test('a device login shows the code, keeps the token private and refreshes afterwards', async t => {
   const github = fakeGitHub(t);

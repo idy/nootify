@@ -90,7 +90,7 @@ export interface LarkDelivery {
   replies: { digest: string; message_id: string; time: string }[];
 }
 /** One Feishu group per local session. The optional literal channel supports existing clients. */
-export interface ThreadRequest { adapter: Adapter; session_id: string; session_name: string; channel?: NotificationChannel }
+export interface ThreadRequest { adapter: Adapter; session_id: string; session_name: string; channel?: NotificationChannel; provider_id?: string }
 export interface ThreadInfo { channel: NotificationChannel; chat_id: string; thread_id?: string; session_id: string; adapter: Adapter; session_name: string; created: boolean }
 export interface ThreadMessage { channel: NotificationChannel; chat_id: string; thread_id?: string; message_id: string }
 export interface LarkReceipt { status: 'session_acknowledged'; message_id: string; acknowledged_at: string }

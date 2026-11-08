@@ -1289,7 +1289,11 @@ mod tests {
         let bundle = &config["bundle"];
         assert_eq!(
             bundle["externalBin"],
-            serde_json::json!(["binaries/node", "binaries/nootify-tsnet"])
+            serde_json::json!([
+                "binaries/node",
+                "binaries/nootify-tsnet",
+                "binaries/nootify-core"
+            ])
         );
         assert_eq!(bundle["resources"]["resources/service/"], "service/");
         assert_eq!(bundle["targets"], serde_json::json!(["app", "dmg"]));

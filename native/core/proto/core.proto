@@ -1,0 +1,33 @@
+syntax = "proto3";
+package nootify.core.v1;
+option go_package = "github.com/idy/nootify/native/core/pb";
+
+// Private authenticated Bot operations use the same versioned JSON values as stdio.
+// Commands never broadcast. Only Subscribe carries broadcast events.
+service NotificationCore {
+  rpc Call(Command) returns (Result);
+  rpc Subscribe(stream SubscriptionFrame) returns (stream SubscriptionFrame);
+}
+message Command { string method = 1; bytes params_json = 2; repeated string visited_nodes = 3; }
+message Result { bytes result_json = 1; string error_code = 2; string error_message = 3; }
+message SubscriptionFrame {
+  oneof body {
+    Hello hello = 1;
+    Event event = 2;
+    Confirmation confirmation = 3;
+  }
+}
+message Hello { string node_id = 1; string name = 2; }
+message Event {
+  string event_id = 1;
+  bytes session_json = 2;
+  bytes message_json = 3;
+  bytes content_json = 4;
+  repeated string visited_nodes = 5;
+  uint32 hops_remaining = 6;
+  string sender_id = 7;
+  string chat_id = 8;
+}
+// A confirmation belongs only to this authenticated peer's subscription.
+// It confirms durable ingestion, never agent acceptance or another peer's queue.
+message Confirmation { string event_id = 1; }

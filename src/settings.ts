@@ -19,6 +19,7 @@ import type { LarkApi } from './lark-metadata.js';
 import { inspectLarkSetup, LarkRegistration, type LarkRegistrationOptions, type LarkRegistrationPage, type LarkRegistrationResult, type LarkSetup } from './lark-registration.js';
 import { DIRECTORY_FRESH_MS, DIRECTORY_MAX_AGE_MS, LarkDirectoryCache } from './lark-directory-cache.js';
 import { mergeRecipients } from './lark-profile.js';
+import type { ProvidersService } from './providers.js';
 
 const FORMAT = 'nootify-config';
 const EXPORTS_KEPT = 10;
@@ -41,6 +42,7 @@ export interface GitHubSettings { account?: GitHubAccount; login: GitHubLogin }
 export interface ImportSummary {
   exported_at?: string; app_id?: string; recipient?: string; pulls_config: boolean; follow?: number; backends: string[]; agents: AgentId[];
   warnings: string[];
+  provider_count?: number;
 }
 /** The exported file. It holds secrets, so it is only ever written to disk, never returned over HTTP. */
 interface ConfigFile {
@@ -49,6 +51,7 @@ interface ConfigFile {
   pulls?: { config?: unknown; follow?: { repository: string; follow: boolean }[] };
   backends?: Partial<Record<'codex' | 'opencode', BackendConnection>>;
   agents?: AgentId[];
+  providers?: Record<string, unknown>;
 }
 export interface LarkControl {
   credentials?: Credentials;
@@ -56,6 +59,7 @@ export interface LarkControl {
   status(): string;
   channel(): { recipient?: string; groups: number };
   configure(credentials?: Credentials): Promise<void>;
+  setRecipient?(openId: string): Promise<void>;
 }
 export interface PullPreferences {
   preferences(): Promise<{ config?: unknown; follow: { repository: string; follow: boolean }[] }>;
@@ -65,6 +69,7 @@ export interface AgentControl { list(): Promise<AgentPrompt[]>; set(agent: Agent
 export interface SettingsOptions {
   state: State; lark: LarkControl; github: GitHubAuth; pulls: PullPreferences; agents: AgentControl;
   tailscale?: TailscaleService;
+  providers?: Pick<ProvidersService, 'exportConfig' | 'importConfig' | 'syncNetwork'>;
   mcpConfig?: string; source?: CredentialSource; env?: NodeJS.ProcessEnv;
   verify?: (credentials: Credentials) => Promise<void>;
   registration?: LarkRegistrationOptions;
@@ -119,6 +124,14 @@ function parseConfig(value: unknown): ConfigFile {
       if (value.backends[adapter] !== undefined) result.backends[adapter] = backend(value.backends[adapter], adapter);
     }
   }
+  if (value.providers !== undefined) {
+    const core = value.providers;
+    if (!isObject(core) || core.version !== 1 || !Array.isArray(core.providers)
+      || core.providers.some(provider => !isObject(provider) || !['feishu', 'remote'].includes(String(provider.type))
+        || typeof provider.id !== 'string' || typeof provider.name !== 'string')
+      || (core.remote !== undefined && !isObject(core.remote))) throw new HttpError(400, 'Invalid providers configuration');
+    result.providers = core;
+  }
   if (value.agents !== undefined) {
     if (!Array.isArray(value.agents) || !value.agents.every(isAgent)) throw new HttpError(400, 'Invalid agents section');
     result.agents = AGENT_IDS.filter(agent => (value.agents as AgentId[]).includes(agent));
@@ -128,7 +141,8 @@ function parseConfig(value: unknown): ConfigFile {
 function summarize(file: ConfigFile): ImportSummary {
   return { ...(file.exported_at ? { exported_at: file.exported_at } : {}), ...(file.lark?.app_id ? { app_id: file.lark.app_id } : {}),
     ...(file.lark?.recipient_open_id ? { recipient: file.lark.recipient_open_id } : {}), pulls_config: file.pulls?.config !== undefined,
-    ...(file.pulls?.follow ? { follow: file.pulls.follow.length } : {}), backends: Object.keys(file.backends ?? {}), agents: file.agents ?? [], warnings: [] };
+    ...(file.pulls?.follow ? { follow: file.pulls.follow.length } : {}), backends: Object.keys(file.backends ?? {}), agents: file.agents ?? [], warnings: [],
+    ...(file.providers ? { provider_count: (file.providers.providers as unknown[]).length } : {}) };
 }
 
 /** Owner settings behind the Settings pages. Page callers are limited to this Mac by the UI layer. */
@@ -218,15 +232,17 @@ export class SettingsService {
   async setTailscaleEnabled(enabled: unknown): Promise<void> {
     if (!this.options.tailscale) throw new HttpError(404, 'Tailscale settings are not enabled');
     await this.options.tailscale.setEnabled(enabled);
+    await this.options.providers?.syncNetwork();
   }
   startTailscaleLogin(): Promise<TailscaleLogin> {
     if (!this.options.tailscale) throw new HttpError(404, 'Tailscale settings are not enabled');
-    return this.options.tailscale.startLogin();
+    return this.options.tailscale.startLogin().then(async result => { await this.options.providers?.syncNetwork(); return result; });
   }
-  async cancelTailscaleLogin(): Promise<void> { await this.options.tailscale?.cancelLogin(); }
+  async cancelTailscaleLogin(): Promise<void> { await this.options.tailscale?.cancelLogin(); await this.options.providers?.syncNetwork(); }
   async logoutTailscale(): Promise<void> {
     if (!this.options.tailscale) throw new HttpError(404, 'Tailscale settings are not enabled');
     await this.options.tailscale.logout();
+    await this.options.providers?.syncNetwork();
   }
   async stop(): Promise<void> { await this.registration.stop(); await this.options.github.stop(); await this.writes.catch(() => {}); }
 
@@ -389,6 +405,7 @@ export class SettingsService {
       if (appId !== undefined && appId !== this.options.lark.credentials?.appId) throw new HttpError(409, 'Feishu credentials changed; reload the directory');
       if (!isOpenId(openId)) throw new HttpError(400, 'Expected a Feishu open_id (ou_…)');
       await this.persistSettings(() => { this.options.state.settings.lark_recipient_open_id = openId; });
+      await this.options.lark.setRecipient?.(openId);
     });
   }
 
@@ -402,7 +419,8 @@ export class SettingsService {
     }));
     return { format: FORMAT, version: 1, exported_at: new Date().toISOString(),
       lark: { ...(credentials ? { app_id: credentials.appId, app_secret: credentials.appSecret, connection_type: this.larkConnectionType() } : {}), ...(recipient ? { recipient_open_id: recipient } : {}) },
-      pulls: await pulls.preferences(), backends, agents: (await agents.list()).filter(agent => agent.injected).map(agent => agent.agent) };
+      pulls: await pulls.preferences(), backends, agents: (await agents.list()).filter(agent => agent.injected).map(agent => agent.agent),
+      ...(this.options.providers ? { providers: await this.options.providers.exportConfig() } : {}) };
   }
   /** Returns only where the file went: the page has no bearer token, so secrets never travel over its HTTP routes. */
   exportConfig(): Promise<{ path: string; summary: ImportSummary }> {
@@ -427,6 +445,10 @@ export class SettingsService {
       const file = parseConfig(value);
       const { state, pulls, agents } = this.options;
       const summary = summarize(file);
+      if (file.providers) {
+        if (!this.options.providers) throw new HttpError(400, 'Provider configuration is not supported by this service');
+        await this.options.providers.importConfig(file.providers);
+      }
       const effective = file.lark?.app_id ? await resolveCredentials(this.env,
         { ...state.settings, lark_app_id: file.lark.app_id, lark_app_secret: file.lark.app_secret }, this.options.mcpConfig) : undefined;
       await this.persistSettings(() => {
@@ -447,7 +469,7 @@ export class SettingsService {
       for (const agent of file.agents ?? []) {
         try { await agents.set(agent, true); } catch (error) { summary.warnings.push(`${agent}: ${(error as Error).message}`); }
       }
-      await this.reload();
+      if (!file.providers) await this.reload();
       if (file.lark?.app_id && this.source === 'environment') summary.warnings.push('LARK_APP_ID and LARK_APP_SECRET are set for this process and stay in use');
       this.report({ source: 'host', status: 'config_imported' });
       return summary;

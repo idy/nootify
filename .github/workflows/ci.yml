@@ -41,10 +41,16 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: native/tailscale/go.mod
-          cache-dependency-path: native/tailscale/go.sum
+          cache-dependency-path: |
+            native/tailscale/go.sum
+            native/core/go.sum
 
       - name: Test embedded Tailscale client
         working-directory: native/tailscale
+        run: go test ./...
+
+      - name: Test notification provider core
+        working-directory: native/core
         run: go test ./...
 
       - name: Install stable Rust with clippy and rustfmt

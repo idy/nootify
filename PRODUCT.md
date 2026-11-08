@@ -1,10 +1,16 @@
 # Nootify product context
 
-Nootify is a Windows and macOS companion for local coding-agent conversations. A per-user TypeScript service bridges Feishu messages to existing agent sessions and tracks GitHub pull requests. The desktop window and tray manage this service; the service does not create or unarchive agent sessions.
+Nootify is a Windows and macOS companion for local coding-agent conversations. A Go notification core manages multiple Feishu WebSocket and Remote Nootify gRPC providers, session bindings, and event routing. The per-user TypeScript service hosts the UI, existing local agent transports, and repository tracking. The desktop window and tray manage this service; notification-session creation does not create or unarchive native agent conversations.
 
 ## Audience and operating scene
 
-The owner configures Feishu and a trusted recipient on their computer, then follows agent progress and replies through Feishu. Settings are an Operate surface: quick, familiar controls and an accurate explanation of connection, permissions, and routing matter more than visual expression.
+The owner adds named providers on their computer: a Feishu bot and its trusted recipient, or a Remote Nootify connection. Other Nootify nodes can subscribe to this node's authenticated gRPC service. Each node tries the addressed local agent session first and broadcasts unmatched events independently to every downstream subscriber. Settings are an Operate surface: quick, familiar controls and an accurate explanation of connections, permissions, and routing matter more than visual expression.
+
+## Provider and session model
+
+An agent session is the business identity; groups and topics are provider implementation details. Providers implement idempotent session creation, metadata access, deletion, rich-text messaging, replies, and event subscription. A remote provider forwards the same operations without changing the originating session identity. Locally owned failures are distinct from unmatched events. Each downstream has independent acknowledgement and replay state. Provider mutation and remote access credentials are available only in the local UI.
+
+The message-bridge sidebar includes Providers alongside logs, routing sessions, and Agents. Repository navigation is grouped under Repos. Remote access settings configure the listener and show nodes connected to this Nootify. Feishu credentials belong to each provider instance.
 
 ## Existing commitments
 

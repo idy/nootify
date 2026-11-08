@@ -131,7 +131,12 @@ impl BundledService {
         } else {
             "nootify-tsnet"
         });
-        for path in [&bundled.node, &bundled.cli, &tailscale] {
+        let core = bundled.node.with_file_name(if cfg!(target_os = "windows") {
+            "nootify-core.exe"
+        } else {
+            "nootify-core"
+        });
+        for path in [&bundled.node, &bundled.cli, &tailscale, &core] {
             if !path.is_file() {
                 return Err(format!("This app bundle has no {}", path.display()));
             }

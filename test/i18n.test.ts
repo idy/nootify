@@ -48,16 +48,22 @@ test('all marked static UI messages and dynamic translation keys have a catalog 
   assert.match(page, /data-view="settings-general"/);
 });
 
-test('settings and agent notification UI expose only Feishu in both languages', async () => {
+test('provider navigation and agent summaries replace the legacy global Feishu entry in both languages', async () => {
   const page = await readFile(new URL('../../public/index.html', import.meta.url), 'utf8');
   const { document } = parseHTML(page);
   assert.deepEqual([...document.querySelectorAll('#settings-subnav [data-view]')].map(link => link.getAttribute('data-view')), [
-    'settings-general', 'settings-github', 'settings-lark', 'settings-tailscale', 'settings-backup', 'settings-about',
+    'settings-general', 'settings-github', 'settings-remote', 'settings-tailscale', 'settings-backup', 'settings-about',
   ]);
   assert.equal(document.querySelectorAll('[data-panel="settings-lark"]').length, 1);
   assert.equal(document.querySelector('#notification-channel, #channel-save, [id^="slack-"], [id^="telegram-"]'), null);
-  assert.equal(document.querySelector('#channel-title')!.textContent, '飞书通知');
-  assert.equal(document.querySelector('#channel-settings')!.getAttribute('href'), '#/settings/lark');
+  assert.equal(document.querySelector('#channel-title')!.textContent, '消息接入');
+  assert.equal(document.querySelector('#channel-settings')!.getAttribute('href'), '#/providers');
+  assert.ok(document.querySelector('[data-view="providers"]'));
+  assert.equal(document.querySelector('#settings-subnav [href="#/settings/lark"]'), null);
+  assert.ok(document.querySelector('[data-panel="settings-remote"]'));
+  assert.equal(document.querySelectorAll('.nav-label')[1].textContent, 'Repos');
+  assert.equal(document.querySelector('[data-view="settings-github"]')!.textContent, 'GitHub');
+  assert.doesNotMatch(page, /每台电脑独立轮询/);
   assert.ok(document.querySelector('#channel-state'));
   assert.equal(document.querySelector('#agents-view select'), null);
   assert.doesNotMatch(page, /slack|telegram/i);

@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -108,6 +109,8 @@ type embeddedNode interface {
 	Start() error
 	Client() (localClient, error)
 	Listen() (net.Listener, error)
+	Dial(context.Context, string, string) (net.Conn, error)
+	ListenPort(int) (net.Listener, error)
 	Close() error
 }
 
@@ -115,8 +118,14 @@ type tsnetNode struct{ server *tsnet.Server }
 
 func (n *tsnetNode) Start() error                  { return n.server.Start() }
 func (n *tsnetNode) Client() (localClient, error)  { return n.server.LocalClient() }
-func (n *tsnetNode) Listen() (net.Listener, error) { return n.server.Listen("tcp", ":80") }
-func (n *tsnetNode) Close() error                  { return n.server.Close() }
+func (n *tsnetNode) Listen() (net.Listener, error) { return n.ListenPort(80) }
+func (n *tsnetNode) Dial(ctx context.Context, network, address string) (net.Conn, error) {
+	return n.server.Dial(ctx, network, address)
+}
+func (n *tsnetNode) ListenPort(port int) (net.Listener, error) {
+	return n.server.Listen("tcp", ":"+strconv.Itoa(port))
+}
+func (n *tsnetNode) Close() error { return n.server.Close() }
 
 // Propagate RPC stream shutdown to startup before closing the underlying input.
 // serveRPC owns a child context; waiting for it to return leaves a window where
@@ -192,10 +201,13 @@ func runService(parent context.Context, cfg config, stdin io.ReadCloser, stdout 
 	}
 
 	forwarder := newForwarder(listener, cfg.target)
+	transport := newTCPTransport(ctx, node.Dial, node.ListenPort)
+	defer transport.close()
 	dispatcher = &rpcDispatcher{
 		client:    client,
 		listening: forwarder.listening.Load,
 		mutations: make(chan struct{}, 1),
+		transport: transport,
 	}
 	// Readiness means the embedded stack, LocalAPI, and port 80 listener exist;
 	// it deliberately does not wait for authentication or an assigned address.

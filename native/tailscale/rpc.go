@@ -26,9 +26,13 @@ const (
 )
 
 type request struct {
-	ID     int64
-	Method string
-	IP     string
+	ID       int64
+	Method   string
+	IP       string
+	Address  string
+	TunnelID string
+	Port     int
+	Target   string
 }
 
 type response struct {
@@ -64,6 +68,14 @@ func decodeRequest(line []byte) (request, string) {
 			err = decoder.Decode(&req.Method)
 		case "ip":
 			err = decoder.Decode(&req.IP)
+		case "address":
+			err = decoder.Decode(&req.Address)
+		case "tunnel_id":
+			err = decoder.Decode(&req.TunnelID)
+		case "port":
+			err = decoder.Decode(&req.Port)
+		case "target":
+			err = decoder.Decode(&req.Target)
 		default:
 			return request{}, "invalid_request"
 		}
@@ -78,7 +90,14 @@ func decodeRequest(line []byte) (request, string) {
 		return request{}, "invalid_request"
 	}
 	req.ID = *id
-	if req.Method != "whois" && seen["ip"] {
+	for field, method := range map[string]string{
+		"ip": "whois", "address": "tunnel", "tunnel_id": "close_tunnel", "target": "publish",
+	} {
+		if seen[field] && req.Method != method {
+			return req, "invalid_request"
+		}
+	}
+	if seen["port"] && req.Method != "publish" && req.Method != "unpublish" {
 		return req, "invalid_request"
 	}
 	return req, ""
@@ -129,6 +148,7 @@ type rpcDispatcher struct {
 	client    localClient
 	listening func() bool
 	mutations chan struct{}
+	transport *tcpTransport
 }
 
 func (d *rpcDispatcher) dispatch(ctx context.Context, req request) response {
@@ -136,6 +156,13 @@ func (d *rpcDispatcher) dispatch(ctx context.Context, req request) response {
 	var err error
 	code := "unknown_method"
 	switch req.Method {
+	case "tunnel", "close_tunnel", "publish", "unpublish":
+		if d.transport == nil {
+			return failure(req.ID, "unavailable")
+		}
+		// Creation checks cancellation before handing ownership to the service.
+		// Do not turn a successful allocation into a timeout with a hidden handle.
+		return d.transport.dispatch(ctx, req)
 	case "status":
 		code = "status_failed"
 		var status *ipnstate.Status
