@@ -162,7 +162,7 @@ const state = {
   pendingRepos: new Set<string>(), repoError: '' as TranslatedText, openRepoSources: new Set<string>(),
   agents: undefined as AgentsPage | undefined, agentsError: '' as TranslatedText, pendingAgents: new Set<string>(), openPreviews: new Set<string>(),
   providers: undefined as ProvidersPage | undefined, loadingProviders: false, providersBusy: false, providersError: '' as TranslatedText, providersReadError: false,
-  providerEditor: undefined as { id?: string; secretSet: boolean; tokenSet: boolean } | undefined, providerEditorError: '' as TranslatedText,
+  providerEditor: undefined as { id?: string; step: 'choose' | 'configure'; type: ProviderSummary['type']; secretSet: boolean; tokenSet: boolean } | undefined, providerEditorError: '' as TranslatedText,
   providerDelete: undefined as ProviderSummary | undefined, providerDeleteError: '' as TranslatedText, providerDeleteOpener: undefined as HTMLElement | undefined,
   remote: undefined as RemotePage | undefined, loadingRemote: false, remoteBusy: false, remoteError: '' as TranslatedText, remoteReadError: false,
   remoteEdited: false, remoteNote: '' as TranslatedText, remoteSecretLoading: false, remoteSecretRevealed: false, remoteRevision: 0,
@@ -623,12 +623,14 @@ function renderProviders(): void {
   setText('providers-summary', !page ? t('正在读取 Providers…') : selected ? t('默认：{p0}', { p0: selected.name }) : t('尚未选择默认 Provider'));
   $('providers-empty').hidden = !page || page.providers.length > 0;
   if (changed('provider-rows', [page?.providers, page?.default_provider_id, editable, busy])) replaceRows($('provider-rows'), (page?.providers ?? []).map(provider => {
-    const item = node('div', undefined, 'entry'); item.setAttribute('role', 'listitem'); item.dataset.providerId = provider.id;
+    const item = node('div', undefined, 'provider-card'); item.setAttribute('role', 'listitem'); item.dataset.providerId = provider.id;
     const row = node('div', undefined, 'setting provider-row');
     const main = node('div', undefined, 'setting-main');
     const title = node('div', undefined, 'provider-row-title'); title.append(node('span', provider.name, 'setting-title'));
     if (provider.id === page?.default_provider_id) title.append(node('span', t('默认'), 'tag'));
-    main.append(title, node('div', [providerTypeName(provider.type), provider.type === 'feishu' ? provider.app_id : provider.address].filter(Boolean).join(' · '), 'setting-sub mono'));
+    const details = node('div', undefined, 'setting-sub provider-identity');
+    details.append(node('span', providerTypeName(provider.type)), node('span', provider.type === 'feishu' ? provider.app_id : provider.address, 'mono'));
+    main.append(title, details);
     if (provider.error) main.append(node('div', provider.error, 'setting-sub tone-error provider-error'));
     const tone = providerStatus(provider.status, provider.enabled, provider.error);
     row.append(main, node('span', tone.label, `provider-status tone-${tone.tone}`));
@@ -653,39 +655,70 @@ function renderProviders(): void {
   }));
   renderProviderEditor(); renderProviderDelete();
 }
-function openProviderEditor(provider?: ProviderSummary): void {
+function openProviderEditor(provider?: ProviderSummary, type?: ProviderSummary['type']): void {
   if (state.providers?.editable !== true || state.providersBusy) return;
-  state.providerEditor = { id: provider?.id, secretSet: provider?.secret_set === true, tokenSet: provider?.token_set === true };
+  state.providerEditor = { id: provider?.id, step: provider || type ? 'configure' : 'choose', type: provider?.type ?? type ?? 'feishu', secretSet: provider?.secret_set === true, tokenSet: provider?.token_set === true };
   state.providerEditorError = ''; state.providersError = '';
+  field('provider-type-search').value = '';
   field('provider-name').value = provider?.name ?? '';
-  $<HTMLSelectElement>('provider-type').value = provider?.type ?? 'feishu';
   field('provider-enabled').checked = provider?.enabled ?? true;
   field('provider-app-id').value = provider?.app_id ?? ''; field('provider-app-secret').value = '';
   field('provider-recipient').value = provider?.recipient_open_id ?? '';
   field('provider-address').value = provider?.address ?? ''; field('provider-token').value = '';
   field('provider-tls').checked = provider?.tls ?? true; field('provider-server-name').value = provider?.server_name ?? '';
-  renderProviders(); field('provider-name').focus();
+  renderProviders();
+  const dialog = $<HTMLDialogElement>('provider-dialog');
+  if (!dialog.open) dialog.showModal();
+  (state.providerEditor.step === 'choose' ? field('provider-type-search') : field('provider-name')).focus();
+}
+function backToProviderTypes(): void {
+  const editor = state.providerEditor;
+  if (!editor || editor.id || state.providersBusy || state.providers?.editable !== true) return;
+  const type = editor.type;
+  openProviderEditor(); $('provider-choose-' + type).focus();
+}
+function renderProviderTypes(): void {
+  const query = field('provider-type-search').value.trim().toLocaleLowerCase();
+  let visible = 0;
+  for (const option of document.querySelectorAll<HTMLButtonElement>('#provider-type-options button')) {
+    const type = option.dataset.providerType!;
+    const terms = `${option.textContent} ${type === 'feishu' ? 'feishu lark 飞书 机器人 bot' : 'remote nootify grpc 远程'}`.toLocaleLowerCase();
+    option.hidden = !!query && !terms.includes(query);
+    option.disabled = state.providers?.editable !== true || state.providersBusy;
+    if (!option.hidden) visible++;
+  }
+  $('provider-type-empty').hidden = visible > 0;
+  field('provider-type-search').disabled = state.providers?.editable !== true || state.providersBusy;
 }
 function closeProviderEditor(restore = true): void {
-  if (state.providersBusy) return;
+  if (state.providersBusy && restore) return;
   const id = state.providerEditor?.id;
   state.providerEditor = undefined; state.providerEditorError = '';
-  field('provider-app-secret').value = ''; field('provider-token').value = '';
+  field('provider-app-secret').value = ''; field('provider-token').value = ''; field('provider-type-search').value = '';
+  const dialog = $<HTMLDialogElement>('provider-dialog');
+  if (dialog.open) dialog.close();
   renderProviders();
   if (restore && state.view === 'providers') ($('provider-rows').querySelector<HTMLElement>(`[data-key="${CSS.escape(`provider-edit-${id}`)}"]`) ?? $('provider-add')).focus();
 }
 function renderProviderEditor(): void {
   const editor = state.providerEditor;
-  $('provider-editor').hidden = !editor;
+  $('provider-editor').hidden = !editor || editor.step === 'choose';
+  $('provider-chooser').hidden = !editor || editor.step !== 'choose';
   if (!editor) return;
   const editable = state.providers?.editable === true;
   const busy = state.providersBusy;
-  const type = $<HTMLSelectElement>('provider-type').value;
+  const type = editor.type;
+  const choosing = editor.step === 'choose';
   const current = state.providers?.providers.find(provider => provider.id === editor.id);
-  setText('provider-editor-title', editor.id ? t('编辑 Provider') : t('添加 Provider'));
-  setText('provider-editor-status', current ? [providerStatus(current.status, current.enabled, current.error).label, current.error].filter(Boolean).join(' · ') : t('保存后连接此接入。'));
-  $<HTMLFieldSetElement>('provider-fields').disabled = !editable || busy;
-  $<HTMLSelectElement>('provider-type').disabled = !!editor.id || !editable || busy;
+  setText('provider-editor-title', choosing ? t('添加 Provider') : editor.id ? t('编辑 Provider') : t('配置{p0}', { p0: providerTypeName(type) }));
+  setText('provider-editor-status', choosing ? t('选择接入类型，然后填写连接信息。') : current ? [providerStatus(current.status, current.enabled, current.error).label, current.error].filter(Boolean).join(' · ') : t('保存后连接此接入。'));
+  setText('provider-type-name', providerTypeName(type));
+  $('provider-back').hidden = choosing || !!editor.id;
+  $<HTMLButtonElement>('provider-back').disabled = !editable || busy;
+  $<HTMLButtonElement>('provider-dialog-close').disabled = busy;
+  $<HTMLButtonElement>('provider-chooser-cancel').disabled = busy;
+  $<HTMLFieldSetElement>('provider-fields').disabled = choosing || !editable || busy;
+  renderProviderTypes();
   $('provider-feishu-fields').hidden = type !== 'feishu'; $<HTMLFieldSetElement>('provider-feishu-fields').disabled = type !== 'feishu';
   $('provider-remote-fields').hidden = type !== 'remote'; $<HTMLFieldSetElement>('provider-remote-fields').disabled = type !== 'remote';
   field('provider-app-id').required = type === 'feishu'; field('provider-app-secret').required = type === 'feishu' && !editor.secretSet;
@@ -695,10 +728,10 @@ function renderProviderEditor(): void {
   setText('provider-token-hint', editor.tokenSet ? t('已保存，留空则不修改') : t('填写远程节点提供的访问令牌。'));
   $('provider-editor-error').hidden = !state.providerEditorError; setText('provider-editor-error', resolveText(state.providerEditorError));
   setText('provider-editor-local', editable ? '' : t('请在本机修改。'));
-  $<HTMLButtonElement>('provider-save').disabled = !editable || busy;
+  $<HTMLButtonElement>('provider-save').disabled = choosing || !editable || busy;
   $<HTMLButtonElement>('provider-cancel').disabled = busy;
   setText('provider-save', busy ? t('保存中…') : t('保存'));
-  $('provider-editor').setAttribute('aria-busy', String(busy));
+  $('provider-dialog').setAttribute('aria-busy', String(busy));
 }
 type ProviderAction = { action: 'save'; provider: ProviderConfig } | { action: 'delete' | 'default'; id: string };
 async function mutateProvider(body: ProviderAction, target: 'page' | 'editor' | 'delete' = 'page'): Promise<void> {
@@ -719,8 +752,8 @@ async function mutateProvider(body: ProviderAction, target: 'page' | 'editor' | 
 }
 async function saveProvider(): Promise<void> {
   const editor = state.providerEditor;
-  if (!editor || state.providers?.editable !== true || state.providersBusy) return;
-  const type = $<HTMLSelectElement>('provider-type').value as ProviderSummary['type'];
+  if (!editor || editor.step !== 'configure' || state.providers?.editable !== true || state.providersBusy) return;
+  const type = editor.type;
   const provider: ProviderConfig = { ...(editor.id ? { id: editor.id } : {}), name: field('provider-name').value.trim(), type, enabled: field('provider-enabled').checked };
   let invalid: string | undefined;
   if (!provider.name) invalid = 'provider-name';
@@ -1639,12 +1672,27 @@ async function refreshNow(): Promise<void> {
 
 $('provider-add').addEventListener('click', () => openProviderEditor());
 $('providers-retry').addEventListener('click', () => { state.providersError = ''; state.providersReadError = false; void loadProviders(); });
-$('provider-type').addEventListener('change', renderProviderEditor);
 $('provider-tls').addEventListener('change', renderProviderEditor);
-$('provider-cancel').addEventListener('click', () => closeProviderEditor());
+for (const id of ['provider-cancel', 'provider-chooser-cancel', 'provider-dialog-close']) $(id).addEventListener('click', () => closeProviderEditor());
+$('provider-back').addEventListener('click', backToProviderTypes);
+$('provider-type-search').addEventListener('input', renderProviderTypes);
+for (const type of ['feishu', 'remote'] as const) $('provider-choose-' + type).addEventListener('click', () => openProviderEditor(undefined, type));
+$('provider-type-search').addEventListener('keydown', event => {
+  const options = [...document.querySelectorAll<HTMLButtonElement>('#provider-type-options button')].filter(option => !option.hidden && !option.disabled);
+  if (event.key === 'ArrowDown') { event.preventDefault(); options[0]?.focus(); }
+  else if (event.key === 'Enter' && options.length === 1) { event.preventDefault(); options[0]!.click(); }
+});
+$('provider-type-options').addEventListener('keydown', event => {
+  const options = [...document.querySelectorAll<HTMLButtonElement>('#provider-type-options button')].filter(option => !option.hidden && !option.disabled);
+  const index = options.indexOf(document.activeElement as HTMLButtonElement);
+  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+    event.preventDefault(); options[Math.max(0, Math.min(options.length - 1, index + (event.key === 'ArrowDown' ? 1 : -1)))]?.focus();
+  } else if (event.key === 'Home' || event.key === 'End') { event.preventDefault(); options[event.key === 'Home' ? 0 : options.length - 1]?.focus(); }
+});
 $('provider-editor').addEventListener('submit', event => { event.preventDefault(); void saveProvider(); });
-$('provider-editor').addEventListener('keydown', event => {
-  if (event.key === 'Escape' && !state.providersBusy) { event.preventDefault(); closeProviderEditor(); }
+$('provider-dialog').addEventListener('cancel', event => { event.preventDefault(); closeProviderEditor(); });
+$('provider-dialog').addEventListener('keydown', event => {
+  if (event.key === 'Escape') { event.preventDefault(); closeProviderEditor(); }
 });
 $('provider-delete-cancel').addEventListener('click', () => closeProviderDelete());
 $('provider-delete-confirm').addEventListener('click', () => {

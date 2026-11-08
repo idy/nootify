@@ -105,14 +105,16 @@ func (m MessageRef) valid() bool {
 }
 
 type Binding struct {
-	ProviderID    string  `json:"provider_id"`
-	Session       Session `json:"session"`
-	Created       bool    `json:"created"`
-	ChatID        string  `json:"chat_id,omitempty"`
-	ThreadID      string  `json:"thread_id,omitempty"`
-	SenderID      string  `json:"sender_open_id,omitempty"`
-	Deleted       bool    `json:"deleted,omitempty"`
-	DeletePending bool    `json:"delete_pending,omitempty"`
+	ProviderID         string  `json:"provider_id"`
+	Session            Session `json:"session"`
+	Created            bool    `json:"created"`
+	ChatID             string  `json:"chat_id,omitempty"`
+	ThreadID           string  `json:"thread_id,omitempty"`
+	SenderID           string  `json:"sender_open_id,omitempty"`
+	Deleted            bool    `json:"deleted,omitempty"`
+	DeletePending      bool    `json:"delete_pending,omitempty"`
+	ResourceNodeID     string  `json:"resource_origin_node_id,omitempty"`
+	ResourceProviderID string  `json:"resource_provider_id,omitempty"`
 }
 type SendResult struct {
 	Message   MessageRef `json:"message"`
@@ -159,7 +161,10 @@ type Peer struct {
 	Name        string   `json:"name,omitempty"`
 	ConnectedAt string   `json:"connected_at"`
 	Pending     []string `json:"pending_ids"`
-	LastAck     string   `json:"last_ack,omitempty"`
+	// Cursor is the last broadcast copied into this peer's bounded window (or
+	// skipped because it was deleted/visited). Later events remain in the ledger.
+	Cursor  uint64 `json:"broadcast_cursor,omitempty"`
+	LastAck string `json:"last_ack,omitempty"`
 }
 type RemoteSummary struct {
 	Enabled  bool          `json:"enabled"`
@@ -190,8 +195,9 @@ type Event struct {
 	ChatID   string     `json:"chat_id,omitempty"`
 }
 type EventRecord struct {
-	Event   Event  `json:"event"`
-	Outcome string `json:"outcome"`
+	Sequence uint64 `json:"broadcast_sequence,omitempty"`
+	Event    Event  `json:"event"`
+	Outcome  string `json:"outcome"`
 }
 type Delivery struct {
 	ID        string `json:"delivery_id"`
@@ -209,6 +215,8 @@ type Operation struct {
 	State       string          `json:"state"`
 	Fingerprint string          `json:"fingerprint"`
 	Result      json.RawMessage `json:"result,omitempty"`
+	RequestID   string          `json:"request_id,omitempty"`
+	Failure     *rpcError       `json:"failure,omitempty"`
 }
 type rpcError struct {
 	Code    string `json:"code"`
@@ -218,6 +226,9 @@ type rpcError struct {
 func (e *rpcError) Error() string  { return e.Message }
 func fault(code, msg string) error { return &rpcError{code, msg} }
 func publicError(err error) *rpcError {
+	if rejection, ok := rejectionPublicError(err); ok {
+		return rejection
+	}
 	var e *rpcError
 	if errors.As(err, &e) {
 		return e

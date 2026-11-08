@@ -10,7 +10,7 @@ The owner adds named providers on their computer: a Feishu bot and its trusted r
 
 An agent session is the business identity; groups and topics are provider implementation details. Providers implement idempotent session creation, metadata access, deletion, rich-text messaging, replies, and event subscription. A remote provider forwards the same operations without changing the originating session identity. Locally owned failures are distinct from unmatched events. Each downstream has independent acknowledgement and replay state. Provider mutation and remote access credentials are available only in the local UI.
 
-The message-bridge sidebar includes Providers alongside logs, routing sessions, and Agents. Repository navigation is grouped under Repos. Remote access settings configure the listener and show nodes connected to this Nootify. Feishu credentials belong to each provider instance.
+Providers is a card list with an upper-left Add action. Adding opens a provider-type list in a dialog, then the chosen type's configuration; editing also uses the dialog. The message-bridge sidebar includes Providers alongside logs, routing sessions, and Agents. Repository navigation is grouped under Repos. Remote access settings configure the listener and show nodes connected to this Nootify. Feishu credentials belong to each provider instance.
 
 ## Existing commitments
 

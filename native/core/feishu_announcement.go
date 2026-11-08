@@ -12,6 +12,27 @@ type feishuAPIError struct{ Code, HTTPStatus int }
 
 func (*feishuAPIError) Error() string { return "Feishu rejected the request" }
 
+func (e *feishuAPIError) rejectionState() (string, bool) {
+	// A timeout, gateway error, or undocumented internal failure proves nothing
+	// about message creation. Auth/rate limits and application-level 4xx errors
+	// explicitly reject the request before accepting a message.
+	if e.HTTPStatus >= 500 || e.HTTPStatus == 408 {
+		return "", false
+	}
+	if e.HTTPStatus == 401 || e.HTTPStatus == 403 || e.HTTPStatus == 429 || e.Code >= 99991600 && e.Code < 99991700 || e.Code >= 99991400 && e.Code < 99991500 {
+		return "retryable", true
+	}
+	if e.HTTPStatus == 404 || e.HTTPStatus == 422 || e.Code == 230001 || (e.HTTPStatus == 400 && e.Code == 0) {
+		return "terminal", true
+	}
+	// An otherwise unknown application code may describe an internal failure,
+	// even in a successful HTTP envelope. Numeric ranges alone are not proof.
+	if e.HTTPStatus >= 400 && e.HTTPStatus < 500 {
+		return "terminal", true
+	}
+	return "", false
+}
+
 // Feishu's newer groups expose Docx announcements. Both representations are
 // read for adoption, but neither is rewritten or replaced by the core.
 func (p *feishuProvider) readAnnouncement(ctx context.Context, chat string) (json.RawMessage, error) {

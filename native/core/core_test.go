@@ -151,7 +151,7 @@ func TestLocalOwnershipNeverBroadcastsAndDeduplicatesRoutes(t *testing.T) {
 		t.Fatal("failed local owner was rerouted")
 	}
 }
-func TestLoopSuppressionAndAtomicQueueExhaustion(t *testing.T) {
+func TestLoopSuppressionWithFullPeerWindow(t *testing.T) {
 	c := testCore(t, nil)
 	s, err := c.Subscribe(context.Background(), "downstream", "")
 	must(t, err)
@@ -168,12 +168,12 @@ func TestLoopSuppressionAndAtomicQueueExhaustion(t *testing.T) {
 		d.Peers[p.NodeID] = p
 		return nil
 	}))
-	err = c.Ingest(context.Background(), eventFor("elsewhere", "full"), "")
-	if publicError(err).Code != "resource_exhausted" {
-		t.Fatalf("queue exhaustion not reported: %v", err)
+	must(t, c.Ingest(context.Background(), eventFor("elsewhere", "full"), ""))
+	if _, ok := c.store.Snapshot().Events["full"]; !ok {
+		t.Fatal("full delivery window rejected durable broadcast")
 	}
-	if _, ok := c.store.Snapshot().Events["full"]; ok {
-		t.Fatal("failed admission was partially persisted")
+	if len(c.store.Snapshot().Peers["downstream"].Pending) != maxPending {
+		t.Fatal("peer delivery window exceeded its bound")
 	}
 }
 
@@ -184,6 +184,10 @@ type fakeProvider struct {
 	lastAck                                MessageRef
 	lastReply                              MessageRef
 	failSend                               bool
+	deleteErr                              error
+	sendErr                                error
+	replyErr                               error
+	requests                               []string
 	ensure                                 func(context.Context, Session) (Binding, error)
 }
 
@@ -194,7 +198,7 @@ func (p *fakeProvider) Ensure(ctx context.Context, s Session) (Binding, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.ensures++
-	return Binding{ProviderID: p.id, Session: s, ChatID: "group-" + s.SessionID}, nil
+	return Binding{ProviderID: p.id, Session: s, ChatID: fmt.Sprintf("group-%s-%s-%d", p.id, s.SessionID, p.ensures)}, nil
 }
 func (p *fakeProvider) Metadata(_ context.Context, b Binding, m map[string]any, set bool) (map[string]any, error) {
 	if set {
@@ -206,12 +210,16 @@ func (p *fakeProvider) Delete(context.Context, Binding) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.deletes++
-	return nil
+	return p.deleteErr
 }
 func (p *fakeProvider) Send(_ context.Context, b Binding, c Content, r string) (SendResult, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.sends++
+	p.requests = append(p.requests, r)
+	if p.sendErr != nil {
+		return SendResult{}, p.sendErr
+	}
 	if p.failSend {
 		return SendResult{}, fault("unavailable", "send uncertain")
 	}
@@ -222,6 +230,10 @@ func (p *fakeProvider) Reply(_ context.Context, m MessageRef, c Content, r strin
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.replies++
+	p.requests = append(p.requests, r)
+	if p.replyErr != nil {
+		return SendResult{}, p.replyErr
+	}
 	p.lastReply = m
 	ref := MessageRef{p.node, p.id, fmt.Sprintf("reply-%d", p.replies)}
 	return SendResult{Message: ref, MessageID: ref.MessageID}, nil

@@ -12,12 +12,19 @@ import (
 // including on offline downstreams. Explicit ensure permits new messages only.
 func recordTombstone(d *State, b Binding) {
 	d.Bindings[b.Session.key()] = b
+	if b.ChatID != "" {
+		if d.RetiredBindings == nil {
+			d.RetiredBindings = map[string]Binding{}
+		}
+		d.RetiredBindings[resourceKey(b)] = b
+	}
 	for id, record := range d.Events {
 		if record.Event.Session.key() == b.Session.key() {
 			record.Outcome = "deleted"
 			d.Events[id] = record
 		}
 	}
+	log := broadcastLog(d)
 	for node, peer := range d.Peers {
 		pending := make([]string, 0, len(peer.Pending))
 		for _, id := range peer.Pending {
@@ -27,7 +34,7 @@ func recordTombstone(d *State, b Binding) {
 			}
 		}
 		peer.Pending = pending
-		d.Peers[node] = peer
+		d.Peers[node] = refillPeer(peer, log)
 	}
 }
 
@@ -42,18 +49,32 @@ func (c *Core) Bind(ctx context.Context, pid string, s Session, chat, sender str
 	if chat == "" {
 		return Binding{}, fault("invalid_argument", "chat_id is required")
 	}
-	c.ops.Lock()
+	if err := c.ops.LockContext(ctx); err != nil {
+		return Binding{}, err
+	}
 	defer c.ops.Unlock()
-	d := c.store.Snapshot()
-	if old, ok := d.Bindings[s.key()]; ok && !old.Deleted {
-		if (pid != "" && pid != old.ProviderID) || chat != old.ChatID {
-			return Binding{}, fault("conflict", "session already has a different notification binding")
+	old, selected, reused, err := c.prepareSession(ctx, pid, s)
+	if err != nil {
+		return old, err
+	}
+	if reused {
+		if chat != old.ChatID {
+			return old, fault("conflict", "session already has a different notification binding")
 		}
-		old.Created = false
 		return old, nil
 	}
-	if pid == "" {
-		pid = d.DefaultProvider
+	pid = selected
+	if s.Metadata == nil {
+		s.Metadata = old.Session.Metadata
+	}
+	if s.Name == "" {
+		s.Name = old.Session.Name
+	}
+	d := c.store.Snapshot()
+	candidate := Binding{ProviderID: pid, Session: s, ChatID: chat}
+	setResourceOrigin(d, &candidate, d.NodeID)
+	if wasRetired(d, candidate) {
+		return candidate, fault("conflict", "retired notification resources cannot be re-adopted")
 	}
 	for _, b := range d.Bindings {
 		sameProvider := b.ProviderID == pid
@@ -81,6 +102,10 @@ func (c *Core) Bind(ctx context.Context, pid string, s Session, chat, sender str
 		return b, err
 	}
 	b.ProviderID = pid
+	setResourceOrigin(d, &b, d.NodeID)
+	if wasRetired(d, b) {
+		return b, fault("conflict", "retired notification resources cannot be re-adopted")
+	}
 	if b.Session.key() != s.key() {
 		return b, fault("conflict", "provider returned a different session identity")
 	}

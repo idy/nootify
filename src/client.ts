@@ -16,7 +16,7 @@ export class NootifyClient {
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
     const response = await fetch(new URL(path, this.baseUrl), {
       method, headers: { authorization: `Bearer ${this.options.token}`, 'content-type': 'application/json' },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(20000),
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(75000),
     });
     const data = await response.json() as T & { error?: string };
     if (!response.ok) throw new Error(data.error ?? `HTTP ${response.status}`);
@@ -43,8 +43,9 @@ export class NootifyClient {
   larkBindings(): Promise<LarkBinding[]> { return this.request('GET', '/v1/lark/bindings'); }
   /** Find or create the session's Feishu group. */
   openThread(request: ThreadRequest): Promise<ThreadInfo> { return this.request('POST', '/v1/threads', request); }
-  sendThread(sessionId: string, text: string, adapter?: Adapter, channel?: NotificationChannel, providerId?: string): Promise<ThreadMessage> {
-    return this.request('POST', `/v1/threads/${encodeURIComponent(sessionId)}/messages`, { text, adapter, channel, ...(providerId ? { provider_id: providerId } : {}) });
+  sendThread(sessionId: string, text: string, adapter?: Adapter, channel?: NotificationChannel, providerId?: string, requestId?: string): Promise<ThreadMessage> {
+    return this.request('POST', `/v1/threads/${encodeURIComponent(sessionId)}/messages`, { text, adapter, channel,
+      ...(providerId ? { provider_id: providerId } : {}), ...(requestId ? { request_id: requestId } : {}) });
   }
   deleteThread(sessionId: string, adapter: Adapter, providerId?: string): Promise<unknown> {
     return this.request('DELETE', `/v1/threads/${encodeURIComponent(sessionId)}`, { adapter, ...(providerId ? { provider_id: providerId } : {}) });

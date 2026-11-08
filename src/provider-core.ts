@@ -33,7 +33,8 @@ export class ProviderCore implements CoreTransport {
   private starting?: Promise<void>;
   private sequence = 0;
   constructor(private readonly directory: string, private readonly onEvent: (event: CoreEvent) => void,
-    private readonly command?: { file: string; args: string[] }, private readonly timeout = 30000,
+    // Core commands have a 60s deadline; allow the terminal response to arrive.
+    private readonly command?: { file: string; args: string[] }, private readonly timeout = 65000,
     private readonly onExit: () => void = () => {}) {}
   start(): Promise<void> {
     if (this.starting) return this.starting;

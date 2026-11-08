@@ -12,6 +12,7 @@ import { RetryableDeliveryError } from '../src/types.js';
 import { createServiceHost } from '../src/server.js';
 import { EventLog } from '../src/events.js';
 import type { TailnetAccess } from '../src/tailnet.js';
+import { NootifyClient } from '../src/client.js';
 
 const page: ProviderPage = { node_id: 'local-node', providers: [], remote: { enabled: false, listen: '127.0.0.1:9418', status: 'disabled', tls: false, token_set: false, peers: [] } };
 class FakeCore implements CoreTransport {
@@ -60,6 +61,48 @@ readline.createInterface({input:process.stdin}).on('line', line => {
   assert.equal(events[0].event, 'delivery');
   await core.stop();
   await assert.rejects(core.request('status'), (error: unknown) => error instanceof CoreError && error.code === 'unavailable');
+});
+
+test('HTTP and stdio deadlines leave time for the core terminal response and preserve explicit send IDs', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'nootify-deadline-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const script = join(directory, 'fixture.cjs');
+  await writeFile(script, `const readline = require('node:readline');
+process.stdout.write(JSON.stringify({id:0,result:{ready:true}})+'\\n');
+readline.createInterface({input:process.stdin}).on('line', line => {
+ const r=JSON.parse(line);process.stdout.write(JSON.stringify({id:r.id,result:{done:true}})+'\\n');
+});`);
+  const core = new ProviderCore(join(directory, 'state'), () => {}, { file: process.execPath, args: [script] });
+  t.after(() => core.stop());
+  await core.start();
+  const originalTimeout = globalThis.setTimeout;
+  const timers: number[] = [];
+  t.mock.method(globalThis, 'setTimeout', ((fn: (...args: unknown[]) => void, timeout?: number, ...args: unknown[]) => {
+    timers.push(timeout ?? 0); return originalTimeout(fn, timeout, ...args);
+  }) as typeof globalThis.setTimeout);
+  assert.deepEqual(await core.request('message.send'), { done: true });
+  assert.ok(timers.some(timeout => timeout > 60_000), 'stdio must outlive the core 60-second deadline');
+  let clientTimeout = 0; let sent: Record<string, unknown> | undefined;
+  t.mock.method(AbortSignal, 'timeout', (timeout: number) => { clientTimeout = timeout; return new AbortController().signal; });
+  t.mock.method(globalThis, 'fetch', async (_url: unknown, init?: RequestInit) => {
+    sent = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return Response.json({ message_id: 'message-result' });
+  });
+  const client = new NootifyClient({ token: 'synthetic-token' });
+  await client.sendThread('session-a', 'progress', 'codex', undefined, 'remote-a', 'stable-attempt');
+  assert.equal(sent?.request_id, 'stable-attempt'); assert.equal(sent?.provider_id, 'remote-a');
+  assert.ok(clientTimeout > Math.max(...timers), 'HTTP must outlive the stdio request');
+});
+
+test('thread-send leaves automatic retry identity with the durable core and preserves explicit IDs', async t => {
+  const { providers, core } = await fixture(t, { sessionName: id => id });
+  const request = { method: 'POST', path: '/v1/threads/session-a/messages', body: { adapter: 'codex', text: 'progress' } };
+  await providers.handle(request); await providers.handle(request);
+  const sends = core.calls.filter(call => call.method === 'message.send');
+  assert.equal(sends.length, 2);
+  assert.ok(sends.every(call => !Object.hasOwn(call.params, 'request_id')), 'bridge must not replace uncertain attempts with random IDs');
+  await providers.handle({ ...request, body: { ...request.body, request_id: 'explicit-retry' } });
+  assert.equal(core.calls.at(-1)?.params.request_id, 'explicit-retry');
 });
 
 test('provider message references keep source node and bot identity separate', () => {

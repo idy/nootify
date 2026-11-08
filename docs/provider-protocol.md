@@ -19,6 +19,8 @@ Content is `{text?: string, blocks?: ContentBlock[]}`. Blocks use `{type, text?,
 
 ## Private stdio RPC
 
+Remote RPCs are bounded to 45 seconds within a 60-second core command deadline. The stdio bridge waits 65 seconds, and the HTTP client waits 75 seconds, so outer transports do not cut off a live inner operation. Unknown submission outcomes keep their durable request identity and are never blindly resubmitted with a new ID.
+
 The process starts with `--state-dir <private directory>`. It emits a ready frame `{id:0,result:{ready:true,node_id}}`. Requests are NDJSON `{id:number,method:string,params:object}`; responses are `{id,result}` or `{id,error:{code,message}}`. Request handling must be concurrent: an operation waiting for an agent delivery or outbound tunnel must not prevent completion RPCs from being read. Stdout is exclusively protocol data. EOF cancels the service and closes network connections.
 
 Methods:
@@ -35,7 +37,7 @@ Methods:
 - `session.bind` accepts `{provider_id?,session,chat_id,sender_open_id}` to validate and adopt an existing Feishu group without replacing conflicting routing metadata.
 - `session.metadata.get` / `session.metadata.set` accept `{provider_id?,session,metadata?}`.
 - `session.delete` accepts `{provider_id?,session}`. It is idempotent. Preserve a tombstone so event replay cannot recreate a deleted session. Explicit ensure can reactivate it.
-- `message.send` accepts `{provider_id?,session,content,request_id?}` -> `{message:MessageRef,chat_id?,message_id}`.
+- `message.send` accepts `{provider_id?,session,content,request_id?}` -> `{message:MessageRef,chat_id?,message_id}`. Without an explicit ID, the core retains one durable attempt for the same provider/session/content while its outcome is unresolved or proven retryable; a completed send allows a later identical intentional send. An explicit ID remains idempotent.
 - `message.reply` accepts `{message?:MessageRef,message_id?:string,content,request_id?}` -> `{message:MessageRef,message_id}`.
 - `message.ack` accepts `{message?:MessageRef,message_id?:string}` -> `{status:"session_acknowledged",message_id,acknowledged_at}`. Feishu uses a reaction. A plain message ID must fail if ambiguous.
 - `delivery.complete` accepts `{delivery_id,status,transport_status?,error?}`. Status is `delivered`, `retryable`, `unconfirmed`, or `rejected`.
@@ -72,7 +74,7 @@ Navigation adds `Providers` under message bridging. The sidebar's `GitHub` group
 
 ## Routing and persistence
 
-Only unmatched events are broadcast. Matching uses the full session identity, not just a local agent ID. Locally owned offline/failed sessions are not rerouted as unmatched. Invalid/unauthorized events are rejected at ingress. Every peer has its own bounded pending queue, confirmations, and reconnect replay. One peer's confirmation cannot consume another peer's event. Keep stable event IDs, origin provider references, hop limits and visited-node information to stop loops and duplicate local execution across multiple routes.
+Only unmatched events are broadcast. Matching uses the full session identity, not just a local agent ID. Locally owned offline/failed sessions are not rerouted as unmatched. Invalid/unauthorized events are rejected at ingress. Every peer has its own bounded delivery window, durable cursor into the shared broadcast ledger, confirmations, and reconnect replay. A full window does not reject other peers' broadcasts; that peer refills its window from the retained backlog independently. Global storage limits remain explicit admission failures. One peer's confirmation cannot consume another peer's event. Keep stable event IDs, origin provider references, hop limits and visited-node information to stop loops and duplicate local execution across multiple routes.
 
 Session operations, message sending, replying, metadata and deletion follow their selected provider binding and return path. They are not broadcast commands. Delete notification resources and mappings only, never an agent's original conversation. Multiple feeds from the same bot must not independently execute the same source message.
 

@@ -183,13 +183,14 @@ func (s *remoteServer) Subscribe(stream grpc.BidiStreamingServer[pb.Subscription
 }
 
 type remoteProvider struct {
-	core    *Core
-	config  ProviderConfig
-	conn    *grpc.ClientConn
-	client  pb.NotificationCoreClient
-	ctx     context.Context
-	cancel  context.CancelFunc
-	initErr error
+	core      *Core
+	config    ProviderConfig
+	conn      *grpc.ClientConn
+	client    pb.NotificationCoreClient
+	ctx       context.Context
+	cancel    context.CancelFunc
+	initErr   error
+	retryWait func(context.Context, time.Duration) error
 }
 
 func newRemoteProvider(c *Core, p ProviderConfig) *remoteProvider {
@@ -223,25 +224,33 @@ func (p *remoteProvider) Subscribe(ctx context.Context, receive EventHandler) er
 	defer stop()
 	delay := 100 * time.Millisecond
 	for ctx.Err() == nil && p.ctx.Err() == nil {
-		_ = p.consume(ctx, receive)
+		_ = p.consume(ctx, receive, func() { delay = 100 * time.Millisecond })
 		if ctx.Err() != nil || p.ctx.Err() != nil {
 			break
 		}
 		p.core.setStatus(p.config.ID, "reconnecting")
-		timer := time.NewTimer(delay)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
+		wait := p.retryWait
+		if wait == nil {
+			wait = waitForReconnect
 		}
-		if delay < 10*time.Second {
-			delay *= 2
+		if err := wait(ctx, delay); err != nil {
+			return err
 		}
+		delay = min(delay*2, 10*time.Second)
 	}
 	return ctx.Err()
 }
-func (p *remoteProvider) consume(ctx context.Context, receive EventHandler) error {
+func waitForReconnect(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+func (p *remoteProvider) consume(ctx context.Context, receive EventHandler, connected func()) error {
 	if p.initErr != nil {
 		return p.initErr
 	}
@@ -262,6 +271,7 @@ func (p *remoteProvider) consume(ctx context.Context, receive EventHandler) erro
 		return fault("loop", "remote subscription loops to this node")
 	}
 	p.core.setStatus(p.config.ID, "connected")
+	connected()
 	for {
 		frame, err = stream.Recv()
 		if err != nil {
@@ -309,7 +319,7 @@ func (p *remoteProvider) call(ctx context.Context, method string, params any, ou
 		return fault("unavailable", "remote operation failed")
 	}
 	if result.ErrorCode != "" {
-		return fault(result.ErrorCode, result.ErrorMessage)
+		return decodeOperationError(result.ErrorCode, result.ErrorMessage)
 	}
 	if out != nil {
 		return json.Unmarshal(result.ResultJson, out)

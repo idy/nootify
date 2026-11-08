@@ -1,6 +1,6 @@
 import { hostname } from 'node:os';
 import { join } from 'node:path';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import type { State } from './state.js';
 import type { SessionsService } from './sessions.js';
 import { CoreError, ProviderCore, type CoreEvent, type CoreTransport } from './provider-core.js';
@@ -47,7 +47,8 @@ export function decodeMessageRef(value: string): ProviderMessageRef {
 function publicFailure(error: unknown): HttpError {
   if (error instanceof HttpError) return error;
   const code = error instanceof CoreError ? error.code.toLowerCase() : '';
-  const status = /not.?found/.test(code) ? 404 : /invalid|argument|unsupported/.test(code) ? 400 : /unauth/.test(code) ? 401
+  const status = code === 'rejection_retryable' ? 503 : code === 'rejection_terminal' ? 422
+    : /not.?found/.test(code) ? 404 : /invalid|argument|unsupported/.test(code) ? 400 : /unauth/.test(code) ? 401
     : /permission/.test(code) ? 403 : /conflict|exist|precondition|unconfirmed|deleted/.test(code) ? 409
     : /resource_exhausted/.test(code) ? 429 : /unavailable|timeout|busy/.test(code) ? 503 : 500;
   return new HttpError(status, (error as Error).message);
@@ -282,7 +283,7 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
       if (request.method === 'POST' && thread[2] === 'messages') {
         const content = body.content === undefined ? { text: text(body.text, 'text') } : object(body.content);
         return { body: { ...await this.rpc<Record<string, unknown>>('message.send', { session, ...provider, content,
-          request_id: typeof body.request_id === 'string' ? body.request_id : randomUUID() }), channel: 'feishu' } };
+          ...(typeof body.request_id === 'string' ? { request_id: body.request_id } : {}) }), channel: 'feishu' } };
       }
     }
     const callback = /^\/v1\/(?:lark\/messages|provider-messages)\/([^/]+)\/(ack|reply)$/.exec(request.path);

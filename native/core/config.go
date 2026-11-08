@@ -173,6 +173,16 @@ func (c *Core) DeleteProvider(id string) error {
 	c.ops.Lock()
 	defer c.ops.Unlock()
 	if err := c.store.Update(func(d *State) error {
+		// Retire notification resources before losing their provider configuration.
+		// Agent conversations stay untouched; automatic discovery cannot move them.
+		for _, binding := range d.Bindings {
+			if binding.ProviderID == id {
+				setResourceOrigin(*d, &binding, d.NodeID)
+				binding.Deleted = true
+				binding.DeletePending = binding.ChatID != ""
+				recordTombstone(d, binding)
+			}
+		}
 		delete(d.Providers, id)
 		d.ProviderTombstones[id] = true
 		if d.DefaultProvider == id {
@@ -187,6 +197,7 @@ func (c *Core) DeleteProvider(id string) error {
 	delete(c.providers, id)
 	delete(c.statuses, id)
 	c.mu.Unlock()
+	c.wakePeers()
 	if p != nil {
 		return p.Close()
 	}
@@ -297,6 +308,14 @@ func (c *Core) ImportConfig(raw json.RawMessage) error {
 	if err := c.store.Update(func(d *State) error {
 		for id := range d.Providers {
 			if _, ok := ps[id]; !ok {
+				for _, binding := range d.Bindings {
+					if binding.ProviderID == id {
+						setResourceOrigin(*d, &binding, d.NodeID)
+						binding.Deleted = true
+						binding.DeletePending = binding.ChatID != ""
+						recordTombstone(d, binding)
+					}
+				}
 				d.ProviderTombstones[id] = true
 			}
 		}

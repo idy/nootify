@@ -87,16 +87,25 @@
     <p class="hint" data-i18n="添加飞书或远程 Nootify 接入。新会话使用默认 Provider；已有会话保留原来的接入。">添加飞书或远程 Nootify 接入。新会话使用默认 Provider；已有会话保留原来的接入。</p>
     <div id="providers-banner" class="banner" role="alert" hidden></div>
     <div id="providers-readonly" class="banner note" role="status" hidden data-i18n="只能查看连接状态；请在运行 Nootify 的电脑上修改接入和密钥。">只能查看连接状态；请在运行 Nootify 的电脑上修改接入和密钥。</div>
-    <div class="group">
-      <div class="group-head"><div><div class="group-title">Providers</div><div id="providers-summary" class="group-sub" role="status" aria-live="polite"></div></div><div class="setting-actions provider-head-actions"><button type="button" id="providers-retry" class="text-button" data-i18n="重试" hidden>重试</button><button type="button" id="provider-add" class="text-button primary" data-i18n="添加 Provider" disabled>添加 Provider</button></div></div>
-      <div id="provider-rows" class="rows" role="list"></div>
-      <div id="providers-empty" class="empty" hidden><strong data-i18n="还没有 Provider">还没有 Provider</strong><span data-i18n="添加飞书应用，或连接另一台 Nootify。">添加飞书应用，或连接另一台 Nootify。</span></div>
-    </div>
-    <form id="provider-editor" class="group provider-editor" aria-labelledby="provider-editor-title" hidden>
-      <div class="group-head"><div><h2 id="provider-editor-title" class="group-title"></h2><div id="provider-editor-status" class="group-sub"></div></div></div>
+    <div class="providers-toolbar"><button type="button" id="provider-add" class="text-button primary" aria-haspopup="dialog" aria-controls="provider-dialog" disabled><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg><span data-i18n="添加 Provider">添加 Provider</span></button><div id="providers-summary" class="setting-sub" role="status" aria-live="polite"></div><button type="button" id="providers-retry" class="text-button" data-i18n="重试" hidden>重试</button></div>
+    <div id="provider-rows" class="provider-card-list" role="list" aria-label="Providers"></div>
+    <div id="providers-empty" class="empty provider-list-empty" hidden><strong data-i18n="还没有 Provider">还没有 Provider</strong><span data-i18n="添加飞书应用，或连接另一台 Nootify。">添加飞书应用，或连接另一台 Nootify。</span></div>
+    <dialog id="provider-dialog" class="recipient-dialog provider-dialog" aria-labelledby="provider-editor-title" aria-describedby="provider-editor-status">
+      <div class="recipient-dialog-head provider-dialog-head"><button type="button" id="provider-back" class="icon-button" aria-label="返回接入类型" title="返回接入类型" data-i18n-aria-label="返回接入类型" data-i18n-title="返回接入类型" hidden><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m9 3-5 5 5 5M4 8h9"/></svg></button><div><h2 id="provider-editor-title"></h2><p id="provider-editor-status"></p></div><button type="button" id="provider-dialog-close" class="icon-button" aria-label="关闭" data-i18n-aria-label="关闭"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8"/></svg></button></div>
+      <div id="provider-chooser">
+        <label class="recipient-dialog-search provider-type-search"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/></svg><input id="provider-type-search" type="search" placeholder="搜索接入类型" aria-label="搜索接入类型" data-i18n-placeholder="搜索接入类型" data-i18n-aria-label="搜索接入类型" autocomplete="off" spellcheck="false"></label>
+        <div id="provider-type-options" class="provider-type-options" role="group" aria-label="接入类型" data-i18n-aria-label="接入类型">
+          <button type="button" id="provider-choose-feishu" class="provider-type-option" data-provider-type="feishu"><svg class="provider-type-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="6" width="16" height="13" rx="3"/><path d="M12 3v3M8 11h.01M16 11h.01M8 15h8M1 11v4M23 11v4"/></svg><span><strong data-i18n="飞书机器人">飞书机器人</strong><span data-i18n="通过飞书应用收发会话消息。">通过飞书应用收发会话消息。</span></span><svg class="chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m6 3.5 4.5 4.5L6 12.5"/></svg></button>
+          <button type="button" id="provider-choose-remote" class="provider-type-option" data-provider-type="remote"><svg class="provider-type-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/><path d="M10 6.5h4a3.5 3.5 0 0 1 3.5 3.5v4M6.5 10v4a3.5 3.5 0 0 0 3.5 3.5h4"/></svg><span><strong data-i18n="远程 Nootify gRPC">远程 Nootify gRPC</strong><span data-i18n="连接另一台 Nootify，接收并转发会话消息。">连接另一台 Nootify，接收并转发会话消息。</span></span><svg class="chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m6 3.5 4.5 4.5L6 12.5"/></svg></button>
+        </div>
+        <p id="provider-type-empty" class="provider-type-empty" role="status" hidden data-i18n="没有匹配的接入类型">没有匹配的接入类型</p>
+        <div class="recipient-dialog-foot provider-chooser-foot"><button type="button" id="provider-chooser-cancel" class="dialog-secondary" data-i18n="取消">取消</button></div>
+      </div>
+    <form id="provider-editor" class="provider-editor" aria-labelledby="provider-editor-title" hidden>
+      <div class="provider-config-body">
       <fieldset id="provider-fields" class="settings-fields" disabled>
+        <div class="setting"><div class="setting-main"><div class="setting-title" data-i18n="接入类型">接入类型</div></div><span id="provider-type-name" class="setting-sub"></span></div>
         <label class="setting setting-field-row"><span class="setting-main"><span class="setting-title" data-i18n="名称">名称</span></span><input id="provider-name" class="setting-field" type="text" maxlength="120" required autocomplete="off"></label>
-        <div class="setting setting-field-row"><label class="setting-main" for="provider-type"><span class="setting-title" data-i18n="接入类型">接入类型</span></label><select id="provider-type" class="setting-field"><option value="feishu" data-i18n="飞书">飞书</option><option value="remote" data-i18n="远程 Nootify">远程 Nootify</option></select></div>
         <div class="setting setting-with-switch"><div class="setting-main"><label class="setting-title" for="provider-enabled" data-i18n="启用此 Provider">启用此 Provider</label></div><input id="provider-enabled" type="checkbox" role="switch" class="switch" checked></div>
         <fieldset id="provider-feishu-fields" class="settings-fields">
           <label class="setting setting-field-row"><span class="setting-main"><span class="setting-title">App ID</span></span><input id="provider-app-id" class="setting-field mono" type="text" placeholder="cli_…" autocomplete="off" spellcheck="false"></label>
@@ -112,8 +121,10 @@
         </fieldset>
       </fieldset>
       <div id="provider-editor-error" class="form-error" role="alert" hidden></div>
-      <div class="setting provider-editor-foot"><span id="provider-editor-local" class="setting-sub" role="status"></span><div class="setting-actions"><button type="button" id="provider-cancel" class="text-button" data-i18n="取消">取消</button><button type="submit" id="provider-save" class="text-button primary" data-i18n="保存">保存</button></div></div>
+      </div>
+      <div class="recipient-dialog-foot provider-editor-foot"><span id="provider-editor-local" class="setting-sub" role="status"></span><button type="button" id="provider-cancel" class="dialog-secondary" data-i18n="取消">取消</button><button type="submit" id="provider-save" class="dialog-primary" data-i18n="保存">保存</button></div>
     </form>
+    </dialog>
     <dialog id="provider-delete-dialog" class="recipient-dialog confirmation-dialog" aria-labelledby="provider-delete-title" aria-describedby="provider-delete-detail">
       <div class="recipient-dialog-head"><div><h2 id="provider-delete-title" data-i18n="删除 Provider">删除 Provider</h2><p id="provider-delete-detail"></p></div></div>
       <div id="provider-delete-error" class="form-error" role="alert" hidden></div>

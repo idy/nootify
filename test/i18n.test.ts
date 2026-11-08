@@ -66,6 +66,12 @@ test('provider navigation and agent summaries replace the legacy global Feishu e
   assert.doesNotMatch(page, /每台电脑独立轮询/);
   assert.ok(document.querySelector('#channel-state'));
   assert.equal(document.querySelector('#agents-view select'), null);
+  assert.ok(document.querySelector('dialog#provider-dialog #provider-editor'));
+  assert.equal(document.querySelector('#provider-editor select'), null);
+  assert.equal(document.querySelector('#provider-add')!.parentElement!.firstElementChild!.id, 'provider-add');
+  assert.deepEqual([...document.querySelectorAll('#provider-type-options button strong')].map(item => item.textContent), ['飞书机器人', '远程 Nootify gRPC']);
+  assert.equal(translate('en', '远程 Nootify gRPC'), 'Remote Nootify gRPC');
+  assert.equal(translate('en', '搜索接入类型'), 'Search provider types');
   assert.doesNotMatch(page, /slack|telegram/i);
   assert.doesNotMatch(JSON.stringify(english), /slack|telegram|default notification channel/i);
   assert.equal(translate('en', '飞书通知'), 'Feishu notifications');

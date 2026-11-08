@@ -15,7 +15,7 @@ type Core struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 	mu        sync.Mutex
-	ops       sync.Mutex
+	ops       *operationGate
 	providers map[string]Provider
 	statuses  map[string]string
 	subs      map[string]*Subscription
@@ -27,8 +27,15 @@ type Core struct {
 
 func NewCore(parent context.Context, s *Store, emit func(string, any) error) (*Core, error) {
 	ctx, cancel := context.WithCancel(parent)
-	c := &Core{store: s, ctx: ctx, cancel: cancel, providers: map[string]Provider{}, statuses: map[string]string{}, subs: map[string]*Subscription{}, emit: emit, dials: map[string]chan dialResult{}}
+	c := &Core{store: s, ctx: ctx, cancel: cancel, ops: newOperationGate(), providers: map[string]Provider{}, statuses: map[string]string{}, subs: map[string]*Subscription{}, emit: emit, dials: map[string]chan dialResult{}}
 	err := s.Update(func(d *State) error {
+		// Upgrade deleted bindings written before resource tombstones existed.
+		for _, binding := range d.Bindings {
+			if binding.Deleted && binding.ChatID != "" {
+				setResourceOrigin(*d, &binding, d.NodeID)
+				d.RetiredBindings[resourceKey(binding)] = binding
+			}
+		}
 		for id, v := range d.Deliveries {
 			if v.Status == "pending" {
 				v.Status = "unconfirmed"
@@ -109,42 +116,41 @@ func (c *Core) Ensure(ctx context.Context, pid string, s Session) (Binding, erro
 	if err := s.validate(); err != nil {
 		return Binding{}, err
 	}
-	c.ops.Lock()
+	if err := c.ops.LockContext(ctx); err != nil {
+		return Binding{}, err
+	}
 	defer c.ops.Unlock()
-	d := c.store.Snapshot()
-	b, exists := d.Bindings[s.key()]
-	if exists && b.Deleted && automaticEnsure(ctx) {
-		return b, fault("deleted", "automatic enrollment cannot reactivate a deleted session")
+	old, selected, reused, err := c.prepareSession(ctx, pid, s)
+	if err != nil {
+		return old, err
 	}
-	if exists && !b.Deleted {
-		if pid != "" && pid != b.ProviderID {
-			return b, fault("conflict", "session is bound to a different provider")
-		}
-		b.Created = false
-		return b, nil
+	if reused {
+		return old, nil
 	}
-	if exists && b.DeletePending {
-		return b, fault("conflict", "session deletion must complete before reactivation")
+	pid = selected
+	if s.Metadata == nil {
+		s.Metadata = old.Session.Metadata
 	}
-	if exists && b.ProviderID != "" {
-		if pid != "" && pid != b.ProviderID {
-			return b, fault("conflict", "reactivation must use the original provider")
-		}
-		pid = b.ProviderID
-	}
-	if pid == "" {
-		pid = d.DefaultProvider
+	if s.Name == "" {
+		s.Name = old.Session.Name
 	}
 	p, err := c.provider(pid)
 	if err != nil {
-		return b, err
+		return old, err
 	}
-	b, err = p.Ensure(ctx, s)
+	if err := ctx.Err(); err != nil {
+		return old, err
+	}
+	b, err := p.Ensure(ctx, s)
 	if err != nil {
 		return b, err
 	}
 	b.ProviderID = pid
 	b.Session = s
+	setResourceOrigin(c.store.Snapshot(), &b, c.node())
+	if wasRetired(c.store.Snapshot(), b) {
+		return b, fault("conflict", "provider returned a retired notification resource")
+	}
 	b.Created = true
 	b.Deleted = false
 	b.DeletePending = false
@@ -165,7 +171,9 @@ func (c *Core) GetMetadata(ctx context.Context, pid string, s Session) (map[stri
 }
 func (c *Core) SetMetadata(ctx context.Context, pid string, s Session, m map[string]any) (map[string]any, error) {
 	s = c.normalize(s)
-	c.ops.Lock()
+	if err := c.ops.LockContext(ctx); err != nil {
+		return nil, err
+	}
 	defer c.ops.Unlock()
 	b, err := c.binding(pid, s)
 	if err != nil {
@@ -187,7 +195,9 @@ func (c *Core) Delete(ctx context.Context, pid string, s Session) error {
 	if err := s.validate(); err != nil {
 		return err
 	}
-	c.ops.Lock()
+	if err := c.ops.LockContext(ctx); err != nil {
+		return err
+	}
 	defer c.ops.Unlock()
 	d := c.store.Snapshot()
 	b, ok := d.Bindings[s.key()]
@@ -202,59 +212,123 @@ func (c *Core) Delete(ctx context.Context, pid string, s Session) error {
 		return c.store.Update(func(d *State) error { recordTombstone(d, b); return nil })
 	}
 	b.Deleted = true
-	b.DeletePending = true
+	b.DeletePending = b.ChatID != ""
+	setResourceOrigin(d, &b, d.NodeID)
 	if err := c.store.Update(func(d *State) error { recordTombstone(d, b); return nil }); err != nil {
 		return err
 	}
-	p, err := c.provider(b.ProviderID)
-	if err != nil {
-		return err
+	c.wakePeers()
+	if !b.DeletePending {
+		return nil
 	}
-	if err = p.Delete(ctx, b); err != nil {
-		return err
+	// Removed providers cannot be contacted. The mapping stays tombstoned and
+	// retired; explicit Ensure/Bind may select an available replacement.
+	if _, configured := d.Providers[b.ProviderID]; !configured {
+		return nil
 	}
-	b.DeletePending = false
-	return c.store.Update(func(d *State) error { d.Bindings[s.key()] = b; return nil })
+	return c.cleanupBinding(ctx, &b)
 }
-func (c *Core) operation(ctx context.Context, key string, input any, fn func() (SendResult, error)) (SendResult, error) {
-	c.ops.Lock()
+func (c *Core) operation(ctx context.Context, key, request string, input any, automatic bool, fn func(string) (SendResult, error)) (SendResult, error) {
+	if err := c.ops.LockContext(ctx); err != nil {
+		return SendResult{}, err
+	}
 	defer c.ops.Unlock()
-	b, _ := json.Marshal(input)
-	h := sha256.Sum256(b)
-	finger := hex.EncodeToString(h[:])
+	raw, err := json.Marshal(input)
+	if err != nil {
+		return SendResult{}, err
+	}
+	hash := sha256.Sum256(raw)
+	finger := hex.EncodeToString(hash[:])
+	if automatic {
+		key = "auto-send:" + finger
+	}
 	if key != "" {
-		d := c.store.Snapshot()
-		if prev, ok := d.Operations[key]; ok {
-			if prev.Fingerprint != finger {
+		if previous, exists := c.store.Snapshot().Operations[key]; exists {
+			if previous.Fingerprint != finger {
 				return SendResult{}, fault("conflict", "request ID was used for a different operation")
 			}
-			if prev.State != "complete" {
+			switch previous.State {
+			case "complete":
+				if !automatic {
+					var result SendResult
+					err := json.Unmarshal(previous.Result, &result)
+					return result, err
+				}
+			case "terminal":
+				if !automatic {
+					if previous.Failure != nil {
+						return SendResult{}, decodeOperationError(previous.Failure.Code, previous.Failure.Message)
+					}
+					return SendResult{}, rejectOperation(false, "request was definitively rejected")
+				}
+			case "retryable":
+				request = previous.RequestID
+			default:
 				return SendResult{}, fault("unconfirmed", "previous send may have succeeded; automatic retry is unsafe")
 			}
-			var r SendResult
-			err := json.Unmarshal(prev.Result, &r)
-			return r, err
 		}
-		if err := c.store.Update(func(d *State) error { d.Operations[key] = Operation{State: "pending", Fingerprint: finger}; return nil }); err != nil {
+		if automatic && request == "" {
+			request = uid()
+		}
+		if err := ctx.Err(); err != nil {
+			return SendResult{}, err
+		}
+		if err := c.store.Update(func(d *State) error {
+			d.Operations[key] = Operation{State: "pending", Fingerprint: finger, RequestID: request}
+			return nil
+		}); err != nil {
 			return SendResult{}, err
 		}
 	}
-	r, err := fn()
+	// Cancellation while fsyncing is a proven pre-submission failure.
+	if err = ctx.Err(); err != nil {
+		rejection := rejectOperation(true, "request expired before provider submission")
+		if key != "" {
+			if persistErr := c.store.Update(func(d *State) error {
+				op := d.Operations[key]
+				op.State = "retryable"
+				op.Failure = publicError(rejection)
+				d.Operations[key] = op
+				return nil
+			}); persistErr != nil {
+				return SendResult{}, persistErr
+			}
+		}
+		return SendResult{}, rejection
+	}
+	result, err := fn(request)
 	if err != nil {
-		return r, err
+		state, proven := rejectionState(err)
+		responseErr := err
+		if !proven {
+			state = "unconfirmed"
+			responseErr = fault("unconfirmed", "provider outcome is unknown; do not automatically resubmit this request")
+		}
+		if key != "" {
+			if persistErr := c.store.Update(func(d *State) error {
+				op := d.Operations[key]
+				op.State = state
+				op.Failure = publicError(responseErr)
+				d.Operations[key] = op
+				return nil
+			}); persistErr != nil {
+				return result, persistErr
+			}
+		}
+		return result, responseErr
 	}
 	err = c.store.Update(func(d *State) error {
-		remember(d, r.Message, "")
+		remember(d, result.Message, "")
 		if key != "" {
-			raw, e := json.Marshal(r)
+			raw, e := json.Marshal(result)
 			if e != nil {
 				return e
 			}
-			d.Operations[key] = Operation{State: "complete", Fingerprint: finger, Result: raw}
+			d.Operations[key] = Operation{State: "complete", Fingerprint: finger, RequestID: request, Result: raw}
 		}
 		return nil
 	})
-	return r, err
+	return result, err
 }
 func (c *Core) Send(ctx context.Context, pid string, s Session, content Content, request string) (SendResult, error) {
 	s = c.normalize(s)
@@ -265,15 +339,27 @@ func (c *Core) Send(ctx context.Context, pid string, s Session, content Content,
 	if err != nil {
 		return SendResult{}, err
 	}
-	p, err := c.provider(b.ProviderID)
-	if err != nil {
+	if _, err := c.provider(b.ProviderID); err != nil {
 		return SendResult{}, err
 	}
 	key := ""
 	if request != "" {
 		key = "send:" + s.key() + ":" + request
 	}
-	return c.operation(ctx, key, []any{s, content}, func() (SendResult, error) { return p.Send(ctx, b, content, request) })
+	return c.operation(ctx, key, request, []any{b.ProviderID, s.key(), content}, request == "", func(effectiveRequest string) (SendResult, error) {
+		live, err := c.binding(b.ProviderID, s)
+		if err != nil {
+			return SendResult{}, rejectOperation(false, "notification binding changed before submission")
+		}
+		if live.ChatID != b.ChatID {
+			return SendResult{}, rejectOperation(false, "notification resource changed before submission")
+		}
+		current, err := c.provider(live.ProviderID)
+		if err != nil {
+			return SendResult{}, rejectOperation(true, "provider is unavailable before submission")
+		}
+		return current.Send(ctx, live, content, effectiveRequest)
+	})
 }
 func remember(d *State, m MessageRef, route string) {
 	k := m.key()
@@ -337,7 +423,7 @@ func (c *Core) Reply(ctx context.Context, m MessageRef, content Content, request
 	if request != "" {
 		key = "reply:" + m.key() + ":" + request
 	}
-	return c.operation(ctx, key, []any{m, content}, func() (SendResult, error) { return p.Reply(ctx, m, content, request) })
+	return c.operation(ctx, key, request, []any{m, content}, false, func(effectiveRequest string) (SendResult, error) { return p.Reply(ctx, m, content, effectiveRequest) })
 }
 func (c *Core) Ack(ctx context.Context, m MessageRef) (map[string]any, error) {
 	if !m.valid() {
@@ -412,7 +498,7 @@ func (c *Core) Ingest(ctx context.Context, e Event, route string) error {
 		e.Hops--
 		record := EventRecord{Event: e}
 		b, bound := d.Bindings[e.Session.key()]
-		if bound && b.Deleted {
+		if bound && b.Deleted || retiredResource(d, e) {
 			record.Outcome = "deleted"
 		} else if e.Session.NodeID == node {
 			record.Outcome = "local"
@@ -421,15 +507,12 @@ func (c *Core) Ingest(ctx context.Context, e Event, route string) error {
 			delivery = &v
 		} else {
 			record.Outcome = "broadcast"
+			d.BroadcastSequence++
+			record.Sequence = d.BroadcastSequence
+			d.Events[e.ID] = record
+			log := broadcastLog(d)
 			for id, p := range d.Peers {
-				if contains(e.Visited, id) {
-					continue
-				}
-				if len(p.Pending) >= maxPending {
-					return fault("resource_exhausted", "downstream pending queue is full")
-				}
-				p.Pending = append(p.Pending, e.ID)
-				d.Peers[id] = p
+				d.Peers[id] = refillPeer(p, log)
 				wake = append(wake, id)
 			}
 		}
@@ -478,6 +561,7 @@ type Subscription struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 	signal  chan struct{}
+	mu      sync.Mutex
 	offered map[string]bool
 }
 
@@ -486,14 +570,17 @@ func (c *Core) Subscribe(ctx context.Context, node, name string) (*Subscription,
 		return nil, fault("invalid_argument", "invalid subscriber identity")
 	}
 	if err := c.store.Update(func(d *State) error {
-		p := d.Peers[node]
+		p, exists := d.Peers[node]
+		if !exists {
+			p.Cursor = d.BroadcastSequence
+		}
 		p.NodeID = node
 		p.Name = name
 		p.ConnectedAt = now()
 		if p.Pending == nil {
 			p.Pending = []string{}
 		}
-		d.Peers[node] = p
+		d.Peers[node] = refillPeer(p, broadcastLog(d))
 		return nil
 	}); err != nil {
 		return nil, err
@@ -521,18 +608,34 @@ func (c *Core) wake(node string) {
 }
 func (s *Subscription) Next() (Event, error) {
 	for {
+		if err := s.ctx.Err(); err != nil {
+			return Event{}, err
+		}
+		s.mu.Lock()
 		d := s.core.store.Snapshot()
 		p := d.Peers[s.node]
+		pendingSet := make(map[string]bool, len(p.Pending))
+		for _, id := range p.Pending {
+			pendingSet[id] = true
+		}
+		for id := range s.offered {
+			if !pendingSet[id] {
+				delete(s.offered, id)
+			}
+		}
 		for _, id := range p.Pending {
 			if !s.offered[id] {
 				r, ok := d.Events[id]
 				if !ok {
+					s.mu.Unlock()
 					return Event{}, fmt.Errorf("pending event is missing")
 				}
 				s.offered[id] = true
+				s.mu.Unlock()
 				return r.Event, nil
 			}
 		}
+		s.mu.Unlock()
 		select {
 		case <-s.ctx.Done():
 			return Event{}, s.ctx.Err()
@@ -541,7 +644,9 @@ func (s *Subscription) Next() (Event, error) {
 	}
 }
 func (s *Subscription) Confirm(id string) error {
-	return s.core.store.Update(func(d *State) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	err := s.core.store.Update(func(d *State) error {
 		p, ok := d.Peers[s.node]
 		if !ok {
 			return fault("not_found", "subscriber does not exist")
@@ -550,12 +655,17 @@ func (s *Subscription) Confirm(id string) error {
 			if v == id {
 				p.Pending = append(p.Pending[:i:i], p.Pending[i+1:]...)
 				p.LastAck = now()
-				d.Peers[s.node] = p
+				d.Peers[s.node] = refillPeer(p, broadcastLog(d))
 				return nil
 			}
 		}
 		return nil
 	})
+	if err == nil {
+		delete(s.offered, id)
+		s.core.wake(s.node)
+	}
+	return err
 }
 func (s *Subscription) Close() {
 	s.cancel()
@@ -601,8 +711,9 @@ func summary(p ProviderConfig, status string) ProviderSummary {
 }
 func remoteSummary(d State, status string) RemoteSummary {
 	r := RemoteSummary{Enabled: d.Remote.Enabled, Listen: d.Remote.Listen, Status: status, TLS: d.Remote.CertFile != "", TokenSet: d.Remote.Token != "", CertFile: d.Remote.CertFile, KeyFile: d.Remote.KeyFile, Peers: []PeerSummary{}}
+	log := broadcastLog(&d)
 	for _, p := range d.Peers {
-		r.Peers = append(r.Peers, PeerSummary{NodeID: p.NodeID, Name: p.Name, ConnectedAt: p.ConnectedAt, Pending: len(p.Pending), LastAck: p.LastAck})
+		r.Peers = append(r.Peers, PeerSummary{NodeID: p.NodeID, Name: p.Name, ConnectedAt: p.ConnectedAt, Pending: pendingCount(p, log), LastAck: p.LastAck})
 	}
 	sort.Slice(r.Peers, func(i, j int) bool { return r.Peers[i].NodeID < r.Peers[j].NodeID })
 	return r

@@ -289,26 +289,63 @@ label.row:hover { background: var(--hover); }
 .secret-field .icon-button { position: absolute; top: 1px; right: 2px; }
 .secret-field .icon-button:disabled { color: var(--faint); cursor: default; }
 .secret-field .icon-button:disabled:hover { background: none; }
-/* Provider forms use the same compact rows; status belongs to the saved connection. */
-#providers-view > .group { max-width: 960px; }
+/* Provider instances are individual cards; the chooser and editor share one dialog. */
+.providers-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; max-width: 960px; margin: 0 0 12px; }
+.providers-toolbar .setting-sub { margin: 0; }
+#provider-add { gap: 6px; margin-left: -10px; }
+#provider-add svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
+.provider-card-list { display: grid; gap: 12px; max-width: 960px; }
+.provider-card { min-width: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+.provider-list-empty { max-width: 960px; padding: 36px 16px; }
+.provider-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 12px 16px; padding: 16px; }
+.provider-row-title { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; min-width: 0; }
+.provider-row-title .setting-title { overflow-wrap: anywhere; }
+.provider-identity { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+.provider-row .setting-actions { grid-column: 1 / -1; width: 100%; }
+.provider-status { margin-top: 3px; font-size: var(--type-meta); }
+.provider-error { max-width: 70ch; }
+.provider-enable-label { display: inline-flex; align-items: center; gap: 8px; margin-right: auto; }
+.provider-enable-label .setting-sub { margin: 0; }
 .settings-fields { min-width: 0; margin: 0; padding: 0; border: 0; }
-.settings-fields > .settings-fields, .settings-fields + .setting, .provider-editor-foot { border-top: 1px solid var(--line-soft); }
+.settings-fields > .settings-fields, .settings-fields + .setting { border-top: 1px solid var(--line-soft); }
 .settings-fields:disabled .setting-field { color: var(--faint); }
 .settings-fields .setting-field:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
 .settings-fields select.setting-field { padding-right: 26px; }
-.provider-editor .group-title, #remote-title { margin: 0; }
-.provider-editor .setting-main { flex-basis: 220px; }
-.provider-head-actions { margin-left: auto; }
-.provider-row { gap: 12px; flex-wrap: wrap; }
-.provider-row .setting-main { flex: 1 1 180px; }
-.provider-row-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.provider-row-title .setting-title { overflow-wrap: anywhere; }
-.provider-row .setting-actions { margin-left: auto; }
-.provider-status { flex: none; font-size: var(--type-meta); }
-.provider-error { max-width: 70ch; }
-.provider-enable-label { display: inline-flex; align-items: center; gap: 8px; margin-right: 6px; }
-.provider-enable-label .setting-sub { margin: 0; }
-.provider-editor-foot { justify-content: space-between; }
+#remote-title { margin: 0; }
+.provider-dialog.recipient-dialog { width: min(600px, calc(100vw - 32px)); }
+.provider-dialog-head { flex: none; padding-bottom: 16px; }
+.provider-dialog-head > div { flex: 1; min-width: 0; }
+.provider-dialog-head p { overflow-wrap: anywhere; }
+.provider-dialog-head #provider-back { margin-left: -6px; }
+#provider-chooser { min-height: 0; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+.provider-type-search { margin-bottom: 12px; }
+.provider-type-options { padding: 0 12px 16px; }
+.provider-type-option { display: flex; align-items: center; gap: 14px; width: 100%; min-height: 80px; padding: 14px 12px; border-radius: 8px; text-align: left; }
+.provider-type-option + .provider-type-option { border-top: 1px solid var(--line-soft); }
+.provider-type-option:hover { background: var(--hover); }
+.provider-type-option:disabled { color: var(--faint); cursor: default; }
+.provider-type-option:disabled:hover { background: none; }
+.provider-type-icon { width: 28px; height: 28px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; color: var(--muted); }
+.provider-type-option > span { flex: 1; min-width: 0; }
+.provider-type-option strong { display: block; font-size: var(--type-primary); font-weight: 500; line-height: 20px; }
+.provider-type-option > span > span { display: block; margin-top: 4px; color: var(--muted); font-size: var(--type-meta); line-height: 1.6; }
+.provider-type-option .chevron { width: 16px; height: 16px; }
+.provider-type-empty { margin: 0; padding: 28px 24px 40px; color: var(--muted); font-size: var(--type-body); text-align: center; }
+.provider-chooser-foot.recipient-dialog-foot { display: flex; justify-content: flex-end; min-height: 62px; }
+.provider-editor { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.provider-config-body { min-height: 0; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+.provider-editor .setting { padding-inline: 24px; }
+.provider-editor .setting-main { flex-basis: 200px; }
+.provider-editor .setting-field, .provider-editor .secret-field { flex-basis: 280px; }
+.provider-editor-foot.recipient-dialog-foot { display: flex; flex-wrap: wrap; justify-content: flex-end; }
+.provider-editor-foot #provider-editor-local { display: block; flex: 1; white-space: normal; }
+@media (max-width: 640px) {
+  .provider-dialog .setting-field-row { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  .provider-dialog .setting-field-row .setting-field { width: 100%; font-size: 16px; }
+  .provider-dialog .setting { padding-inline: 18px; }
+  .provider-dialog .setting-main { flex-basis: auto; }
+  .provider-dialog .provider-type-option { gap: 12px; }
+}
 .form-error { margin: 0; padding: 10px 16px; color: var(--red); font-size: var(--type-body); overflow-wrap: anywhere; }
 .danger:not(:disabled) { color: var(--red); }
 .dialog-primary.danger { border-color: var(--red); background: var(--red); color: var(--panel); }
@@ -320,8 +357,7 @@ label.row:hover { background: var(--hover); }
 #remote-state { margin-left: auto; font-size: var(--type-meta); }
 #remote-save-note { flex: 1; }
 @container workspace (max-width: 640px) {
-  .provider-row .setting-main { flex-basis: calc(100% - 100px); }
-  .provider-row .setting-actions { width: 100%; }
+  .provider-row .setting-actions { gap: 2px; }
   .provider-editor .setting-main { flex-basis: auto; }
   .remote-peer-row { flex-wrap: wrap; gap: 6px 12px; }
   .remote-peer-row .row-main { flex-basis: 100%; }

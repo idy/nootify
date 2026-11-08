@@ -40,9 +40,12 @@ test('provider and remote-access UI performs real mutations, preserves secrets a
   const field = (id: string) => element(id) as HTMLInputElement;
   const button = (id: string) => element(id) as HTMLButtonElement;
   const dialog = element('provider-delete-dialog') as HTMLDialogElement;
-  Object.defineProperty(dialog, 'open', { configurable: true, get: () => dialog.hasAttribute('open') });
-  dialog.showModal = () => { dialog.setAttribute('open', ''); };
-  dialog.close = () => { dialog.removeAttribute('open'); };
+  const providerDialog = element('provider-dialog') as HTMLDialogElement;
+  for (const nativeDialog of [dialog, providerDialog]) {
+    Object.defineProperty(nativeDialog, 'open', { configurable: true, get: () => nativeDialog.hasAttribute('open') });
+    nativeDialog.showModal = () => { nativeDialog.setAttribute('open', ''); };
+    nativeDialog.close = () => { nativeDialog.removeAttribute('open'); };
+  }
   const timers: { run: () => void; milliseconds: number }[] = [];
   t.mock.method(globalThis, 'setInterval', ((run: () => void, milliseconds: number) => {
     timers.push({ run, milliseconds }); return {} as NodeJS.Timeout;
@@ -130,14 +133,48 @@ test('provider and remote-access UI performs real mutations, preserves secrets a
     assert.equal(secretReads, 0);
   });
 
-  await t.test('adding Feishu saves exact credentials and displays names as escaped text', async () => {
+  const key = (id: string, value: string) => {
+    const event = new window.Event('keydown', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'key', { value }); element(id).dispatchEvent(event);
+  };
+  await t.test('Add opens only two provider choices with search, keyboard navigation, Back and cancellable drafts', () => {
+    assert.equal(element('provider-add').parentElement!.firstElementChild, element('provider-add'), 'Add is the first action at the upper left');
     button('provider-add').click();
+    assert.equal(providerDialog.open, true); assert.equal(element('provider-chooser').hidden, false);
+    assert.equal(element('provider-editor').hidden, true); assert.equal(document.activeElement, element('provider-type-search'));
+    assert.equal(document.querySelectorAll('#provider-type-options button').length, 2);
+    assert.equal(element('provider-choose-feishu').querySelector('strong')!.textContent, 'Feishu bot');
+    assert.equal(element('provider-choose-remote').querySelector('strong')!.textContent, 'Remote Nootify gRPC');
+    submit('provider-editor'); assert.equal(providerWrites.length, 0, 'Choosing a type does not save anything');
+    key('provider-type-search', 'ArrowDown'); assert.equal(document.activeElement, element('provider-choose-feishu'));
+    key('provider-choose-feishu', 'ArrowDown'); assert.equal(document.activeElement, element('provider-choose-remote'));
+    key('provider-choose-remote', 'Home'); assert.equal(document.activeElement, element('provider-choose-feishu'));
+    change('provider-type-search', 'unavailable'); assert.equal(element('provider-type-empty').hidden, false);
+    change('provider-type-search', 'grpc'); assert.equal(element('provider-choose-feishu').hidden, true);
+    key('provider-type-search', 'Enter'); assert.equal(element('provider-remote-fields').hidden, false);
+    assert.equal(element('provider-chooser').hidden, true); assert.equal(document.activeElement, element('provider-name'));
+    change('provider-token', 'synthetic-draft-token'); button('provider-back').click();
+    assert.equal(element('provider-chooser').hidden, false); assert.equal(field('provider-token').value, '');
+    assert.equal(field('provider-type-search').value, ''); assert.equal(document.activeElement, element('provider-choose-remote'));
+    button('provider-choose-feishu').click(); change('provider-app-secret', 'synthetic-draft-secret');
+    key('provider-name', 'Escape'); assert.equal(providerDialog.open, false); assert.equal(field('provider-app-secret').value, '');
+    assert.equal(document.activeElement, element('provider-add')); assert.equal(providerWrites.length, 0);
+    button('provider-add').click(); providerDialog.dispatchEvent(new window.Event('cancel', { cancelable: true }));
+    assert.equal(providerDialog.open, false); assert.equal(document.activeElement, element('provider-add'));
+    button('provider-add').click(); button('provider-dialog-close').click(); assert.equal(providerDialog.open, false);
+  });
+
+  await t.test('adding Feishu saves exact credentials and displays names as escaped text', async () => {
+    button('provider-add').click(); button('provider-choose-feishu').click();
     change('provider-name', '<img src=x onerror=alert(1)>'); change('provider-app-id', 'cli_synthetic');
     change('provider-app-secret', 'synthetic-feishu-secret'); change('provider-recipient', 'ou_synthetic');
     submit('provider-editor');
     assert.equal(button('provider-save').disabled, true);
     await until(() => element('provider-editor').hidden, 'Feishu provider did not save');
     assert.equal(providers.length, 1); assert.equal(providers[0].type, 'feishu');
+    assert.equal(providerDialog.open, false);
+    assert.equal(providerRow('provider-1').classList.contains('provider-card'), true);
+    assert.equal(providerRow('provider-1').closest('.group'), null, 'Instance cards are not nested in a group card');
     assert.equal(secrets.get('provider-1'), 'synthetic-feishu-secret');
     assert.equal(providerRow('provider-1').querySelector('.setting-title')!.textContent, '<img src=x onerror=alert(1)>');
     assert.equal(providerRow('provider-1').querySelector('img'), null);
@@ -149,7 +186,9 @@ test('provider and remote-access UI performs real mutations, preserves secrets a
     providerButton('provider-1', 'edit').click();
     assert.equal(field('provider-app-secret').value, '');
     assert.equal(field('provider-recipient').value, 'ou_synthetic');
-    assert.equal(field('provider-type').disabled, true);
+    assert.equal(providerDialog.open, true); assert.equal(element('provider-chooser').hidden, true);
+    assert.equal(element('provider-back').hidden, true); assert.equal(element('provider-type-name').textContent, 'Feishu');
+    assert.equal(document.querySelector('#provider-editor select'), null);
     assert.match(element('provider-secret-hint').textContent!, /leave blank to keep/i);
     change('provider-name', 'Work Feishu'); submit('provider-editor');
     await until(() => element('provider-editor').hidden, 'Provider edit did not finish');
@@ -160,7 +199,7 @@ test('provider and remote-access UI performs real mutations, preserves secrets a
   });
 
   await t.test('remote providers save TLS options, change the default and preserve tokens when toggled', async () => {
-    button('provider-add').click(); select('provider-type', 'remote');
+    button('provider-add').click(); button('provider-choose-remote').click();
     assert.equal(element('provider-feishu-fields').hidden, true);
     assert.equal(element('provider-remote-fields').hidden, false);
     change('provider-name', 'Remote home'); change('provider-address', 'home.example:9418');
@@ -187,6 +226,7 @@ test('provider and remote-access UI performs real mutations, preserves secrets a
     const before = providerWrites.length; submit('provider-editor'); submit('provider-editor');
     assert.equal((element('provider-fields') as HTMLFieldSetElement).disabled, true);
     assert.equal(button('provider-save').disabled, true); assert.equal(providerWrites.length, before + 1);
+    assert.equal(button('provider-dialog-close').disabled, true); key('provider-name', 'Escape'); assert.equal(providerDialog.open, true, 'A pending mutation retains the dialog');
     releaseProvider!();
     await until(() => !button('provider-save').disabled, 'Save failure left the editor busy');
     assert.equal(field('provider-name').value, 'Retry this name');
@@ -223,6 +263,19 @@ test('provider and remote-access UI performs real mutations, preserves secrets a
     button('provider-add').click(); providerButton('provider-1', 'delete').click();
     assert.equal(element('provider-editor').hidden, true); assert.equal(dialog.open, false); assert.equal(providerWrites.length, before);
     editable = true;
+  });
+
+  await t.test('editing can cancel with focus restored, and a permission change disables an already open dialog', async () => {
+    poll(); await until(() => !button('provider-add').disabled, 'Local provider controls did not restore');
+    providerButton('provider-1', 'edit').click(); change('provider-app-secret', 'synthetic-discarded-secret');
+    const before = providerWrites.length; button('provider-cancel').click();
+    assert.equal(providerDialog.open, false); assert.equal(field('provider-app-secret').value, '');
+    assert.equal(providerWrites.length, before); assert.equal(document.activeElement?.getAttribute('data-key'), 'provider-edit-provider-1');
+    providerButton('provider-1', 'edit').click(); editable = false; poll();
+    await until(() => (element('provider-fields') as HTMLFieldSetElement).disabled, 'Permission update did not disable dialog fields');
+    assert.equal(button('provider-save').disabled, true); assert.match(element('provider-editor-local').textContent!, /local computer/);
+    submit('provider-editor'); assert.equal(providerWrites.length, before);
+    button('provider-cancel').click(); assert.equal(providerDialog.open, false); editable = true;
   });
 
   await t.test('remote access shows independently acknowledged downstreams and saves listener/TLS settings', async () => {
@@ -285,12 +338,21 @@ test('provider and remote-access UI performs real mutations, preserves secrets a
     assert.equal(remoteWrites.length, before); assert.equal(secretReads, reveals);
   });
 
-  await t.test('new provider and remote labels translate without changing user data', () => {
+  await t.test('new provider and remote labels translate without changing user data', async () => {
     select('language', 'zh-CN');
     assert.equal(element('crumb-page').textContent, '远程接入'); assert.equal(element('remote-title').textContent, '远程接入');
     assert.equal(element('remote-peer-rows').querySelector('.row-title')!.textContent, '<b>Desktop A</b>');
     assert.match(element('remote-peer-rows').textContent!, /2 条待确认/);
     navigate('#/providers'); assert.equal(element('provider-add').textContent, '添加 Provider');
     assert.equal(providerRow('provider-1').querySelector('.setting-title')!.textContent, 'Retry this name');
+    editable = true; poll(); await until(() => !button('provider-add').disabled, 'Provider chooser did not regain local access');
+    button('provider-add').click();
+    assert.equal(element('provider-editor-title').textContent, '添加 Provider');
+    assert.equal(element('provider-choose-feishu').querySelector('strong')!.textContent, '飞书机器人');
+    assert.equal(element('provider-choose-remote').querySelector('strong')!.textContent, '远程 Nootify gRPC');
+    change('provider-type-search', '飞书'); assert.equal(element('provider-choose-remote').hidden, true);
+    button('provider-choose-feishu').click(); assert.equal(element('provider-editor-title').textContent, '配置飞书');
+    select('language', 'en'); assert.equal(element('provider-editor-title').textContent, 'Configure Feishu');
+    button('provider-cancel').click(); assert.equal(providerDialog.open, false);
   });
 });

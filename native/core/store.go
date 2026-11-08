@@ -24,6 +24,8 @@ type State struct {
 	Migrated           bool                       `json:"legacy_migrated"`
 	Bindings           map[string]Binding         `json:"bindings"`
 	Events             map[string]EventRecord     `json:"events"`
+	BroadcastSequence  uint64                     `json:"broadcast_sequence,omitempty"`
+	RetiredBindings    map[string]Binding         `json:"retired_bindings"`
 	Deliveries         map[string]Delivery        `json:"deliveries"`
 	References         map[string]ReferenceRecord `json:"references"`
 	Peers              map[string]Peer            `json:"peers"`
@@ -150,6 +152,9 @@ func (s *Store) initMaps() {
 	if d.Operations == nil {
 		d.Operations = map[string]Operation{}
 	}
+	if d.RetiredBindings == nil {
+		d.RetiredBindings = map[string]Binding{}
+	}
 }
 func cloneState(d State) State {
 	b, _ := json.Marshal(d)
@@ -169,7 +174,7 @@ func (s *Store) Update(fn func(*State) error) error {
 	if err := fn(&n); err != nil {
 		return err
 	}
-	if len(n.Events) > maxRecords || len(n.Bindings) > maxRecords || len(n.References) > maxRecords || len(n.Operations) > maxRecords || len(n.Deliveries) > maxRecords || len(n.Peers) > maxPeers || len(n.ProviderTombstones) > maxRecords || len(n.Providers) > maxRecords {
+	if len(n.Events) > maxRecords || len(n.Bindings) > maxRecords || len(n.References) > maxRecords || len(n.Operations) > maxRecords || len(n.Deliveries) > maxRecords || len(n.Peers) > maxPeers || len(n.ProviderTombstones) > maxRecords || len(n.Providers) > maxRecords || len(n.RetiredBindings) > maxRecords {
 		return fault("resource_exhausted", "durable ledger limit reached")
 	}
 	b, err := json.Marshal(n)

@@ -146,7 +146,11 @@ func (p *feishuProvider) Ensure(ctx context.Context, s Session) (Binding, error)
 	if len(runes) > 70 {
 		name = string(runes[:70])
 	}
-	hash := sha256.Sum256([]byte(s.key() + "\n" + p.config.AppID + "\n" + p.config.Recipient))
+	identity := s.key() + "\n" + p.config.AppID + "\n" + p.config.Recipient
+	if incarnation := resourceIncarnation(p.core.store.Snapshot(), s); incarnation != "" {
+		identity += "\n" + incarnation
+	}
+	hash := sha256.Sum256([]byte(identity))
 	var result struct {
 		ChatID string `json:"chat_id"`
 	}
