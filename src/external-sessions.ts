@@ -55,7 +55,14 @@ export class ExternalSessions implements ExternalResolver {
       const home = this.options.codexHome ?? process.env.CODEX_HOME ?? join(homedir(), '.codex');
       const path = this.options.codexDesktopSocket ?? join(home, 'ipc', 'ipc.sock');
       try { await stat(path); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return blocked('backend_unavailable'); throw error; }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          // A selected Desktop transport may remove its socket while restarting.
+          if (this.desktop?.path === path) throw new RetryableDeliveryError('Codex Desktop socket is temporarily unavailable');
+          return blocked('backend_unavailable');
+        }
+        throw error;
+      }
       if (this.desktop?.path !== path) { this.desktop?.close(); this.desktop = new CodexDesktop(path); }
       const desktop = this.desktop;
       await desktop.ready(id);

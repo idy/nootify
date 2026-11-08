@@ -163,8 +163,11 @@ test('a regular file cannot stand in for the Desktop socket', options, async t =
   await assert.rejects(desktop.ready(thread), RetryableDeliveryError); desktop.close();
 });
 
-for (const reconnect of [false, true]) test(reconnect ? 'Feishu safely retries a Desktop reconnect failure before input'
-  : 'Feishu receives its reaction only after automatic Desktop routing is accepted', options, async t => {
+for (const [name, failedAttempts] of [
+  ['Feishu receives its reaction only after automatic Desktop routing is accepted', 0],
+  ['Feishu safely retries a Desktop reconnect failure before input', 1],
+  ['Feishu retains retryability while the selected Desktop socket remains missing', 3],
+] as const) test(name, options, async t => {
   const f = await fixture(t, 'idle');
   const db = new DatabaseSync(join(f.directory, 'state_5.sqlite'));
   db.exec('CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT NOT NULL, archived INTEGER NOT NULL)');
@@ -172,7 +175,7 @@ for (const reconnect of [false, true]) test(reconnect ? 'Feishu safely retries a
   const state = await State.open(join(f.directory, 'nootify'));
   state.bindings.set('oc_desktop', { chat_id: 'oc_desktop', session_id: thread, sender_open_id: 'ou_owner', adapter: 'codex' });
   const external = new ExternalSessions(state, { codexHome: f.directory, codexDesktopSocket: f.path });
-  if (reconnect) {
+  if (failedAttempts > 0) {
     const ready = CodexDesktop.prototype.ready;
     let disconnect = true;
     t.mock.method(CodexDesktop.prototype, 'ready', async function(this: CodexDesktop, id: string) {
@@ -199,14 +202,14 @@ for (const reconnect of [false, true]) test(reconnect ? 'Feishu safely retries a
     assert.equal(state.backends.size, 0, 'no guessed WebSocket endpoint is needed');
     const payload = { sender: { sender_type: 'user', sender_id: { open_id: 'ou_owner' } }, message: {
       chat_id: 'oc_desktop', message_id: 'om_desktop', message_type: 'text', content: JSON.stringify({ text: 'hello' }) } };
-    if (reconnect) {
-      assert.equal(await lark.enqueue(payload), false, 'a disconnect before input must retain the reply for retry');
+    for (let attempt = 0; attempt < failedAttempts; attempt++) {
+      assert.equal(await lark.enqueue(payload), false, 'pre-input Desktop failures must retain the reply for retry');
       assert.equal(state.larkDelivery('om_desktop')?.transport_status, 'delivery_failed');
       assert.equal(state.larkDelivery('om_desktop')?.retryable, true);
       assert.equal(reactions.length, 0);
       assert.equal(f.requests.filter(request => request.method === 'thread-follower-steer-turn' || request.method === 'thread-follower-start-turn').length, 0);
-      await f.restoreSocket();
     }
+    if (failedAttempts > 0) await f.restoreSocket();
     assert.equal(await lark.enqueue(payload), true); assert.equal(await lark.enqueue(payload), true);
     assert.equal(state.larkDelivery('om_desktop')?.transport_status, 'input_accepted');
     assert.equal(state.larkDelivery('om_desktop')?.retryable, undefined);
