@@ -13,6 +13,35 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  headless-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      CGO_ENABLED: '0'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.22.2
+          cache: npm
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: native/core/go.mod
+          cache-dependency-path: native/core/go.sum
+      - run: npm ci
+      - name: Exercise CLI, TypeScript service and Go gRPC nodes without a desktop
+        run: npm run test:integration
+      - name: Upload headless integration report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: headless-integration-report
+          path: .cache/headless-integration.xml
+          if-no-files-found: ignore
+          retention-days: 7
+
   test:
     strategy:
       fail-fast: false
@@ -62,6 +91,19 @@ jobs:
           go vet ./...
 
       - run: npm ci
+
+      - name: Run headless process integration tests
+        timeout-minutes: 5
+        run: npm run test:integration
+
+      - name: Upload headless integration report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: headless-integration-${{ matrix.target }}
+          path: .cache/headless-integration.xml
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Probe native Windows installer hooks
         if: runner.os == 'Windows'

@@ -46,6 +46,18 @@ npm run core:test
 
 `npm test` discovers test files without relying on shell glob expansion, sets a three-minute default test timeout, and writes `.cache/test-results.xml` in JUnit format. Windows runs test files serially to keep full-sync SQLite fixtures and native compiler children within the hosted runner's disk and CPU budget; concurrency inside individual tests is unchanged. CI uploads that report for each platform and limits the test step to ten minutes as a separate guard against cleanup hooks that never finish. SQLite fixtures close databases and backend sockets before temporary-directory removal; bounded subprocess regressions cover Windows file locks and failed cleanup.
 
+### Headless integration tests
+
+```bash
+npm run test:integration
+```
+
+This command builds only the notification core and a test-binary upstream fixture, then runs two real TypeScript HTTP services with their real Go cores and the production CLI. The upstream mocks only the external bot boundary; routing, authenticated gRPC, session operations, stdio delivery completion, SQLite inboxes, acknowledgements and replies use production code.
+
+Coverage includes independent broadcast to two downstream nodes, local ownership, source-event deduplication, full-reference reply return paths, metadata, process-restart replay, notification-session deletion, and EOF shutdown. The suite uses the cooperative Trae inbox transport and does not start an agent client.
+
+No desktop window, tray, installer, browser, system background service, Feishu connection, or Tailscale enrollment is started. State and binaries live in a fresh private temporary directory; listeners use ephemeral numeric loopback ports. Runtime children receive a restricted environment, credentials are synthetic, and the runner removes owned processes/state on completion. Results are written to `.cache/headless-integration.xml`. CI runs an independent Ubuntu headless job and the same process suite on macOS/Windows before installer tests. Native GUI smoke remains a separate disposable-runner check.
+
 ## MyGo desktop application and system tray
 
 The native **Nootify** app supports Apple Silicon with macOS 13.5+, and Windows 10/11 x64. Both distributions bundle the background service, their own Node.js runtime, the Go `nootify-core` executable, and an independent Tailscale client built with tsnet. Its native window, web UI, and offline page follow the system's light or dark appearance, including changes while the app is open. It provides a menu-bar tray with **打开**, **退出**, service controls, and update controls. PR rows open GitHub in the default browser. Closing the window hides it; quitting the desktop app leaves the independent daemon running.

@@ -79,6 +79,18 @@ npm run core:test
 npm run desktop:test
 ```
 
+For process-level integration checks without opening any desktop windows:
+
+```bash
+npm run test:integration
+```
+
+This runs real CLI, TypeScript service, stdio, and gRPC processes with temporary
+state and ephemeral loopback ports. The external bot is synthetic; no Feishu,
+Tailscale enrollment, system-service management, or production credentials are
+used. All owned processes and temporary state are cleaned up after the run.
+The JUnit report is `.cache/headless-integration.xml`.
+
 The Go core owns provider connections, notification-session mappings, and durable
 delivery/replay state. The Node service starts it through private stdio RPC and
 retains the TypeScript UI, agent input adapters, local session discovery, GitHub
@@ -98,7 +110,8 @@ See [desktop builds](docs/guide.md#build-the-desktop-app).
 | `public/` | Local application UI |
 | `desktop/` | Go/MyGo desktop host, native tray, signed updater, and offline assets |
 | `site/` | Public website |
-| `test/` | Node integration and regression checks |
+| `test/` | Node regression checks and test-only headless service wiring |
+| `integration/`, `scripts/integration.mjs` | Headless CLI/HTTP/stdio/gRPC process integration and isolated build runner |
 
 ## Documentation
 
