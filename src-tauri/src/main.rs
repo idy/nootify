@@ -498,7 +498,7 @@ fn create_tray(app: &AppHandle) -> tauri::Result<TrayItems> {
         true,
         None::<&str>,
     )?;
-    // Inserted below Check for Updates only while an update is available.
+    // Inserted into the tray's top level only while an update is available.
     let install_update = MenuItem::with_id(
         app,
         update::INSTALL_ID,
@@ -561,6 +561,7 @@ fn create_tray(app: &AppHandle) -> tauri::Result<TrayItems> {
         install,
         settings,
         update: UpdateMenu::new(
+            menu.clone(),
             updates,
             update_status,
             check_update,

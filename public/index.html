@@ -69,7 +69,7 @@
     <div class="group"><div class="rows" id="logs-table" role="list"></div><div id="empty" class="empty" hidden><strong data-i18n="没有匹配的日志">没有匹配的日志</strong><span data-i18n="换个筛选条件，或在飞书群里发一条消息。">换个筛选条件，或在飞书群里发一条消息。</span></div></div>
   </section>
   <section id="sessions-view" class="view" aria-label="路由会话" hidden data-i18n-aria-label="路由会话">
-    <p class="hint" data-i18n="收到消息时才按飞书群公告查找对应的 Claude、Codex 或 OpenCode 会话。这里只列出本次运行遇到的会话和最近一次查找结果。">收到消息时才按飞书群公告查找对应的 Claude、Codex 或 OpenCode 会话。这里只列出本次运行遇到的会话和最近一次查找结果。</p>
+    <p class="hint" data-i18n="收到消息时才按飞书群公告查找对应的 Claude、Codex 或 OpenCode 会话。这里保留最近 1,000 个路由会话及最后一次查找结果，重启后仍可查看。">收到消息时才按飞书群公告查找对应的 Claude、Codex 或 OpenCode 会话。这里保留最近 1,000 个路由会话及最后一次查找结果，重启后仍可查看。</p>
     <div class="group"><div class="rows" id="sessions-body" role="list"></div><div id="no-sessions" class="empty" hidden><strong data-i18n="还没有会话路由记录">还没有会话路由记录</strong><span data-i18n="绑定会话的飞书群收到消息后，这里会显示查找结果。">绑定会话的飞书群收到消息后，这里会显示查找结果。</span></div></div>
   </section>
   <section id="pulls-view" class="view" aria-label="PR" hidden>
@@ -180,9 +180,9 @@
     <div data-panel="settings-about" hidden>
       <div class="group">
         <div class="setting"><div class="setting-main"><div class="setting-title">Nootify</div><div class="setting-sub" id="about-version"></div></div><div class="setting-actions"><a class="text-button" href="https://github.com/idy/nootify/releases" target="_blank" rel="noopener noreferrer" data-i18n="发布记录">发布记录</a></div></div>
-        <div class="setting"><div class="setting-main"><div class="setting-title" data-i18n="软件更新">软件更新</div><div class="setting-sub" id="update-status"></div></div></div>
+        <div class="setting"><div class="setting-main"><div class="setting-title" data-i18n="软件更新">软件更新</div><div class="setting-sub" id="update-status"></div></div><div class="setting-actions"><button type="button" id="about-update-action" class="text-button primary" hidden data-i18n="检查更新">检查更新</button></div></div>
       </div>
-      <p class="hint" data-i18n="桌面应用启动约 30 秒后和之后每 6 小时检查一次 GitHub Releases。发现新版本时会在窗口顶部和托盘菜单提示，下载和安装由你确认后才开始，更新包会先校验签名。">桌面应用启动约 30 秒后和之后每 6 小时检查一次 GitHub Releases。发现新版本时会在窗口顶部和托盘菜单提示，下载和安装由你确认后才开始，更新包会先校验签名。</p>
+      <p class="hint" data-i18n="启动后自动检查 GitHub Releases，之后约每 6 小时检查一次；检查时间会随机错开，失败后自动重试。有新版才显示更新按钮，下载和安装由你确认后开始，安装前会校验更新包签名。">启动后自动检查 GitHub Releases，之后约每 6 小时检查一次；检查时间会随机错开，失败后自动重试。有新版才显示更新按钮，下载和安装由你确认后开始，安装前会校验更新包签名。</p>
     </div>
   </section>
 </main>

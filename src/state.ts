@@ -17,7 +17,7 @@ const retiredTables = ['chat_bindings', 'chat_deliveries', 'telegram_clients'] a
 type LegacyRecord = Record<string, unknown>;
 /** Retired provider data is opaque migration input, never an active transport or inbox. */
 interface StoredState {
-  version: 1; sessions: SessionRecord[]; lark_bindings: LarkBinding[]; backends?: [Adapter, BackendConnection][];
+  version: 1; sessions: SessionRecord[]; session_observations?: PublicSession[]; lark_bindings: LarkBinding[]; backends?: [Adapter, BackendConnection][];
   lark_deliveries?: LarkDelivery[]; lark_poll_cursors?: LarkPollCursor[]; lark_poll_receipts?: LarkPollReceipt[];
   chat_bindings?: LegacyRecord[]; chat_deliveries?: LegacyRecord[]; telegram_clients?: LegacyRecord[];
   inbox_messages?: StoredInboxMessage[]; settings?: Settings & Record<string, unknown>;
@@ -37,7 +37,7 @@ function validate(data: unknown): asserts data is StoredState {
   if (!data || typeof data !== 'object' || Array.isArray(data)) return fail();
   const state = data as Record<string, unknown>;
   if (state.version !== 1 || !Array.isArray(state.sessions) || !Array.isArray(state.lark_bindings)) return fail();
-  for (const [field, identity] of [['sessions', 'session_id'], ['lark_bindings', 'chat_id'], ['lark_deliveries', 'message_id'],
+  for (const [field, identity] of [['sessions', 'session_id'], ['session_observations', 'session_id'], ['lark_bindings', 'chat_id'], ['lark_deliveries', 'message_id'],
     ['chat_bindings', 'id'], ['chat_deliveries', 'id'], ['telegram_clients', 'key'], ['inbox_messages', 'id']] as const) {
     const records = state[field];
     if (records === undefined) continue;
@@ -67,6 +67,7 @@ const decode = <T>(rows: Map<string, string>): T[] => [...rows.values()].map(val
 export const defaultStateDir = () => serviceStateDir();
 export class State {
   readonly sessions = new Map<string, SessionRecord>();
+  readonly sessionObservations = new Map<string, PublicSession>();
   readonly bindings = new Map<string, LarkBinding>();
   readonly backends = new Map<Adapter, BackendConnection>();
   readonly deliveries = new Map<string, LarkDelivery>();
@@ -112,7 +113,7 @@ export class State {
       return state.snapshot();
     });
     const rows = state.database.load();
-    const data: StoredState = { version: 1, sessions: decode(rows.sessions), lark_bindings: decode(rows.lark_bindings),
+    const data: StoredState = { version: 1, sessions: decode(rows.sessions), session_observations: decode(rows.session_observations), lark_bindings: decode(rows.lark_bindings),
       backends: [...rows.backends].map(([adapter, value]) => [adapter as Adapter, JSON.parse(value) as BackendConnection]),
       lark_deliveries: decode(rows.lark_deliveries), lark_poll_cursors: decode(rows.lark_poll_cursors), lark_poll_receipts: decode(rows.lark_poll_receipts),
       inbox_messages: decode(rows.inbox_messages), settings: Object.fromEntries([...rows.settings].map(([id, value]) => [id, JSON.parse(value)])) };
@@ -124,7 +125,7 @@ export class State {
     return state;
   }
   private restore(data: StoredState): void {
-    this.sessions.clear(); this.bindings.clear(); this.backends.clear(); this.deliveries.clear(); this.larkPollCursors.clear();
+    this.sessions.clear(); this.sessionObservations.clear(); this.bindings.clear(); this.backends.clear(); this.deliveries.clear(); this.larkPollCursors.clear();
     this.inboxMessages.clear(); this.pollReceiptRows.clear(); this.pollReceipts.clear(); this.retainedSettings.clear(); this.retainedInbox.clear();
     for (const table of retiredTables) {
       this.retainedTables[table].clear();
@@ -132,6 +133,12 @@ export class State {
     }
     for (const key of Object.keys(this.settings)) delete this.settings[key as keyof Settings];
     for (const session of data.sessions) this.sessions.set(session.session_id, session);
+    for (const saved of data.session_observations ?? []) {
+      const observation = { ...saved };
+      // A past live target is not proof that it is still available after restart.
+      if (observation.availability === 'active') observation.availability = 'unknown';
+      this.sessionObservations.set(`${observation.adapter}:${observation.session_id}`, observation);
+    }
     for (const binding of data.lark_bindings) this.bindings.set(binding.chat_id, binding);
     for (const [adapter, backend] of data.backends ?? []) this.backends.set(adapter, backend);
     for (const delivery of data.lark_deliveries ?? []) this.deliveries.set(delivery.message_id, delivery);
@@ -162,7 +169,7 @@ export class State {
     }
   }
   private snapshot(): StateRows {
-    return { sessions: encode(this.sessions), lark_bindings: encode(this.bindings), backends: encode(this.backends),
+    return { sessions: encode(this.sessions), session_observations: encode(this.sessionObservations), lark_bindings: encode(this.bindings), backends: encode(this.backends),
       lark_deliveries: encode(this.deliveries), lark_poll_cursors: encode(this.larkPollCursors), lark_poll_receipts: new Map(this.pollReceiptRows),
       chat_bindings: new Map(this.retainedTables.chat_bindings), chat_deliveries: new Map(this.retainedTables.chat_deliveries), telegram_clients: new Map(this.retainedTables.telegram_clients),
       inbox_messages: new Map([...this.retainedInbox, ...encode(this.inboxMessages)]), settings: new Map([...this.retainedSettings, ...encode(Object.entries(this.settings))]) };

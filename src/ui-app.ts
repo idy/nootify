@@ -1134,7 +1134,7 @@ function updateStatus(update: UpdateView): string {
   if (update.phase === 'restarting') return t('已安装 {p0}，正在重启…', { p0: tag });
   if (update.phase === 'failed') return t('检查更新失败：{p0}', { p0: update.error ?? t('未知错误') });
   if (update.phase === 'current') return t('已是最新版本{p0}', { p0: update.checked_at ? t(' · {p0}检查', { p0: ago(new Date(update.checked_at).toISOString()) }) : '' });
-  return t('启动约 30 秒后自动检查');
+  return t('启动后自动检查，之后约每 6 小时检查一次');
 }
 function compactUpdateStatus(update: UpdateView): string {
   if (update.phase === 'checking') return t('检查中…');
@@ -1159,7 +1159,9 @@ function renderUpdate(): void {
   const working = !!update && updateAction(update) === 'details';
   const failed = update?.phase === 'failed' || (available && !!update.error);
   for (const dot of document.querySelectorAll<HTMLElement>('.update-dot')) dot.hidden = !available;
-  $('titlebar-update').hidden = !update;
+  // Routine background checks stay quiet; only an available update or its installation
+  // belongs in the title row. The About page keeps manual checks and full status visible.
+  $('titlebar-update').hidden = !update?.version || !['checking', 'available', 'downloading', 'installing', 'restarting'].includes(update.phase);
   $('titlebar-update').classList.toggle('has-error', !!failed);
   const button = $<HTMLButtonElement>('update-action');
   button.classList.toggle('busy', working);
@@ -1173,6 +1175,10 @@ function renderUpdate(): void {
       : update.phase === 'current' ? 'm3.5 8 3 3 6-6'
       : failed ? 'M13.2 8A5.2 5.2 0 1 1 11.7 4.3M13.2 2.6v3.1h-3.1' : 'M8 13V3M4 7l4-4 4 4');
   }
+  const aboutButton = $<HTMLButtonElement>('about-update-action');
+  aboutButton.hidden = !update;
+  aboutButton.disabled = working;
+  if (update) setText('about-update-action', updateAction(update) === 'check' ? t('检查更新') : compactUpdateStatus(update));
   const service = state.settings?.version;
   setText('about-version', [update ? t('应用 {p0}', { p0: update.current }) : '', service ? t('后台服务 {p0}', { p0: service }) : ''].filter(Boolean).join(' · ') || '—');
   setText('update-status', update ? updateStatus(update) : t('在 Nootify 桌面应用里检查和安装更新'));
@@ -1332,7 +1338,7 @@ window.addEventListener('hashchange', () => {
   $(views[state.view].section).scrollTop = 0;
 });
 window.addEventListener('nootify-update', event => { state.update = (event as CustomEvent<UpdateView>).detail; renderUpdate(); });
-$('update-action').addEventListener('click', () => {
+for (const id of ['update-action', 'about-update-action']) $(id).addEventListener('click', () => {
   if (!state.update) return;
   const action = updateAction(state.update);
   if (action === 'details') location.hash = views['settings-about'].hash;

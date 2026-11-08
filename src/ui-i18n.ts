@@ -150,6 +150,7 @@ export const english = {
   "已为会话创建消息桥接": "Message bridge created for session",
   "待回执：已写入客户端，还没有收到会话回执。已回复：回复已发回原消息。保留最近 1,000 条，最新在前。": "Awaiting receipt: written to the client, but the session has not acknowledged it yet. Replied: a reply was sent to the original message. Shows the latest 1,000 entries, newest first.",
   "搜索消息、会话、聊天 ID": "Search messages, sessions, chat IDs",
+  "收到消息时才按飞书群公告查找对应的 Claude、Codex 或 OpenCode 会话。这里保留最近 1,000 个路由会话及最后一次查找结果，重启后仍可查看。": "Claude, Codex, or OpenCode sessions are looked up from Feishu group announcements when a message arrives. The latest 1,000 routed sessions and their last lookup results are retained across restarts.",
   "服务收到消息": "Message received",
   "正在连接消息服务": "Connecting to messaging service",
   "添加消息表情失败": "Could not add message reaction",
@@ -471,7 +472,7 @@ export const english = {
   '未知错误': 'Unknown error',
   '已是最新版本{p0}': 'You’re up to date{p0}',
   ' · {p0}检查': ' · Checked {p0}',
-  '启动约 30 秒后自动检查': 'Checks automatically about 30 seconds after launch',
+  '启动后自动检查，之后约每 6 小时检查一次': 'Checks automatically after launch, then about every 6 hours',
   '检查中…': 'Checking…',
   '下载中 {p0}%': 'Downloading {p0}%',
   '下载中…': 'Downloading…',
@@ -590,7 +591,7 @@ export const english = {
   '配置文件包含飞书凭据和接收人、PR 配置与关注选择、Codex 和 OpenCode 连接、已启用的 Agents。其中有明文密钥，文件权限是 0600，不要提交到仓库或转发。导入只覆盖文件里有的设置；Agents 只会启用，不会关闭。GitHub 登录不在文件里，换机器后重新登录。': 'The file includes Feishu credentials and recipient, PR configuration and follow preferences, Codex and OpenCode connections, and enabled agents. It contains plaintext secrets and uses mode 0600. Do not commit or forward it. Import only overwrites settings present in the file; agents are enabled, never disabled. GitHub sign-in is excluded; sign in again on a new device.',
   '发布记录': 'Release notes',
   '软件更新': 'Software updates',
-  '桌面应用启动约 30 秒后和之后每 6 小时检查一次 GitHub Releases。发现新版本时会在窗口顶部和托盘菜单提示，下载和安装由你确认后才开始，更新包会先校验签名。': 'The desktop app checks GitHub Releases about 30 seconds after launch and every 6 hours afterward. Updates appear in the title bar and tray menu. Download and installation start only when you choose, and the update signature is verified first.',
+  '启动后自动检查 GitHub Releases，之后约每 6 小时检查一次；检查时间会随机错开，失败后自动重试。有新版才显示更新按钮，下载和安装由你确认后开始，安装前会校验更新包签名。': 'The app checks GitHub Releases automatically after launch, then about every 6 hours, with randomized timing and automatic retries. The update button appears only when an update is available. Download and installation start when you choose, and the update signature is verified before installation.',
 } as const;
 
 export type MessageKey = keyof typeof english;
