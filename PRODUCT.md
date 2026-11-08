@@ -14,7 +14,7 @@ Providers is a card list with an upper-left Add action. Adding opens a provider-
 
 ## Existing commitments
 
-Preserve the application’s penguin identity, compact neutral settings, blue action color, and system light/dark appearance. English typography follows the website: Montserrat for headings, Monda for body and controls, and Lato for small text and metadata; Chinese keeps system-font fallbacks. Support Simplified Chinese and English. Configuration edits, secret reveal, and contact directories remain local to the computer; tailnet access does not grant those capabilities.
+Preserve the application’s penguin identity, compact neutral settings, blue action color, and system light/dark appearance. English typography uses Montserrat for navigation menus, their section labels and counts, and the brand; Lato for body text, controls, content headings, row titles, and metadata. Chinese keeps system-font fallbacks. Support Simplified Chinese and English. Configuration edits, secret reveal, and contact directories remain local to the computer; tailnet access does not grant those capabilities.
 
 ## Feishu recipient selection
 

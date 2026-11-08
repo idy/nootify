@@ -39,17 +39,20 @@ colors:
   dark-focus-line: "#4a4a53"
   dark-check-line: "#55555e"
 typography:
-  heading:
+  navigation:
     fontFamily: 'Montserrat, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", "Helvetica Neue", sans-serif'
+    fontSize: "14px"
+  heading:
+    fontFamily: 'Lato, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", "Helvetica Neue", sans-serif'
     fontSize: "16px"
     fontWeight: 600
   primary:
-    fontFamily: 'Monda, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif'
+    fontFamily: 'Lato, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif'
     fontSize: "14px"
     fontWeight: 500
     lineHeight: "20px"
   body:
-    fontFamily: 'Monda, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif'
+    fontFamily: 'Lato, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif'
     fontSize: "13px"
     lineHeight: 1.4
   meta:
@@ -140,7 +143,7 @@ Background and sidebar frame panel groups. Raised surfaces separate footers and 
 
 ## Typography
 
-English roles follow the website: Montserrat leads headings and the brand, Monda carries body text and controls, and Lato carries notes, metadata, and log actions. The Latin font files are bundled locally through `desktop/fonts.css` and `desktop/fonts/`, shared with the offline page; Chinese keeps the existing system fallback stack. Code retains its separate monospace stack, tabular numerals, and disabled ligatures. The compact fixed type scale and line boxes remain unchanged.
+English typography uses Montserrat for navigation menus, their section labels and counts, and the brand. Lato carries body text, controls, content headings, row titles, notes, metadata, and log actions. The Latin font files are bundled locally through `desktop/fonts.css` and `desktop/fonts/`, shared with the offline page; Chinese keeps the existing system fallback stack. Code retains its separate monospace stack, tabular numerals, and disabled ligatures. The compact fixed type scale and line boxes remain unchanged.
 
 - Heading: page hierarchy; semibold. The modal locally uses (17px/24px), reducing to the heading size on mobile.
 - Primary: row names and settings labels; medium with fixed line boxes.
@@ -152,7 +155,7 @@ English roles follow the website: Montserrat leads headings and the brand, Monda
 
 ## Layout
 
-The desktop shell has a (224px) sidebar, (52px) titlebar, page-gutter spacing, and settings panels capped at (960px). Only the native macOS window reserves space before the brand for its window controls; browser views and desktop-layout previews keep the normal left inset. Groups use panel-inset spacing and section-gap separation. At (760px), page gutters become (14px); browser navigation reflows horizontally. Logs, both PR queues, and subscriptions place search and page actions in the title row, with compact text filters directly above the list card. The selected filter uses blue text and semibold weight. Narrow title rows hide search inputs behind labeled search icons and use a sort icon. Clicking search or pressing `/` opens a field below the title row; Escape and outside clicks close it without clearing the query. Active queries tint the search icon blue. Pause and export use icons when native update status is also visible. Working content reflows through a container query at (640px), including single-column Feishu QR flows and wrapping settings actions. Import preview filenames wrap within their row.
+The desktop shell has a (224px) sidebar, (52px) titlebar, page-gutter spacing, and settings panels capped at (960px). Only the native macOS window reserves space before the brand for its window controls; browser views and desktop-layout previews keep the normal left inset. Groups use panel-inset spacing and section-gap separation. At (760px), page gutters become (14px); browser navigation reflows horizontally. Logs, both PR queues, and subscriptions place search and page actions in the title row, with compact text filters directly above the list card. List titles, descriptions, counts, and connection information sit above and outside the bordered list cards; the cards begin with their first data item. PR summaries precede the filters, while Agents connection summaries sit directly above their list. The selected filter uses blue text and semibold weight. Narrow title rows hide search inputs behind labeled search icons and use a sort icon. Clicking search or pressing `/` opens a field below the title row; Escape and outside clicks close it without clearing the query. Active queries tint the search icon blue. Pause and export use icons when native update status is also visible. Working content reflows through a container query at (640px), including single-column Feishu QR flows and wrapping settings actions. Import preview filenames wrap within their row.
 
 The recipient modal is capped at (520px), with viewport width minus (32px) and dynamic viewport height minus (48px). Its result body scrolls independently with a (336px) flex basis, or (420px) for permission help; header, status, and footer remain outside that scroller. Rows have a (60px) minimum height and (12px) gap.
 
@@ -180,7 +183,7 @@ Controls use modest curved corners; groups are slightly rounder. The modal uses 
 
 ### Do:
 
-- **Do** use the bundled website font roles with system Chinese fallbacks, preserving semantic colors and automatic appearance.
+- **Do** use the bundled application font roles with system Chinese fallbacks, preserving semantic colors and automatic appearance.
 - **Do** preserve useful loaded contacts and a reachable footer while loading or explaining access.
 - **Do** keep portraits as runtime provider data and the permission QR as locally generated functional imagery.
 

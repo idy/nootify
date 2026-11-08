@@ -303,7 +303,7 @@ $runner = $null; $job = $null; $unrelated = $null; $unrelatedJob = $null; $start
 $unrelatedProcess = $null; $orphanProcess = $null
 $unrelatedMemberHandles = @()
 $unrelatedDirectory = $null; $orphanDirectory = $null
-$crashProcesses = @()
+$crashProcesses = @(); $reloginProcesses = @()
 $task | Add-Member NoteProperty Job $null
 try {
     Must-Fail { Stop-OwnedTask $task } 'An active task without a runtime job identity must fail closed'
@@ -683,13 +683,18 @@ catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
     $reloginRuntime = [IO.File]::ReadAllText($runtimePath) | ConvertFrom-Json
     Assert ($reloginRuntime.job -cne $crashRuntime.job) 'A completed old terminal session must permit a fresh owned job'
     Assert ($reloginRuntime.boot -eq $crashRuntime.boot) 'Sign-in recovery must work without changing the kernel boot sequence'
+    $reloginProcesses = @(([IO.File]::ReadAllText($pidsPath) | ConvertFrom-Json) | ForEach-Object { $process = [Diagnostics.Process]::GetProcessById([int]$_); $null = $process.Handle; $process })
     Stop-OwnedTask $task
     Assert ($task.Job.ActiveProcesses -eq 0) 'The recovered daemon must retain authoritative shutdown'
+    # Job accounting can reach zero before process-exit notification. The old crash
+    # handles cannot synchronize this new run's Node image release before the move.
+    foreach ($process in $reloginProcesses) { Assert ($process.WaitForExit(5000)) 'The drained recovery Node and helper must signal their retained process handles' }
     $task.Job.Dispose(); $task.Job = $null
     Assert (!(Test-Path -LiteralPath $runtimePath)) 'A recovered daemon must retire runtime only after a verified stop'
     Assert (Test-Path -LiteralPath (Join-Path $StateDir 'state.json')) 'Same-boot session recovery must preserve private settings'
     $startup.Dispose(); $startup = $null
     foreach ($process in $crashProcesses) { $process.Dispose() }; $crashProcesses = @()
+    foreach ($process in $reloginProcesses) { $process.Dispose() }; $reloginProcesses = @()
     $task.Enabled = $false
     [IO.File]::Move($copiedNode, (Join-Path $directory 'crash-released-node.exe'))
     [IO.File]::Move((Join-Path $directory 'crash-released-node.exe'), $copiedNode)
@@ -816,7 +821,7 @@ setInterval(() => {
     throw
 } finally {
     if ($startup) { if (!$startup.HasExited) { $startup.Kill(); $null = $startup.WaitForExit(5000) }; $startup.Dispose() }
-    foreach ($process in $crashProcesses) {
+    foreach ($process in ($crashProcesses + $reloginProcesses)) {
         if (!$process.HasExited) { $process.Kill(); $null = $process.WaitForExit(5000) }
         $process.Dispose()
     }

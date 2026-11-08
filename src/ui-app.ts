@@ -927,6 +927,7 @@ async function setAgent(agent: AgentPrompt, enabled: boolean): Promise<void> {
 }
 function renderAgents(): void {
   const page = state.agents;
+  $('agents-card').hidden = !page?.agents.length;
   $('agents-count').textContent = page ? (page.agents.some(agent => agent.injected) ? number(page.agents.filter(agent => agent.injected).length) : '') : '';
   const remote = page?.editable !== true;
   const banner = resolveText(state.agentsError) || (page && remote ? t('通过 Tailscale 访问时只能查看；请在这台 Mac 上修改 agent 提示词。') : '');
@@ -1655,7 +1656,10 @@ async function loadPulls(): Promise<void> {
   finally { state.loadingPulls = false; renderChrome(); renderPulls(); renderRepos(); }
 }
 async function refreshNow(): Promise<void> {
-  if (state.view === 'agents' || state.view === 'providers') { await Promise.all([loadSnapshot(), loadProviders(), ...(state.view === 'agents' ? [loadAgents()] : [])]); return; }
+  if (state.view === 'agents' || state.view === 'providers') {
+    if (state.view === 'agents') state.agentsError = '';
+    await Promise.all([loadSnapshot(), loadProviders(), ...(state.view === 'agents' ? [loadAgents()] : [])]); return;
+  }
   if (state.view === 'settings-remote') { await Promise.all([loadSnapshot(), loadRemote()]); return; }
   if (isSettingsView(state.view)) {
     await Promise.all([loadSnapshot(), loadSettings(), ...(state.view === 'settings-github' ? [loadGitHub()] : []), ...(state.view === 'settings-tailscale' ? [loadTailscale()] : [])]);

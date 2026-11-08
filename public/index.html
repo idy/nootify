@@ -75,10 +75,10 @@
   </section>
   <section id="pulls-view" class="view" aria-label="PR" hidden>
     <div id="pull-banner" class="banner" role="status" hidden></div>
+    <div class="list-summary"><div><div class="group-title" id="pull-title"></div><div class="group-sub"><span id="pull-sub"></span><a id="pull-hidden" class="inline-link" href="#/repos" hidden></a></div></div><div class="group-side" id="pull-side"></div></div>
     <div class="list-filters" id="pull-tabs" role="group" aria-label="按状态筛选" data-i18n-aria-label="按状态筛选"></div>
     <div class="group">
-      <div class="group-head"><div><div class="group-title" id="pull-title"></div><div class="group-sub"><span id="pull-sub"></span><a id="pull-hidden" class="inline-link" href="#/repos" hidden></a></div></div><div class="group-side" id="pull-side"></div></div>
-      <div class="rows" id="pull-rows" role="list"></div>
+      <div class="rows" id="pull-rows" role="list" aria-labelledby="pull-title"></div>
       <div id="pull-empty" class="empty" hidden><strong id="pull-empty-title"></strong><span id="pull-empty-detail"></span></div>
     </div>
     <details class="warnings" id="pull-warnings" hidden><summary></summary><ul></ul></details>
@@ -135,9 +135,9 @@
     <p class="hint" data-i18n="勾选后，Nootify 会在该 agent 的全局提示词文件末尾写入通知说明，只改动 nootify 标记之间的内容。会话通过选定的 Provider 汇报进度，回复会转发回对应会话。每次修改前都会备份原文件。">勾选后，Nootify 会在该 agent 的全局提示词文件末尾写入通知说明，只改动 nootify 标记之间的内容。会话通过选定的 Provider 汇报进度，回复会转发回对应会话。每次修改前都会备份原文件。</p>
     <p class="hint" data-i18n="Trae 和 WorkBuddy 会在工作节点主动检查回复，无法自动唤醒空闲或已关闭的会话。">Trae 和 WorkBuddy 会在工作节点主动检查回复，无法自动唤醒空闲或已关闭的会话。</p>
     <div id="agents-banner" class="banner" role="alert" hidden></div>
-    <div class="group">
-      <div class="group-head"><div><div class="group-title" id="channel-title" data-i18n="消息接入">消息接入</div><div class="group-sub" id="channel-sub"></div></div><div class="group-side" id="channel-side"><span id="channel-state"></span><a id="channel-settings" class="inline-link" href="#/providers" data-i18n="管理 Providers">管理 Providers</a></div></div>
-      <div class="rows" id="agent-rows" role="list"></div>
+    <div class="list-summary"><div><div class="group-title" id="channel-title" data-i18n="消息接入">消息接入</div><div class="group-sub" id="channel-sub"></div></div><div class="group-side" id="channel-side"><span id="channel-state"></span><a id="channel-settings" class="inline-link" href="#/providers" data-i18n="管理 Providers">管理 Providers</a></div></div>
+    <div class="group" id="agents-card" hidden>
+      <div class="rows" id="agent-rows" role="list" aria-labelledby="channel-title"></div>
     </div>
   </section>
   <section id="repos-view" class="view" aria-label="PR 订阅" data-i18n-aria-label="PR 订阅" hidden>
