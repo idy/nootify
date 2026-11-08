@@ -67,8 +67,9 @@
 html, body { height: 100%; }
 body { margin: 0; background: var(--bg); color: var(--text); }
 button, input, select { font: inherit; color: inherit; }
-:where(h1, h2, h3, h4, .brand, .crumbs strong, .group-title) { font-family: var(--font-heading); }
-:where(.hint, .row-meta, .group-sub, .group-side, .row-side, .nav-label, .nav-count, .sidebar-foot, .updated, .list-filters, .tag, .log-type, .log-action, .setting-sub, .detail-grid dt, .agent-extra, .repo-table) { font-family: var(--font-small); }
+:where(h1, h2, h3, h4, .crumbs strong, .group-title) { font-family: var(--font-heading); }
+:where(.brand, .nav-item, .nav-label, .nav-count) { font-family: var(--font-navigation); }
+:where(.hint, .row-meta, .group-sub, .group-side, .row-side, .sidebar-foot, .updated, .list-filters, .tag, .log-type, .log-action, .setting-sub, .detail-grid dt, .agent-extra, .repo-table) { font-family: var(--font-small); }
 button { margin: 0; padding: 0; border: 0; background: none; cursor: pointer; }
 a { color: inherit; text-decoration: none; }
 :focus { outline: none; }
@@ -162,7 +163,7 @@ svg { flex: none; }
 
 /* Lists: one bordered group, two-line rows, quiet metadata, aligned figures on the right. */
 .group { overflow: hidden; border: 1px solid var(--line); border-radius: 11px; background: var(--panel); }
-.group-head { display: flex; align-items: center; gap: 16px; padding: 11px 16px; border-bottom: 1px solid var(--line-soft); }
+.list-summary { display: flex; align-items: center; gap: 16px; margin-bottom: 12px; padding: 0 2px; }
 .group-title { font-size: var(--type-primary); font-weight: 600; line-height: 20px; text-wrap: balance; }
 .group-sub { margin-top: 3px; color: var(--muted); font-size: var(--type-meta); line-height: 18px; text-wrap: pretty; }
 .group-side { margin-left: auto; color: var(--muted); font-size: var(--type-meta); line-height: 1.55; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
@@ -185,7 +186,7 @@ a.row:hover, button.row:hover { background: var(--hover); }
 .log-action { flex: none; color: var(--muted); font-size: var(--type-body); font-weight: 400; line-height: 20px; }
 /* PR rows lead with their repository, so it remains visible before long titles and session names. */
 #pull-rows .row-title { display: flex; align-items: center; gap: 8px; }
-.pull-repository { --repository-color: #3987e5; --repository-tint: 16%; flex: none; max-width: 50%; overflow: hidden; padding: 0 6px; border: 1px solid color-mix(in srgb, var(--repository-color) 50%, var(--line)); border-radius: 5px; background: color-mix(in srgb, var(--repository-color) var(--repository-tint), var(--panel)); color: var(--text); font-size: var(--type-meta); font-weight: 600; line-height: 18px; text-overflow: ellipsis; }
+.pull-repository { --repository-color: #3987e5; --repository-tint: 16%; flex: none; max-width: 50%; overflow: hidden; padding: 0 6px; border: 1px solid color-mix(in srgb, var(--repository-color) 50%, var(--line)); border-radius: 5px; background: color-mix(in srgb, var(--repository-color) var(--repository-tint), var(--panel)); color: var(--text); font-size: var(--type-meta); font-weight: 400; line-height: 18px; text-overflow: ellipsis; }
 /* Fixed identity colors, separate from the review and CI status tokens. Deeper tints extend the set. */
 .pull-repository[data-color="1"] { --repository-color: #d95926; }
 .pull-repository[data-color="2"] { --repository-color: #199e70; }
@@ -472,8 +473,8 @@ label.row:hover { background: var(--hover); }
 }
 /* Reflow working content by its available width, including native windows with a sidebar. */
 @container workspace (max-width: 640px) {
-  .group-head { flex-wrap: wrap; align-items: flex-start; gap: 8px 16px; }
-  .group-head > div:first-child { flex: 1 1 200px; min-width: 0; }
+  .list-summary { flex-wrap: wrap; align-items: flex-start; gap: 8px 16px; }
+  .list-summary > div:first-child { flex: 1 1 200px; min-width: 0; }
   .group-sub { overflow-wrap: anywhere; }
   .setting { flex-wrap: wrap; gap: 8px 12px; }
   .setting-main { flex: 1 1 200px; }
