@@ -332,14 +332,14 @@ func (p *feishuProvider) Send(ctx context.Context, b Binding, c Content, request
 	if out.MessageID == "" {
 		return SendResult{}, fault("unavailable", "Feishu did not return a message ID")
 	}
-	return SendResult{Message: MessageRef{p.core.node(), p.config.ID, out.MessageID}, MessageID: out.MessageID, ChatID: b.ChatID}, nil
+	return SendResult{Message: MessageRef{OriginNodeID: p.core.node(), ProviderID: p.config.ID, MessageID: out.MessageID}, MessageID: out.MessageID, ChatID: b.ChatID}, nil
 }
 func (p *feishuProvider) Reply(ctx context.Context, m MessageRef, c Content, request string) (SendResult, error) {
 	kind, content, err := toFeishu(c)
 	if err != nil {
 		return SendResult{}, err
 	}
-	body := map[string]any{"msg_type": kind, "content": content}
+	body := map[string]any{"msg_type": kind, "content": content, "reply_in_thread": m.ThreadID != ""}
 	if request != "" {
 		h := sha256.Sum256([]byte(m.key() + ":" + request))
 		body["uuid"] = hex.EncodeToString(h[:16])
@@ -353,7 +353,7 @@ func (p *feishuProvider) Reply(ctx context.Context, m MessageRef, c Content, req
 	if out.MessageID == "" {
 		return SendResult{}, fault("unavailable", "Feishu did not return a message ID")
 	}
-	return SendResult{Message: MessageRef{p.core.node(), p.config.ID, out.MessageID}, MessageID: out.MessageID}, nil
+	return SendResult{Message: MessageRef{OriginNodeID: p.core.node(), ProviderID: p.config.ID, MessageID: out.MessageID, ThreadID: m.ThreadID}, MessageID: out.MessageID}, nil
 }
 func (p *feishuProvider) Ack(ctx context.Context, m MessageRef) error {
 	return p.api(ctx, "POST", "/open-apis/im/v1/messages/"+url.PathEscape(m.MessageID)+"/reactions", map[string]any{"reaction_type": map[string]string{"emoji_type": "FINGERHEART"}}, nil)
@@ -410,7 +410,7 @@ func (p *feishuProvider) receive(ctx context.Context, in *im.P2MessageReceiveV1)
 			return nil
 		}
 	}
-	ref := MessageRef{p.core.node(), p.config.ID, val(m.MessageId)}
+	ref := MessageRef{OriginNodeID: p.core.node(), ProviderID: p.config.ID, MessageID: val(m.MessageId), ThreadID: val(m.ThreadId)}
 	hash := sha256.Sum256([]byte("feishu:" + p.config.AppID + ":" + val(m.MessageId)))
 	p.mu.Lock()
 	receive := p.receiver

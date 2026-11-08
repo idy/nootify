@@ -13,7 +13,7 @@ This document defines the implementation contract between the Go notification co
 
 A session is `{node_id, adapter, session_id, name?, metadata?}`. `node_id` is a core-generated stable UUID. The bridge fills a missing local node ID. Existing hostname bindings are adopted during migration without changing the original agent session ID.
 
-A message reference contains `{origin_node_id, provider_id, message_id}`; implementations may retain opaque return-route information. Provider IDs belong to their originating node. The reference survives every relay unchanged.
+A message reference contains `{origin_node_id, provider_id, message_id}`; optional `thread_id` preserves the original Feishu reply thread as return-route context without changing message identity. Provider IDs belong to their originating node. The reference survives every relay and durable replay unchanged. Resolving a legacy message ID or a three-field reference recovers retained thread context, and acknowledgement must not erase it.
 
 Content is `{text?: string, blocks?: ContentBlock[]}`. Blocks use `{type, text?, url?, children?}` and support at least paragraph, text, link, and code. Providers must reject unsupported blocks rather than silently discard them. Plain text uses `{text}`. The normalized incoming event carries both this content and a text representation for existing agent adapters.
 
@@ -89,7 +89,7 @@ Requests retain the helper's existing flat `{id,method,...fields}` format:
 - `tunnel` with `{address:"tailnet-host:port"}` -> `{id:string,address:"127.0.0.1:ephemeral-port"}`; raw bidirectional TCP forwarding through `tsnet.Server.Dial`. Validate destination and bound active tunnels. `close_tunnel` with `{tunnel_id}` closes the listener and connections.
 - `publish` with `{port:number,target:"127.0.0.1:port"}` -> `{port}`; listens on that Tailscale port and forwards raw TCP to the numeric loopback target. It must not inject the existing HTTP PROXY preamble into gRPC. `unpublish` with `{port}` closes it.
 
-All listeners and connections close on EOF/shutdown. Changing to a listener that cannot be reached through numeric loopback withdraws the previous Tailnet publication before reporting the new configuration; failed withdrawal retains its handle for retry. IPv4-mapped IPv6 Tailnet addresses are unmapped before transport selection. Existing port-80 browser proxy behavior and peer verification remain intact.
+All listeners and connections close on EOF/shutdown. Publication and tunnel handles belong to one helper process: intentional disable, enrollment cancellation, logout, and helper failure invalidate those handles. Re-enabling must publish the configured listener and create tunnels in the replacement helper. Changing to a listener that cannot be reached through numeric loopback withdraws the previous Tailnet publication before reporting the new configuration; failed withdrawal retains its handle for retry. IPv4-mapped IPv6 Tailnet addresses are unmapped before transport selection. Existing port-80 browser proxy behavior and peer verification remain intact.
 
 Legacy thread sends and metadata reads may omit the adapter. The Node bridge resolves the full local identity from core notification-session bindings, optionally scoped by provider, and rejects ambiguous IDs instead of assuming a default agent adapter.
 

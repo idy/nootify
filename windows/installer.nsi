@@ -62,7 +62,7 @@ Function un.onInit
   !insertmacro InitOptions
 FunctionEnd
 
-Function NootifyPreflightDesktop
+!macro NootifyPreflightDesktop OPERATION
   Push $0
   Push $1
   ; OPEN_EXISTING + GENERIC_WRITE checks replaceability without creating,
@@ -87,7 +87,7 @@ Function NootifyPreflightDesktop
       Pop $1
       Pop $0
       SetErrorLevel 1
-      MessageBox MB_OK|MB_ICONSTOP "Close Nootify and retry the installation. Its executable is still in use or cannot be replaced. The existing files and service have not been changed." /SD IDOK
+      MessageBox MB_OK|MB_ICONSTOP "Close Nootify and retry the ${OPERATION}. Its executable is still in use or cannot be replaced. The existing files and service have not been changed." /SD IDOK
       Abort "Nootify.exe is not writable; existing files and service are unchanged."
     ${EndIf}
     Sleep 250
@@ -95,6 +95,14 @@ Function NootifyPreflightDesktop
   ${Loop}
   Pop $1
   Pop $0
+!macroend
+
+Function NootifyPreflightDesktop
+  !insertmacro NootifyPreflightDesktop "installation"
+FunctionEnd
+
+Function un.NootifyPreflightDesktop
+  !insertmacro NootifyPreflightDesktop "uninstallation"
 FunctionEnd
 
 Section "Nootify" Install
@@ -136,6 +144,9 @@ Function .onInstSuccess
 FunctionEnd
 
 Section "Uninstall"
+  ; The desktop is independent of the owned service job. Refuse a locked image
+  ; before stopping that service or removing payload, task or registration.
+  Call un.NootifyPreflightDesktop
   !insertmacro NSIS_HOOK_PREUNINSTALL
   Delete "$INSTDIR\Nootify.exe"
   Delete "$INSTDIR\node.exe"

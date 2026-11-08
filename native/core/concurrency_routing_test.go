@@ -257,7 +257,7 @@ func TestReplyPendingDuplicateAndUnrelatedSendProceedIndependently(t *testing.T)
 	must(t, err)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	ref := MessageRef{c.node(), "bot", "incoming"}
+	ref := MessageRef{OriginNodeID: c.node(), ProviderID: "bot", MessageID: "incoming"}
 	result := make(chan error, 1)
 	go func() { _, err := c.Reply(ctx, ref, Content{Text: "reply"}, "stable"); result <- err }()
 	waitRouting(t, entered)

@@ -223,7 +223,7 @@ func (p *fakeProvider) Send(_ context.Context, b Binding, c Content, r string) (
 	if p.failSend {
 		return SendResult{}, fault("unavailable", "send uncertain")
 	}
-	m := MessageRef{p.node, p.id, fmt.Sprintf("sent-%d", p.sends)}
+	m := MessageRef{OriginNodeID: p.node, ProviderID: p.id, MessageID: fmt.Sprintf("sent-%d", p.sends)}
 	return SendResult{Message: m, MessageID: m.MessageID, ChatID: b.ChatID}, nil
 }
 func (p *fakeProvider) Reply(_ context.Context, m MessageRef, c Content, r string) (SendResult, error) {
@@ -235,7 +235,7 @@ func (p *fakeProvider) Reply(_ context.Context, m MessageRef, c Content, r strin
 		return SendResult{}, p.replyErr
 	}
 	p.lastReply = m
-	ref := MessageRef{p.node, p.id, fmt.Sprintf("reply-%d", p.replies)}
+	ref := MessageRef{OriginNodeID: p.node, ProviderID: p.id, MessageID: fmt.Sprintf("reply-%d", p.replies)}
 	return SendResult{Message: ref, MessageID: ref.MessageID}, nil
 }
 func (p *fakeProvider) Ack(_ context.Context, m MessageRef) error {
@@ -341,8 +341,8 @@ func TestUncertainSendDoesNotRetry(t *testing.T) {
 }
 func TestMessageIDAmbiguity(t *testing.T) {
 	c := testCore(t, nil)
-	a := MessageRef{"upstream", "bot-one", "same-id"}
-	b := MessageRef{"upstream", "bot-two", "same-id"}
+	a := MessageRef{OriginNodeID: "upstream", ProviderID: "bot-one", MessageID: "same-id"}
+	b := MessageRef{OriginNodeID: "upstream", ProviderID: "bot-two", MessageID: "same-id"}
 	must(t, c.store.Update(func(d *State) error { remember(d, a, "remote-a"); return nil }))
 	got, err := c.Resolve(nil, "same-id")
 	must(t, err)
@@ -496,7 +496,7 @@ func TestRemoteMultiHopFullRefLegacyReturnPathAndLoops(t *testing.T) {
 	if binding.Session.NodeID != c.node() {
 		t.Fatal("origin session identity changed")
 	}
-	ref := MessageRef{a.node(), "feishu-origin", "incoming"}
+	ref := MessageRef{OriginNodeID: a.node(), ProviderID: "feishu-origin", MessageID: "incoming"}
 	event := Event{ID: "across-hops", Session: session, Message: ref, Content: Content{Text: "hello"}, Hops: 16}
 	must(t, a.Ingest(context.Background(), event, ""))
 	select {

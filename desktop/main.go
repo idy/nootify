@@ -225,7 +225,7 @@ func (s *shell) createWindow() {
 		}
 	})
 	page.SetPermissionHandler(func(mygo.PermissionRequest) bool { return false })
-	page.OnWillDownload(func(e *mygo.DownloadEvent) { e.PreventDefault() })
+	page.OnWillDownload(func(e *mygo.DownloadEvent) { s.policy.download(page.URL(), e) })
 	page.OnWillNavigate(func(e *mygo.NavigateEvent) {
 		if action := fixedAction(e.URL); action != "" {
 			e.PreventDefault()

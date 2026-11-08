@@ -11,7 +11,8 @@ import { SessionsService } from '../src/sessions.js';
 import { RetryableDeliveryError } from '../src/types.js';
 import { createServiceHost } from '../src/server.js';
 import { EventLog } from '../src/events.js';
-import type { TailnetAccess } from '../src/tailnet.js';
+import { TailnetAccess } from '../src/tailnet.js';
+import { TailscaleService } from '../src/tailscale.js';
 import { NootifyClient } from '../src/client.js';
 import type { TsnetClient } from '../src/tsnet-client.js';
 
@@ -187,6 +188,49 @@ test('changing to a non-loopback listener withdraws the old Tailnet publication 
   await providers.syncNetwork();
   assert.deepEqual(network.at(-1), { method: 'unpublish', port: 9444 }, 'LAN IPv6 zone listeners must withdraw the old publication too');
 });
+
+for (const transition of ['disable', 'cancel', 'logout'] as const) {
+  test(`intentional Tailscale ${transition} invalidates publications and tunnels before re-enable`, async t => {
+    let online = false; let generation = 0;
+    const publications: number[] = []; const tunnels: number[] = [];
+    const tsnet = {
+      async start() { online = true; generation++; },
+      async stop() { online = false; },
+      async status() { return { BackendState: 'Running', NootifyListening: true, User: { 1: { LoginName: 'synthetic@example.com' } },
+        Self: { UserID: 1, TailscaleIPs: ['100.64.0.7'] } }; },
+      async logout() {},
+      async publish(port: number) { assert.ok(online, 'publish requires a live helper'); publications.push(generation); return { port }; },
+      async unpublish() { assert.ok(online, 'must not clean up an expired publication through a stopped helper'); },
+      async tunnel() { assert.ok(online); tunnels.push(generation); return { id: `tunnel-${generation}`, address: `127.0.0.1:${12000 + generation}` }; },
+      async closeTunnel() { assert.ok(online, 'must not close a stale tunnel through a stopped helper'); },
+    } as unknown as TsnetClient;
+    const { providers, core, state } = await fixture(t, { sessionName: id => id }, tsnet);
+    core.snapshot.remote.enabled = true;
+    const tailscale = new TailscaleService({ state, access: new TailnetAccess(80, { probe: tsnet }), client: tsnet,
+      listen: async () => ({ target: 'tcp://127.0.0.1:1', close: async () => {} }),
+      disconnected: () => providers.networkDisconnected() });
+    t.after(() => tailscale.stop());
+    const dial = async (request_id: string) => {
+      (providers as unknown as { event(e: CoreEvent): void }).event({ event: 'dial', data: { request_id, address: '100.64.0.9:9418' } });
+      for (let i = 0; i < 100 && !core.calls.some(call => call.method === 'dial.complete' && call.params.request_id === request_id); i++) {
+        await new Promise(resolve => setImmediate(resolve));
+      }
+      const result = core.calls.find(call => call.method === 'dial.complete' && call.params.request_id === request_id);
+      assert.ok(result, 'dial must settle'); return result.params.address;
+    };
+    await tailscale.setEnabled(true); await providers.syncNetwork();
+    assert.equal(await dial('first-run'), '127.0.0.1:12001');
+    if (transition === 'disable') await tailscale.setEnabled(false);
+    else if (transition === 'cancel') await tailscale.cancelLogin();
+    else await tailscale.logout();
+    assert.equal(online, false);
+    await providers.syncNetwork();
+    await tailscale.setEnabled(true); await providers.syncNetwork();
+    assert.equal(await dial('second-run'), '127.0.0.1:12002', 'must dial through the replacement helper');
+    assert.deepEqual(publications, [1, 2], 'must republish the same port in the replacement helper');
+    assert.deepEqual(tunnels, [1, 2], 'must not reuse the old helper tunnel');
+  });
+}
 
 test('agent delivery returns true transport outcome and retains source reference in reply instructions', async t => {
   let received = '';

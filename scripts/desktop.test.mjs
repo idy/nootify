@@ -95,6 +95,8 @@ test('production NSIS runs ownership hooks before all replacement/removal and pr
   assert.ok(install.indexOf('Call NootifyPreflightDesktop') < install.indexOf('!insertmacro NSIS_HOOK_PREINSTALL'));
   assert.ok(install.indexOf('!insertmacro NSIS_HOOK_PREINSTALL') < install.indexOf('RMDir /r'));
   assert.ok(install.indexOf('!insertmacro NSIS_HOOK_PREINSTALL') < install.indexOf('  File '));
+  assert.ok(uninstall.indexOf('Call un.NootifyPreflightDesktop') >= 0);
+  assert.ok(uninstall.indexOf('Call un.NootifyPreflightDesktop') < uninstall.indexOf('!insertmacro NSIS_HOOK_PREUNINSTALL'));
   assert.ok(uninstall.indexOf('!insertmacro NSIS_HOOK_PREUNINSTALL') < uninstall.indexOf('  Delete '));
   assert.match(installer, /RequestExecutionLevel user/);
   assert.match(installer, /Uninstall\\Nootify/);
@@ -109,9 +111,13 @@ test('production NSIS runs ownership hooks before all replacement/removal and pr
   for (const variable of ['NODE_OPTIONS', 'NODE_PATH', 'NODE_EXTRA_CA_CERTS', 'NODE_ICU_DATA']) assert.match(hooks, new RegExp(`NootifyClearNodeVariable ${variable}`));
 });
 
-test('desktop preflight probes write access without truncation and bounds updater handoff', async () => {
+test('install and uninstall share a nondestructive desktop preflight with bounded updater handoff', async () => {
   const installer = await readFile(join(root, 'windows/installer.nsi'), 'utf8');
-  const guard = installer.slice(installer.indexOf('Function NootifyPreflightDesktop'), installer.indexOf('Section "Nootify"'));
+  const start = installer.indexOf('!macro NootifyPreflightDesktop OPERATION');
+  assert.ok(start >= 0);
+  const guard = installer.slice(start, installer.indexOf('!macroend', start));
+  assert.match(installer, /Function NootifyPreflightDesktop\s+!insertmacro NootifyPreflightDesktop "installation"\s+FunctionEnd/);
+  assert.match(installer, /Function un\.NootifyPreflightDesktop\s+!insertmacro NootifyPreflightDesktop "uninstallation"\s+FunctionEnd/);
   assert.match(guard, /\$UpdateMode = 1[\s\S]*StrCpy \$1 80/);
   assert.match(guard, /CreateFileW\(w "\$INSTDIR\\Nootify\.exe", i 0x40000000, i 7, p 0, i 3, i 0x80, p 0\)/);
   assert.match(guard, /CloseHandle\(p r0\)/);

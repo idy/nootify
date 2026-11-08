@@ -341,7 +341,47 @@ try {
             Assert-RunningTask
         } finally { $browser.Dispose() }
     }
-    Test-Step 'Silent uninstall ignores inherited Node options and keeps private data' {
+    Test-Step 'Active desktop refuses silent uninstall before changing files, task or registration' {
+        $apps = @(Get-TestApps)
+        if ($apps.Count -ne 1) { throw 'Expected one active desktop before the uninstall refusal probe' }
+        $activeDesktop = Get-Process -Id $apps[0].ProcessId
+        $null = $activeDesktop.Handle # Retain the exact desktop identity across the probe.
+        $activeDaemon = Get-ServiceProcess
+        $before = @{}
+        foreach ($file in @(Get-ChildItem -LiteralPath $installDir -Recurse -File)) {
+            $before[$file.FullName] = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
+        }
+        $registrationBefore = Get-ItemProperty -LiteralPath $registryKey | ConvertTo-Json -Compress
+        $taskBefore = (Get-TestTask).Xml
+        $shortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'Nootify.lnk'
+        $shortcutBefore = (Get-FileHash -LiteralPath $shortcut -Algorithm SHA256).Hash
+        # Probe the actual mapped desktop image, without an extra file-sharing lock.
+        # _?= must be last and unquoted: keep the uninstaller synchronous so its
+        # refusal exit code is checked rather than the temporary handoff's result.
+        $watch = [Diagnostics.Stopwatch]::StartNew()
+        $null = Run-Native $uninstaller "/S _?=$installDir" 'active-desktop-uninstall' 1
+        if ($watch.Elapsed.TotalSeconds -gt 15) { throw 'Silent uninstall did not refuse the active desktop promptly' }
+        if (@(Get-ChildItem -LiteralPath $installDir -Recurse -File).Count -ne $before.Count) {
+            throw 'Refused uninstall added or removed installed files'
+        }
+        foreach ($path in $before.Keys) {
+            if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -cne $before[$path]) { throw 'Refused uninstall changed installed files' }
+        }
+        if ($activeDesktop.HasExited -or $activeDaemon.HasExited -or !(Test-Health) -or
+            (Get-ServiceProcess).Id -ne $activeDaemon.Id) { throw 'Refused uninstall stopped the desktop or independent service' }
+        Assert-Installation $Version
+        Assert-RunningTask
+        if ((Get-ItemProperty -LiteralPath $registryKey | ConvertTo-Json -Compress) -cne $registrationBefore -or
+            (Get-TestTask).Xml -cne $taskBefore -or
+            (Get-FileHash -LiteralPath $shortcut -Algorithm SHA256).Hash -cne $shortcutBefore) {
+            throw 'Refused uninstall changed registration, the owned task or the shortcut'
+        }
+        if ([IO.File]::ReadAllText((Join-Path $stateDir 'install-smoke-marker')) -cne $marker -or
+            (Get-FileHash -LiteralPath (Join-Path $stateDir 'auth-token') -Algorithm SHA256).Hash -cne $tokenHash) {
+            throw 'Refused uninstall changed private state'
+        }
+    }
+    Test-Step 'Silent uninstall after desktop exit ignores inherited Node options and keeps private data' {
         With-NodeStartupOptions { Uninstall-TestApp 'uninstall-current' }
         if ([IO.File]::ReadAllText((Join-Path $stateDir 'install-smoke-marker')) -cne $marker -or
             (Get-FileHash -LiteralPath (Join-Path $stateDir 'auth-token') -Algorithm SHA256).Hash -cne $tokenHash) { throw 'Uninstall removed private state' }

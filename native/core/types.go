@@ -94,6 +94,8 @@ type MessageRef struct {
 	OriginNodeID string `json:"origin_node_id"`
 	ProviderID   string `json:"provider_id"`
 	MessageID    string `json:"message_id"`
+	// ThreadID is return-path context, not part of the message identity/key.
+	ThreadID string `json:"thread_id,omitempty"`
 }
 
 func (m MessageRef) key() string {

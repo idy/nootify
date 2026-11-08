@@ -145,7 +145,7 @@ func TestProviderRemovalAllowsExplicitMoveAndSuppressesLateResources(t *testing.
 	late := eventFor(c.node(), "late-old-group")
 	late.Session = original.Session
 	late.ChatID = original.ChatID
-	late.Message = MessageRef{c.node(), "removed", late.ID}
+	late.Message = MessageRef{OriginNodeID: c.node(), ProviderID: "removed", MessageID: late.ID}
 	must(t, c.Ingest(context.Background(), late, ""))
 	if delivered != 0 || c.store.Snapshot().Events[late.ID].Outcome != "deleted" {
 		t.Fatal("late event from a retired group executed after move")
@@ -153,7 +153,7 @@ func TestProviderRemovalAllowsExplicitMoveAndSuppressesLateResources(t *testing.
 	current := late
 	current.ID = "new-group-message"
 	current.ChatID = moved.ChatID
-	current.Message = MessageRef{c.node(), "replacement", current.ID}
+	current.Message = MessageRef{OriginNodeID: c.node(), ProviderID: "replacement", MessageID: current.ID}
 	must(t, c.Ingest(context.Background(), current, ""))
 	if delivered != 1 {
 		t.Fatal("new notification resource was suppressed")
@@ -306,7 +306,7 @@ func TestExplicitBindCannotBypassUncertainCleanupAndCanMoveAfterRemoval(t *testi
 func TestReplyDefiniteRejectionCanRetryAndSuccessfulReplyDeduplicates(t *testing.T) {
 	c := testCore(t, nil)
 	p := installFake(t, c, "bot")
-	ref := MessageRef{c.node(), "bot", "incoming"}
+	ref := MessageRef{OriginNodeID: c.node(), ProviderID: "bot", MessageID: "incoming"}
 	content := Content{Text: "same reply"}
 	p.replyErr = &feishuAPIError{Code: 99991672, HTTPStatus: 403}
 	_, err := c.Reply(context.Background(), ref, content, "stable")
@@ -447,7 +447,7 @@ func TestProvenRejectionCodesRoundTripThroughRemoteReturnPath(t *testing.T) {
 	address, token := testServer(t, upstream)
 	downstream := testCore(t, nil)
 	addRemote(t, downstream, "upstream", address, token)
-	ref := MessageRef{upstream.node(), "bot", "incoming"}
+	ref := MessageRef{OriginNodeID: upstream.node(), ProviderID: "bot", MessageID: "incoming"}
 	must(t, downstream.store.Update(func(d *State) error { remember(d, ref, "upstream"); return nil }))
 	p.replyErr = &feishuAPIError{HTTPStatus: 403, Code: 99991672}
 	_, err := downstream.Reply(context.Background(), ref, Content{Text: "reply"}, "stable-remote")

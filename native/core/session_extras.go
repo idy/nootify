@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/url"
 	"os"
 	"regexp"
@@ -128,11 +129,15 @@ func (p *remoteProvider) Bind(ctx context.Context, s Session, chat, sender strin
 var legacyRoutePattern = regexp.MustCompile(`agent-session:v1:([A-Za-z0-9._-]+):([A-Za-z0-9._-]+):([A-Za-z0-9._-]+)`)
 
 func verifyLegacyRoutes(raw []byte, s Session) error {
-	routes := legacyRoutePattern.FindAllSubmatch(raw, -1)
+	var content any
+	if err := json.Unmarshal(raw, &content); err != nil {
+		return fault("unavailable", "invalid announcement content")
+	}
+	routes := legacyRoutePattern.FindAllStringSubmatch(announcementText(content), -1)
 	host, _ := os.Hostname()
 	for _, match := range routes {
 		legacyHost, _ := s.Metadata["legacy_host"].(string)
-		if string(match[2]) != s.Adapter || string(match[3]) != s.SessionID || (string(match[1]) != s.NodeID && string(match[1]) != host && string(match[1]) != legacyHost) {
+		if match[2] != s.Adapter || match[3] != s.SessionID || (match[1] != s.NodeID && match[1] != host && match[1] != legacyHost) {
 			return fault("conflict", "existing group metadata identifies another agent session")
 		}
 	}

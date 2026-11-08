@@ -366,6 +366,11 @@ func (c *Core) Send(ctx context.Context, pid string, s Session, content Content,
 func remember(d *State, m MessageRef, route string) {
 	k := m.key()
 	r := d.References[k]
+	// Older peers and acknowledgment callers may omit optional return context.
+	// Once retained, it must survive those references to the same message.
+	if r.Message.ThreadID != "" {
+		m.ThreadID = r.Message.ThreadID
+	}
 	r.Message = m
 	if route != "" && !contains(r.Routes, route) {
 		r.Routes = append(r.Routes, route)
@@ -377,7 +382,11 @@ func (c *Core) Resolve(m *MessageRef, id string) (MessageRef, error) {
 		if !m.valid() {
 			return MessageRef{}, fault("invalid_argument", "full message reference is required")
 		}
-		return *m, nil
+		resolved := *m
+		if retained := c.store.Snapshot().References[m.key()].Message; retained.ThreadID != "" {
+			resolved.ThreadID = retained.ThreadID
+		}
+		return resolved, nil
 	}
 	var found *MessageRef
 	for _, v := range c.store.Snapshot().References {
@@ -411,8 +420,9 @@ func (c *Core) returnProvider(m MessageRef) (Provider, error) {
 	return nil, fault("unavailable", "message return route is unavailable")
 }
 func (c *Core) Reply(ctx context.Context, m MessageRef, content Content, request string) (SendResult, error) {
-	if !m.valid() {
-		return SendResult{}, fault("invalid_argument", "full message reference is required")
+	m, err := c.Resolve(&m, "")
+	if err != nil {
+		return SendResult{}, err
 	}
 	if err := content.Validate(); err != nil {
 		return SendResult{}, err

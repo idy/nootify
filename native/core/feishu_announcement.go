@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/url"
 	"strconv"
+	"strings"
 )
 
 type feishuAPIError struct{ Code, HTTPStatus int }
@@ -31,6 +32,49 @@ func (e *feishuAPIError) rejectionState() (string, bool) {
 		return "terminal", true
 	}
 	return "", false
+}
+
+// Match the retained announcement parser: inline styled runs concatenate,
+// while blocks/paragraphs remain separated. Legacy Doc content may itself be
+// JSON encoded; Docx uses text_run.content instead of textRun.text.
+func announcementText(value any) string {
+	switch v := value.(type) {
+	case string:
+		var decoded any
+		if json.Unmarshal([]byte(v), &decoded) == nil {
+			return announcementText(decoded)
+		}
+		return v
+	case []any:
+		parts := make([]string, 0, len(v))
+		for _, item := range v {
+			parts = append(parts, announcementText(item))
+		}
+		return strings.Join(parts, "\n")
+	case map[string]any:
+		if elements, ok := v["elements"].([]any); ok {
+			var text strings.Builder
+			for _, element := range elements {
+				text.WriteString(announcementText(element))
+			}
+			return text.String()
+		}
+		if run, ok := v["text_run"].(map[string]any); ok {
+			text, _ := run["content"].(string)
+			return text
+		}
+		if run, ok := v["textRun"].(map[string]any); ok {
+			text, _ := run["text"].(string)
+			return text
+		}
+		parts := make([]string, 0, len(v))
+		for _, item := range v {
+			parts = append(parts, announcementText(item))
+		}
+		return strings.Join(parts, "\n")
+	default:
+		return ""
+	}
 }
 
 // Feishu's newer groups expose Docx announcements. Both representations are

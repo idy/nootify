@@ -129,7 +129,8 @@ export async function main(): Promise<void> {
     const tsnet = new TsnetClient(join(state.directory, 'tailscale'));
     const tailnet = new TailnetAccess(80, { users: process.env.NOOTIFY_TAILNET_USERS?.split(',').map(user => user.trim()).filter(Boolean), probe: tsnet });
     const peers = new WeakMap<Socket, string>();
-    const tailscale = new TailscaleService({ state, access: tailnet, client: tsnet, report, listen: () => listenTailnetProxy(tailnetServer, peers) });
+    const tailscale = new TailscaleService({ state, access: tailnet, client: tsnet, report,
+      disconnected: () => networkChanged(false), listen: () => listenTailnetProxy(tailnetServer, peers) });
     const agents = new AgentPrompts({ stateDir: state.directory, port, tailnetAddress: () => { const url = tailnet.url(); return url ? new URL(url).hostname : undefined; } }, report);
     const providers = new ProvidersService(state, sessions, resolved?.credentials, report, port, tsnet, undefined, sessionThreadDiscovery(agents, state, report));
     networkChanged = ready => {

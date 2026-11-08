@@ -122,6 +122,235 @@ func TestStoreRejectsLinksAndRollsBackFailedTransaction(t *testing.T) {
 	}
 }
 func str(v string) *string { return &v }
+
+func TestFeishuRepliesPreserveThreadAcrossRestartAndRemote(t *testing.T) {
+	for _, thread := range []string{"", "omt-original"} {
+		name := "ordinary-message"
+		if thread != "" {
+			name = "ordinary-group-thread"
+		}
+		t.Run(name, func(t *testing.T) {
+			type replyRequest struct {
+				Path     string
+				InThread bool `json:"reply_in_thread"`
+			}
+			requests := make(chan replyRequest, 4)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch {
+				case strings.Contains(r.URL.Path, "tenant_access_token"):
+					fmt.Fprint(w, `{"code":0,"tenant_access_token":"thread-fixture-token","expire":3600}`)
+				case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/reply"):
+					var request replyRequest
+					if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+						t.Error(err)
+					}
+					request.Path = r.URL.Path
+					requests <- request
+					fmt.Fprint(w, `{"code":0,"data":{"message_id":"fixture-reply"}}`)
+				case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/reactions"):
+					fmt.Fprint(w, `{"code":0,"data":{}}`)
+				default:
+					t.Errorf("unexpected fixture request: %s %s", r.Method, r.URL.Path)
+					http.Error(w, "unexpected request", http.StatusBadRequest)
+				}
+			}))
+			defer server.Close()
+			upstream := testCore(t, nil)
+			deliveries := make(chan map[string]any, 1)
+			downstream := testCore(t, func(name string, data any) error {
+				if name == "delivery" {
+					deliveries <- data.(map[string]any)
+				}
+				return nil
+			})
+			cfg := ProviderConfig{ID: "thread-bot", Type: "feishu", AppID: "thread-fixture-app", AppSecret: "fixture-secret", Recipient: "trusted"}
+			attach := func(c *Core) *feishuProvider {
+				p := newFeishu(c, cfg)
+				p.client = lark.NewClient(cfg.AppID, cfg.AppSecret, lark.WithOpenBaseUrl(server.URL), lark.WithLogger(quietLogger{}), lark.WithHttpClient(server.Client()))
+				p.receiver = func(ctx context.Context, e Event) error { return c.Ingest(ctx, e, cfg.ID) }
+				c.providers[cfg.ID] = p
+				return p
+			}
+			p := attach(upstream)
+			session := Session{NodeID: downstream.node(), Adapter: "codex", SessionID: "thread-session"}
+			must(t, upstream.store.Update(func(d *State) error {
+				d.Providers[cfg.ID] = cfg // Disabled: no live WebSocket, including after restart.
+				d.Bindings[session.key()] = Binding{ProviderID: cfg.ID, Session: session, ChatID: "ordinary-group", SenderID: "trusted"}
+				return nil
+			}))
+			// Keep an offline subscriber so ingress is replayed from durable state.
+			sub, err := upstream.Subscribe(context.Background(), downstream.node(), "fixture")
+			must(t, err)
+			sub.Close()
+			payload := &im.P2MessageReceiveV1{Event: &im.P2MessageReceiveV1Data{
+				Sender:  &im.EventSender{SenderType: str("user"), SenderId: &im.UserId{OpenId: str("trusted")}},
+				Message: &im.EventMessage{MessageId: str("incoming"), ChatId: str("ordinary-group"), ChatType: str("group"), ThreadId: str(thread), MessageType: str("text"), Content: str(`{"text":"question"}`)},
+			}}
+			must(t, p.receive(context.Background(), payload))
+			upstream = reopenCore(t, upstream, nil)
+			attach(upstream)
+			address, token := testServer(t, upstream)
+			addRemote(t, downstream, "upstream", address, token)
+			var delivered MessageRef
+			select {
+			case data := <-deliveries:
+				delivered = data["message"].(MessageRef)
+			case <-time.After(5 * time.Second):
+				t.Fatal("persisted ingress was not replayed over gRPC")
+			}
+			// Inspect the wire representation as well as the persisted return path.
+			assertThread := func(ref MessageRef) {
+				t.Helper()
+				raw, err := json.Marshal(ref)
+				must(t, err)
+				var wire struct {
+					ThreadID string `json:"thread_id"`
+				}
+				must(t, json.Unmarshal(raw, &wire))
+				if wire.ThreadID != thread {
+					t.Errorf("thread context = %q, want %q", wire.ThreadID, thread)
+				}
+			}
+			assertThread(delivered)
+			retained, err := upstream.Resolve(nil, "incoming")
+			must(t, err)
+			assertThread(retained)
+			downstream = reopenCore(t, downstream, nil)
+			addRemote(t, downstream, "upstream", address, token)
+			resolved, err := downstream.Resolve(nil, "incoming")
+			must(t, err)
+			assertThread(resolved)
+			// Old clients may supply only the three identity fields. Acknowledging
+			// one must not erase the retained context used by later replies.
+			minimal := MessageRef{OriginNodeID: delivered.OriginNodeID, ProviderID: delivered.ProviderID, MessageID: delivered.MessageID}
+			if delivered.key() != minimal.key() {
+				t.Fatal("thread context changed message identity")
+			}
+			normalized, err := downstream.Resolve(&minimal, "")
+			must(t, err)
+			assertThread(normalized)
+			_, err = downstream.Ack(context.Background(), minimal)
+			must(t, err)
+			resolved, err = downstream.Resolve(nil, "incoming")
+			must(t, err)
+			assertThread(resolved)
+			for i, ref := range []MessageRef{resolved, minimal} {
+				result, err := downstream.Reply(context.Background(), ref, Content{Text: "answer"}, fmt.Sprintf("reply-%d", i))
+				must(t, err)
+				assertThread(result.Message)
+				request := <-requests
+				if request.Path != "/open-apis/im/v1/messages/incoming/reply" || request.InThread != (thread != "") {
+					t.Errorf("reply request = %+v, want original message with in-thread %v", request, thread != "")
+				}
+			}
+			// A returned reply reference must preserve the same thread for chaining.
+			ref, err := downstream.Resolve(nil, "fixture-reply")
+			must(t, err)
+			_, err = downstream.Reply(context.Background(), ref, Content{Text: "follow-up"}, "follow-up")
+			must(t, err)
+			request := <-requests
+			if request.Path != "/open-apis/im/v1/messages/fixture-reply/reply" || request.InThread != (thread != "") {
+				t.Errorf("chained reply request = %+v", request)
+			}
+		})
+	}
+}
+
+func TestFeishuAdoptionChecksStyledAnnouncementRoutes(t *testing.T) {
+	const own = "agent-session:v1:old-host:codex:existing"
+	const other = "agent-session:v1:other-host:codex:other-session"
+	styled := func(marker string, docx bool) any {
+		parts := []any{}
+		for _, part := range []string{marker[:10], marker[10:35], marker[35:]} {
+			if docx {
+				parts = append(parts, map[string]any{"text_run": map[string]any{"content": part, "text_element_style": map[string]any{"bold": true}}})
+			} else {
+				parts = append(parts, map[string]any{"type": "textRun", "textRun": map[string]any{"text": part, "style": map[string]any{"bold": true}}})
+			}
+		}
+		return map[string]any{"elements": parts}
+	}
+	for _, tc := range []struct {
+		name     string
+		docx     bool
+		content  any
+		conflict bool
+	}{
+		{"plain matching", false, own, false},
+		{"plain conflict", false, other, true},
+		{"no marker", false, "User announcement without routing metadata", false},
+		{"empty announcement", false, "", false},
+		{"Doc split matching", false, styled(own, false), false},
+		{"Doc split conflict", false, styled(other, false), true},
+		{"Docx split matching", true, styled(own, true), false},
+		{"Docx split conflict", true, styled(other, true), true},
+		{"Docx matching and conflicting", true, []any{styled(own, true), styled(other, true)}, true},
+		{"separate paragraphs", true, []any{"agent-session:v1:", "other-host:codex:other-session"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			patches := 0
+			content := tc.content
+			if !tc.docx {
+				// Legacy Doc announcements embed their document as a JSON string.
+				raw, err := json.Marshal(map[string]any{"blocks": []any{map[string]any{"paragraph": content}}})
+				must(t, err)
+				content = string(raw)
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				var data any
+				switch {
+				case strings.Contains(r.URL.Path, "tenant_access_token"):
+					fmt.Fprint(w, `{"code":0,"tenant_access_token":"announcement-fixture-token","expire":3600}`)
+					return
+				case r.Method == "GET" && r.URL.Path == "/open-apis/im/v1/chats/group":
+					data = map[string]any{"description": "Original description"}
+				case r.Method == "GET" && r.URL.Path == "/open-apis/im/v1/chats/group/announcement":
+					if tc.docx {
+						fmt.Fprint(w, `{"code":232097}`)
+						return
+					}
+					data = map[string]any{"revision": "1", "content": content}
+				case r.Method == "GET" && r.URL.Path == "/open-apis/docx/v1/chats/group/announcement":
+					data = map[string]any{"revision_id": 1}
+				case r.Method == "GET" && r.URL.Path == "/open-apis/docx/v1/chats/group/announcement/blocks":
+					data = map[string]any{"items": []any{map[string]any{"block_type": 2, "text": content}}}
+				case r.Method == "PATCH" && r.URL.Path == "/open-apis/im/v1/chats/group":
+					patches++
+					var body map[string]any
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body) != 1 || body["description"] == nil {
+						t.Error("adoption must only update the group description")
+					}
+					data = map[string]any{}
+				default:
+					t.Errorf("unexpected fixture request: %s %s", r.Method, r.URL.Path)
+					http.Error(w, "unexpected request", http.StatusBadRequest)
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": data})
+			}))
+			defer server.Close()
+			c := testCore(t, nil)
+			cfg := ProviderConfig{ID: "announcement-bot", AppID: "announcement-fixture-app", AppSecret: "fixture-secret", Recipient: "trusted"}
+			p := newFeishu(c, cfg)
+			defer p.Close()
+			p.client = lark.NewClient(cfg.AppID, cfg.AppSecret, lark.WithOpenBaseUrl(server.URL), lark.WithLogger(quietLogger{}), lark.WithHttpClient(server.Client()))
+			session := Session{NodeID: c.node(), Adapter: "codex", SessionID: "existing", Metadata: map[string]any{"legacy_host": "old-host"}}
+			binding, err := p.Bind(context.Background(), session, "group", "")
+			if tc.conflict {
+				if err == nil || publicError(err).Code != "conflict" || patches != 0 {
+					t.Fatalf("conflicting route adopted: error=%v patches=%d", err, patches)
+				}
+			} else {
+				must(t, err)
+				if binding.ChatID != "group" || patches != 1 {
+					t.Fatalf("legitimate group was not adopted: %+v patches=%d", binding, patches)
+				}
+			}
+		})
+	}
+}
 func TestFeishuOfficialSDKRequestsAdoptionAndIngress(t *testing.T) {
 	var mu sync.Mutex
 	description := ""
