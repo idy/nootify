@@ -48,7 +48,14 @@ export class CodexDesktop {
     })();
     this.opening = opening;
     try { await opening; }
-    catch (error) { if (this.opening === opening) this.close(); throw error; }
+    catch (error) {
+      if (this.opening === opening) {
+        // Validation may fail before a socket exists for close() to disconnect.
+        this.opening = undefined;
+        this.close();
+      }
+      throw error;
+    }
   }
 
   async owner(threadId: string): Promise<string> {

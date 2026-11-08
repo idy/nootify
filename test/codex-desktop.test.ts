@@ -26,7 +26,8 @@ function frame(value: unknown): Buffer {
   const body = Buffer.from(JSON.stringify(value)); const header = Buffer.alloc(4); header.writeUInt32LE(body.length);
   return Buffer.concat([header, body]);
 }
-async function fixture(t: TestContext, mode: 'active' | 'idle' | 'timeout' | 'disconnect' | 'error' | 'wrong-owner' | 'no-receipt' = 'active') {
+async function fixture(t: TestContext, mode: 'active' | 'idle' | 'timeout' | 'disconnect' | 'error' | 'wrong-owner' | 'no-receipt' = 'active',
+  initial: 'socket' | 'missing' | 'file' = 'socket') {
   const directory = await mkdtemp(join(tmpdir(), 'ncd-'));
   const path = join(directory, 'ipc.sock');
   const sockets = new Set<Socket>(); const requests: Request[] = [];
@@ -84,15 +85,18 @@ async function fixture(t: TestContext, mode: 'active' | 'idle' | 'timeout' | 'di
       }
     });
   });
-  server.listen(path); await once(server, 'listening');
+  const listen = async () => { server.listen(path); await once(server, 'listening'); };
+  if (initial === 'socket') await listen();
+  else if (initial === 'file') await writeFile(path, 'temporarily not a socket');
   const desktop = new CodexDesktop(path, 1000, mode === 'timeout' ? 30 : 1000);
   t.after(async () => {
     desktop.close(); for (const socket of sockets) socket.destroy();
-    await new Promise<void>(resolve => server.close(() => resolve()));
+    if (server.listening) await new Promise<void>(resolve => server.close(() => resolve()));
     await rm(directory, { recursive: true, force: true });
   });
   return { directory, path, requests, desktop, setResumed(value: boolean) { resumed = value; }, setOwned(value: boolean) { owned = value; },
-    setSupportsInput(value: boolean) { supportsInput = value; } };
+    setSupportsInput(value: boolean) { supportsInput = value; },
+    async restoreSocket() { await rm(path, { force: true }); await listen(); } };
 }
 
 for (const mode of ['active', 'idle'] as const) test(`Desktop ${mode} thread accepts input in its existing owner`, options, async t => {
@@ -121,6 +125,16 @@ test('Desktop rejects missing owners, unloaded threads and unsupported owner ver
   f.setOwned(true); f.setResumed(false); await assert.rejects(f.desktop.send(thread, 'no resume'), /session_offline/);
   f.setResumed(true); f.setSupportsInput(false); await assert.rejects(f.desktop.send(thread, 'no legacy fallback'), /unsupported_adapter/);
   assert.equal(f.requests.filter(request => request.method === 'thread-follower-steer-turn' || request.method === 'thread-follower-start-turn').length, 0);
+});
+
+for (const initial of ['missing', 'file'] as const) test(`Desktop reconnects after ${initial} socket validation fails`, options, async t => {
+  const f = await fixture(t, 'active', initial);
+  await assert.rejects(f.desktop.ready(thread), SessionUnavailable);
+  assert.equal(f.requests.length, 0, 'validation failure must not submit any input');
+  await f.restoreSocket();
+  assert.deepEqual(await f.desktop.send(thread, 'input after recovery'), { status: 'input_accepted' });
+  assert.equal(f.requests.filter(request => request.method === 'initialize').length, 1);
+  assert.equal(f.requests.filter(request => request.method === 'thread-follower-steer-turn').length, 1);
 });
 
 test('a regular file cannot stand in for the Desktop socket', options, async t => {
