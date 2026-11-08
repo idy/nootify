@@ -313,14 +313,10 @@ func TestStdioShutdownInheritedStdoutReleasesState(t *testing.T) {
 				}
 				outReader, outWriter, err := os.Pipe()
 				must(t, err)
+				t.Cleanup(func() { _ = outReader.Close(); _ = outWriter.Close() })
 				if phase == "ready" {
 					// Fill before inheritance makes this descriptor blocking.
-					must(t, outWriter.SetWriteDeadline(time.Now().Add(50*time.Millisecond)))
-					_, err := outWriter.Write(make([]byte, 2<<20))
-					if !errors.Is(err, os.ErrDeadlineExceeded) {
-						t.Fatalf("could not fill stdout pipe: %v", err)
-					}
-					must(t, outWriter.SetWriteDeadline(time.Time{}))
+					prefillStdioPipe(t, outReader, outWriter)
 				}
 				cmd := exec.Command(os.Args[0], "-test.run=^TestStdioShutdownProcess$")
 				cmd.Env = append(os.Environ(), "NOOTIFY_STDIO_SHUTDOWN_HELPER=1", "NOOTIFY_STDIO_SHUTDOWN_STATE="+dir)
