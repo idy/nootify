@@ -112,8 +112,9 @@ try {
     $phase = 'download and verify NSIS 3.13'
     $archive = Join-Path $fixture 'nsis-3.13.zip'
     $ProgressPreference = 'SilentlyContinue' # PS5.1 progress rendering slows downloads greatly.
-    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-    Invoke-WebRequest -UseBasicParsing -TimeoutSec 60 -Uri 'https://downloads.sourceforge.net/project/nsis/NSIS%203/3.13/nsis-3.13.zip' -OutFile $archive
+    # Use the same mirror fallback and checksum policy as production packaging.
+    & $node (Join-Path $PSScriptRoot 'nsis.mjs') --download $archive
+    if ($LASTEXITCODE -ne 0) { throw 'Pinned NSIS downloader failed; refusing extraction' }
     if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -cne 'BA63DFFC4410EE89193E1CB5A41989991BD77C61068DA17E3156D136B7B0B3D8') {
         throw 'NSIS archive SHA256 mismatch; refusing extraction'
     }

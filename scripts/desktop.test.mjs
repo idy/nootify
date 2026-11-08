@@ -8,7 +8,8 @@ import { promisify } from 'node:util';
 import test from 'node:test';
 import { buildTarget, sidecarName } from './build-targets.mjs';
 import { APP_ID, DEV_APP_ID, copyPayload, desktopLinkerFlags, desktopPaths, macInfoPlist, packageVersion, parseDesktopArgs } from './desktop.mjs';
-import { NSIS_SHA256, NSIS_URL, verifyNsisArchive } from './nsis.mjs';
+import { NSIS_SHA256, NSIS_URL, NSIS_URLS, downloadNsisArchive, verifyNsisArchive } from './nsis.mjs';
+import { createHash } from 'node:crypto';
 import { verifyWindowsX64 } from './bundle-utils.mjs';
 
 const run = promisify(execFile);
@@ -125,10 +126,52 @@ test('NSIS compiler pin rejects corrupt downloads before executable extraction',
   await writeFile(path, 'a downloaded executable must never be trusted implicitly');
   await assert.rejects(verifyNsisArchive(path), /refusing extraction or execution/);
   assert.equal(NSIS_SHA256, 'ba63dffc4410ee89193e1cb5a41989991bd77c61068da17e3156d136b7b0b3d8');
-  assert.match(NSIS_URL, /^https:\/\/downloads\.sourceforge\.net\//);
+  assert.match(NSIS_URL, /^https:\/\/github\.com\/tauri-apps\/binary-releases\/releases\/download\/nsis-3\.13\//);
+  assert.equal(NSIS_URLS.length, 2);
+  assert.ok(NSIS_URLS.every(url => url.startsWith('https://')));
   const smoke = await readFile(join(root, 'scripts/windows-installer-hook-smoke.ps1'), 'utf8');
   assert.ok(smoke.includes(NSIS_SHA256.toUpperCase()));
-  assert.ok(smoke.includes(NSIS_URL));
+  assert.match(smoke, /\$node \(Join-Path \$PSScriptRoot 'nsis\.mjs'\) --download \$archive/);
+  assert.doesNotMatch(smoke, /Invoke-WebRequest/);
+});
+
+test('NSIS mirror fallback rejects HTML and replaces a corrupt cached download only with verified bytes', async t => {
+  const work = await temporary(t);
+  const archive = join(work, 'compiler.zip');
+  await writeFile(archive, 'a previous corrupt download');
+  const fixture = Buffer.from('PK synthetic archive bytes');
+  const checksum = createHash('sha256').update(fixture).digest('hex');
+  const urls = ['https://first.invalid/nsis.zip', 'https://mirror.invalid/nsis.zip'];
+  const calls = [];
+  await downloadNsisArchive(archive, { urls, checksum, fetchArchive: async url => {
+    calls.push(url);
+    return new Response(calls.length === 1 ? '<html>download landing page</html>' : fixture);
+  } });
+  assert.deepEqual(calls, urls);
+  assert.deepEqual(await readFile(archive), fixture);
+  assert.deepEqual(await readdir(work), ['compiler.zip']);
+});
+
+test('NSIS downloader rechecks a valid cache without requesting a mirror', async t => {
+  const work = await temporary(t);
+  const archive = join(work, 'compiler.zip');
+  const fixture = Buffer.from('PK verified cache fixture');
+  await writeFile(archive, fixture);
+  const checksum = createHash('sha256').update(fixture).digest('hex');
+  await downloadNsisArchive(archive, { checksum, fetchArchive: async () => assert.fail('valid cache should not be downloaded again') });
+  assert.deepEqual(await readFile(archive), fixture);
+});
+
+test('NSIS downloader never publishes corrupt mirror responses or changes the production pin', async t => {
+  const work = await temporary(t);
+  const archive = join(work, 'compiler.zip');
+  let calls = 0;
+  await assert.rejects(downloadNsisArchive(archive, { fetchArchive: async () => {
+    calls++; return new Response('<html>not a pinned compiler archive</html>');
+  } }), /all pinned sources:.*SHA-256 mismatch.*refusing extraction or execution/);
+  assert.equal(calls, NSIS_URLS.length);
+  assert.deepEqual(await readdir(work), []);
+  assert.equal(NSIS_SHA256, 'ba63dffc4410ee89193e1cb5a41989991bd77c61068da17e3156d136b7b0b3d8');
 });
 
 test('pure Go resources link from a disposable module copy with actual Windows icon/version/manifest', { timeout: 180_000 }, async t => {
