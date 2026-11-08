@@ -145,13 +145,15 @@ Each adapter resolves only the incoming ID:
 | Adapter | Lookup and archive check | Input transport |
 | --- | --- | --- |
 | `claude-desktop`, `claude-code` | Targeted local record and live runtime lookup | Existing inbox socket |
-| `codex` | Read-only indexed `WHERE id = ?` query in the latest `state_*.sqlite` under `CODEX_HOME` (default `~/.codex`); then `thread/read` for that ID | The existing app-server WebSocket: `turn/start` when idle, `turn/steer` for its latest active turn |
+| `codex` | Read-only indexed `WHERE id = ?` query in the latest `state_*.sqlite` under `CODEX_HOME` (default `~/.codex`); then resolve that ID through the configured app-server or the existing macOS Desktop owner | Configured app-server WebSocket, or Desktop's local IPC router when no backend URL is configured; accepted input is confirmed by its turn receipt |
 | `opencode` | `GET /session/:id` through the official SDK; check `time.archived` | `POST /session/:id/prompt_async` |
 | `trae`, `workbuddy` | Explicitly registered Nootify conversation ID; native availability/archive state is unknown | Private inbox read by that conversation's `thread-receive`; no automatic wake-up |
 
-Codex never calls `thread/list`, `thread/start`, `thread/resume`, or `thread/unarchive`. A thread not loaded in the configured app-server is logged as offline. OpenCode never calls its session-list API or creates a session. `input_accepted` means the client accepted the input, not that generation completed. Interactive approval requests are not approved by the bridge.
+Codex never calls `thread/list`, `thread/start`, `thread/resume`, or `thread/unarchive`. A thread not loaded in the selected client is logged as offline. OpenCode never calls its session-list API or creates a session. `input_accepted` means the client accepted the input, not that generation completed. Interactive approval requests are not approved by the bridge.
 
-Set the **existing** local backend address once, not one configuration per session:
+On macOS, Codex Desktop needs no manual backend address. When no explicit Codex backend is configured, Nootify connects to `CODEX_HOME/ipc/ipc.sock`, verifies its OS-user ownership, discovers the owner of the requested thread and requires an already-resumed conversation. It forwards input through Desktop's versioned local IPC protocol, keeping the original app-server and native tools. The owner first attempts to steer its current turn; only its exact, pre-submission inactive-turn rejection permits starting a new turn. Timeouts, disconnects and invalid input receipts never trigger another submission. The adapter was checked against Codex Desktop's bundled CLI `0.166.0-alpha.5.1`; this IPC is private and can change between Desktop versions. Unsupported method versions fail without submitting input. Windows and standalone clients can use an existing app-server WebSocket.
+
+To select an **existing** local backend explicitly, set its address once, not one configuration per session:
 
 ```bash
 node dist/src/cli.js backend-set --adapter codex --url ws://127.0.0.1:4500
@@ -414,7 +416,7 @@ Read the bearer token from the private state file in your local application; nev
 | `src/state.ts` | Private local session and binding persistence |
 | `src/state.ts`, `src/state-database.ts` | Private SQLite state, incremental transactional saves, and one-time legacy JSON migration |
 | `src/sessions.ts`, `src/local-sessions.ts` | Lazy dispatch, encountered targets, and targeted Claude lookup |
-| `src/external-sessions.ts`, `src/codex-rpc.ts` | Targeted Codex/OpenCode lookup and client input transports |
+| `src/external-sessions.ts`, `src/codex-rpc.ts`, `src/codex-desktop.ts` | Targeted Codex/OpenCode lookup, app-server input, and existing Codex Desktop owner routing |
 | `src/events.ts`, `src/ui.ts`, `src/ui-app.ts`, `public/` | Persistent bounded logs and the read-only browser UI |
 | `src/lark.ts`, `src/lark-polling.ts`, `src/lark-history-buffer.ts`, `src/lark-metadata.ts` | Feishu history polling, ordered disk-backed windows, durable receipts, bounded HTTP and announcement routing |
 | `src/launchd.ts`, `src/service.ts`, `src/cli.ts` | Platform background service installation and control, acknowledgments, and replies |
