@@ -2,8 +2,10 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -158,26 +160,254 @@ type rpcResponse struct {
 	Error  *rpcError `json:"error,omitempty"`
 }
 
-func serveStdio(ctx context.Context, c *Core, in io.Reader, out io.Writer) error {
-	var writeMu sync.Mutex
-	encoder := json.NewEncoder(out)
-	write := func(v any) error { writeMu.Lock(); defer writeMu.Unlock(); return encoder.Encode(v) }
+// stdioFile owns a pipe/socket descriptor. Inherited Unix stdio descriptors may
+// be blocking and unpollable: Close alone cannot interrupt a blocked syscall.
+// Put them in nonblocking mode without calling Fd (which disables Go deadlines).
+// Go's Windows pipe Close also cancels synchronous I/O via CancelIoEx.
+// The retry path is only used when the descriptor lacks runtime poller support.
+type stdioFile struct {
+	*os.File
+	ctx context.Context
+}
+
+func setStdioNonblock[T ~int | ~uintptr](fd uintptr, set func(T, bool) error) error {
+	return set(T(fd), true)
+}
+
+func ownStdioFile(ctx context.Context, f *os.File) (*stdioFile, error) {
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&(os.ModeNamedPipe|os.ModeSocket) == 0 {
+		return nil, fmt.Errorf("stdio requires a pipe or socket")
+	}
+	raw, err := f.SyscallConn()
+	if err != nil {
+		return nil, err
+	}
+	var nonblockErr error
+	if err = raw.Control(func(fd uintptr) {
+		nonblockErr = setStdioNonblock(fd, syscall.SetNonblock)
+	}); err != nil {
+		return nil, err
+	}
+	if nonblockErr != nil {
+		return nil, nonblockErr
+	}
+	return &stdioFile{File: f, ctx: ctx}, nil
+}
+
+func (f *stdioFile) retry() error {
+	timer := time.NewTimer(20 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-f.ctx.Done():
+		return context.Cause(f.ctx)
+	case <-timer.C:
+		return nil
+	}
+}
+
+func (f *stdioFile) Read(p []byte) (int, error) {
+	for {
+		if err := f.ctx.Err(); err != nil {
+			return 0, context.Cause(f.ctx)
+		}
+		n, err := f.File.Read(p)
+		if n > 0 || !errors.Is(err, syscall.EAGAIN) {
+			return n, err
+		}
+		if err = f.retry(); err != nil {
+			return 0, err
+		}
+	}
+}
+
+func (f *stdioFile) Write(p []byte) (int, error) {
+	written := 0
+	for len(p) > 0 {
+		if err := f.ctx.Err(); err != nil {
+			return written, context.Cause(f.ctx)
+		}
+		n, err := f.File.Write(p)
+		written += n
+		p = p[n:]
+		if err != nil {
+			if !errors.Is(err, syscall.EAGAIN) {
+				return written, err
+			}
+			if err = f.retry(); err != nil {
+				return written, err
+			}
+		} else if n == 0 {
+			return written, io.ErrShortWrite
+		}
+	}
+	return written, nil
+}
+
+const stdioOutputBuffer = 16
+
+// newStdioOutput uses one encoder and a bounded queue, never one goroutine per
+// write. Canceling ctx wakes every caller, including those waiting to enqueue.
+// The owner must interrupt the underlying writer on cancellation and join run.
+func newStdioOutput(ctx context.Context, out io.Writer, cancel context.CancelCauseFunc) (write func(any) error, run func()) {
+	type pendingWrite struct {
+		value any
+		done  chan error
+	}
+	queue := make(chan pendingWrite, stdioOutputBuffer)
+	write = func(value any) error {
+		if ctx.Err() != nil {
+			return context.Cause(ctx)
+		}
+		pending := pendingWrite{value: value, done: make(chan error, 1)}
+		select {
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		case queue <- pending:
+		}
+		select {
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		case err := <-pending.done:
+			return err
+		}
+	}
+	run = func() {
+		encoder := json.NewEncoder(out)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case pending := <-queue:
+				if ctx.Err() != nil {
+					return
+				}
+				err := encoder.Encode(pending.value)
+				if err != nil {
+					cancel(err)
+				}
+				pending.done <- err
+				if err != nil {
+					return
+				}
+			}
+		}
+	}
+	return write, run
+}
+
+// serveStdio takes ownership of closable input/output. Their Close methods must
+// promptly interrupt ongoing Read/Write calls and reject future calls (io.Pipe
+// satisfies this contract). OS pipes/sockets are adapted above; finite in-memory
+// readers and *bytes.Buffer output need no interruption. Arbitrary blocking
+// io.Writer/io.Reader implementations cannot be canceled and are rejected.
+func serveStdio(parent context.Context, c *Core, in io.Reader, out io.Writer) error {
+	ctx, cancel := context.WithCancelCause(parent)
+	var ioWG, requestWG sync.WaitGroup
+	defer func() {
+		cancel(io.EOF)
+		c.Close()
+		requestWG.Wait()
+		ioWG.Wait()
+	}()
+	if f, ok := in.(*os.File); ok {
+		adapted, err := ownStdioFile(ctx, f)
+		if err != nil {
+			return err
+		}
+		in = adapted
+	}
+	if f, ok := out.(*os.File); ok {
+		adapted, err := ownStdioFile(ctx, f)
+		if err != nil {
+			return err
+		}
+		out = adapted
+	}
+	inputCloser, inputClosable := in.(io.Closer)
+	if !inputClosable {
+		switch in.(type) {
+		case *bytes.Buffer, *bytes.Reader, *strings.Reader:
+		default:
+			return fmt.Errorf("stdio input must support interruptible Close")
+		}
+	}
+	outputCloser, outputClosable := out.(io.Closer)
+	if !outputClosable {
+		if _, ok := out.(*bytes.Buffer); !ok {
+			return fmt.Errorf("stdio output must support interruptible Close")
+		}
+	}
+	ioWG.Add(1)
+	go func() {
+		defer ioWG.Done()
+		<-ctx.Done()
+		if outputClosable {
+			_ = outputCloser.Close()
+		}
+		if inputClosable {
+			_ = inputCloser.Close()
+		}
+	}()
+	write, runOutput := newStdioOutput(ctx, out, cancel)
+	ioWG.Add(1)
+	go func() { defer ioWG.Done(); runOutput() }()
 	c.emit = func(event string, data any) error { return write(map[string]any{"event": event, "data": data}) }
+
+	type scannedRequest struct {
+		rpcRequest
+		invalid bool
+	}
+	requests := make(chan scannedRequest, 128)
+	ioWG.Add(1)
+	go func() {
+		defer ioWG.Done()
+		scanner := bufio.NewScanner(in)
+		scanner.Buffer(make([]byte, 64<<10), maxPayload+65536)
+		for scanner.Scan() {
+			var req scannedRequest
+			req.invalid = json.Unmarshal(scanner.Bytes(), &req.rpcRequest) != nil
+			select {
+			case <-ctx.Done():
+				return
+			case requests <- req:
+			default:
+				// Bound pre-ready input too, so an undrained handshake cannot
+				// hide EOF behind an unlimited queue of pipelined requests.
+				cancel(fault("resource_exhausted", "too many pending requests"))
+				return
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			cancel(err)
+		} else {
+			cancel(io.EOF)
+		}
+	}()
+	result := func() error {
+		if errors.Is(context.Cause(ctx), io.EOF) {
+			return nil
+		}
+		return context.Cause(ctx)
+	}
 	if err := write(rpcResponse{ID: 0, Result: map[string]any{"ready": true, "node_id": c.node()}}); err != nil {
-		return err
+		return result()
 	}
 	if err := c.Start(); err != nil {
 		c.log("remote_listener_failed", "", "")
 	}
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	var wg sync.WaitGroup
 	var active atomic.Int32
-	scanner := bufio.NewScanner(in)
-	scanner.Buffer(make([]byte, 64<<10), maxPayload+65536)
-	for scanner.Scan() {
-		var req rpcRequest
-		if err := json.Unmarshal(scanner.Bytes(), &req); err != nil {
+	for {
+		var req scannedRequest
+		select {
+		case <-ctx.Done():
+			return result()
+		case req = <-requests:
+		}
+		if req.invalid {
 			_ = write(rpcResponse{ID: 0, Error: &rpcError{"invalid_argument", "invalid request JSON"}})
 			continue
 		}
@@ -187,9 +417,9 @@ func serveStdio(ctx context.Context, c *Core, in io.Reader, out io.Writer) error
 			continue
 		}
 		active.Add(1)
-		wg.Add(1)
+		requestWG.Add(1)
 		go func(req rpcRequest) {
-			defer wg.Done()
+			defer requestWG.Done()
 			defer active.Add(-1)
 			rctx, stop := context.WithTimeout(ctx, 60*time.Second)
 			defer stop()
@@ -205,12 +435,8 @@ func serveStdio(ctx context.Context, c *Core, in io.Reader, out io.Writer) error
 				response.Error = publicError(err)
 			}
 			_ = write(response)
-		}(req)
+		}(req.rpcRequest)
 	}
-	cancel()
-	c.Close()
-	wg.Wait()
-	return scanner.Err()
 }
 func main() {
 	// The SDK's dispatcher constructor logs once before a custom logger can be
@@ -236,7 +462,6 @@ func main() {
 	defer store.Close()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	go func() { <-ctx.Done(); _ = os.Stdin.Close() }()
 	core, err := NewCore(ctx, store, nil)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "cannot initialize core state")

@@ -21,7 +21,7 @@ Content is `{text?: string, blocks?: ContentBlock[]}`. Blocks use `{type, text?,
 
 Remote RPCs are bounded to 45 seconds within a 60-second core command deadline. The stdio bridge waits 65 seconds, and the HTTP client waits 75 seconds, so outer transports do not cut off a live inner operation. Unknown submission outcomes keep their durable request identity and are never blindly resubmitted with a new ID.
 
-The process starts with `--state-dir <private directory>`. It emits a ready frame `{id:0,result:{ready:true,node_id}}`. Requests are NDJSON `{id:number,method:string,params:object}`; responses are `{id,result}` or `{id,error:{code,message}}`. Request handling must be concurrent: an operation waiting for an agent delivery or outbound tunnel must not prevent completion RPCs from being read. Stdout is exclusively protocol data. EOF cancels the service and closes network connections.
+The process starts with `--state-dir <private directory>`. It emits a ready frame `{id:0,result:{ready:true,node_id}}`. Requests are NDJSON `{id:number,method:string,params:object}`; responses are `{id,result}` or `{id,error:{code,message}}`. Request handling must be concurrent: an operation waiting for an agent delivery or outbound tunnel must not prevent completion RPCs from being read. Stdout is exclusively protocol data. Protocol writes use a bounded queue, and cancellation interrupts owned pipe IO even if the parent stops draining output. EOF cancels the service and closes network connections.
 
 Methods:
 
@@ -76,6 +76,8 @@ Navigation adds `Providers` under message bridging. The sidebar's `GitHub` group
 
 Only unmatched events are broadcast. Matching uses the full session identity, not just a local agent ID. Locally owned offline/failed sessions are not rerouted as unmatched. Invalid/unauthorized events are rejected at ingress. Every peer has its own bounded delivery window, durable cursor into the shared broadcast ledger, confirmations, and reconnect replay. A full window does not reject other peers' broadcasts; that peer refills its window from the retained backlog independently. Global storage limits remain explicit admission failures. One peer's confirmation cannot consume another peer's event. Keep stable event IDs, origin provider references, hop limits and visited-node information to stop loops and duplicate local execution across multiple routes.
 
+Session operations use per-session synchronization; no node-wide operation lock is held while calling a remote provider. Multiple streams from the same downstream node share that node's durable queue and confirmations without replacing one another. A hop-exhausted or already-visited copy that was not handled does not suppress a later valid route for the same event.
+
 Session operations, message sending, replying, metadata and deletion follow their selected provider binding and return path. They are not broadcast commands. Delete notification resources and mappings only, never an agent's original conversation. Multiple feeds from the same bot must not independently execute the same source message.
 
 A write is persisted before it is acknowledged. Retrying uncertain agent acceptance is forbidden. Upstream ingestion acknowledgement is distinct from downstream acknowledgement and from agent acknowledgement. Queue exhaustion and disconnected downstreams must not silently lose admitted events.
@@ -87,7 +89,9 @@ Requests retain the helper's existing flat `{id,method,...fields}` format:
 - `tunnel` with `{address:"tailnet-host:port"}` -> `{id:string,address:"127.0.0.1:ephemeral-port"}`; raw bidirectional TCP forwarding through `tsnet.Server.Dial`. Validate destination and bound active tunnels. `close_tunnel` with `{tunnel_id}` closes the listener and connections.
 - `publish` with `{port:number,target:"127.0.0.1:port"}` -> `{port}`; listens on that Tailscale port and forwards raw TCP to the numeric loopback target. It must not inject the existing HTTP PROXY preamble into gRPC. `unpublish` with `{port}` closes it.
 
-All listeners and connections close on EOF/shutdown. Existing port-80 browser proxy behavior and peer verification remain intact.
+All listeners and connections close on EOF/shutdown. Changing to a listener that cannot be reached through numeric loopback withdraws the previous Tailnet publication before reporting the new configuration; failed withdrawal retains its handle for retry. IPv4-mapped IPv6 Tailnet addresses are unmapped before transport selection. Existing port-80 browser proxy behavior and peer verification remain intact.
+
+Legacy thread sends and metadata reads may omit the adapter. The Node bridge resolves the full local identity from core notification-session bindings, optionally scoped by provider, and rejects ambiguous IDs instead of assuming a default agent adapter.
 
 ## Validation
 

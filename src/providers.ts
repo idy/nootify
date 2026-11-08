@@ -123,7 +123,7 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
     clearInterval(this.discoveryTimer); this.discoveryController?.abort();
     await this.networkQueue.catch(() => {});
     await this.core.stop();
-    await this.closeNetwork();
+    await this.closeNetwork().catch(error => this.report({ source: 'providers', status: 'tailnet_cleanup_failed', error: (error as Error).message }));
     await Promise.allSettled([...this.deliveries.values(), ...(this.discovery ? [this.discovery] : [])]);
   }
   private scheduleDiscovery(): void {
@@ -197,22 +197,32 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
       await this.rpc('transport.configure', { tailnet_enabled: enabled });
       const remote = (await this.page()).remote;
       if (!enabled || !remote.enabled || !this.tsnet) { await this.closeNetwork(); return; }
-      const endpoint = new URL(`http://${remote.listen}`);
-      const port = Number(endpoint.port);
+      // The core validates host:port. Splitting the final colon also handles
+      // bracketed IPv6 zone addresses, which are not valid WHATWG URL hosts.
+      const separator = remote.listen.lastIndexOf(':');
+      const port = Number(remote.listen.slice(separator + 1));
       // A wildcard listener is reachable through loopback too. The helper only accepts numeric loopback targets.
-      const host = endpoint.hostname.replace(/^\[|\]$/g, '');
+      const host = remote.listen.slice(0, separator).replace(/^\[|\]$/g, '');
       if (!['127.0.0.1', '0.0.0.0', 'localhost'].includes(host)) {
+        await this.unpublishCurrent();
         this.report({ source: 'providers', status: 'tailnet_publish_skipped', reason: 'listener_not_loopback_reachable' }); return;
       }
       if (this.published === port) return;
-      if (this.published) await this.tsnet.unpublish(this.published);
+      await this.unpublishCurrent();
       await this.tsnet.publish(port, `127.0.0.1:${port}`); this.published = port;
     });
     this.networkQueue = task;
     return task;
   }
+  private async unpublishCurrent(): Promise<void> {
+    const port = this.published;
+    if (port === undefined || !this.tsnet) return;
+    // Keep the handle if cleanup fails, so the next transition can retry it.
+    await this.tsnet.unpublish(port);
+    this.published = undefined;
+  }
   private async closeNetwork(): Promise<void> {
-    if (this.published) { const port = this.published; this.published = undefined; await this.tsnet?.unpublish(port).catch(() => {}); }
+    await this.unpublishCurrent();
     for (const tunnel of this.tunnels.values()) await this.tsnet?.closeTunnel(tunnel.id).catch(() => {});
     this.tunnels.clear();
   }
@@ -259,6 +269,20 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
     const node_id = (await this.page()).node_id;
     return { node_id, adapter, session_id, name: sessionName };
   }
+  private async threadSession(id: string, adapter: unknown, providerId: unknown): Promise<SessionRef> {
+    if (adapter !== undefined) return this.localSession(id, adapter);
+    const session_id = identifier(id, 'session_id');
+    const { node_id } = await this.page();
+    const bindings = await this.rpc<Binding[]>('session.list');
+    const local = bindings.filter(binding => binding.session.node_id === node_id && binding.session.session_id === session_id);
+    const scoped = typeof providerId === 'string' ? local.filter(binding => binding.provider_id === providerId) : local;
+    const candidates = scoped.length ? scoped : local;
+    const adapters = new Set(candidates.map(binding => binding.session.adapter));
+    if (adapters.size > 1) throw new HttpError(409, 'This session ID has multiple adapter bindings; specify adapter');
+    const resolved = candidates[0]?.session.adapter ?? this.state.sessions.get(session_id)?.adapter;
+    if (!resolved) throw new HttpError(404, 'No notification session with this ID; specify adapter');
+    return this.localSession(session_id, resolved);
+  }
   async handle(request: RouteRequest): Promise<RouteResponse | undefined> {
     if (request.path === '/v1/providers') {
       if (request.method === 'GET') return { body: await this.page() };
@@ -274,8 +298,7 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
     const thread = /^\/v1\/threads\/([^/]+)(?:\/(messages|metadata))?$/.exec(request.path);
     if (thread) {
       const body = request.body === undefined ? {} : object(request.body);
-      const saved = this.state.sessions.get(decodeURIComponent(thread[1]));
-      const session = await this.localSession(decodeURIComponent(thread[1]), body.adapter ?? saved?.adapter ?? 'claude-desktop');
+      const session = await this.threadSession(decodeURIComponent(thread[1]), body.adapter, body.provider_id);
       const provider = body.provider_id ? { provider_id: body.provider_id } : {};
       if (request.method === 'DELETE' && !thread[2]) return { body: await this.rpc('session.delete', { session, ...provider }) };
       if (thread[2] === 'metadata' && ['GET', 'PUT'].includes(request.method)) return { body: await this.rpc(

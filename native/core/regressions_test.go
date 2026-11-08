@@ -406,11 +406,12 @@ func TestDeadlineWhileQueuedNeverSubmitsOrPersistsAnIntent(t *testing.T) {
 	s := Session{Adapter: "codex", SessionID: "blocked"}
 	_, err := c.Ensure(context.Background(), "", s)
 	must(t, err)
-	c.ops.Lock()
+	unlock, err := c.sessions.acquire(context.Background(), c.normalize(s).key())
+	must(t, err)
 	locked := true
 	defer func() {
 		if locked {
-			c.ops.Unlock()
+			unlock()
 		}
 	}()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
@@ -423,9 +424,9 @@ func TestDeadlineWhileQueuedNeverSubmitsOrPersistsAnIntent(t *testing.T) {
 			t.Fatalf("wrong queued deadline result: %v", err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("expired request waited for the operation gate")
+		t.Fatal("expired request waited for the session gate")
 	}
-	c.ops.Unlock()
+	unlock()
 	locked = false
 	if p.sends != 0 || len(c.store.Snapshot().Operations) != 0 {
 		t.Fatal("expired queued request submitted or persisted a pending operation")

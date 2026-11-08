@@ -13,25 +13,31 @@ import { createServiceHost } from '../src/server.js';
 import { EventLog } from '../src/events.js';
 import type { TailnetAccess } from '../src/tailnet.js';
 import { NootifyClient } from '../src/client.js';
+import type { TsnetClient } from '../src/tsnet-client.js';
 
 const page: ProviderPage = { node_id: 'local-node', providers: [], remote: { enabled: false, listen: '127.0.0.1:9418', status: 'disabled', tls: false, token_set: false, peers: [] } };
+interface FakeBinding { provider_id: string; session: { node_id: string; adapter: string; session_id: string; name?: string }; created: boolean; deleted?: boolean }
 class FakeCore implements CoreTransport {
+  snapshot: ProviderPage = structuredClone(page);
+  bindings: FakeBinding[] = [];
   calls: { method: string; params: Record<string, unknown> }[] = [];
   async start(): Promise<void> {}
   async stop(): Promise<void> {}
   async request<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
     this.calls.push({ method, params });
-    const result = method === 'status' ? page : method === 'session.ensure' ? { provider_id: 'remote-one', session: params.session, created: true }
-      : method === 'remote.secret' ? { token: 'private-peer-token' } : { message_id: 'reply-id' };
+    const binding = method === 'session.ensure' ? { provider_id: String(params.provider_id ?? 'remote-one'), session: params.session as FakeBinding['session'], created: true } : undefined;
+    if (binding) this.bindings.push(binding);
+    const result = method === 'status' ? this.snapshot : method === 'session.list' ? this.bindings : binding
+      ?? (method === 'remote.secret' ? { token: 'private-peer-token' } : { message_id: 'reply-id' });
     return result as T;
   }
 }
-async function fixture(t: { after(fn: () => unknown): void }, session?: Partial<SessionsService>) {
+async function fixture(t: { after(fn: () => unknown): void }, session?: Partial<SessionsService>, tsnet?: TsnetClient) {
   const directory = await mkdtemp(join(tmpdir(), 'nootify-providers-'));
   const state = await State.open(directory);
   const core = new FakeCore();
   const sessions = session as SessionsService ?? new SessionsService(state);
-  const providers = new ProvidersService(state, sessions, undefined, undefined, 9417, undefined, core);
+  const providers = new ProvidersService(state, sessions, undefined, undefined, 9417, tsnet, core);
   await providers.start();
   t.after(async () => { await providers.stop(); await rm(directory, { recursive: true, force: true }); });
   return { directory, state, core, sessions, providers };
@@ -124,6 +130,62 @@ test('legacy session commands use full local identity and preserve explicit prov
   assert.equal(ensure.params.provider_id, 'remote-one');
   await providers.handle({ method: 'DELETE', path: '/v1/threads/agent-session', body: { adapter: 'codex', provider_id: 'remote-one' } });
   assert.equal(core.calls.at(-1)?.method, 'session.delete');
+});
+
+test('thread operations infer native adapters from durable local bindings and refuse ambiguous IDs', async t => {
+  const { providers, core, state } = await fixture(t, { sessionName: id => id });
+  const server = createServiceHost([providers], state.token);
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(async () => { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); });
+  const baseUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  const client = new NootifyClient({ baseUrl, token: state.token });
+  for (const adapter of ['codex', 'opencode', 'claude-code'] as const) {
+    const id = `native-${adapter}`;
+    await client.openThread({ adapter, session_id: id, session_name: adapter });
+    assert.equal(state.sessions.has(id), false, 'native sessions are not cooperative inbox registrations');
+    await client.sendThread(id, 'progress');
+    assert.equal((core.calls.at(-1)?.params.session as FakeBinding['session']).adapter, adapter);
+    const metadata = await fetch(`${baseUrl}/v1/threads/${id}/metadata`, { headers: { authorization: `Bearer ${state.token}` } });
+    assert.equal(metadata.status, 200);
+    await metadata.json();
+    assert.equal(core.calls.at(-1)?.method, 'session.metadata.get');
+    assert.equal((core.calls.at(-1)?.params.session as FakeBinding['session']).adapter, adapter);
+  }
+  core.bindings.push({ provider_id: 'foreign', session: { node_id: 'other-node', adapter: 'trae', session_id: 'native-codex' }, created: true });
+  await providers.handle({ method: 'POST', path: '/v1/threads/native-codex/messages', body: { text: 'still local' } });
+  assert.equal((core.calls.at(-1)?.params.session as FakeBinding['session']).adapter, 'codex');
+  core.bindings.push({ provider_id: 'other', session: { node_id: page.node_id, adapter: 'opencode', session_id: 'native-codex' }, created: true });
+  await assert.rejects(providers.handle({ method: 'POST', path: '/v1/threads/native-codex/messages', body: { text: 'ambiguous' } }), /multiple adapter bindings/);
+  await providers.handle({ method: 'POST', path: '/v1/threads/native-codex/messages', body: { text: 'selected', provider_id: 'other' } });
+  assert.equal((core.calls.at(-1)?.params.session as FakeBinding['session']).adapter, 'opencode');
+  await assert.rejects(providers.handle({ method: 'GET', path: '/v1/threads/missing/metadata', body: undefined }), /No notification session/);
+});
+
+test('changing to a non-loopback listener withdraws the old Tailnet publication and retries failed cleanup', async t => {
+  const network: { method: string; port: number; target?: string }[] = [];
+  let failCleanup = false;
+  const tsnet = { async publish(port: number, target: string) { network.push({ method: 'publish', port, target }); return { port }; },
+    async unpublish(port: number) { network.push({ method: 'unpublish', port }); if (failCleanup) throw new Error('cleanup interrupted'); },
+    async closeTunnel() {} } as unknown as TsnetClient;
+  const { providers, core, state } = await fixture(t, { sessionName: id => id }, tsnet);
+  state.settings.tailscale_enabled = true;
+  core.snapshot.remote.enabled = true;
+  await providers.syncNetwork();
+  assert.deepEqual(network, [{ method: 'publish', port: 9418, target: '127.0.0.1:9418' }]);
+  core.snapshot.remote.listen = '192.168.1.5:9443'; core.snapshot.remote.tls = true;
+  failCleanup = true;
+  await assert.rejects(providers.syncNetwork(), /cleanup interrupted/);
+  failCleanup = false;
+  await providers.syncNetwork();
+  assert.deepEqual(network.slice(1), [{ method: 'unpublish', port: 9418 }, { method: 'unpublish', port: 9418 }]);
+  await providers.syncNetwork();
+  assert.equal(network.length, 3, 'removed publication must not remain tracked or be recreated for a LAN-only listener');
+  core.snapshot.remote.listen = '127.0.0.1:9444';
+  await providers.syncNetwork();
+  assert.deepEqual(network.at(-1), { method: 'publish', port: 9444, target: '127.0.0.1:9444' });
+  core.snapshot.remote.listen = '[fe80::1%en0]:9443';
+  await providers.syncNetwork();
+  assert.deepEqual(network.at(-1), { method: 'unpublish', port: 9444 }, 'LAN IPv6 zone listeners must withdraw the old publication too');
 });
 
 test('agent delivery returns true transport outcome and retains source reference in reply instructions', async t => {

@@ -16,9 +16,10 @@ type Core struct {
 	cancel    context.CancelFunc
 	mu        sync.Mutex
 	ops       *operationGate
+	sessions  sessionGates
 	providers map[string]Provider
 	statuses  map[string]string
-	subs      map[string]*Subscription
+	subs      map[string]map[*Subscription]struct{}
 	emit      func(string, any) error
 	server    *remoteServer
 	dialMu    sync.Mutex
@@ -27,7 +28,7 @@ type Core struct {
 
 func NewCore(parent context.Context, s *Store, emit func(string, any) error) (*Core, error) {
 	ctx, cancel := context.WithCancel(parent)
-	c := &Core{store: s, ctx: ctx, cancel: cancel, ops: newOperationGate(), providers: map[string]Provider{}, statuses: map[string]string{}, subs: map[string]*Subscription{}, emit: emit, dials: map[string]chan dialResult{}}
+	c := &Core{store: s, ctx: ctx, cancel: cancel, ops: newOperationGate(), providers: map[string]Provider{}, statuses: map[string]string{}, subs: map[string]map[*Subscription]struct{}{}, emit: emit, dials: map[string]chan dialResult{}}
 	err := s.Update(func(d *State) error {
 		// Upgrade deleted bindings written before resource tombstones existed.
 		for _, binding := range d.Bindings {
@@ -67,8 +68,10 @@ func (c *Core) Close() {
 	c.providers = map[string]Provider{}
 	sv := c.server
 	c.server = nil
-	for _, s := range c.subs {
-		s.cancel()
+	for _, streams := range c.subs {
+		for s := range streams {
+			s.cancel()
+		}
 	}
 	c.mu.Unlock()
 	if sv != nil {
@@ -116,10 +119,11 @@ func (c *Core) Ensure(ctx context.Context, pid string, s Session) (Binding, erro
 	if err := s.validate(); err != nil {
 		return Binding{}, err
 	}
-	if err := c.ops.LockContext(ctx); err != nil {
+	unlock, err := c.sessions.acquire(ctx, s.key())
+	if err != nil {
 		return Binding{}, err
 	}
-	defer c.ops.Unlock()
+	defer unlock()
 	old, selected, reused, err := c.prepareSession(ctx, pid, s)
 	if err != nil {
 		return old, err
@@ -134,28 +138,23 @@ func (c *Core) Ensure(ctx context.Context, pid string, s Session) (Binding, erro
 	if s.Name == "" {
 		s.Name = old.Session.Name
 	}
-	p, err := c.provider(pid)
+	lease, err := c.captureProvider(ctx, pid, s)
 	if err != nil {
 		return old, err
 	}
 	if err := ctx.Err(); err != nil {
 		return old, err
 	}
-	b, err := p.Ensure(ctx, s)
+	b, err := lease.Bot.Ensure(ctx, s)
 	if err != nil {
 		return b, err
 	}
 	b.ProviderID = pid
 	b.Session = s
-	setResourceOrigin(c.store.Snapshot(), &b, c.node())
-	if wasRetired(c.store.Snapshot(), b) {
-		return b, fault("conflict", "provider returned a retired notification resource")
-	}
 	b.Created = true
 	b.Deleted = false
 	b.DeletePending = false
-	err = c.store.Update(func(d *State) error { d.Bindings[s.key()] = b; return nil })
-	return b, err
+	return c.publishBinding(lease, b)
 }
 func (c *Core) GetMetadata(ctx context.Context, pid string, s Session) (map[string]any, error) {
 	s = c.normalize(s)
@@ -171,23 +170,37 @@ func (c *Core) GetMetadata(ctx context.Context, pid string, s Session) (map[stri
 }
 func (c *Core) SetMetadata(ctx context.Context, pid string, s Session, m map[string]any) (map[string]any, error) {
 	s = c.normalize(s)
-	if err := c.ops.LockContext(ctx); err != nil {
+	unlock, err := c.sessions.acquire(ctx, s.key())
+	if err != nil {
 		return nil, err
 	}
-	defer c.ops.Unlock()
+	defer unlock()
 	b, err := c.binding(pid, s)
 	if err != nil {
 		return nil, err
 	}
-	p, err := c.provider(b.ProviderID)
+	lease, err := c.captureProvider(ctx, b.ProviderID, s)
 	if err != nil {
 		return nil, err
 	}
-	v, err := p.SetMetadata(ctx, b, m)
+	if lease.Binding.Deleted {
+		return nil, fault("deleted", "notification session was deleted")
+	}
+	b = lease.Binding
+	v, err := lease.Bot.SetMetadata(ctx, b, m)
 	if err != nil {
 		return nil, err
 	}
-	err = c.store.Update(func(d *State) error { b.Session.Metadata = v; d.Bindings[s.key()] = b; return nil })
+	c.ops.Lock()
+	defer c.ops.Unlock()
+	err = c.store.Update(func(d *State) error {
+		if !c.leaseCurrent(*d, lease) || bindingState(*d, s) != lease.BindingState {
+			return fault("conflict", "provider or session changed while setting metadata")
+		}
+		b.Session.Metadata = v
+		d.Bindings[s.key()] = b
+		return nil
+	})
 	return v, err
 }
 func (c *Core) Delete(ctx context.Context, pid string, s Session) error {
@@ -195,10 +208,21 @@ func (c *Core) Delete(ctx context.Context, pid string, s Session) error {
 	if err := s.validate(); err != nil {
 		return err
 	}
+	unlock, err := c.sessions.acquire(ctx, s.key())
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if err := c.ops.LockContext(ctx); err != nil {
 		return err
 	}
-	defer c.ops.Unlock()
+	// Release the configuration gate before any cleanup RPC.
+	locked := true
+	defer func() {
+		if locked {
+			c.ops.Unlock()
+		}
+	}()
 	d := c.store.Snapshot()
 	b, ok := d.Bindings[s.key()]
 	if ok && pid != "" && b.ProviderID != pid {
@@ -217,6 +241,8 @@ func (c *Core) Delete(ctx context.Context, pid string, s Session) error {
 	if err := c.store.Update(func(d *State) error { recordTombstone(d, b); return nil }); err != nil {
 		return err
 	}
+	c.ops.Unlock()
+	locked = false
 	c.wakePeers()
 	if !b.DeletePending {
 		return nil
@@ -229,10 +255,6 @@ func (c *Core) Delete(ctx context.Context, pid string, s Session) error {
 	return c.cleanupBinding(ctx, &b)
 }
 func (c *Core) operation(ctx context.Context, key, request string, input any, automatic bool, fn func(string) (SendResult, error)) (SendResult, error) {
-	if err := c.ops.LockContext(ctx); err != nil {
-		return SendResult{}, err
-	}
-	defer c.ops.Unlock()
 	raw, err := json.Marshal(input)
 	if err != nil {
 		return SendResult{}, err
@@ -242,43 +264,12 @@ func (c *Core) operation(ctx context.Context, key, request string, input any, au
 	if automatic {
 		key = "auto-send:" + finger
 	}
-	if key != "" {
-		if previous, exists := c.store.Snapshot().Operations[key]; exists {
-			if previous.Fingerprint != finger {
-				return SendResult{}, fault("conflict", "request ID was used for a different operation")
-			}
-			switch previous.State {
-			case "complete":
-				if !automatic {
-					var result SendResult
-					err := json.Unmarshal(previous.Result, &result)
-					return result, err
-				}
-			case "terminal":
-				if !automatic {
-					if previous.Failure != nil {
-						return SendResult{}, decodeOperationError(previous.Failure.Code, previous.Failure.Message)
-					}
-					return SendResult{}, rejectOperation(false, "request was definitively rejected")
-				}
-			case "retryable":
-				request = previous.RequestID
-			default:
-				return SendResult{}, fault("unconfirmed", "previous send may have succeeded; automatic retry is unsafe")
-			}
-		}
-		if automatic && request == "" {
-			request = uid()
-		}
-		if err := ctx.Err(); err != nil {
-			return SendResult{}, err
-		}
-		if err := c.store.Update(func(d *State) error {
-			d.Operations[key] = Operation{State: "pending", Fingerprint: finger, RequestID: request}
-			return nil
-		}); err != nil {
-			return SendResult{}, err
-		}
+	request, cached, err := c.admitOperation(ctx, key, request, finger, automatic)
+	if err != nil {
+		return SendResult{}, err
+	}
+	if cached != nil {
+		return *cached, nil
 	}
 	// Cancellation while fsyncing is a proven pre-submission failure.
 	if err = ctx.Err(); err != nil {
@@ -335,6 +326,11 @@ func (c *Core) Send(ctx context.Context, pid string, s Session, content Content,
 	if err := content.Validate(); err != nil {
 		return SendResult{}, err
 	}
+	unlock, err := c.sessions.acquire(ctx, s.key())
+	if err != nil {
+		return SendResult{}, err
+	}
+	defer unlock()
 	b, err := c.binding(pid, s)
 	if err != nil {
 		return SendResult{}, err
@@ -354,11 +350,17 @@ func (c *Core) Send(ctx context.Context, pid string, s Session, content Content,
 		if live.ChatID != b.ChatID {
 			return SendResult{}, rejectOperation(false, "notification resource changed before submission")
 		}
-		current, err := c.provider(live.ProviderID)
+		lease, err := c.captureProvider(ctx, live.ProviderID, s)
 		if err != nil {
 			return SendResult{}, rejectOperation(true, "provider is unavailable before submission")
 		}
-		return current.Send(ctx, live, content, effectiveRequest)
+		if lease.Binding.Deleted || lease.Binding.ChatID != live.ChatID {
+			return SendResult{}, rejectOperation(false, "notification resource changed before submission")
+		}
+		if err := ctx.Err(); err != nil {
+			return SendResult{}, rejectOperation(true, "request expired before provider submission")
+		}
+		return lease.Bot.Send(ctx, lease.Binding, content, effectiveRequest)
 	})
 }
 func remember(d *State, m MessageRef, route string) {
@@ -471,7 +473,12 @@ func (c *Core) Ingest(ctx context.Context, e Event, route string) error {
 	var wake []string
 	err := c.store.Update(func(d *State) error {
 		remember(d, e.Message, route)
-		if record, ok := d.Events[e.ID]; ok {
+		// A route that did not handle the event cannot reserve its stable ID.
+		// A later shorter path must still be eligible to deliver or broadcast it.
+		if contains(e.Visited, node) || e.Hops == 0 {
+			return nil
+		}
+		if record, ok := d.Events[e.ID]; ok && record.Outcome != "loop_suppressed" {
 			if binding, bound := d.Bindings[record.Event.Session.key()]; bound && binding.Deleted {
 				return nil
 			}
@@ -488,10 +495,6 @@ func (c *Core) Ingest(ctx context.Context, e Event, route string) error {
 					}
 				}
 			}
-			return nil
-		}
-		if contains(e.Visited, node) || e.Hops == 0 {
-			d.Events[e.ID] = EventRecord{Event: e, Outcome: "loop_suppressed"}
 			return nil
 		}
 		e.Visited = append(append([]string{}, e.Visited...), node)
@@ -588,18 +591,17 @@ func (c *Core) Subscribe(ctx context.Context, node, name string) (*Subscription,
 	sctx, cancel := context.WithCancel(ctx)
 	s := &Subscription{core: c, node: node, ctx: sctx, cancel: cancel, signal: make(chan struct{}, 1), offered: map[string]bool{}}
 	c.mu.Lock()
-	if old := c.subs[node]; old != nil {
-		old.cancel()
+	if c.subs[node] == nil {
+		c.subs[node] = map[*Subscription]struct{}{}
 	}
-	c.subs[node] = s
+	c.subs[node][s] = struct{}{}
 	c.mu.Unlock()
 	return s, nil
 }
 func (c *Core) wake(node string) {
 	c.mu.Lock()
-	s := c.subs[node]
-	c.mu.Unlock()
-	if s != nil {
+	defer c.mu.Unlock()
+	for s := range c.subs[node] {
 		select {
 		case s.signal <- struct{}{}:
 		default:
@@ -670,7 +672,9 @@ func (s *Subscription) Confirm(id string) error {
 func (s *Subscription) Close() {
 	s.cancel()
 	s.core.mu.Lock()
-	if s.core.subs[s.node] == s {
+	streams := s.core.subs[s.node]
+	delete(streams, s)
+	if len(streams) == 0 {
 		delete(s.core.subs, s.node)
 	}
 	s.core.mu.Unlock()
@@ -693,8 +697,12 @@ func (c *Core) Status() map[string]any {
 	r := remoteSummary(d, remoteStatus)
 	c.mu.Lock()
 	for i := range r.Peers {
-		sub := c.subs[r.Peers[i].NodeID]
-		r.Peers[i].Connected = sub != nil && sub.ctx.Err() == nil
+		for sub := range c.subs[r.Peers[i].NodeID] {
+			if sub.ctx.Err() == nil {
+				r.Peers[i].Connected = true
+				break
+			}
+		}
 	}
 	c.mu.Unlock()
 	return map[string]any{"node_id": d.NodeID, "providers": ps, "default_provider_id": d.DefaultProvider, "remote": r}

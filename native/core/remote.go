@@ -381,6 +381,7 @@ func isTailnet(address string) bool {
 	if err != nil {
 		return false
 	}
+	ip = ip.Unmap()
 	return netip.MustParsePrefix("100.64.0.0/10").Contains(ip) || netip.MustParsePrefix("fd7a:115c:a1e0::/48").Contains(ip)
 }
 func (c *Core) dial(ctx context.Context, address string) (net.Conn, error) {

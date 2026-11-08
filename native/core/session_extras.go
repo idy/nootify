@@ -49,10 +49,11 @@ func (c *Core) Bind(ctx context.Context, pid string, s Session, chat, sender str
 	if chat == "" {
 		return Binding{}, fault("invalid_argument", "chat_id is required")
 	}
-	if err := c.ops.LockContext(ctx); err != nil {
+	unlock, err := c.sessions.acquire(ctx, s.key())
+	if err != nil {
 		return Binding{}, err
 	}
-	defer c.ops.Unlock()
+	defer unlock()
 	old, selected, reused, err := c.prepareSession(ctx, pid, s)
 	if err != nil {
 		return old, err
@@ -64,6 +65,11 @@ func (c *Core) Bind(ctx context.Context, pid string, s Session, chat, sender str
 		return old, nil
 	}
 	pid = selected
+	resourceUnlock, err := c.sessions.acquire(ctx, "resource:"+chat)
+	if err != nil {
+		return Binding{}, err
+	}
+	defer resourceUnlock()
 	if s.Metadata == nil {
 		s.Metadata = old.Session.Metadata
 	}
@@ -87,11 +93,11 @@ func (c *Core) Bind(ctx context.Context, pid string, s Session, chat, sender str
 			return Binding{}, fault("conflict", "chat is bound to another session")
 		}
 	}
-	provider, err := c.provider(pid)
+	lease, err := c.captureProvider(ctx, pid, s)
 	if err != nil {
 		return Binding{}, err
 	}
-	binder, ok := provider.(interface {
+	binder, ok := lease.Bot.(interface {
 		Bind(context.Context, Session, string, string) (Binding, error)
 	})
 	if !ok {
@@ -111,8 +117,7 @@ func (c *Core) Bind(ctx context.Context, pid string, s Session, chat, sender str
 	}
 	b.Deleted = false
 	b.DeletePending = false
-	err = c.store.Update(func(d *State) error { d.Bindings[s.key()] = b; return nil })
-	return b, err
+	return c.publishBinding(lease, b)
 }
 func (p *remoteProvider) Bind(ctx context.Context, s Session, chat, sender string) (Binding, error) {
 	var b Binding

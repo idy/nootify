@@ -605,7 +605,23 @@ func TestStdioRemainsConcurrentDuringTunnelDial(t *testing.T) {
 	scanner := bufio.NewScanner(outReader)
 	if !scanner.Scan() {
 		t.Fatal("no ready frame")
-	} // Prevent Start from replacing the test provider.
+	}
+	// A status round trip proves Start has finished before installing the
+	// configured fixture bot. The Ensure then follows the real provider path.
+	_, err = fmt.Fprintln(inWriter, `{"id":99,"method":"status","params":{}}`)
+	must(t, err)
+	if !scanner.Scan() {
+		t.Fatal("no startup status response")
+	}
+	var startup rpcResponse
+	must(t, json.Unmarshal(scanner.Bytes(), &startup))
+	if startup.ID != 99 || startup.Error != nil {
+		t.Fatal("startup status failed")
+	}
+	must(t, c.store.Update(func(d *State) error {
+		d.Providers["wait"] = ProviderConfig{ID: "wait", Name: "wait", Type: "feishu", AppID: "app", AppSecret: "private", Enabled: true}
+		return nil
+	}))
 	c.mu.Lock()
 	c.providers["wait"] = p
 	c.mu.Unlock()
