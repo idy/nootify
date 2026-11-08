@@ -1,6 +1,6 @@
 {
   "name": "nootify",
-  "version": "0.1.20",
+  "version": "0.1.21",
   "private": true,
   "type": "module",
   "description": "Routes Feishu replies to local coding-agent sessions and tracks pull requests, with a Windows and macOS tray app",
