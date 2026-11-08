@@ -7,3 +7,29 @@ src-tauri/gen/
 .cache/
 .impeccable/review/
 .claude/launch.json
+
+# Impeccable generated evidence and runtime state.
+# Shared config.json, design.json, surfaces/ and live/config.json stay tracked.
+**/.impeccable/config.local.json
+**/.impeccable/hook.cache.json
+**/.impeccable/hook.pending.json
+**/.impeccable/review/
+**/.impeccable/critique/*
+!**/.impeccable/critique/ignore.md
+**/.impeccable/build/
+**/.impeccable/live/server.json
+**/.impeccable/live/roots.json
+**/.impeccable/live/app-root.json
+**/.impeccable/live/inject-journal.json
+**/.impeccable/live/sessions/
+**/.impeccable/live/previews/
+**/.impeccable/live/annotations/
+**/.impeccable/live/artifacts/
+**/.impeccable/live/accept-receipts/
+**/.impeccable/live/locks/
+**/.impeccable/live/cache/
+**/.impeccable/live/manual-edit-apply-transaction.json
+**/.impeccable/live/manual-edit-events.jsonl
+**/.impeccable/live/manual-edit-evidence/
+**/.impeccable/live/pending-manual-edits.json
+**/.impeccable/live/deferred-svelte-component-accepts.json
