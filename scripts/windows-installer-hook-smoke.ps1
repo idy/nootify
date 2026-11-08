@@ -113,7 +113,7 @@ try {
     $archive = Join-Path $fixture 'nsis-3.13.zip'
     $ProgressPreference = 'SilentlyContinue' # PS5.1 progress rendering slows downloads greatly.
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-    Invoke-WebRequest -UseBasicParsing -TimeoutSec 60 -Uri 'https://github.com/tauri-apps/binary-releases/releases/download/nsis-3.13/nsis-3.13.zip' -OutFile $archive
+    Invoke-WebRequest -UseBasicParsing -TimeoutSec 60 -Uri 'https://downloads.sourceforge.net/project/nsis/NSIS%203/3.13/nsis-3.13.zip' -OutFile $archive
     if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -cne 'BA63DFFC4410EE89193E1CB5A41989991BD77C61068DA17E3156D136B7B0B3D8') {
         throw 'NSIS archive SHA256 mismatch; refusing extraction'
     }

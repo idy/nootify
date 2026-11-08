@@ -18,7 +18,7 @@ export const TARGETS = Object.freeze({
   }),
 });
 
-export function buildTarget(triple = process.env.TAURI_ENV_TARGET_TRIPLE, platform = process.platform, arch = process.arch) {
+export function buildTarget(triple = process.env.NOOTIFY_BUILD_TARGET, platform = process.platform, arch = process.arch) {
   const target = triple ? TARGETS[triple] : Object.values(TARGETS).find(value => value.platform === platform && value.arch === arch);
   if (!target) throw new Error(`Unsupported Nootify build target: ${triple || `${platform}-${arch}`}`);
   return target;

@@ -28,7 +28,7 @@ export function embeddedBinaryCandidates(platform: NodeJS.Platform = process.pla
   const target = platform === 'win32' ? `${cpu}-pc-windows-msvc` : platform === 'darwin' ? `${cpu}-apple-darwin` : `${cpu}-unknown-linux-gnu`;
   const extension = platform === 'win32' ? '.exe' : '';
   return [join(dirname(process.execPath), `nootify-tsnet${extension}`),
-    fileURLToPath(new URL(`../../src-tauri/binaries/nootify-tsnet-${target}${extension}`, import.meta.url))];
+    fileURLToPath(new URL(`../../build/binaries/nootify-tsnet-${target}${extension}`, import.meta.url))];
 }
 async function helperBinary(): Promise<string> {
   const candidates = process.env.NOOTIFY_TSNET_BIN ? [resolve(process.env.NOOTIFY_TSNET_BIN)] : embeddedBinaryCandidates();

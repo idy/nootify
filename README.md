@@ -67,8 +67,8 @@ Reproducible bugs can also be filed as [GitHub issues](https://github.com/idy/no
 
 ## Development
 
-Requires Node.js 22.13+, npm, and the Go versions pinned in `native/core/go.mod`
-and `native/tailscale/go.mod`. From the repository root:
+Requires Node.js 22.13+, npm, and the Go versions pinned in `desktop/go.mod`,
+`native/core/go.mod`, and `native/tailscale/go.mod`. From the repository root:
 
 ```sh
 npm ci
@@ -76,6 +76,7 @@ npm run core:build
 npm run check
 npm test
 npm run core:test
+npm run desktop:test
 ```
 
 The Go core owns provider connections, notification-session mappings, and durable
@@ -84,7 +85,8 @@ retains the TypeScript UI, agent input adapters, local session discovery, GitHub
 integration, and desktop lifecycle. Production Feishu ingestion uses WebSocket
 events; it does not run the legacy history poller.
 
-Desktop builds also require Rust and the platform's native toolchain.
+The desktop shell uses [MyGo](https://github.com/egoist/mygo) with the system
+WebView. Desktop builds use Go and Node.js; Rust and Cargo are not required.
 See [desktop builds](docs/guide.md#build-the-desktop-app).
 
 | Path | Contents |
@@ -94,7 +96,7 @@ See [desktop builds](docs/guide.md#build-the-desktop-app).
 | `src/` | Local HTTP service, CLI, TypeScript UI, agent adapters, discovery, and GitHub integration |
 | `native/tailscale/` | Embedded Tailscale identity, browser proxy, and core TCP tunnels/listeners |
 | `public/` | Local application UI |
-| `src-tauri/`, `desktop/` | Desktop app and bundled runtimes |
+| `desktop/` | Go/MyGo desktop host, native tray, signed updater, and offline assets |
 | `site/` | Public website |
 | `test/` | Node integration and regression checks |
 
@@ -108,7 +110,7 @@ See [desktop builds](docs/guide.md#build-the-desktop-app).
 - [Tailscale remote access](docs/guide.md#tailscale-access)
 - [TypeScript client and service API](docs/guide.md#typescript-client-and-module-api)
 - [Website preview and deployment](docs/guide.md#project-website)
-- [Builds, updates, and releases](docs/guide.md#tauri-desktop-application-and-system-tray)
+- [Builds, updates, and releases](docs/guide.md#mygo-desktop-application-and-system-tray)
 
 ## License
 

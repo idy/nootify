@@ -172,7 +172,7 @@ function Start-TestApp {
     return $process
 }
 function Assert-Installation([string]$ExpectedVersion) {
-    foreach ($path in @($app, $node, $cli, $server, $uninstaller, (Join-Path $installDir 'nootify-tsnet.exe'), (Join-Path $installDir 'service\windows\service-runner.cs'), (Join-Path $installDir 'service\windows\inbox-auth.ps1'), (Join-Path $installDir 'service\windows\inbox-auth.cs'))) {
+    foreach ($path in @($app, $node, $cli, $server, $uninstaller, (Join-Path $installDir 'nootify-tsnet.exe'), (Join-Path $installDir 'nootify-core.exe'), (Join-Path $installDir 'service\windows\service-runner.cs'), (Join-Path $installDir 'service\windows\inbox-auth.ps1'), (Join-Path $installDir 'service\windows\inbox-auth.cs'))) {
         if (!(Test-Path -LiteralPath $path -PathType Leaf)) { throw "Installed payload is missing $path" }
     }
     if ([Diagnostics.FileVersionInfo]::GetVersionInfo($app).ProductVersion -cne $ExpectedVersion) {
@@ -271,6 +271,32 @@ try {
         if (!$second.WaitForExit(15000) -or $second.ExitCode -ne 0) { throw 'The second desktop instance did not exit cleanly' }
         if ($desktop.HasExited -or (Get-ServiceProcess).Id -ne $daemon.Id) { throw 'Reopening replaced the existing desktop or service' }
         Assert-RunningTask
+    }
+    Test-Step 'Locked desktop aborts normal and updater installs before changing files or service' {
+        $before = @{}
+        foreach ($path in @($app, $node, $cli, $server, (Join-Path $installDir 'nootify-core.exe'), (Join-Path $installDir 'nootify-tsnet.exe'))) {
+            $before[$path] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+        }
+        # A real Windows sharing lock guarantees GENERIC_WRITE is rejected even
+        # if a future desktop runtime changes how it maps its executable image.
+        $lock = [IO.File]::Open($app, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        try {
+            $watch = [Diagnostics.Stopwatch]::StartNew()
+            $null = Run-Native $Installer "/S /D=$installDir" 'locked-normal-install' 1
+            if ($watch.Elapsed.TotalSeconds -gt 15) { throw 'Normal installation did not abort promptly for a locked desktop' }
+            $watch.Restart()
+            $null = Run-Native $Installer "/S /UPDATE /R /D=$installDir" 'locked-updater-install' 1
+            if ($watch.Elapsed.TotalSeconds -lt 15 -or $watch.Elapsed.TotalSeconds -gt 45) { throw 'Updater lock wait was not bounded near the 20-second handoff deadline' }
+            foreach ($path in $before.Keys) {
+                if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -cne $before[$path]) { throw 'A locked upgrade changed installed files' }
+            }
+            if ($desktop.HasExited -or $daemon.HasExited -or !(Test-Health) -or (Get-ServiceProcess).Id -ne $daemon.Id) {
+                throw 'A locked upgrade stopped the existing desktop or service'
+            }
+            Assert-Installation $BaselineVersion
+            Assert-RunningTask
+            if ((Get-TestTask).Definition.Data -cne $marker) { throw 'A locked upgrade changed the registered task' }
+        } finally { $lock.Dispose() }
     }
     Test-Step 'Daemon remains healthy after desktop exit and reopening' {
         Stop-TestApps

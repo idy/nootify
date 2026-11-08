@@ -24,6 +24,9 @@ jobs:
             target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
+    env:
+      NOOTIFY_BUILD_TARGET: ${{ matrix.target }}
+      CGO_ENABLED: '0'
     permissions:
       contents: read
     steps:
@@ -41,8 +44,9 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version-file: native/tailscale/go.mod
+          go-version-file: desktop/go.mod
           cache-dependency-path: |
+            desktop/go.sum
             native/tailscale/go.sum
             native/core/go.sum
 
@@ -54,16 +58,12 @@ jobs:
         working-directory: native/core
         run: go test ./...
 
-      - name: Install stable Rust
+      - name: Test and vet MyGo desktop module
+        working-directory: desktop
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
-          rustup target add ${{ matrix.target }}
+          go test ./...
+          go vet ./...
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
-          key: release-${{ matrix.target }}
       - uses: actions/cache@v6
         with:
           path: .cache/node
@@ -76,12 +76,12 @@ jobs:
       # updater artifacts. Matrix workers never write to the GitHub release.
       - name: Build signed desktop release
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          NOOTIFY_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          NOOTIFY_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run desktop:build -- --target ${{ matrix.target }} --ci
 
       - name: Collect signed release assets
-        run: node scripts/release-assets.mjs collect --target ${{ matrix.target }} --bundles src-tauri/target/${{ matrix.target }}/release/bundle --output .cache/release-assets
+        run: node scripts/release-assets.mjs collect --target ${{ matrix.target }} --bundles build/desktop/${{ matrix.target }} --output .cache/release-assets
 
       - uses: actions/upload-artifact@v7
         with:

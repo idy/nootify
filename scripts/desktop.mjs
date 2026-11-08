@@ -1,29 +1,213 @@
-import { spawn } from 'node:child_process';
-import { homedir } from 'node:os';
-import { delimiter, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { buildTarget } from './build-targets.mjs';
+// Compile the pinned MyGo module directly. All version metadata comes from the
+// root package.json; --package-version exists only for upgrade test fixtures.
+import { execFile, spawn } from 'node:child_process';
+import { chmod, copyFile, cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { parseArgs, promisify } from 'node:util';
+import { buildTarget, sidecarName } from './build-targets.mjs';
+import { runNpm, verifyExecutable, verifyWindowsX64 } from './bundle-utils.mjs';
+import { stageServiceBundle } from './stage-service.mjs';
+import { withNsisCompiler } from './nsis.mjs';
 
+const run = promisify(execFile);
 const root = fileURLToPath(new URL('../', import.meta.url));
-const cargoBin = join(process.env.CARGO_HOME ?? join(homedir(), '.cargo'), 'bin');
-const args = process.argv.slice(2);
-if (args[0] === 'build' || args[0] === 'dev') {
-  const targetOption = args.findIndex(arg => arg === '--target');
-  const triple = targetOption === -1 ? args.find(arg => arg.startsWith('--target='))?.slice(9) : args[targetOption + 1];
-  const target = buildTarget(triple);
-  if (args[0] === 'build' && !args.some(arg => arg === '--bundles' || arg.startsWith('--bundles='))) {
-    args.push('--bundles', target.bundles.join(','));
+export const APP_ID = 'dev.idy.nootify';
+export const DEV_APP_ID = `${APP_ID}.dev`;
+export const MYGO_VERSION = 'v0.8.3';
+
+export function packageVersion(value) {
+  if (typeof value !== 'string' || value.trim() !== value || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(value) || value.split('.').some(part => Number(part) > 65535)) {
+    throw new Error(`Invalid package version: ${value}`);
+  }
+  return value;
+}
+
+export function desktopLinkerFlags(target, version, appID = APP_ID) {
+  packageVersion(version);
+  if (![APP_ID, DEV_APP_ID].includes(appID)) throw new Error(`Unsupported app identity: ${appID}`);
+  // Direct Go builds must supply the same package metadata as MyGo's bundler.
+  // MyGo uses these values when no native bundle metadata is available.
+  return ['-s', '-w', `-X main.version=${version}`, `-X main.appID=${appID}`,
+    `-X github.com/egoist/mygo.packageIdentifier=${appID}`,
+    '-X github.com/egoist/mygo.packageName=Nootify',
+    `-X github.com/egoist/mygo.packageVersion=${version}`,
+    ...(target.platform === 'win32' ? ['-H=windowsgui'] : [])].join(' ');
+}
+
+export function desktopPaths(target, base = root, development = false) {
+  const output = join(base, 'build', development ? 'dev' : 'desktop', target.triple);
+  const app = join(output, 'macos', 'Nootify.app');
+  return {
+    output, app, service: join(base, 'build', 'resources', 'service'), binaries: join(base, 'build', 'binaries'),
+    executable: target.platform === 'darwin' ? join(app, 'Contents', 'MacOS', 'Nootify') : join(output, 'payload', 'Nootify.exe'),
+    payload: join(output, 'payload'), macos: join(output, 'macos'), dmg: join(output, 'dmg'), nsis: join(output, 'nsis'),
+  };
+}
+
+export function parseDesktopArgs(args) {
+  const { values, positionals } = parseArgs({ args, allowPositionals: true, options: {
+    target: { type: 'string' }, bundles: { type: 'string' }, 'package-version': { type: 'string' },
+    'no-sign': { type: 'boolean', default: false }, ci: { type: 'boolean', default: false },
+  } });
+  const [command] = positionals;
+  if (!['build', 'dev'].includes(command) || positionals.length !== 1) throw new Error('Use desktop.mjs build|dev [--target <triple>] [--bundles app,dmg|nsis] [--no-sign] [--package-version <version>]');
+  const target = buildTarget(values.target);
+  const bundles = values.bundles?.split(',') ?? target.bundles;
+  if (!bundles.length || bundles.some(bundle => !target.bundles.includes(bundle))) throw new Error(`Unsupported bundles for ${target.triple}: ${bundles}`);
+  const noSign = values['no-sign'] || command === 'dev';
+  if (values['package-version'] && !noSign) throw new Error('Package version overrides are unsigned test fixtures; use --no-sign');
+  return { command, target, bundles, version: values['package-version'] && packageVersion(values['package-version']), noSign };
+}
+
+const xml = value => value.replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' })[character]);
+export function macInfoPlist(version, appID = APP_ID) {
+  packageVersion(version);
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleName</key><string>Nootify</string>
+<key>CFBundleDisplayName</key><string>Nootify</string>
+<key>CFBundleIdentifier</key><string>${xml(appID)}</string>
+<key>CFBundleVersion</key><string>${version}</string>
+<key>CFBundleShortVersionString</key><string>${version}</string>
+<key>CFBundleExecutable</key><string>Nootify</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+<key>CFBundleIconFile</key><string>icon.icns</string>
+<key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
+<key>LSMinimumSystemVersion</key><string>13.5</string>
+<key>NSPrincipalClass</key><string>NSApplication</string>
+<key>NSHighResolutionCapable</key><true/>
+<key>CFBundleDevelopmentRegion</key><string>en</string>
+<key>CFBundleLocalizations</key><array><string>en</string><string>zh-Hans</string></array>
+<key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>
+</dict></plist>
+`;
+}
+
+export async function copyPayload(target, paths, base = root) {
+  const binDir = target.platform === 'darwin' ? join(paths.app, 'Contents', 'MacOS') : paths.payload;
+  const resourceDir = target.platform === 'darwin' ? join(paths.app, 'Contents', 'Resources') : paths.payload;
+  await mkdir(binDir, { recursive: true });
+  for (const name of ['node', 'nootify-core', 'nootify-tsnet']) {
+    const destination = join(binDir, `${name}${target.extension}`);
+    await copyFile(join(paths.binaries, sidecarName(name, target)), destination);
+    await chmod(destination, 0o755);
+  }
+  await cp(paths.service, join(resourceDir, 'service'), { recursive: true, dereference: false });
+  if (target.platform === 'darwin') await copyFile(join(base, 'desktop', 'icons', 'icon.icns'), join(resourceDir, 'icon.icns'));
+}
+
+async function compileDesktop(target, paths, version, appID) {
+  const env = { ...process.env, GOOS: target.goos, GOARCH: target.goarch, CGO_ENABLED: '0' };
+  const { stdout } = await run('go', ['list', '-m', '-mod=readonly', '-f', '{{.Version}}', 'github.com/egoist/mygo'], { cwd: join(root, 'desktop'), env });
+  if (stdout.trim() !== MYGO_VERSION) throw new Error(`desktop must pin MyGo ${MYGO_VERSION}, found ${stdout.trim()}`);
+  const args = ['build', '-mod=readonly', '-trimpath', '-buildvcs=false'];
+  let source = join(root, 'desktop');
+  let temporarySource;
+  try {
+    if (target.platform === 'win32') {
+      // Go does not discover newly added .syso files through -overlay. Compile
+      // an exact temporary module copy so generated files never touch desktop/.
+      temporarySource = await mkdtemp(join(paths.output, '.source-'));
+      await cp(source, temporarySource, { recursive: true });
+      source = temporarySource;
+      const syso = join(source, 'nootify_windows_amd64.syso');
+      const hostEnv = { ...process.env, CGO_ENABLED: '0' }; delete hostEnv.GOOS; delete hostEnv.GOARCH;
+      await run('go', ['run', join(root, 'scripts', 'windows-resources.go'), '--icon', join(root, 'desktop', 'icons', 'icon.ico'), '--version', version, '--identifier', appID, '--output', syso], { cwd: root, env: hostEnv });
+    }
+    const flags = desktopLinkerFlags(target, version, appID);
+    await run('go', [...args, `-ldflags=${flags}`, '-o', paths.executable, '.'], { cwd: source, env, maxBuffer: 16 << 20 });
+  } finally {
+    if (temporarySource) await rm(temporarySource, { recursive: true, force: true });
+  }
+  await chmod(paths.executable, 0o755);
+  if (target.platform === 'win32') await verifyWindowsX64(paths.executable);
+  else await verifyExecutable(paths.executable, `nootify-desktop ${version}`, target);
+}
+
+async function packageMac(paths, version, appID, bundles) {
+  await writeFile(join(paths.app, 'Contents', 'Info.plist'), macInfoPlist(version, appID));
+  await writeFile(join(paths.app, 'Contents', 'PkgInfo'), 'APPL????');
+  // Sign inside-out. The Node runtime must retain the JIT entitlement; signing
+  // only the outer app or using --deep to sign can silently discard it.
+  for (const name of ['node', 'nootify-core', 'nootify-tsnet', 'Nootify']) {
+    const args = ['--force', '--sign', '-', '--options', 'runtime', '--timestamp=none'];
+    if (name === 'node') args.push('--entitlements', join(root, 'desktop', 'Entitlements.plist'));
+    await run('/usr/bin/codesign', [...args, join(paths.app, 'Contents', 'MacOS', name)], { cwd: root });
+  }
+  await run('/usr/bin/codesign', ['--force', '--sign', '-', '--options', 'runtime', '--timestamp=none', paths.app], { cwd: root });
+  await run('/usr/bin/codesign', ['--verify', '--deep', '--strict', paths.app], { cwd: root });
+  // The updater archive keeps the existing Nootify.app top-level member.
+  const archive = join(paths.macos, 'Nootify.app.tar.gz');
+  await run('/usr/bin/tar', ['-czf', archive, '-C', paths.macos, 'Nootify.app'], { cwd: root, env: { ...process.env, COPYFILE_DISABLE: '1' } });
+  if (bundles.includes('dmg')) {
+    await mkdir(paths.dmg, { recursive: true });
+    const staging = await mkdtemp(join(paths.output, '.dmg-'));
+    try {
+      await cp(paths.app, join(staging, 'Nootify.app'), { recursive: true });
+      await symlink('/Applications', join(staging, 'Applications'));
+      const dmg = join(paths.dmg, `Nootify_${version}_aarch64.dmg`);
+      await run('/usr/bin/hdiutil', ['create', '-volname', 'Nootify', '-srcfolder', staging, '-ov', '-format', 'UDZO', dmg], { cwd: root, maxBuffer: 16 << 20 });
+      await run('/usr/bin/codesign', ['--force', '--sign', '-', '--timestamp=none', dmg], { cwd: root });
+    } finally { await rm(staging, { recursive: true, force: true }); }
+  }
+  return archive;
+}
+
+async function packageWindows(paths, version) {
+  await mkdir(paths.nsis, { recursive: true });
+  const installer = join(paths.nsis, `Nootify_${version}_x64-setup.exe`);
+  await withNsisCompiler(root, compiler => run(compiler, ['/V3', `/DVERSION=${version}`, `/DPAYLOAD=${paths.payload}`, `/DOUTPUT=${installer}`,
+    `/DICON=${join(root, 'desktop', 'icons', 'icon.ico')}`, `/DHOOKS=${join(root, 'scripts', 'windows-installer-hooks.nsh')}`, join(root, 'windows', 'installer.nsi')], { cwd: root, maxBuffer: 16 << 20 }));
+  return installer;
+}
+
+export async function signUpdate(file) {
+  // Do not include keys in arguments or child error output. The Go CLI reads
+  // NOOTIFY_SIGNING_* and the legacy TAURI_SIGNING_* compatibility variables.
+  try {
+    await run('go', ['-C', 'desktop', 'run', '-mod=readonly', './cmd/sign-update', '--file', file], { cwd: root, maxBuffer: 4 << 20 });
+  } catch {
+    throw new Error('Go updater signing failed; check the configured signing key and password');
   }
 }
-// Environment names are case-insensitive on Windows; avoid keeping both Path and PATH.
-const env = { ...process.env };
-const pathKey = Object.keys(env).find(key => key.toUpperCase() === 'PATH') ?? 'PATH';
-const searchPath = env[pathKey] ?? '';
-for (const key of Object.keys(env)) if (key.toUpperCase() === 'PATH') delete env[key];
-env.PATH = `${cargoBin}${delimiter}${searchPath}`;
-const child = spawn(process.execPath, [join(root, 'node_modules/@tauri-apps/cli/tauri.js'), ...args], {
-  cwd: root, stdio: 'inherit', env,
-});
-child.on('error', error => { console.error(error.message); process.exitCode = 1; });
-child.on('exit', (code, signal) => { process.exitCode = code ?? (signal === 'SIGINT' ? 130 : 1); });
-for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => child.kill(signal));
+
+export async function buildDesktop(options) {
+  const { target, command, bundles, noSign } = options;
+  if (target.platform !== process.platform || target.arch !== process.arch) throw new Error('Desktop packaging must run on its target platform and architecture');
+  const development = command === 'dev';
+  const { version: currentVersion } = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
+  const version = packageVersion(options.version ?? currentVersion);
+  const appID = development ? DEV_APP_ID : APP_ID;
+  const paths = desktopPaths(target, root, development);
+  await runNpm(['run', 'build'], { cwd: root, maxBuffer: 16 << 20 });
+  await stageServiceBundle({ target, version });
+  await rm(paths.output, { recursive: true, force: true });
+  await mkdir(target.platform === 'darwin' ? join(paths.app, 'Contents', 'MacOS') : paths.payload, { recursive: true });
+  await compileDesktop(target, paths, version, appID);
+  await copyPayload(target, paths);
+  const updater = target.platform === 'darwin'
+    ? await packageMac(paths, version, appID, development ? ['app'] : bundles)
+    : development ? undefined : await packageWindows(paths, version);
+  if (!noSign && updater) await signUpdate(updater);
+  console.log(`desktop: ${development ? 'development app' : 'bundle'} built in ${paths.output}`);
+  return paths;
+}
+
+async function main() {
+  const options = parseDesktopArgs(process.argv.slice(2));
+  const paths = await buildDesktop(options);
+  if (options.command === 'dev') {
+    // This command is explicitly invoked to launch development; packaging and
+    // CI never start a desktop window implicitly.
+    const child = spawn(paths.executable, [], { cwd: root, stdio: 'inherit', env: process.env });
+    child.on('error', error => { console.error(error.message); process.exitCode = 1; });
+    child.on('exit', (code, signal) => { process.exitCode = code ?? (signal === 'SIGINT' ? 130 : 1); });
+    for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => child.kill(signal));
+  }
+}
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  main().catch(error => { console.error(`desktop: ${error.message}`); process.exitCode = 1; });
+}

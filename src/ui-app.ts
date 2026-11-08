@@ -34,7 +34,7 @@ type ProviderConfig = Pick<ProviderSummary, 'name' | 'type' | 'enabled'> & Parti
 interface Tone { label: string; tone: string }
 type TranslatedText = string | (() => string);
 const resolveText = (value?: TranslatedText): string => typeof value === 'function' ? value() : value ?? '';
-/** Pushed by the desktop shell as a `nootify-update` event; mirrors `UpdateView` in src-tauri/src/update.rs. A plain browser never receives it. */
+/** Pushed by the desktop shell as a `nootify-update` event; mirrors `View` in desktop/internal/updater. A plain browser never receives it. */
 interface UpdateView {
   phase: 'idle' | 'checking' | 'current' | 'available' | 'downloading' | 'installing' | 'restarting' | 'failed';
   current: string; version: string | null; received: number; total: number | null; error: string | null; checked_at: number | null;

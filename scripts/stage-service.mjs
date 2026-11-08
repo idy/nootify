@@ -1,18 +1,17 @@
-// Stage service resources and target-suffixed Node.js/tsnet sidecars for Tauri.
-// macOS: Contents/Resources/service/ and Contents/MacOS/{node,nootify-tsnet}.
-// Windows: service/ and {node.exe,nootify-tsnet.exe} beside installed Nootify.exe.
-// Service resources include production modules, Node/Tailscale licenses, and
-// third-party-notices.txt for the target's Rust crates and npm packages.
+// Stage service resources and target-suffixed Node.js/Go sidecars in build/.
+// Installed paths remain Contents/Resources/service and Contents/MacOS on macOS,
+// or service/ and executables beside Nootify.exe on Windows.
+// Notices cover the target's Go modules and production npm packages.
 // Official Node archives are checked against both the pinned SHA-256 and SHASUMS256.txt.
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
 import { chmod, copyFile, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join, sep } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { buildTsnet } from './build-tsnet.mjs';
 import { buildCore } from './build-core.mjs';
@@ -22,23 +21,23 @@ import { thirdPartyNotices } from './third-party-notices.mjs';
 
 const run = promisify(execFile);
 
-const target = buildTarget();
 const root = fileURLToPath(new URL('../', import.meta.url));
-const resourcesDir = join(root, 'src-tauri', 'resources');
+const resourcesDir = join(root, 'build', 'resources');
 const serviceDir = join(resourcesDir, 'service');
-const nodeBinary = join(root, 'src-tauri', 'binaries', sidecarName('node', target));
 const cacheDir = join(root, '.cache', 'node', NODE_VERSION);
-const release = target.nodeRelease;
-const archive = nodeArchive(target);
 const distUrl = `https://nodejs.org/dist/${NODE_VERSION}/`;
 
-async function main() {
-  const [license, tailscale, core] = await Promise.all([stageNode(), buildTsnet(target), buildCore(target)]);
-  const changed = await stageService(license, tailscale, core);
+export async function stageServiceBundle({ target = buildTarget(), version } = {}) {
+  const [license, tailscale, core] = await Promise.all([stageNode(target), buildTsnet(target), buildCore(target)]);
+  const changed = await stageService(license, tailscale, core, target, version);
   console.log(`stage-service: Node.js ${NODE_VERSION} sidecar ready; service ${changed ? 'staged' : 'unchanged'} in ${serviceDir}`);
+  return serviceDir;
 }
 
-async function stageNode() {
+async function stageNode(target) {
+  const nodeBinary = join(root, 'build', 'binaries', sidecarName('node', target));
+  const release = target.nodeRelease;
+  const archive = nodeArchive(target);
   await mkdir(cacheDir, { recursive: true });
   const sumsPath = join(cacheDir, 'SHASUMS256.txt');
   if (!await exists(sumsPath)) await download(`${distUrl}SHASUMS256.txt`, sumsPath);
@@ -65,7 +64,7 @@ async function stageNode() {
     await run(tar, ['-xf', archivePath, '-C', work, member, `${release}/LICENSE`], { cwd: root });
     const binary = join(work, member);
     await verifyExecutable(binary, NODE_VERSION, target);
-    // Rewriting an identical binary would only make cargo rerun the build script and relink.
+    // Keep identical runtime files untouched between incremental builds.
     if (!await exists(nodeBinary) || await sha256(nodeBinary) !== await sha256(binary)) {
       await mkdir(dirname(nodeBinary), { recursive: true });
       await copyFile(binary, `${nodeBinary}.partial`);
@@ -79,7 +78,7 @@ async function stageNode() {
   }
 }
 
-async function stageService(nodeLicense, tailscale, core) {
+async function stageService(nodeLicense, tailscale, core, target, version) {
   await mkdir(resourcesDir, { recursive: true });
   for (const entry of await readdir(resourcesDir)) {
     if (entry.startsWith('.service-')) await rm(join(resourcesDir, entry), { recursive: true, force: true });
@@ -109,7 +108,7 @@ async function stageService(nodeLicense, tailscale, core) {
       for (const file of await files(windows)) await copyInto(join(windows, file), join(staging, 'windows', file));
     }
     const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
-    await writeFile(join(staging, 'package.json'), `${JSON.stringify({ name: pkg.name, version: pkg.version, private: true, type: 'module' }, null, 2)}\n`);
+    await writeFile(join(staging, 'package.json'), `${JSON.stringify({ name: pkg.name, version: version ?? pkg.version, private: true, type: 'module' }, null, 2)}\n`);
     await writeFile(join(staging, 'node-LICENSE'), nodeLicense);
     for (const [name, component] of [['tailscale', tailscale], ['core', core]]) {
       const licenses = join(staging, `${name}-licenses`);
@@ -123,8 +122,8 @@ async function stageService(nodeLicense, tailscale, core) {
     await installProductionModules(join(staging, 'node_modules'));
     await writeFile(join(staging, 'third-party-notices.txt'), await thirdPartyNotices(target.triple, join(staging, 'node_modules')));
 
-    // mkdtemp creates the directory 0700. An identical tree stays untouched (chmod keeps mtimes)
-    // so cargo does not rerun the build script and relink.
+    // mkdtemp creates the directory 0700. Preserve readable permissions and avoid
+    // replacing an identical tree so incremental packaging keeps stable mtimes.
     await chmod(staging, 0o755);
     const current = await treeDigest(serviceDir).catch(() => undefined);
     if (current === await treeDigest(staging)) {
@@ -155,8 +154,8 @@ async function installProductionModules(destination) {
   }
 }
 
-/** Sorted relative paths of the regular files below `dir`. Symlinks and special files are refused:
- * tauri-build and the bundler would copy them inconsistently. */
+/** Sorted regular files below `dir`. Refuse symlinks and special files so the
+ * staged payload has the same contents on both supported platforms. */
 async function files(dir, skip = () => false, prefix = '') {
   const found = [];
   for (const entry of await readdir(join(dir, prefix), { withFileTypes: true })) {
@@ -191,7 +190,9 @@ async function download(url, destination) {
   await pipeline(Readable.fromWeb(response.body), createWriteStream(destination));
 }
 
-main().catch(error => {
-  console.error(`stage-service: ${error.message}`);
-  process.exitCode = 1;
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  stageServiceBundle().catch(error => {
+    console.error(`stage-service: ${error.message}`);
+    process.exitCode = 1;
+  });
+}

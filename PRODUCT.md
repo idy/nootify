@@ -1,6 +1,6 @@
 # Nootify product context
 
-Nootify is a Windows and macOS companion for local coding-agent conversations. A Go notification core manages multiple Feishu WebSocket and Remote Nootify gRPC providers, session bindings, and event routing. The per-user TypeScript service hosts the UI, existing local agent transports, and repository tracking. The desktop window and tray manage this service; notification-session creation does not create or unarchive native agent conversations.
+Nootify is a Windows and macOS companion for local coding-agent conversations. A Go notification core manages multiple Feishu WebSocket and Remote Nootify gRPC providers, session bindings, and event routing. The per-user TypeScript service hosts the UI, existing local agent transports, and repository tracking. The desktop window and tray use the Go/MyGo host, including native menus, language preferences, signed updates, and service management. Notification-session creation does not create or unarchive native agent conversations.
 
 ## Audience and operating scene
 

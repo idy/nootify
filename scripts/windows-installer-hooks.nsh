@@ -1,9 +1,7 @@
-; Lifecycle checked against @tauri-apps/cli 2.12.4:
-; https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.12.4/crates/tauri-bundler/src/bundle/windows/nsis/installer.nsi
-; PREINSTALL is before all File commands. The updater passes /UPDATE, sets
-; $UpdateMode=1, and normally skips the old uninstaller. PREUNINSTALL is before
-; any Delete commands. An interactive uninstall-before-upgrade is a real
-; uninstall; the next app launch installs its task again.
+; windows/installer.nsi invokes PREINSTALL before all File commands and
+; PREUNINSTALL before any Delete commands. /UPDATE sets $UpdateMode=1 and
+; replaces this installation in place, preserving its registered task and state.
+; Real uninstall removes only the task owned by this exact bundled CLI.
 ;
 ; Only the bundled CLI determines task/process ownership. Never use taskkill by
 ; image name, delete another installation's task, or continue after a stop error.
@@ -91,6 +89,6 @@
   ${EndIf}
 !macroend
 
-; Tauri's .onInstSuccess handles /R after a successful /UPDATE, including /S and
-; /P installs. tauri-plugin-updater supplies /R by default; the relaunched app
-; starts the task. Do not start it before replacement has finished, or twice.
+; The installer's .onInstSuccess handles /R after successful replacement,
+; including /S /UPDATE. The relaunched app starts the preserved task. Never
+; start it before replacement has finished, or twice.

@@ -20,7 +20,7 @@ export function coreBinaryCandidates(platform = process.platform, arch = process
   const target = platform === 'win32' ? `${cpu}-pc-windows-msvc` : platform === 'darwin' ? `${cpu}-apple-darwin` : `${cpu}-unknown-linux-gnu`;
   const suffix = platform === 'win32' ? '.exe' : '';
   return [join(dirname(process.execPath), `nootify-core${suffix}`),
-    fileURLToPath(new URL(`../../src-tauri/binaries/nootify-core-${target}${suffix}`, import.meta.url))];
+    fileURLToPath(new URL(`../../build/binaries/nootify-core-${target}${suffix}`, import.meta.url))];
 }
 async function binary(): Promise<string> {
   const candidates = process.env.NOOTIFY_CORE_BIN ? [resolve(process.env.NOOTIFY_CORE_BIN)] : coreBinaryCandidates();

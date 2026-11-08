@@ -20,14 +20,15 @@ jobs:
         include:
           - runner: macos-latest
             target: aarch64-apple-darwin
-            bundles: app
+            bundles: app,dmg
           - runner: windows-latest
             target: x86_64-pc-windows-msvc
             bundles: nsis
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     env:
-      TAURI_ENV_TARGET_TRIPLE: ${{ matrix.target }}
+      NOOTIFY_BUILD_TARGET: ${{ matrix.target }}
+      CGO_ENABLED: '0'
     steps:
       - uses: actions/checkout@v7
         with:
@@ -40,8 +41,9 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version-file: native/tailscale/go.mod
+          go-version-file: desktop/go.mod
           cache-dependency-path: |
+            desktop/go.sum
             native/tailscale/go.sum
             native/core/go.sum
 
@@ -53,16 +55,11 @@ jobs:
         working-directory: native/core
         run: go test ./...
 
-      - name: Install stable Rust with clippy and rustfmt
+      - name: Test and vet MyGo desktop module
+        working-directory: desktop
         run: |
-          rustup toolchain install stable --profile minimal --component clippy,rustfmt
-          rustup default stable
-          rustup target add ${{ matrix.target }}
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
-          key: ${{ matrix.target }}
+          go test ./...
+          go vet ./...
 
       - run: npm ci
 
@@ -115,10 +112,6 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: cargo fmt
-        working-directory: src-tauri
-        run: cargo fmt --check
-
       # Real staging validates the pinned runtime, PE/Mach-O architecture,
       # Windows task resources, production lockfile, and embedded tsnet build.
       - name: Cache the Node.js runtime download
@@ -126,20 +119,20 @@ jobs:
         with:
           path: .cache/node
           key: node-runtime-${{ matrix.target }}-${{ hashFiles('scripts/build-targets.mjs', 'scripts/stage-service.mjs') }}
-      - name: Stage the service, Node.js and embedded Tailscale
-        run: node scripts/stage-service.mjs
-
-      - name: cargo clippy
-        working-directory: src-tauri
-        run: cargo clippy --target ${{ matrix.target }} --all-targets --features custom-protocol -- -D warnings
-      - name: cargo test
-        working-directory: src-tauri
-        run: cargo test --target ${{ matrix.target }} --features custom-protocol
-
       # CI has no release signing key. Build the actual app/NSIS payload so
       # installer hooks, ICO, sidecar layout and platform config are validated.
       - name: Build desktop bundle without updater signing
-        run: npm run desktop:build -- --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --config src-tauri/tauri.ci.conf.json --no-sign --ci
+        run: npm run desktop:build -- --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --no-sign --ci
+
+      - name: Smoke test the native MyGo app with an isolated identity
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          if [[ "${{ runner.os }}" == Windows ]]; then
+            build/desktop/${{ matrix.target }}/payload/Nootify.exe --smoke-test
+          else
+            build/desktop/${{ matrix.target }}/macos/Nootify.app/Contents/MacOS/Nootify --smoke-test
+          fi
 
       - name: Preserve current Windows installer
         if: runner.os == 'Windows'
@@ -147,13 +140,13 @@ jobs:
         run: |
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
           $null = New-Item -ItemType Directory -Force .cache/windows-current-installer
-          Copy-Item "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/Nootify_${version}_x64-setup.exe" .cache/windows-current-installer/
+          Copy-Item "build/desktop/x86_64-pc-windows-msvc/nsis/Nootify_${version}_x64-setup.exe" .cache/windows-current-installer/
 
       # Same sources, older package version: exercise a real cross-version /UPDATE
       # without depending on an existing Windows release or any signing secret.
       - name: Build baseline Windows installer fixture
         if: runner.os == 'Windows'
-        run: npm run desktop:build -- --target ${{ matrix.target }} --bundles nsis --config src-tauri/tauri.install-baseline.conf.json --no-sign --ci
+        run: npm run desktop:build -- --target ${{ matrix.target }} --bundles nsis --package-version 0.0.0 --no-sign --ci
 
       - name: Test Windows installation, upgrade and uninstall
         if: runner.os == 'Windows'
@@ -161,7 +154,7 @@ jobs:
         shell: powershell
         run: |
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          $bundles = 'src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis'
+          $bundles = 'build/desktop/x86_64-pc-windows-msvc/nsis'
           .\scripts\windows-install-smoke.ps1 `
             -Installer (Join-Path '.cache/windows-current-installer' "Nootify_${version}_x64-setup.exe") `
             -BaselineInstaller (Join-Path $bundles 'Nootify_0.0.0_x64-setup.exe') `

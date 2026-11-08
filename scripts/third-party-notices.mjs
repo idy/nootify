@@ -1,11 +1,10 @@
-// Builds service/third-party-notices.txt: the license texts of the Rust crates Cargo builds for the
-// desktop app and of the production npm packages in service/node_modules. A crate or package that
-// includes no license file gets the SPDX License List text of its declared license from
-// scripts/spdx-licenses/. The Node.js runtime and Tailscale sidecar licenses are staged separately.
+// License texts of the Go modules actually linked into the desktop/core/tsnet
+// and the production npm packages in service/node_modules. License-less npm
+// packages fall back to their declared SPDX license in scripts/spdx-licenses/.
 import { execFile } from 'node:child_process';
 import { readdir, readFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
-import { delimiter, dirname, isAbsolute, join, normalize, sep } from 'node:path';
+import { isAbsolute, join, normalize, sep } from 'node:path';
+import { buildTarget } from './build-targets.mjs';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
@@ -16,46 +15,35 @@ const spdxDir = join(root, 'scripts', 'spdx-licenses');
 // https://github.com/spdx/license-list-data.
 export const SPDX_LICENSE_LIST = '3.29.0';
 const LICENSE_FILE = /^(?:LICEN[CS]E|COPYING|COPYRIGHT|NOTICE|PATENTS|UNLICENSE)(?:[._-].*)?$/i;
-const CRATES_IO = 'registry+https://github.com/rust-lang/crates.io-index';
 const collator = new Intl.Collator('en', { numeric: true });
 
-export async function thirdPartyNotices(target, modules) {
-  return renderNotices(target, cratesFromMetadata(await cargoMetadata(target)), await npmPackages(modules));
+export async function thirdPartyNotices(triple, modules) {
+  return renderNotices(triple, await goModules(buildTarget(triple)), await npmPackages(modules));
 }
 
-async function cargoMetadata(target) {
-  // Like scripts/desktop.mjs, also find a rustup install whose bin directory is not on PATH.
-  const cargoBin = join(process.env.CARGO_HOME ?? join(homedir(), '.cargo'), 'bin');
-  const args = ['metadata', '--format-version=1', '--locked', '--all-features', `--filter-platform=${target}`];
-  try {
-    const { stdout } = await run('cargo', args, {
-      cwd: join(root, 'src-tauri'), maxBuffer: 64 << 20, env: { ...process.env, PATH: `${cargoBin}${delimiter}${process.env.PATH ?? ''}` },
-    });
-    return JSON.parse(stdout);
-  } catch (error) {
-    throw new Error(`cargo metadata failed while listing the app's Rust crates for third-party-notices.txt: ${error.stderr?.trim() || error.message}`);
-  }
-}
-
-/** Registry and git crates reachable from the app crate through normal and build dependencies;
- * dev-dependencies are never built for the app. */
-export function cratesFromMetadata({ packages, resolve }) {
-  if (!resolve?.root) throw new Error('cargo metadata reported no root package for src-tauri/Cargo.toml');
-  const byId = new Map(packages.map(pkg => [pkg.id, pkg]));
-  const deps = new Map(resolve.nodes.map(node => [node.id, node.deps]));
-  const seen = new Set([resolve.root]);
-  for (const queue = [resolve.root]; queue.length;) {
-    for (const dep of deps.get(queue.pop())) {
-      if (seen.has(dep.pkg) || dep.dep_kinds.every(({ kind }) => kind === 'dev')) continue;
-      seen.add(dep.pkg);
-      queue.push(dep.pkg);
-    }
-  }
-  return [...seen].map(id => byId.get(id)).filter(pkg => pkg.source).map(pkg => ({
-    kind: 'Rust crate', name: pkg.name, version: pkg.version, license: pkg.license ?? undefined,
-    licenseFile: pkg.license_file ?? undefined, authors: pkg.authors ?? [], dir: dirname(pkg.manifest_path),
-    source: pkg.source === CRATES_IO ? `https://crates.io/crates/${pkg.name}/${pkg.version}` : pkg.source,
+/** go list -deps selects only linked packages for this platform, excluding tests
+ * and unused requirements. Deduplicate modules shared by the three executables. */
+export async function goModules(target) {
+  const env = { ...process.env, GOOS: target.goos, GOARCH: target.goarch, CGO_ENABLED: '0' };
+  const lists = await Promise.all(['desktop', 'native/core', 'native/tailscale'].map(async directory => {
+    const { stdout } = await run('go', ['list', '-deps', '-mod=readonly', '-f', '{{with .Module}}{{.Path}}\t{{.Version}}\t{{.Dir}}{{end}}', '.'],
+      { cwd: join(root, directory), env, maxBuffer: 16 << 20 });
+    return stdout;
   }));
+  const { stdout } = await run('go', ['env', '-json', 'GOROOT', 'GOVERSION'], { cwd: root });
+  const { GOROOT, GOVERSION } = JSON.parse(stdout);
+  return [{ kind: 'Go runtime', name: 'Go standard library', version: GOVERSION, authors: [], dir: GOROOT, source: 'https://go.dev/' },
+    ...modulesFromGoList(lists.join('\n'))];
+}
+
+export function modulesFromGoList(output) {
+  const modules = new Map();
+  for (const line of output.split(/\r?\n/)) {
+    const [name, version, dir] = line.split('\t');
+    if (!version || !dir) continue; // The local main modules are Nootify's own source.
+    modules.set(`${name}@${version}`, { kind: 'Go module', name, version, dir, authors: [], source: `https://${name}` });
+  }
+  return [...modules.values()];
 }
 
 /** Every package in a node_modules tree, including scoped and nested ones. */
@@ -82,9 +70,9 @@ export async function npmPackages(modules) {
   return [...found.values()];
 }
 
-export async function renderNotices(target, crates, packages) {
+export async function renderNotices(target, modules, packages) {
   const sections = [];
-  for (const component of [...sorted(crates), ...sorted(packages)]) {
+  for (const component of [...sorted(modules), ...sorted(packages)]) {
     const { included, texts } = await licenseTexts(component);
     const lines = [
       '='.repeat(80),
@@ -94,40 +82,39 @@ export async function renderNotices(target, crates, packages) {
     ];
     if (!included) {
       if (component.authors.length) lines.push(`${component.authors.length === 1 ? 'Author' : 'Authors'}: ${component.authors.join(', ')}`);
-      lines.push(`No license file comes with this ${component.kind === 'Rust crate' ? 'crate' : 'package'}; its declared license follows, from the SPDX License List ${SPDX_LICENSE_LIST}.`);
+      lines.push(`No license file comes with this ${component.kind === 'npm package' ? 'package' : 'module'}; its declared license follows, from the SPDX License List ${SPDX_LICENSE_LIST}.`);
     }
     for (const { title, text } of texts) lines.push('', `--- ${title} ---`, '', clean(text));
     sections.push(`${lines.join('\n')}\n`);
   }
-  return [header(target, crates.length, packages.length), ...sections].join('\n');
+  return [header(target, modules.length, packages.length), ...sections].join('\n');
 }
 
-function header(target, crates, packages) {
+function header(target, modules, packages) {
   return `Nootify third-party notices
 
 Nootify is available under the MIT License. The desktop app includes the
 third-party software listed below, each under its own license:
 
-- ${crates} Rust crates that Cargo builds for the desktop app (${target}),
-  including build-time dependencies
+- ${modules} Go runtime/modules linked into the desktop app, notification core
+  and embedded Tailscale client (${target})
 - ${packages} npm packages in service/node_modules
 
-Each entry reproduces the license files that come with the crate or package.
+Each entry reproduces the license files that come with the module or package.
 For one that comes without any, the entry reproduces its declared license
 from the SPDX License List ${SPDX_LICENSE_LIST}.
 
-The Node.js runtime's license is in node-LICENSE, and the licenses of the Go
-modules in the embedded Tailscale client are in tailscale-licenses/, both next
-to this file.
+The Node.js runtime's license is in node-LICENSE. Additional attribution for
+sidecars is in core-licenses/ and tailscale-licenses/, next to this file.
 `;
 }
 
-/** The license files that come with a crate or package, else the SPDX texts of its declared license. */
+/** Included module/package licenses, else SPDX texts of the declared license. */
 async function licenseTexts(component) {
   const label = `${component.kind} ${component.name} ${component.version}`;
   const names = new Set((await readdir(component.dir, { withFileTypes: true }))
     .filter(entry => entry.isFile() && LICENSE_FILE.test(entry.name)).map(entry => entry.name));
-  // Cargo's license-file and npm's "SEE LICENSE IN <file>" can name any file in the crate or package.
+  // npm's "SEE LICENSE IN <file>" can name a nested file in the package.
   if (component.licenseFile) {
     const name = normalize(component.licenseFile);
     if (isAbsolute(name) || name === '..' || name.startsWith(`..${sep}`)) throw new Error(`${label} names the license file ${component.licenseFile} outside its directory`);
