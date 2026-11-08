@@ -231,8 +231,7 @@ async function proxyHost(t: TestContext) {
   const settings: SettingsSource = {
     page: unexpected, github: unexpected, startGitHubLogin: unexpected, cancelGitHubLogin: unexpected, signOutGitHub: unexpected,
     larkRegistration: unexpected, startLarkRegistration: unexpected, cancelLarkRegistration: unexpected, larkSetup: unexpected,
-    saveLark: unexpected, clearLark: unexpected, larkSecret: unexpected, larkRecipients: unexpected, setRecipient: unexpected, saveChat: unexpected, clearChat: unexpected, chatSecret: unexpected, chatDirectory: unexpected, setNotificationChannel: unexpected,
-    exportConfig: unexpected, previewImport: unexpected, importConfig: unexpected, reveal: unexpected,
+    saveLark: unexpected, clearLark: unexpected, larkSecret: unexpected, larkRecipients: unexpected, setRecipient: unexpected,     exportConfig: unexpected, previewImport: unexpected, importConfig: unexpected, reveal: unexpected,
     tailscale: async (): Promise<TailscalePage> => ({ enabled: true, status: 'connected', deviceName: 'nootify', sharing: 'ready', address, url: access.url(), login: { status: 'waiting', url: loginUrl } }),
     setTailscaleEnabled: async () => { mutations++; }, startTailscaleLogin: async () => { mutations++; return { status: 'starting' }; },
     cancelTailscaleLogin: async () => { mutations++; }, logoutTailscale: async () => { mutations++; },

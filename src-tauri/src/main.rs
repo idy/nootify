@@ -825,8 +825,6 @@ fn module_label(locale: Locale, name: &str, status: &str) -> String {
         "lark" => locale.text(Text::Lark),
         "pulls" => locale.text(Text::Pulls),
         "agents" => locale.text(Text::Agents),
-        "slack" => "Slack",
-        "telegram" => "Telegram",
         name => name,
     };
     let status = match status {

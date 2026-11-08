@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
+import { parseHTML } from 'linkedom';
 import { english, isPreference, resolveLocale, translate } from '../src/ui-i18n.js';
 
 const placeholders = (text: string): string[] => [...text.matchAll(/\{(\w+)\}/g)].map(match => match[1]).sort();
@@ -45,6 +46,26 @@ test('all marked static UI messages and dynamic translation keys have a catalog 
   for (const match of script.matchAll(/\bt\('([^']+)'/g)) assert.ok(Object.hasOwn(english, match[1]), `Missing dynamic translation: ${match[1]}`);
   assert.match(page, /<select[^>]+id="language"/);
   assert.match(page, /data-view="settings-general"/);
+});
+
+test('settings and agent notification UI expose only Feishu in both languages', async () => {
+  const page = await readFile(new URL('../../public/index.html', import.meta.url), 'utf8');
+  const { document } = parseHTML(page);
+  assert.deepEqual([...document.querySelectorAll('#settings-subnav [data-view]')].map(link => link.getAttribute('data-view')), [
+    'settings-general', 'settings-github', 'settings-lark', 'settings-tailscale', 'settings-backup', 'settings-about',
+  ]);
+  assert.equal(document.querySelectorAll('[data-panel="settings-lark"]').length, 1);
+  assert.equal(document.querySelector('#notification-channel, #channel-save, [id^="slack-"], [id^="telegram-"]'), null);
+  assert.equal(document.querySelector('#channel-title')!.textContent, '飞书通知');
+  assert.equal(document.querySelector('#channel-settings')!.getAttribute('href'), '#/settings/lark');
+  assert.ok(document.querySelector('#channel-state'));
+  assert.equal(document.querySelector('#agents-view select'), null);
+  assert.doesNotMatch(page, /slack|telegram/i);
+  assert.doesNotMatch(JSON.stringify(english), /slack|telegram|default notification channel/i);
+  assert.equal(translate('en', '飞书通知'), 'Feishu notifications');
+  assert.equal(translate('zh-CN', '飞书通知'), '飞书通知');
+  const script = await readFile(new URL('../../src/ui-app.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(script, /\/ui\/api\/settings\/(?:channel|slack|telegram)|chat-transport/);
 });
 
 test('saved preferences override browser defaults; native preferences override browser storage', async t => {

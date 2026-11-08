@@ -186,37 +186,25 @@ test('startup scans immediately and the next minute discovers newly added thread
   await sync.stop();
 });
 
-test('other notification channels and missing recipients do not create Feishu groups', async t => {
-  const f = await fixture(t);
-  f.state.settings.notification_channel = 'slack'; await f.sync.reconcile();
-  f.state.settings.notification_channel = 'feishu'; delete f.state.settings.lark_recipient_open_id;
+test('missing recipients defer Feishu group creation until configured', async t => {
+  const f = await fixture(t); delete f.state.settings.lark_recipient_open_id;
   await f.sync.reconcile(); assert.equal(f.creates(), 0);
   f.state.settings.lark_recipient_open_id = 'ou_owner'; await f.sync.reconcile(); assert.equal(f.creates(), 1);
 });
 
-for (const change of ['slack', 'telegram', 'recipient'] as const) {
-  test(`changing ${change} during a scan defers all remaining groups`, async t => {
-    const f = await fixture(t); f.candidates.push(session('later-thread'));
-    const open = f.threads.open.bind(f.threads); let changed = false;
-    t.mock.method(f.threads, 'open', async (...args: Parameters<LarkThreads['open']>) => {
-      const result = await open(...args);
-      if (!changed) {
-        changed = true;
-        if (change === 'recipient') f.state.settings.lark_recipient_open_id = 'ou_other';
-        else f.state.settings.notification_channel = change;
-        await f.state.save();
-      }
-      return result;
-    });
-    await f.sync.reconcile();
-    assert.equal(f.creates(), 1);
-    assert.equal(f.threads.binding('later-thread', 'codex'), undefined);
-    f.state.settings.notification_channel = 'feishu'; await f.state.save();
-    await f.sync.reconcile();
-    assert.equal(f.creates(), 2, 'a later scan uses the current enrollment settings');
-    assert.equal(f.threads.binding('later-thread', 'codex')?.sender_open_id, change === 'recipient' ? 'ou_other' : 'ou_owner');
+test('changing the recipient during a scan defers all remaining groups', async t => {
+  const f = await fixture(t); f.candidates.push(session('later-thread'));
+  const open = f.threads.open.bind(f.threads); let changed = false;
+  t.mock.method(f.threads, 'open', async (...args: Parameters<LarkThreads['open']>) => {
+    const result = await open(...args);
+    if (!changed) { changed = true; f.state.settings.lark_recipient_open_id = 'ou_other'; await f.state.save(); }
+    return result;
   });
-}
+  await f.sync.reconcile(); assert.equal(f.creates(), 1);
+  assert.equal(f.threads.binding('later-thread', 'codex'), undefined);
+  await f.sync.reconcile(); assert.equal(f.creates(), 2, 'a later scan uses the current recipient');
+  assert.equal(f.threads.binding('later-thread', 'codex')?.sender_open_id, 'ou_other');
+});
 
 test('the Feishu lifecycle starts backfilling and replies reach the old thread through its saved group', async t => {
   const f = await fixture(t); const created = gate(); const sessions = new SessionsService(f.state);

@@ -1,7 +1,7 @@
 import type { Adapter, BackendConnection, BindingRequest, DeliveryResult, Health, LarkBinding, LarkReceipt, LarkReply, ModuleStatus, PublicSession, SessionRegistration, ThreadInfo, ThreadMessage, ThreadRequest } from './types.js';
 import type { AgentId, AgentPrompt } from './agents.js';
-import type { NotificationChannel } from './chat-transport.js';
-export type { NotificationChannel, ChatChannel } from './chat-transport.js';
+import type { NotificationChannel } from './types.js';
+export type { NotificationChannel } from './types.js';
 export type { Adapter, BackendConnection, BindingRequest, DeliveryResult, Health, LarkBinding, LarkReceipt, LarkReply, ModuleStatus, PublicSession, SessionRegistration, ThreadInfo, ThreadMessage, ThreadRequest } from './types.js';
 export type { AgentId, AgentPrompt } from './agents.js';
 
@@ -41,9 +41,7 @@ export class NootifyClient {
     return this.request('POST', `/v1/lark/messages/${encodeURIComponent(messageId)}/reply`, { text });
   }
   larkBindings(): Promise<LarkBinding[]> { return this.request('GET', '/v1/lark/bindings'); }
-  acknowledgeChat(messageId: string): Promise<LarkReceipt> { return this.request('POST', `/v1/chat/messages/${encodeURIComponent(messageId)}/ack`, {}); }
-  replyChat(messageId: string, text: string): Promise<LarkReply> { return this.request('POST', `/v1/chat/messages/${encodeURIComponent(messageId)}/reply`, { text }); }
-  /** Find or create the session's conversation on the selected notification channel. */
+  /** Find or create the session's Feishu group. */
   openThread(request: ThreadRequest): Promise<ThreadInfo> { return this.request('POST', '/v1/threads', request); }
   sendThread(sessionId: string, text: string, adapter?: Adapter, channel?: NotificationChannel): Promise<ThreadMessage> {
     return this.request('POST', `/v1/threads/${encodeURIComponent(sessionId)}/messages`, { text, adapter, channel });

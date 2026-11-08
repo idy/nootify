@@ -550,7 +550,7 @@ test('an import that actually changes the active app clears the previous app rec
   assert.equal(threads.recipient(), undefined, 'another app cannot inherit the old group recipient');
 });
 
-for (const operation of ['replace', 'clear', 'import', 'recipient', 'channel'] as const) {
+for (const operation of ['replace', 'clear', 'import', 'recipient'] as const) {
   test(`failed local settings ${operation} rolls back before another save can persist it`, async t => {
     const { dir, state, lark, settings, configured } = await harness(t);
     const credentials = { appId, appSecret: 'old-secret' }; lark.credentials = credentials;
@@ -564,8 +564,7 @@ for (const operation of ['replace', 'clear', 'import', 'recipient', 'channel'] a
     const change = () => operation === 'replace' ? settings.saveLark(candidate, 'rejected-secret', 'personal-app')
       : operation === 'clear' ? settings.clearLark()
       : operation === 'recipient' ? settings.setRecipient('ou_rejected', appId)
-      : operation === 'channel' ? settings.setNotificationChannel('feishu')
-      : settings.importConfig({ format: 'nootify-config', version: 1, notification_channel: 'feishu',
+      : settings.importConfig({ format: 'nootify-config', version: 1,
         lark: { app_id: candidate, app_secret: 'rejected-secret', recipient_open_id: 'ou_rejected', connection_type: 'personal-app' },
         backends: { codex: { url: 'ws://127.0.0.1:4501', token: 'rejected-backend-secret' } } });
     await failSettingsWriteBehindOlderSaves(t, state, change);

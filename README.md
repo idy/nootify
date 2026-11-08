@@ -1,6 +1,6 @@
 # Nootify
 
-Follow your coding agents from Feishu, Slack, or Telegram, and send replies back to
+Follow your coding agents from Feishu and send replies back to
 the matching conversation on your computer. Nootify is a Windows and macOS tray
 app that also keeps your GitHub pull requests in view.
 
@@ -8,10 +8,10 @@ app that also keeps your GitHub pull requests in view.
 
 ## What it does
 
-- Gives each agent conversation its own Feishu group, Slack thread, or Telegram topic.
+- Gives each agent conversation its own Feishu group.
 - Automatically backfills missing Feishu groups for eligible existing conversations.
 - Routes replies to existing Claude Code, Codex, and OpenCode sessions.
-- Adds a receipt reaction to successfully routed messages on all three channels.
+- Adds a receipt reaction to successfully routed Feishu messages.
 - Supports Trae and WorkBuddy through an inbox they check at work milestones;
   it cannot wake an idle or closed conversation in those clients.
 - Shows pull requests from your projects and contributions, including review,
@@ -34,9 +34,9 @@ ad-hoc signed and not notarized; Windows installers are not code-signed.
 ## Get started
 
 1. Open Nootify and configure your bot and trusted recipient under
-   **Settings → Feishu, Slack, or Telegram**.
-2. On the **Agents** page, choose the notification channel and enable the clients
-   you use. Configure the existing Codex or OpenCode connection when needed.
+   **Settings → Feishu**.
+2. On the **Agents** page, enable the clients you use. Configure the existing
+   Codex or OpenCode connection when needed.
 3. Start a new agent conversation. It receives instructions to open its group,
    thread, or topic and post progress; reply there to continue the conversation.
 
@@ -68,7 +68,8 @@ See [desktop builds](docs/guide.md#build-the-desktop-app).
 
 | Path | Contents |
 | --- | --- |
-| `src/` | Local service, CLI, chat transports, and agent adapters |
+| `src/` | Local service, CLI, Feishu messaging, and agent adapters |
+| `src/message-ingress.ts` | Feishu event/history normalization and sender/content admission |
 | `public/` | Local application UI |
 | `src-tauri/`, `desktop/`, `native/` | Desktop app and bundled runtimes |
 | `site/` | Public website |

@@ -1,0 +1,11 @@
+/* The same bundled Latin faces and role split as site/shared/header.css. */
+@font-face { font-family: Montserrat; font-style: normal; font-weight: 400 800; font-display: swap; src: url("fonts/montserrat-latin.woff2") format("woff2"); }
+@font-face { font-family: Monda; font-style: normal; font-weight: 400 700; font-display: swap; src: url("fonts/monda-latin.woff2") format("woff2"); }
+@font-face { font-family: Lato; font-style: normal; font-weight: 400; font-display: swap; src: url("fonts/lato-regular-latin.woff2") format("woff2"); }
+@font-face { font-family: Lato; font-style: normal; font-weight: 700; font-display: swap; src: url("fonts/lato-bold-latin.woff2") format("woff2"); }
+:root {
+  --font-system: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", "Helvetica Neue", sans-serif;
+  --font-ui: Monda, var(--font-system);
+  --font-heading: Montserrat, var(--font-system);
+  --font-small: Lato, var(--font-system);
+}

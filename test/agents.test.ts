@@ -97,22 +97,15 @@ test('agents sharing one prompt target cannot overwrite each other\'s commands',
   assert.equal(await readFile(process.platform === 'win32' ? f.files.claude : f.files.codex, 'utf8'), 'shared instructions\n', 'removing a block remains possible');
 });
 
-test('switching the notification channel marks existing prompts outdated and pins new commands to that channel', async t => {
+test('obsolete provider instructions are replaced with the Feishu-only prompt', async t => {
   const f = await fixture(t);
-  let channel: 'feishu' | 'slack' | 'telegram' = 'feishu';
-  const agents = new AgentPrompts({ stateDir: f.state, port: 9417, files: f.files, notificationChannel: () => channel });
-  await agents.set('claude', true);
-  channel = 'slack';
-  assert.equal((await agents.inspect('claude')).status, 'outdated');
-  await agents.set('claude', true);
-  const slack = await readFile(f.files.claude, 'utf8');
-  assert.match(slack, /Slack updates through Nootify/); assert.match(slack, /thread-open --agent claude --channel slack/); assert.match(slack, /chat-ack/);
-  assert.equal((await agents.inspect('claude')).status, 'current');
-  channel = 'telegram';
-  assert.equal((await agents.inspect('claude')).status, 'outdated');
-  const telegram = (await agents.inspect('claude')).block;
-  assert.match(telegram, /Telegram topic/); assert.match(telegram, /--channel telegram/);
-  assert.ok(!telegram.includes('lark-reply'));
+  await writeFile(f.files.claude, `${BEGIN}\n## Legacy notification provider\nUse chat-ack and chat-reply.\n${END}\n`);
+  assert.equal((await f.agents.inspect('claude')).status, 'outdated');
+  await f.agents.set('claude', true);
+  const block = await readFile(f.files.claude, 'utf8');
+  assert.match(block, /Feishu updates through Nootify/); assert.match(block, /lark-ack/); assert.match(block, /lark-reply/);
+  assert.ok(!block.includes('chat-ack')); assert.ok(!block.includes('--channel'));
+  assert.equal((await f.agents.inspect('claude')).status, 'current');
 });
 
 test('sessions come from each client\'s variables; commands quote paths and name non-default service locations', () => {
@@ -132,7 +125,7 @@ test('sessions come from each client\'s variables; commands quote paths and name
 });
 
 for (const agent of ['trae', 'workbuddy'] as const) {
-  test(`${agent} instructions preserve existing rules, support every channel, and require explicit conversation IDs after opening`, async t => {
+  test(`${agent} instructions preserve existing rules, use Feishu, and require explicit conversation IDs after opening`, async t => {
     const f = await fixture(t);
     assert.ok(AGENT_IDS.includes(agent)); assert.ok(isAgent(agent));
     assert.deepEqual(agentSession(agent, { CLAUDE_CODE_HOST_SESSION_ID: 'unrelated', CODEX_THREAD_ID: 'unrelated' }), { adapter: agent });
@@ -149,11 +142,8 @@ for (const agent of ['trae', 'workbuddy'] as const) {
     assert.match(written, new RegExp(`thread-receive --agent ${agent} --session-id`));
     assert.match(written, /thread-ack.*--message-id "<returned message.id>"/);
     assert.match(written, /cannot wake an idle or closed conversation/);
-    for (const channel of ['slack', 'telegram'] as const) {
-      const block = promptBlock(agent, { stateDir: f.state, port: 9417, notificationChannel: () => channel });
-      assert.match(block, new RegExp(`thread-send --agent ${agent} --channel ${channel} --session-id`));
-      assert.match(block, /original-channel receipt and reply commands/);
-    }
+    assert.match(written, /Feishu group/);
+    assert.ok(!written.includes('--channel'));
     await f.agents.set(agent, false);
     assert.equal(await readFile(f.files[agent], 'utf8'), original);
   });

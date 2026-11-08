@@ -1,4 +1,6 @@
-import type { ChatDelivery, NotificationChannel } from './chat-transport.js';
+/** Kept as a literal for existing thread clients; Feishu is the only notification transport. */
+export type NotificationChannel = 'feishu';
+export const isNotificationChannel = (value: unknown): value is NotificationChannel => value === 'feishu';
 
 export type PolledAdapter = 'trae' | 'workbuddy';
 export const isPolledAdapter = (value: unknown): value is PolledAdapter => value === 'trae' || value === 'workbuddy';
@@ -68,7 +70,7 @@ export interface LarkPollReceipt { readonly cursor_id: string; readonly message_
 export const larkPollReceiptKey = (cursorId: string, messageId: string): string => JSON.stringify([cursorId, messageId]);
 export interface DeliveryResult { status: 'socket_written' | 'input_accepted' | 'inbox_queued' }
 export interface InboxMessage { id: string; text: string; created_at: string }
-export type InboxSource = { channel: 'feishu'; delivery: LarkDelivery } | { channel: 'slack' | 'telegram'; delivery: ChatDelivery };
+export type InboxSource = { channel: 'feishu'; delivery: LarkDelivery };
 export interface InboxOrigin { text: string; source: InboxSource }
 export interface StoredInboxMessage extends InboxMessage { session_id: string; adapter: PolledAdapter; source?: InboxSource }
 export interface SessionInbox { session_id: string; adapter: PolledAdapter; messages: InboxMessage[] }
@@ -87,7 +89,7 @@ export interface LarkDelivery {
   acknowledged_at?: string;
   replies: { digest: string; message_id: string; time: string }[];
 }
-/** One provider conversation per local session. Omitted channel uses the saved default (Feishu on older installs). */
+/** One Feishu group per local session. The optional literal channel supports existing clients. */
 export interface ThreadRequest { adapter: Adapter; session_id: string; session_name: string; channel?: NotificationChannel }
 export interface ThreadInfo { channel: NotificationChannel; chat_id: string; thread_id?: string; session_id: string; adapter: Adapter; session_name: string; created: boolean }
 export interface ThreadMessage { channel: NotificationChannel; chat_id: string; thread_id?: string; message_id: string }

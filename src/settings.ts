@@ -13,13 +13,9 @@ import { isOpenId } from './lark-threads.js';
 import { isLarkConnectionType, type LarkConnectionType, type State } from './state.js';
 import { HttpError, type BackendConnection, type LarkBinding } from './types.js';
 import type { TailscaleService, TailscalePage, TailscaleLogin } from './tailscale.js';
-import { isNotificationChannel, validChatConfig, type ChatChannel, type ChatSettingsPage, type NotificationChannel, type SlackConfig, type TelegramConfig, type ChatDirectory, ChatTransportError } from './chat-transport.js';
-import type { ChatService } from './chat-service.js';
 import { larkDirectory, LarkDirectoryPermissionError, type LarkDirectory } from './lark-directory.js';
 import { larkPermissionHelp, LarkPermissionRequiredError, type LarkPermissionHelp } from './lark-permissions.js';
 import type { LarkApi } from './lark-metadata.js';
-import { slackDirectory } from './slack.js';
-import { telegramDirectory } from './telegram.js';
 import { inspectLarkSetup, LarkRegistration, type LarkRegistrationOptions, type LarkRegistrationPage, type LarkRegistrationResult, type LarkSetup } from './lark-registration.js';
 import { DIRECTORY_FRESH_MS, DIRECTORY_MAX_AGE_MS, LarkDirectoryCache } from './lark-directory-cache.js';
 import { mergeRecipients } from './lark-profile.js';
@@ -38,20 +34,18 @@ export interface SettingsPage {
   exports_dir: string;
   last_export?: string;
   lark: { status: string; configured: boolean; connection_type: LarkConnectionType; source?: CredentialSource; app_id?: string; saved: boolean; recipient?: string; groups: number };
-  notification_channel: NotificationChannel; slack: ChatSettingsPage; telegram: ChatSettingsPage;
 }
 export interface LarkRecipientsPage extends Omit<LarkDirectory, 'permission'> { permission?: LarkPermissionHelp; cached?: boolean; fetched_at?: number; refresh_after?: number; expires_at?: number }
 export interface GitHubSettings { account?: GitHubAccount; login: GitHubLogin }
 /** What a configuration file changes, in terms safe to show before and after importing it. */
 export interface ImportSummary {
   exported_at?: string; app_id?: string; recipient?: string; pulls_config: boolean; follow?: number; backends: string[]; agents: AgentId[];
-  warnings: string[]; notification_channel?: NotificationChannel; slack?: { chat_id: string; user_id: string }; telegram?: { chat_id: string; user_id: string };
+  warnings: string[];
 }
 /** The exported file. It holds secrets, so it is only ever written to disk, never returned over HTTP. */
 interface ConfigFile {
   format: typeof FORMAT; version: 1; exported_at: string;
   lark?: { app_id?: string; app_secret?: string; recipient_open_id?: string; connection_type?: LarkConnectionType };
-  notification_channel?: NotificationChannel; slack?: SlackConfig; telegram?: TelegramConfig;
   pulls?: { config?: unknown; follow?: { repository: string; follow: boolean }[] };
   backends?: Partial<Record<'codex' | 'opencode', BackendConnection>>;
   agents?: AgentId[];
@@ -71,8 +65,6 @@ export interface AgentControl { list(): Promise<AgentPrompt[]>; set(agent: Agent
 export interface SettingsOptions {
   state: State; lark: LarkControl; github: GitHubAuth; pulls: PullPreferences; agents: AgentControl;
   tailscale?: TailscaleService;
-  slack?: Pick<ChatService<'slack'>, 'page' | 'configure'> & { directoryTargets?(): ChatDirectory };
-  telegram?: Pick<ChatService<'telegram'>, 'page' | 'configure'> & { directoryTargets?(): ChatDirectory };
   mcpConfig?: string; source?: CredentialSource; env?: NodeJS.ProcessEnv;
   verify?: (credentials: Credentials) => Promise<void>;
   registration?: LarkRegistrationOptions;
@@ -105,20 +97,6 @@ function parseConfig(value: unknown): ConfigFile {
     if (connection_type !== undefined && (!isLarkConnectionType(connection_type) || app_id === undefined)) throw new HttpError(400, 'Invalid Feishu connection type or missing app credentials');
     result.lark = { ...(app_id !== undefined ? { app_id: app_id as string, app_secret: app_secret as string, ...(isLarkConnectionType(connection_type) ? { connection_type } : {}) } : {}), ...(recipient_open_id !== undefined ? { recipient_open_id } : {}) };
   }
-  if (value.notification_channel !== undefined) {
-    if (!isNotificationChannel(value.notification_channel)) throw new HttpError(400, 'Invalid notification channel');
-    result.notification_channel = value.notification_channel;
-  }
-  if (value.slack !== undefined) {
-    if (!validChatConfig('slack', value.slack)) throw new HttpError(400, 'Invalid Slack configuration');
-    const { bot_token, app_token, channel_id, user_id } = value.slack;
-    result.slack = { bot_token, app_token, channel_id, user_id };
-  }
-  if (value.telegram !== undefined) {
-    if (!validChatConfig('telegram', value.telegram)) throw new HttpError(400, 'Invalid Telegram configuration');
-    const { bot_token, chat_id, user_id } = value.telegram;
-    result.telegram = { bot_token, chat_id, user_id };
-  }
   if (value.pulls !== undefined) {
     if (!isObject(value.pulls)) throw new HttpError(400, 'Invalid pulls section');
     result.pulls = {};
@@ -150,10 +128,7 @@ function parseConfig(value: unknown): ConfigFile {
 function summarize(file: ConfigFile): ImportSummary {
   return { ...(file.exported_at ? { exported_at: file.exported_at } : {}), ...(file.lark?.app_id ? { app_id: file.lark.app_id } : {}),
     ...(file.lark?.recipient_open_id ? { recipient: file.lark.recipient_open_id } : {}), pulls_config: file.pulls?.config !== undefined,
-    ...(file.pulls?.follow ? { follow: file.pulls.follow.length } : {}), backends: Object.keys(file.backends ?? {}), agents: file.agents ?? [], warnings: [],
-    ...(file.notification_channel ? { notification_channel: file.notification_channel } : {}),
-    ...(file.slack ? { slack: { chat_id: file.slack.channel_id, user_id: file.slack.user_id } } : {}),
-    ...(file.telegram ? { telegram: { chat_id: file.telegram.chat_id, user_id: file.telegram.user_id } } : {}) };
+    ...(file.pulls?.follow ? { follow: file.pulls.follow.length } : {}), backends: Object.keys(file.backends ?? {}), agents: file.agents ?? [], warnings: [] };
 }
 
 /** Owner settings behind the Settings pages. Page callers are limited to this Mac by the UI layer. */
@@ -224,55 +199,7 @@ export class SettingsService {
     const configured = Boolean(lark.credentials?.appId.trim() && lark.credentials?.appSecret.trim());
     return { version, exports_dir: this.exportsDir, ...(this.lastExport ? { last_export: this.lastExport } : {}),
       lark: { status: configured ? lark.status() : 'disabled', configured, connection_type: this.larkConnectionType(), source: this.source, app_id: lark.credentials?.appId, saved: Boolean(state.settings.lark_app_id && state.settings.lark_app_secret),
-        recipient: channel.recipient ?? state.settings.lark_recipient_open_id, groups: channel.groups },
-      notification_channel: state.settings.notification_channel ?? 'feishu',
-      slack: this.chatPage('slack'), telegram: this.chatPage('telegram') };
-  }
-  private chatPage(channel: ChatChannel): ChatSettingsPage {
-    return this.options[channel]?.page() ?? { status: 'disabled', configured: false, saved: false, threads: 0 };
-  }
-  saveChat(channel: ChatChannel, value: unknown): Promise<void> {
-    return this.serialized(async () => {
-      const service = this.options[channel];
-      if (!service) throw new HttpError(404, 'Channel settings are not enabled');
-      await service.configure(value);
-    });
-  }
-  clearChat(channel: ChatChannel): Promise<void> { return this.saveChat(channel, undefined); }
-  chatSecret(channel: ChatChannel, field: unknown): { secret?: string } {
-    if (field !== 'bot_token' && !(channel === 'slack' && field === 'app_token')) throw new HttpError(400, 'Invalid secret field');
-    const saved = this.options.state.settings[channel];
-    const secret = saved && (field === 'app_token' && 'app_token' in saved ? saved.app_token : field === 'bot_token' ? saved.bot_token : undefined);
-    return secret ? { secret } : {};
-  }
-  async chatDirectory(channel: ChatChannel, value: unknown): Promise<ChatDirectory> {
-    if (!isObject(value)) throw new HttpError(400, 'Expected channel fields');
-    const saved = this.options.state.settings[channel];
-    const input = (name: string): string => {
-      const valueForField = value[name];
-      if (valueForField !== undefined && typeof valueForField !== 'string') throw new HttpError(400, 'Invalid channel field');
-      const fallback = (saved as unknown as Record<string, string> | undefined)?.[name] ?? '';
-      return typeof valueForField === 'string' && valueForField.trim() ? valueForField.trim() : fallback;
-    };
-    const bot_token = input('bot_token');
-    let directory: ChatDirectory;
-    try {
-      directory = channel === 'slack'
-        ? await slackDirectory({ bot_token, app_token: input('app_token'), channel_id: input('channel_id'), user_id: input('user_id') })
-        : await telegramDirectory({ bot_token, chat_id: input('chat_id'), user_id: input('user_id') }, bot_token === saved?.bot_token ? this.options.telegram?.directoryTargets?.() : undefined);
-    } catch (error) {
-      if (error instanceof HttpError) throw error;
-      throw new HttpError(400, error instanceof ChatTransportError ? error.message : 'Could not read channel recipients');
-    }
-    if (saved !== this.options.state.settings[channel]) throw new HttpError(409, 'Channel configuration changed; reload recipients');
-    return directory;
-  }
-  setNotificationChannel(value: unknown): Promise<void> {
-    return this.serialized(async () => {
-      if (!isNotificationChannel(value)) throw new HttpError(400, 'Expected feishu, slack or telegram');
-      if (value !== 'feishu' && !this.chatPage(value).configured) throw new HttpError(409, 'Configure this notification channel first');
-      await this.persistSettings(() => { this.options.state.settings.notification_channel = value; });
-    });
+        recipient: channel.recipient ?? state.settings.lark_recipient_open_id, groups: channel.groups } };
   }
   /** Asking GitHub costs a network round trip, so polling during a login reads only the flow. */
   async github(): Promise<GitHubSettings> {
@@ -475,8 +402,6 @@ export class SettingsService {
     }));
     return { format: FORMAT, version: 1, exported_at: new Date().toISOString(),
       lark: { ...(credentials ? { app_id: credentials.appId, app_secret: credentials.appSecret, connection_type: this.larkConnectionType() } : {}), ...(recipient ? { recipient_open_id: recipient } : {}) },
-      ...(state.settings.notification_channel ? { notification_channel: state.settings.notification_channel } : {}),
-      ...(state.settings.slack ? { slack: { ...state.settings.slack } } : {}), ...(state.settings.telegram ? { telegram: { ...state.settings.telegram } } : {}),
       pulls: await pulls.preferences(), backends, agents: (await agents.list()).filter(agent => agent.injected).map(agent => agent.agent) };
   }
   /** Returns only where the file went: the page has no bearer token, so secrets never travel over its HTTP routes. */
@@ -502,17 +427,9 @@ export class SettingsService {
       const file = parseConfig(value);
       const { state, pulls, agents } = this.options;
       const summary = summarize(file);
-      for (const channel of ['slack', 'telegram'] as const) {
-        if (file[channel]) {
-          const service = this.options[channel];
-          if (!service) throw new HttpError(404, `${channel} settings are not enabled`);
-          await service.configure(file[channel]);
-        }
-      }
       const effective = file.lark?.app_id ? await resolveCredentials(this.env,
         { ...state.settings, lark_app_id: file.lark.app_id, lark_app_secret: file.lark.app_secret }, this.options.mcpConfig) : undefined;
       await this.persistSettings(() => {
-        if (file.notification_channel) state.settings.notification_channel = file.notification_channel;
         if (file.lark?.app_id) {
           const nextAppId = effective?.credentials.appId;
           this.scopeLarkBindings(nextAppId);

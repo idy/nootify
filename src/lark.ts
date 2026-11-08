@@ -1,4 +1,5 @@
 import { LarkPoller, type LarkPollingFactory, type LarkReceiver } from './lark-polling.js';
+import { incomingMessageRejection, normalizeIncomingMessage, selectIncomingMessage } from './message-ingress.js';
 import type { State } from './state.js';
 import { SessionsService, SessionUnavailable } from './sessions.js';
 import { hostname } from 'node:os';
@@ -11,21 +12,10 @@ import { registerPolledSession } from './polled-sessions.js';
 import { createLarkApi, ensureAnnouncement, ensureBindingMessage, readAnnouncement, parseAnnouncement, InvalidAnnouncement, larkActivationTime, requestLark } from './lark-metadata.js';
 import type { Credentials, LarkApi } from './lark-metadata.js';
 
-interface IncomingEvent {
-  sender?: { sender_type?: string; sender_id?: { open_id?: string } };
-  message?: { chat_id?: string; message_id?: string; thread_id?: string; message_type?: string; content?: string };
-}
 export function selectMessage(payload: unknown, binding: LarkBinding): { id: string; text: string } | undefined {
-  if (!payload || typeof payload !== 'object') return;
-  const raw = payload as { event?: unknown };
-  const event = (raw.event ?? payload) as IncomingEvent;
-  const { sender, message } = event;
-  if (sender?.sender_type !== 'user' || sender.sender_id?.open_id !== binding.sender_open_id ||
-      message?.chat_id !== binding.chat_id || message.message_type !== 'text' || !message.message_id || typeof message.content !== 'string') return;
-  let parsed: { text?: unknown } | null;
-  try { parsed = JSON.parse(message.content) as typeof parsed; } catch { return; }
-  if (typeof parsed?.text !== 'string' || !parsed.text.trim()) return;
-  return { id: message.message_id, text: parsed.text };
+  const message = selectIncomingMessage(normalizeIncomingMessage('feishu', payload));
+  if (!message || message.sender_id !== binding.sender_open_id || message.chat_id !== binding.chat_id) return;
+  return { id: message.message_id, text: message.text };
 }
 export class LarkService implements ServiceModule {
   readonly name = 'lark';
@@ -134,12 +124,11 @@ export class LarkService implements ServiceModule {
   enqueue(payload: unknown): Promise<boolean> {
     const api = this.api;
     if (!api || !payload || typeof payload !== 'object') return Promise.resolve(true);
-    const event = ((payload as { event?: unknown }).event ?? payload) as IncomingEvent;
-    if (event.sender?.sender_type !== 'user' || !event.message?.chat_id || !event.message.message_id) return Promise.resolve(true);
-    const chat_id = event.message.chat_id;
-    const message_id = event.message.message_id;
+    const incoming = normalizeIncomingMessage('feishu', payload);
+    const rejection = incomingMessageRejection(incoming);
+    if (!incoming || rejection === 'sender_not_user' || rejection === 'invalid_message') return Promise.resolve(true);
+    const { chat_id, message_id, sender_id: sender } = incoming;
     const context = { source: 'lark', chat_id, message_id };
-    const sender = event.sender.sender_id?.open_id;
     const binding = this.state.bindings.get(chat_id);
     if (binding?.app_id && binding.app_id !== api.appId) {
       this.report({ ...context, status: 'ignored', reason: 'app_mismatch' }); return Promise.resolve(true);
@@ -156,9 +145,9 @@ export class LarkService implements ServiceModule {
     if (this.seen.has(message_id) || (previous && (proof(previous) || previous.transport_status !== 'delivery_failed' || previous.retryable !== true))) {
       this.report({ ...context, status: 'ignored', reason: 'duplicate' }); return Promise.resolve(true);
     }
-    const selected = selectMessage(event, { chat_id, sender_open_id: sender, session_id: '' });
+    const selected = selectIncomingMessage(incoming);
     if (!selected) {
-      this.report({ ...context, status: 'ignored', reason: event.message.message_type !== 'text' ? 'unsupported_message' : 'invalid_content' }); return Promise.resolve(true);
+      this.report({ ...context, status: 'ignored', reason: rejection }); return Promise.resolve(true);
     }
     if (this.pending >= 100) { this.report({ ...context, status: 'queue_full' }); return Promise.resolve(false); }
     this.report({ ...context, status: 'received', sender_open_id: sender, preview: selected.text });
@@ -175,7 +164,7 @@ export class LarkService implements ServiceModule {
         if (route.host_id && route.host_id !== hostname()) throw new SessionUnavailable('host_mismatch');
         if (!isAdapter(route.adapter)) throw new SessionUnavailable('unsupported_adapter');
         if (proof(previous)) { handled = true; return true; }
-        delivery = { ...previous, message_id, chat_id, sender_open_id: sender, thread_id: event.message?.thread_id,
+        delivery = { ...previous, message_id, chat_id, sender_open_id: sender, thread_id: selected.thread_id,
           session_id, session_name: this.sessions.sessionName(session_id, route.adapter), adapter: route.adapter,
           created_at: previous?.created_at ?? new Date().toISOString(), transport_status: 'pending', replies: previous?.replies ?? [] };
         delete delivery.retryable;
@@ -239,6 +228,7 @@ export class LarkService implements ServiceModule {
     if (request.path === '/v1/lark/bindings' && request.method === 'GET') return { body: [...this.state.bindings.values()] };
     if (request.path === '/v1/threads' && request.method === 'POST') {
       const body = object(request.body);
+      if (body.channel !== undefined && body.channel !== 'feishu') throw new HttpError(400, 'Only Feishu notifications are supported');
       if (!isAdapter(body.adapter)) throw new HttpError(400, 'Unsupported session adapter');
       const name = text(body.session_name, 'session_name').trim().slice(0, 80);
       return { body: await this.requireThreads().open(body.adapter, identifier(body.session_id, 'session_id'), name) };
@@ -246,6 +236,7 @@ export class LarkService implements ServiceModule {
     const thread = /^\/v1\/threads\/([^/]+)\/messages$/.exec(request.path);
     if (thread && request.method === 'POST') {
       const body = object(request.body);
+      if (body.channel !== undefined && body.channel !== 'feishu') throw new HttpError(400, 'Only Feishu notifications are supported');
       if (body.adapter !== undefined && !isAdapter(body.adapter)) throw new HttpError(400, 'Unsupported session adapter');
       return { body: await this.requireThreads().send(identifier(decodeURIComponent(thread[1]), 'session_id'), text(body.text, 'text'), body.adapter as Adapter | undefined) };
     }

@@ -6,7 +6,6 @@ import type { AgentPrompt } from './agents.js';
 import type { GitHubLogin } from './github-auth.js';
 import type { GitHubSettings, ImportSummary, SettingsPage, LarkRecipientsPage } from './settings.js';
 import type { TailscalePage } from './tailscale.js';
-import type { ChatChannel, NotificationChannel, ChatDirectory } from './chat-transport.js';
 import type { LarkPermissionHelp } from './lark-permissions.js';
 import type { LarkRegistrationPage, LarkSetup } from './lark-registration.js';
 import type { LarkConnectionType } from './state.js';
@@ -18,8 +17,8 @@ interface Snapshot {
   time: string; modules: ModuleStatus[]; sessions: PublicSession[]; logs: LogEntry[];
   pulls?: PullSummary; access?: { tailnet_url?: string };
 }
-type View = 'logs' | 'sessions' | 'agents' | 'pulls-internal' | 'pulls-upstream' | 'repos' | 'settings-general' | 'settings-github' | 'settings-lark' | 'settings-slack' | 'settings-telegram' | 'settings-tailscale' | 'settings-backup' | 'settings-about';
-interface AgentsPage { agents: AgentPrompt[]; editable: boolean; channel?: { name: NotificationChannel; configured: boolean; recipient?: string; groups: number } }
+type View = 'logs' | 'sessions' | 'agents' | 'pulls-internal' | 'pulls-upstream' | 'repos' | 'settings-general' | 'settings-github' | 'settings-lark' | 'settings-tailscale' | 'settings-backup' | 'settings-about';
+interface AgentsPage { agents: AgentPrompt[]; editable: boolean; channel?: { name: 'feishu'; configured: boolean; recipient?: string; groups: number } }
 interface Tone { label: string; tone: string }
 type TranslatedText = string | (() => string);
 const resolveText = (value?: TranslatedText): string => typeof value === 'function' ? value() : value ?? '';
@@ -40,24 +39,20 @@ function translatedLabels() {
     'settings-general': { hash: '#/settings/general', group: t('设置'), title: t('通用'), section: 'settings-view' },
     'settings-github': { hash: '#/settings/github', group: t('设置'), title: 'GitHub', section: 'settings-view' },
     'settings-lark': { hash: '#/settings/lark', group: t('设置'), title: t('飞书'), section: 'settings-view' },
-    'settings-slack': { hash: '#/settings/slack', group: t('设置'), title: 'Slack', section: 'settings-view' },
-    'settings-telegram': { hash: '#/settings/telegram', group: t('设置'), title: 'Telegram', section: 'settings-view' },
     'settings-tailscale': { hash: '#/settings/tailscale', group: t('设置'), title: 'Tailscale', section: 'settings-view' },
     'settings-backup': { hash: '#/settings/backup', group: t('设置'), title: t('导入导出'), section: 'settings-view' },
     'settings-about': { hash: '#/settings/about', group: t('设置'), title: t('关于'), section: 'settings-view' },
   };
   const descriptions: Record<string, string> = {
     ready: t('服务已启动'), lark_ready: t('飞书消息接收已启动'), lark_failed: t('飞书连接失败'), lark_discovery_failed: t('飞书群聊发现失败'),
-    slack_ready: t('Slack 连接已建立'), slack_failed: t('Slack 连接失败'), telegram_ready: t('Telegram 连接已建立'), telegram_failed: t('Telegram 连接失败'),
-    notification_channel_changed: t('默认通知渠道已更新'), slack_configured: t('Slack 配置已更新'), telegram_configured: t('Telegram 配置已更新'),
-    received: t('服务收到消息'), socket_written: t('已写入客户端，等待会话回执'), input_accepted: t('客户端已接受输入，等待会话回执'),
-    inbox_queued: t('已存入收件箱，等待会话主动检查'),
-    session_acknowledged: t('会话已确认收到'), replied: t('回复已发回原消息'), reply_failed: t('发送回复失败'), reaction_failed: t('添加消息表情失败'),
-    delivery_unconfirmed: t('投递结果未知，未自动重发'), state_write_failed: t('状态保存失败'),
-    delivery_failed: t('消息转发失败'), ignored: t('已跳过此消息'), queue_full: t('消息队列已满'), registered: t('本机会话已注册'),
+    received: t('收到用户消息'), socket_written: t('用户消息已转发'), input_accepted: t('用户消息已转发'),
+    inbox_queued: t('用户消息已排队'),
+    session_acknowledged: t('会话已接收消息'), replied: t('会话回复已发送'), reply_failed: t('会话回复发送失败'), reaction_failed: t('添加消息表情失败'),
+    delivery_unconfirmed: t('用户消息投递未确认'), state_write_failed: t('状态保存失败'),
+    delivery_failed: t('用户消息转发失败'), ignored: t('用户消息已忽略'), queue_full: t('用户消息排队失败'), registered: t('本机会话已注册'),
     bound: t('已保存会话绑定'), stopped: t('监听已停止'), connecting: t('正在连接消息服务'), pin_failed: t('绑定消息置顶失败'),
     reconnecting: t('消息服务正在重连'), reconnected: t('消息服务已重新连接'), refresh_completed: t('GitHub PR 已刷新'), refresh_failed: t('GitHub PR 刷新失败'),
-    thread_created: t('已为会话创建消息桥接'), thread_reused: t('会话已连接消息桥接'), thread_message: t('会话发送了进度消息'), thread_failed: t('进度消息发送失败'),
+    thread_created: t('已为会话创建消息桥接'), thread_reused: t('会话已连接消息桥接'), thread_message: t('进度已发送'), thread_failed: t('进度消息发送失败'),
     prompt_injected: t('已写入 agent 提示词'), prompt_removed: t('已移除 agent 提示词'),
     github_login: t('GitHub 已登录'), github_logout: t('GitHub 已退出登录'), lark_configured: t('飞书应用凭据已更新'), config_exported: t('配置已导出'), config_imported: t('配置已导入'),
     lark_registration_complete: t('应用已保存'), lark_registration_failed: t('扫码配置未完成'),
@@ -70,15 +65,12 @@ function translatedLabels() {
     app_mismatch: t('该群属于另一个飞书应用'), sender_not_allowed: t('发送者不在允许名单'), duplicate: t('重复消息'), unsupported_message: t('暂不处理此消息类型'),
     host_mismatch: t('会话位于另一台机器'), invalid_content: t('消息内容无效'), delivery_failed: t('投递失败'), input_rejected: t('客户端拒绝此输入'),
   };
-  const sourceNames: Record<string, string> = { host: t('服务'), sessions: t('会话'), lark: t('飞书'), slack: 'Slack', telegram: 'Telegram', pulls: 'GitHub', agents: 'Agents' };
-  const channelNames: Record<NotificationChannel, string> = { feishu: t('飞书'), slack: 'Slack', telegram: 'Telegram' };
-  const channelUnits: Record<NotificationChannel, string> = { feishu: t('群'), slack: t('线程'), telegram: t('话题') };
+  const sourceNames: Record<string, string> = { host: t('服务'), sessions: t('会话'), lark: t('飞书'), pulls: 'GitHub', agents: 'Agents' };
   const categories: Record<string, Tone> = {
-    received: { label: t('已收件'), tone: 'info' }, forwarded: { label: t('待回执'), tone: 'warn' },
-    acknowledged: { label: t('已确认'), tone: 'ok' }, replied: { label: t('已回复'), tone: 'ok' },
-    ignored: { label: t('已忽略'), tone: 'muted' }, error: { label: t('异常'), tone: 'error' }, system: { label: t('系统'), tone: 'muted' },
+    incoming: { label: t('用户消息'), tone: 'muted' }, progress: { label: t('会话进度'), tone: 'muted' }, reply: { label: t('会话回复'), tone: 'muted' },
+    system: { label: t('连接与系统'), tone: 'muted' }, ignored: { label: t('已忽略'), tone: 'muted' }, error: { label: t('异常'), tone: 'error' },
   };
-  const outcomeTabs: [string, string][] = [['all', t('全部')], ['forwarded', t('待回执')], ['acknowledged', t('已确认')], ['replied', t('已回复')], ['ignored', t('已忽略')], ['error', t('异常')]];
+  const outcomeTabs: [string, string][] = [['all', t('全部')], ...['incoming', 'progress', 'reply', 'system', 'ignored', 'error'].map(value => [value, categories[value].label] as [string, string])];
   const pullTabs: [string, string][] = [['all', t('全部')], ['attention', t('需跟进')], ['draft', t('草稿')]];
   const repoTabs: [string, string][] = [['all', t('全部')], ['followed', t('已关注')], ['muted', t('未关注')]];
   const agentNames: Record<string, string> = { claude: 'Claude', codex: 'Codex', opencode: 'OpenCode', trae: 'Trae', workbuddy: 'WorkBuddy' };
@@ -94,7 +86,7 @@ function translatedLabels() {
   const reviews: Record<string, Tone> = {
     APPROVED: { label: t('已批准'), tone: 'ok' }, CHANGES_REQUESTED: { label: t('需要修改'), tone: 'error' }, REVIEW_REQUIRED: { label: t('待审查'), tone: 'warn' },
   };
-  const moduleNames: Record<string, string> = { sessions: t('会话'), lark: t('飞书'), slack: 'Slack', telegram: 'Telegram', pulls: 'GitHub' };
+  const moduleNames: Record<string, string> = { sessions: t('会话'), lark: t('飞书'), pulls: 'GitHub' };
   const moduleStates: Record<string, Tone> = {
     ready: { label: t('就绪'), tone: 'ok' }, idle: { label: t('等待刷新'), tone: 'warn' }, refreshing: { label: t('刷新中'), tone: 'warn' },
     stale: { label: t('刷新失败'), tone: 'error' }, error: { label: t('异常'), tone: 'error' }, failed: { label: t('异常'), tone: 'error' },
@@ -121,13 +113,9 @@ function translatedLabels() {
     busy: t('内置客户端忙碌，正在重试。'),
     timeout: t('连接超时，请检查网络后重试。'),
   };
-  return { channelNames, channelUnits, views, descriptions, reasons, sourceNames, categories, outcomeTabs, pullTabs, repoTabs, agentNames, promptStates, adapters, availability, reviews, moduleNames, moduleStates, credentialSources, githubErrors, tailscaleErrors };
+  return { views, descriptions, reasons, sourceNames, categories, outcomeTabs, pullTabs, repoTabs, agentNames, promptStates, adapters, availability, reviews, moduleNames, moduleStates, credentialSources, githubErrors, tailscaleErrors };
 }
-let { channelNames, channelUnits, views, descriptions, reasons, sourceNames, categories, outcomeTabs, pullTabs, repoTabs, agentNames, promptStates, adapters, availability, reviews, moduleNames, moduleStates, credentialSources, githubErrors, tailscaleErrors } = translatedLabels();
-
-const channelViews: Record<NotificationChannel, View> = { feishu: 'settings-lark', slack: 'settings-slack', telegram: 'settings-telegram' };
-const chatChannels: ChatChannel[] = ['slack', 'telegram'];
-const chatFields = { slack: ['bot-token', 'app-token', 'channel-id', 'user-id'], telegram: ['bot-token', 'chat-id', 'user-id'] } as const;
+let { views, descriptions, reasons, sourceNames, categories, outcomeTabs, pullTabs, repoTabs, agentNames, promptStates, adapters, availability, reviews, moduleNames, moduleStates, credentialSources, githubErrors, tailscaleErrors } = translatedLabels();
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
 function node<K extends keyof HTMLElementTagNameMap>(tag: K, text?: string, className?: string): HTMLElementTagNameMap[K] {
@@ -158,19 +146,17 @@ const state = {
   pullsError: '' as TranslatedText,
   outcome: 'all', pullFilter: 'all', pullSort: 'asc' as 'asc' | 'desc', repoFilter: 'all',
   pendingRepos: new Set<string>(), repoError: '' as TranslatedText, openRepoSources: new Set<string>(),
-  agents: undefined as AgentsPage | undefined, agentsError: '' as TranslatedText, pendingAgents: new Set<string>(), openPreviews: new Set<string>(), channelEdited: false, pendingChannel: false,
+  agents: undefined as AgentsPage | undefined, agentsError: '' as TranslatedText, pendingAgents: new Set<string>(), openPreviews: new Set<string>(),
   settings: undefined as (SettingsPage & { editable: boolean }) | undefined, github: undefined as GitHubSettings | undefined, loadingGitHub: false,
   tailscale: undefined as (TailscalePage & { editable: boolean }) | undefined, loadingTailscale: false, tailscaleError: '' as TranslatedText,
   settingsNote: undefined as { text: TranslatedText; error: boolean; source?: 'settings-read' } | undefined, pendingSettings: new Set<string>(),
   larkConnectionType: undefined as LarkConnectionType | undefined,
   larkRegistration: undefined as LarkRegistrationPage | undefined, loadingLarkRegistration: false, larkManual: false,
   larkSetup: undefined as LarkSetup | undefined, loadingLarkSetup: false, larkReconcilePending: false,
-  larkEdited: false, confirmClear: false, chatEdited: { slack: false, telegram: false }, confirmChatClear: { slack: false, telegram: false }, importing: undefined as { name: string; content: unknown; summary: ImportSummary } | undefined,
+  larkEdited: false, confirmClear: false, importing: undefined as { name: string; content: unknown; summary: ImportSummary } | undefined,
   recipientDirectory: undefined as LarkRecipientsPage | undefined, recipientPicker: false, loadingRecipients: false, recipientError: undefined as number | undefined,
   recipientRequest: undefined as AbortController | undefined, recipientLoadedAt: 0, recipientDraft: '', recipientActive: '',
   recipientPermission: undefined as LarkPermissionHelp | undefined, recipientPermissionOpen: false, recipientSaveError: '', failedAvatars: new Set<string>(),
-  chatDirectories: {} as Partial<Record<ChatChannel, ChatDirectory>>, chatPicker: { slack: false, telegram: false },
-  loadingChatDirectory: { slack: false, telegram: false }, chatDirectoryVersion: { slack: 0, telegram: 0 }, chatDirectoryError: {} as Partial<Record<ChatChannel, string>>,
   update: undefined as UpdateView | undefined,
   paused: false, loading: false, loadingPulls: false, connected: false, connectionError: undefined as string | undefined,
   expanded: new Set<string>(),
@@ -236,51 +222,82 @@ function rowMain(title: string | Node[], meta: string): HTMLElement {
 
 // ---- Logs ----
 function source(entry: LogEntry): string {
-  return entry.source ?? (entry.status.startsWith('slack_') ? 'slack' : entry.status.startsWith('telegram_') ? 'telegram'
-    : entry.status.startsWith('lark') || entry.chat_id ? 'lark' : entry.session_id ? 'sessions' : 'host');
+  return entry.source ?? (entry.status.startsWith('lark') || entry.chat_id ? 'lark' : entry.session_id ? 'sessions' : 'host');
 }
 function category(entry: LogEntry): string {
-  if (entry.status === 'delivery_unconfirmed' || entry.reason === 'input_rejected') return 'error';
+  if (entry.error || entry.status.includes('failed') || entry.status === 'queue_full' || entry.status === 'delivery_unconfirmed' || entry.reason === 'input_rejected') return 'error';
   if (entry.status === 'ignored') return 'ignored';
-  if (entry.status === 'received') return 'received';
-  if (entry.status === 'session_acknowledged') return 'acknowledged';
-  if (entry.status === 'replied' || entry.status === 'thread_message') return 'replied';
-  if (entry.status === 'socket_written' || entry.status === 'input_accepted' || entry.status === 'inbox_queued') return 'forwarded';
-  if (entry.error || entry.status.includes('failed') || entry.status === 'queue_full') return 'error';
+  if (['received', 'socket_written', 'input_accepted', 'inbox_queued', 'session_acknowledged'].includes(entry.status)) return 'incoming';
+  if (entry.status === 'thread_message') return 'progress';
+  if (entry.status === 'replied') return 'reply';
   return 'system';
 }
+type LogType = 'incoming' | 'progress' | 'reply' | 'system';
+function logType(entry: LogEntry): LogType {
+  if (entry.status === 'thread_message' || entry.status === 'thread_failed') return 'progress';
+  if (entry.status === 'replied' || entry.status === 'reply_failed') return 'reply';
+  if (['received', 'socket_written', 'input_accepted', 'inbox_queued', 'session_acknowledged', 'ignored', 'delivery_failed', 'delivery_unconfirmed', 'queue_full'].includes(entry.status) || entry.reason === 'input_rejected') return 'incoming';
+  return 'system';
+}
+function logTypeLabel(entry: LogEntry): string {
+  switch (logType(entry)) {
+    case 'incoming': return t('用户消息');
+    case 'progress': return t('会话进度');
+    case 'reply': return t('会话回复');
+    case 'system': return t('系统');
+  }
+}
+function logAction(entry: LogEntry): string {
+  if (entry.status === 'delivery_unconfirmed') return t('投递未确认');
+  if (category(entry) === 'error') return t('失败');
+  switch (entry.status) {
+    case 'received': return t('已收件');
+    case 'socket_written': case 'input_accepted': return t('已转发');
+    case 'inbox_queued': return t('已排队');
+    case 'session_acknowledged': return t('已确认');
+    case 'thread_message': return t('已发送');
+    case 'replied': return t('已回复');
+    case 'ignored': return t('已忽略');
+    case 'thread_created': return t('已创建');
+    case 'thread_reused': return t('已复用');
+  }
+  const status = entry.status.replace(/^lark_/, '');
+  if (status === 'ready') return t('已连接');
+  return moduleStates[status]?.label ?? t('已记录');
+}
 function summary(entry: LogEntry): string {
-  if (entry.reason && reasons[entry.reason]) return reasons[entry.reason];
-  const provider = source(entry);
-  const conversation = provider === 'lark' ? t('飞书群') : provider === 'slack' ? t('Slack 线程') : provider === 'telegram' ? t('Telegram 话题') : undefined;
-  if (conversation && entry.status === 'thread_created') return t('已为会话创建{p0}', { p0: conversation });
-  if (conversation && entry.status === 'thread_reused') return t('会话已连接{p0}', { p0: conversation });
+  if (entry.reason === 'input_rejected') return t('用户消息转发失败');
+  if (source(entry) === 'lark') {
+    if (entry.status === 'thread_created') return t('已为会话创建{p0}', { p0: t('飞书群') });
+    if (entry.status === 'thread_reused') return t('会话已连接{p0}', { p0: t('飞书群') });
+  }
   return descriptions[entry.status] || entry.status;
 }
 function sessionLabel(entry: LogEntry): string | undefined {
-  return entry.session_name ?? state.snapshot.sessions.find(session => session.session_id === entry.session_id)?.session_name ?? entry.session_id;
+  return entry.session_name || state.snapshot.sessions.find(session => session.session_id === entry.session_id)?.session_name || entry.session_id;
 }
-const logTitle = (entry: LogEntry): string => entry.preview && ['received', 'replied', 'thread_message'].includes(entry.status) ? entry.preview : summary(entry);
-function logMeta(entry: LogEntry): string {
-  const parts = [ago(entry.time), sourceNames[source(entry)] ?? source(entry)];
-  if (logTitle(entry) !== summary(entry)) parts.push(summary(entry));
-  if (entry.reason && !reasons[entry.reason]) parts.push(entry.reason);
-  const session = sessionLabel(entry);
-  if (session) parts.push(session);
-  if (entry.error && category(entry) === 'error') parts.push(entry.error);
-  if (entry.message_id) parts.push(entry.message_id.replace(/^om_/, '').slice(-10));
-  return parts.join(' · ');
+function logRoute(entry: LogEntry): string {
+  const provider = sourceNames[source(entry)] ?? source(entry);
+  const session = state.snapshot.sessions.find(session => session.session_id === entry.session_id);
+  const client = session ? adapters[session.adapter] ?? session.adapter : t('会话客户端');
+  if (['thread_message', 'thread_failed', 'replied', 'reply_failed'].includes(entry.status)) return t('{p0} → {p1}', { p0: client, p1: provider });
+  if (['received', 'socket_written', 'input_accepted', 'inbox_queued', 'session_acknowledged', 'delivery_failed', 'delivery_unconfirmed', 'queue_full', 'ignored'].includes(entry.status)) return t('{p0} → {p1}', { p0: provider, p1: client });
+  return provider;
 }
-function filteredLogs(): LogEntry[] {
+function logSubject(entry: LogEntry): string {
+  return entry.preview?.trim() ? entry.preview : sessionLabel(entry) ?? summary(entry);
+}
+function filteredLogs(outcome = state.outcome): LogEntry[] {
   const query = $<HTMLInputElement>('search').value.trim().toLocaleLowerCase();
-  return state.snapshot.logs.filter(entry => (state.outcome === 'all' || category(entry) === state.outcome) &&
-    (!query || [JSON.stringify(entry), sessionLabel(entry) ?? '', summary(entry)].join(' ').toLocaleLowerCase().includes(query)));
+  return state.snapshot.logs.filter(entry => (outcome === 'all' || (outcome === 'ignored' || outcome === 'error' ? category(entry) === outcome : logType(entry) === outcome)) &&
+    (!query || [JSON.stringify(entry), sessionLabel(entry) ?? '', logSubject(entry), summary(entry), logRoute(entry), logAction(entry), logTypeLabel(entry), categories[category(entry)].label].join(' ').toLocaleLowerCase().includes(query)));
 }
 function logDetails(entry: LogEntry): HTMLElement {
-  const box = node('div', undefined, 'details');
+  const box = node('div', undefined, 'details'); box.id = `log-details-${encodeURIComponent(entry.id)}`;
   const grid = node('dl', undefined, 'detail-grid');
   const fields: [string, string | undefined, boolean][] = [
-    [t('时间'), fullTime(entry.time), false], [t('事件'), entry.status, true], [t('会话'), entry.session_id, true], [t('会话名称'), entry.session_name, false],
+    [t('事件说明'), summary(entry), false], [t('消息方向'), logRoute(entry), false], [t('投递状态'), logAction(entry), false],
+    [t('时间'), fullTime(entry.time), false], [t('事件'), entry.status, true], [t('来源'), entry.source, true], [t('会话'), entry.session_id, true], [t('会话名称'), entry.session_name || state.snapshot.sessions.find(session => session.session_id === entry.session_id)?.session_name, false],
     [t('聊天 ID'), entry.chat_id, true], [t('消息 ID'), entry.message_id, true], [t('发送者 ID'), entry.sender_open_id, true], [t('回复 ID'), entry.reply_id, true],
     [t('原因'), entry.reason && reasons[entry.reason] ? t('{p0}（{p1}）', { p0: reasons[entry.reason], p1: entry.reason }) : entry.reason, false], [t('错误'), entry.error, false], [t('消息内容'), entry.preview, false],
   ];
@@ -288,13 +305,19 @@ function logDetails(entry: LogEntry): HTMLElement {
   box.append(grid); return box;
 }
 function renderLogs(force = false): void {
-  const counts: Record<string, number> = { all: state.snapshot.logs.length };
-  for (const entry of state.snapshot.logs) counts[category(entry)] = (counts[category(entry)] ?? 0) + 1;
+  const matching = filteredLogs('all');
+  const counts: Record<string, number> = { all: matching.length };
+  for (const entry of matching) {
+    const type = logType(entry); counts[type] = (counts[type] ?? 0) + 1;
+    const action = category(entry);
+    if (action === 'ignored' || action === 'error') counts[action] = (counts[action] ?? 0) + 1;
+  }
   renderTabs('outcome-tabs', outcomeTabs.map(([value, label]) => [value, label, counts[value] ?? 0]), state.outcome, value => {
     state.outcome = value; renderLogs(true);
   });
-  $('logs-count').textContent = counts.forwarded ? number(counts.forwarded) : '';
-  $('logs-count').title = counts.forwarded ? t('{p0} 条待回执', { p0: number(counts.forwarded) }) : '';
+  const total = state.snapshot.logs.length;
+  $('logs-count').textContent = total ? number(total) : '';
+  $('logs-count').title = total ? t('{p0} 条日志', { p0: number(total) }) : '';
   if (state.paused && !force) return;
   const entries = filteredLogs();
   $('empty').hidden = entries.length > 0;
@@ -302,9 +325,12 @@ function renderLogs(force = false): void {
   replaceRows($('logs-table'), entries.map(entry => {
     const item = node('div', undefined, 'entry'); item.setAttribute('role', 'listitem');
     const open = state.expanded.has(entry.id);
-    const row = node('button', undefined, 'row'); row.type = 'button'; row.dataset.key = entry.id;
-    row.setAttribute('aria-expanded', String(open)); row.title = fullTime(entry.time);
-    row.append(rowMain(logTitle(entry), logMeta(entry)), sideBlock(categories[category(entry)], clock(entry.time)), chevron());
+    const row = node('button', undefined, 'row log-row'); row.type = 'button'; row.dataset.key = entry.id;
+    row.dataset.category = category(entry); row.dataset.status = entry.status;
+    row.setAttribute('aria-expanded', String(open)); row.setAttribute('aria-controls', `log-details-${encodeURIComponent(entry.id)}`); row.title = fullTime(entry.time);
+    const label = node('span', logTypeLabel(entry), 'log-type'); label.dataset.type = logType(entry);
+    const subject = node('span', logSubject(entry), 'row-title log-subject'); subject.title = subject.textContent ?? '';
+    row.append(label, subject, node('span', logAction(entry), 'log-action'), chevron());
     row.addEventListener('click', () => {
       if (state.expanded.has(entry.id)) state.expanded.delete(entry.id); else state.expanded.add(entry.id);
       renderLogs(true);
@@ -535,8 +561,7 @@ function agentDetail(agent: AgentPrompt): string {
   if (agent.status === 'conflict') return t('文件里的 nootify 标记不成对，请先手动修正');
   if (agent.status === 'error') return agent.error ?? t('无法读取文件');
   if (agent.status === 'outdated') return t('写入内容与当前版本不同');
-  const channel = channelNames[state.agents?.channel?.name ?? 'feishu'];
-  return agent.injected ? t('新对话会按说明使用{p0}', { p0: channel }) : t('勾选后写入{p0}通知说明', { p0: channel });
+  return agent.injected ? t('新对话会按说明使用飞书') : t('勾选后写入飞书说明');
 }
 async function loadAgents(): Promise<void> {
   try {
@@ -547,7 +572,7 @@ async function loadAgents(): Promise<void> {
   renderChrome(); renderAgents();
 }
 async function setAgent(agent: AgentPrompt, enabled: boolean): Promise<void> {
-  if (state.agents?.editable !== true || state.pendingChannel || state.pendingAgents.has(agent.agent)) return;
+  if (state.agents?.editable !== true || state.pendingAgents.has(agent.agent)) return;
   state.pendingAgents.add(agent.agent); state.agentsError = ''; renderAgents();
   try {
     const response = await fetch('/ui/api/agents', { method: 'POST', headers: { 'x-nootify-ui': '1', 'content-type': 'application/json' },
@@ -558,52 +583,33 @@ async function setAgent(agent: AgentPrompt, enabled: boolean): Promise<void> {
   state.pendingAgents.delete(agent.agent);
   await loadAgents();
 }
-async function saveChannel(): Promise<void> {
-  if (state.agents?.editable !== true || state.pendingChannel || state.pendingAgents.size) return;
-  const channel = $<HTMLSelectElement>('notification-channel').value;
-  if (channel === state.agents.channel?.name) return;
-  state.pendingChannel = true; state.agentsError = ''; renderAgents();
-  try {
-    await post('/ui/api/settings/channel', { channel });
-    state.channelEdited = false;
-    await loadAgents();
-  } catch (error) { state.agentsError = () => t('无法保存默认通知渠道：{p0}', { p0: (error as Error).message }); }
-  finally { state.pendingChannel = false; renderAgents(); }
-}
 function renderAgents(): void {
   const page = state.agents;
   $('agents-count').textContent = page ? (page.agents.some(agent => agent.injected) ? number(page.agents.filter(agent => agent.injected).length) : '') : '';
   const remote = page?.editable !== true;
-  const banner = resolveText(state.agentsError) || (page && remote ? t('通过 Tailscale 访问时只能查看；请在这台 Mac 上修改 agent 提示词和通知渠道。') : '');
+  const banner = resolveText(state.agentsError) || (page && remote ? t('通过 Tailscale 访问时只能查看；请在这台 Mac 上修改 agent 提示词。') : '');
   $('agents-banner').hidden = !banner; $('agents-banner').textContent = banner;
   const channel = page?.channel;
-  const name = channelNames[channel?.name ?? 'feishu'];
-  setText('channel-title', channel ? t('通知渠道 · {p0}', { p0: name }) : t('通知渠道'));
-  setText('channel-sub', !page ? t('正在读取通知渠道…') : !channel ? t('通知模块未启用') : !channel.configured ? t('还没有完成 {p0} 配置：到「设置 · {p1}」配置后再使用', { p0: name, p1: name })
-    : channel.recipient ? t('{p0} {p1} · 已绑定 {p2} 个{p3}', { p0: channel.name === 'feishu' ? t('接收人') : t('信任的用户'), p1: channel.recipient, p2: number(channel.groups), p3: channelUnits[channel.name] }) : t('还没有设置信任的用户：到「设置 · {p0}」填写', { p0: name }));
-  const settings = $<HTMLAnchorElement>('channel-settings');
-  settings.href = views[channelViews[channel?.name ?? 'feishu']].hash;
-  setText('channel-settings', t('配置{p0}', { p0: name }));
-  const choice = $<HTMLSelectElement>('notification-channel');
-  if (!state.channelEdited) choice.value = channel?.name ?? 'feishu';
-  choice.disabled = remote || !channel || state.pendingChannel || state.pendingAgents.size > 0;
-  $<HTMLButtonElement>('channel-save').disabled = choice.disabled || choice.value === channel?.name;
-  setText('channel-save', state.pendingChannel ? t('保存中…') : t('保存'));
+  setText('channel-title', t('飞书通知'));
+  setTone('channel-state', !page ? { label: t('读取中'), tone: 'muted' } : !channel ? { label: t('未启用'), tone: 'muted' }
+    : channel.configured ? { label: t('已配置'), tone: 'ok' } : { label: t('未配置'), tone: 'muted' });
+  setText('channel-sub', !page ? t('正在读取飞书配置…') : !channel ? t('飞书模块未启用') : !channel.configured ? t('未配置飞书应用凭据，提示词写入后也无法建群：到「设置 · 飞书」配置')
+    : channel.recipient ? t('接收人 {p0} · 已绑定 {p1} 个群', { p0: channel.recipient, p1: number(channel.groups) }) : t('还没有设置接收人：到「设置 · 飞书」填写'));
   if (state.view !== 'agents' || !page) return;
-  if (!changed('agent-rows', [page, [...state.pendingAgents], state.pendingChannel])) return;
+  if (!changed('agent-rows', [page, [...state.pendingAgents]])) return;
   replaceRows($('agent-rows'), page.agents.map(agent => {
     const item = node('div', undefined, 'entry'); item.setAttribute('role', 'listitem');
     const row = node('label', undefined, 'row');
     const box = node('input', undefined, 'check'); box.type = 'checkbox'; box.checked = agent.injected; box.dataset.key = agent.agent;
-    box.disabled = remote || state.pendingChannel || state.pendingAgents.has(agent.agent) || ['conflict', 'error'].includes(agent.status);
-    box.setAttribute('aria-label', t('向 {p0} 写入{p1}通知说明', { p0: agent.name, p1: name }));
+    box.disabled = remote || state.pendingAgents.has(agent.agent) || ['conflict', 'error'].includes(agent.status);
+    box.setAttribute('aria-label', t('向 {p0} 写入飞书说明', { p0: agent.name }));
     box.addEventListener('change', () => { void setAgent(agent, box.checked); });
     row.append(box, rowMain(agent.name, `${(agent.files ?? [agent.file]).map(home).join(' · ')} · ${agentDetail(agent)}`), sideBlock(promptStates[agent.status] ?? promptStates.error));
     const extra = node('div', undefined, 'agent-extra');
     if (agent.agent === 'trae' || agent.agent === 'workbuddy') extra.append(node('p', t('回复需由会话主动检查'), 'hint'));
     if (agent.status === 'outdated' && !remote) {
       const update = node('button', t('更新为当前内容'), 'text-button'); update.type = 'button';
-      update.disabled = state.pendingChannel || state.pendingAgents.has(agent.agent);
+      update.disabled = state.pendingAgents.has(agent.agent);
       update.addEventListener('click', () => { void setAgent(agent, true); });
       extra.append(update);
     }
@@ -626,7 +632,7 @@ const field = (id: string): HTMLInputElement => $<HTMLInputElement>(id);
 async function post<T>(path: string, body?: unknown): Promise<T> {
   const response = await fetch(path, { method: 'POST', headers: { 'x-nootify-ui': '1', 'content-type': 'application/json' },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    signal: AbortSignal.timeout(path === '/ui/api/settings/import' ? 180000 : ['/ui/api/settings/slack', '/ui/api/settings/telegram'].includes(path) ? 90000 : path.endsWith('/recipients') ? 60000 : 20000) });
+    signal: AbortSignal.timeout(path === '/ui/api/settings/import' ? 180000 : 20000) });
   if (!response.ok) throw new Error(((await response.json().catch(() => ({}))) as { error?: string }).error ?? `HTTP ${response.status}`);
   return await response.json() as T;
 }
@@ -637,19 +643,6 @@ function fillLark(): void {
   showLarkSecret(false);
   field('lark-recipient').value = lark?.recipient ?? '';
 }
-function clearChatTokens(channel: ChatChannel): void {
-  for (const suffix of channel === 'slack' ? ['bot-token', 'app-token'] : ['bot-token']) {
-    const id = `${channel}-${suffix}`; field(id).value = ''; showChatSecret(id, false);
-  }
-}
-function fillChat(channel: ChatChannel): void {
-  const page = state.settings?.[channel];
-  const room = field(`${channel}-${channel === 'slack' ? 'channel-id' : 'chat-id'}`);
-  if (!page?.saved || room.value !== (page.chat_id ?? '')) resetChatDirectory(channel);
-  clearChatTokens(channel);
-  room.value = page?.chat_id ?? '';
-  field(`${channel}-user-id`).value = page?.user_id ?? '';
-}
 async function loadSettings(): Promise<boolean> {
   let loaded = false;
   try {
@@ -659,7 +652,6 @@ async function loadSettings(): Promise<boolean> {
     state.larkConnectionType ??= state.settings.lark.connection_type ?? 'bot';
     if (state.recipientDirectory && state.recipientDirectory.app_id !== state.settings.lark.app_id) invalidateRecipientDirectory();
     if (!state.larkEdited) fillLark();
-    for (const channel of chatChannels) if (!state.chatEdited[channel]) fillChat(channel);
     loaded = true;
     if (state.settingsNote?.source === 'settings-read') state.settingsNote = undefined;
   } catch (error) { state.settingsNote = { text: () => t('无法读取设置：{p0}', { p0: (error as Error).message }), error: true, source: 'settings-read' }; }
@@ -1085,87 +1077,10 @@ async function loadRecipients(refresh = false): Promise<void> {
   } catch { if (controller === state.recipientRequest && !controller.signal.aborted) state.recipientError = signal.aborted ? 504 : 502; }
   finally { if (controller === state.recipientRequest) { state.recipientRequest = undefined; state.loadingRecipients = false; renderRecipientPicker(state.settings?.editable !== true); } }
 }
-function renderChat(channel: ChatChannel, remote: boolean): void {
-  const page = state.settings?.[channel];
-  const status = state.snapshot.modules.find(module => module.name === channel)?.status ?? page?.status ?? 'disabled';
-  setTone(`${channel}-state`, !page ? { label: '', tone: 'muted' } : status === 'ready' ? { label: t('已连接'), tone: 'ok' } : moduleStates[status] ?? { label: status, tone: 'muted' });
-  setText(`${channel}-status`, !page ? t('正在读取设置…') : !page.configured ? t('还没有完成机器人配置')
-    : t('{p0} · 已绑定 {p1} 个{p2}', { p0: page.account ?? t('配置已保存'), p1: number(page.threads), p2: channelUnits[channel] }));
-  const busy = state.pendingSettings.has(channel) || state.pendingSettings.has(`${channel}-secret`);
-  for (const suffix of chatFields[channel]) {
-    const input = field(`${channel}-${suffix}`);
-    input.disabled = remote || !page || busy;
-    if (suffix.endsWith('token')) {
-      input.placeholder = page?.saved ? '••••••••••••••••' : suffix === 'app-token' ? 'xapp-…' : channel === 'slack' ? 'xoxb-…' : '123456789:…';
-      $<HTMLButtonElement>(`${channel}-${suffix}-toggle`).disabled = remote || !page || busy;
-      showChatSecret(`${channel}-${suffix}`, input.type === 'text');
-    }
-  }
-  $<HTMLButtonElement>(`${channel}-save`).disabled = remote || !page || busy;
-  setText(`${channel}-save`, busy ? t('处理中…') : t('验证并保存'));
-  const clear = $<HTMLButtonElement>(`${channel}-clear`);
-  clear.hidden = remote || !page?.saved; clear.disabled = busy;
-  setText(`${channel}-clear`, state.confirmChatClear[channel] ? t('确认清除 {p0} 配置', { p0: channelNames[channel] }) : t('清除 {p0} 配置', { p0: channelNames[channel] }));
-  renderChatPicker(channel, remote);
-}
-function resetChatDirectory(channel: ChatChannel): void {
-  delete state.chatDirectories[channel]; delete state.chatDirectoryError[channel]; state.chatDirectoryVersion[channel]++;
-}
-function chatInput(channel: ChatChannel): Record<string, string> {
-  return Object.fromEntries(chatFields[channel].map(suffix => [suffix.replaceAll('-', '_'), field(`${channel}-${suffix}`).value.trim()]));
-}
-function renderChatPicker(channel: ChatChannel, remote: boolean): void {
-  const page = state.settings?.[channel];
-  const ready = !!page && (!!page.saved || !!field(`${channel}-bot-token`).value.trim());
-  const busy = state.loadingChatDirectory[channel] || state.pendingSettings.has(channel) || state.pendingSettings.has(`${channel}-secret`);
-  const choose = $<HTMLButtonElement>(`${channel}-choose`);
-  choose.disabled = remote || !ready || busy;
-  choose.setAttribute('aria-expanded', String(state.chatPicker[channel]));
-  $(`${channel}-picker`).hidden = remote || !state.chatPicker[channel];
-  $<HTMLButtonElement>(`${channel}-reload`).disabled = remote || !ready || busy;
-  field(`${channel}-target-search`).disabled = remote || !ready || busy;
-  const directory = state.chatDirectories[channel];
-  const room = $<HTMLSelectElement>(`${channel}-chat-options`);
-  const currentRoom = field(`${channel}-${channel === 'slack' ? 'channel-id' : 'chat-id'}`).value;
-  if (changed(`${channel}-chat-options`, directory?.chats)) {
-    const placeholder = node('option', channel === 'slack' ? t('选择频道') : t('选择群组')); placeholder.value = ''; placeholder.disabled = true;
-    room.replaceChildren(placeholder, ...(directory?.chats ?? []).map(chat => { const option = node('option', `${chat.name} · ${chat.id}`); option.value = chat.id; return option; }));
-  }
-  room.value = directory?.chats.some(chat => chat.id === currentRoom) ? currentRoom : '';
-  room.disabled = remote || !ready || busy || !directory?.chats.length;
-  const query = field(`${channel}-target-search`).value.trim().toLocaleLowerCase(locale());
-  const users = directory?.users.filter(user => `${user.name} ${user.id}`.toLocaleLowerCase(locale()).includes(query)) ?? [];
-  const list = $<HTMLSelectElement>(`${channel}-user-options`);
-  if (changed(`${channel}-user-options`, users)) list.replaceChildren(...users.map(user => { const option = node('option', `${user.name} · ${user.id}`); option.value = user.id; return option; }));
-  list.value = field(`${channel}-user-id`).value;
-  list.disabled = remote || !ready || busy || !users.length;
-  const error = state.chatDirectoryError[channel];
-  const note = state.loadingChatDirectory[channel] ? t('正在读取接收目标…') : error ? t('无法读取接收目标：{p0}', { p0: error })
-    : !directory ? t('填写 Bot Token 后可读取接收目标；已保存的令牌可以留空。')
-    : !currentRoom ? (channel === 'slack' ? t('先选择频道，再从成员列表选择用户。') : t('先填写超级群 ID，或选择机器人已看到的群组。'))
-    : !users.length ? t('没有匹配的用户，可重新读取或手动填写用户 ID。')
-    : directory.limited ? t('显示 {p0} 位用户，列表可能不完整；未找到时可手动填写 ID。', { p0: number(users.length) })
-    : t('找到 {p0} 位用户', { p0: number(users.length) });
-  setText(`${channel}-directory-note`, note);
-  $(`${channel}-directory-note`).classList.toggle('tone-error', !!error);
-}
-async function loadChatDirectory(channel: ChatChannel): Promise<void> {
-  if (state.loadingChatDirectory[channel] || state.settings?.editable !== true) return;
-  const version = state.chatDirectoryVersion[channel];
-  state.loadingChatDirectory[channel] = true; delete state.chatDirectoryError[channel]; delete state.chatDirectories[channel]; renderChat(channel, false);
-  try {
-    const directory = await post<ChatDirectory>(`/ui/api/settings/${channel}/recipients`, chatInput(channel));
-    if (version === state.chatDirectoryVersion[channel]) state.chatDirectories[channel] = directory;
-  } catch (error) { if (version === state.chatDirectoryVersion[channel]) state.chatDirectoryError[channel] = (error as Error).message; }
-  finally { state.loadingChatDirectory[channel] = false; renderChat(channel, state.settings?.editable !== true); }
-}
 function importLines(summary: ImportSummary): string[] {
   const lines: string[] = [];
-  if (summary.notification_channel) lines.push(t('默认通知渠道：{p0}', { p0: channelNames[summary.notification_channel] }));
   if (summary.app_id) lines.push(t('飞书应用 {p0} 和它的 App Secret', { p0: summary.app_id }));
   if (summary.recipient) lines.push(t('飞书接收人 {p0}', { p0: summary.recipient }));
-  if (summary.slack) lines.push(t('Slack 令牌、频道 {p0} 和信任的用户 {p1}', { p0: summary.slack.chat_id, p1: summary.slack.user_id }));
-  if (summary.telegram) lines.push(t('Telegram 令牌、超级群 {p0} 和信任的用户 {p1}', { p0: summary.telegram.chat_id, p1: summary.telegram.user_id }));
   if (summary.pulls_config) lines.push(t('GitHub PR 配置'));
   if (summary.follow !== undefined) lines.push(t('用文件里的 {p0} 条选择替换现有的仓库关注选择', { p0: number(summary.follow) }));
   if (summary.backends.length) lines.push(t('{p0} 连接', { p0: formatList(summary.backends.map(adapter => adapters[adapter] ?? adapter)) }));
@@ -1200,7 +1115,6 @@ function renderSettings(): void {
   banner.hidden = !note; banner.className = note && !note.error ? 'banner note' : 'banner';
   setText('settings-banner', resolveText(note?.text));
   renderGitHub(remote); renderLark(remote); renderTailscale(); renderBackup(remote);
-  for (const channel of chatChannels) renderChat(channel, remote);
 }
 
 // ---- Updates ----
@@ -1346,7 +1260,7 @@ function renderChrome(): void {
   if (changed('modules', state.snapshot.modules)) {
     $('modules').replaceChildren(...state.snapshot.modules.filter(module => module.name in moduleNames).map(module => {
       const status = moduleStates[module.status] ?? { label: module.status, tone: 'muted' };
-      const display = ['lark', 'slack', 'telegram'].includes(module.name) && module.status === 'ready' ? { label: t('已连接'), tone: 'ok' } : status;
+      const display = module.name === 'lark' && module.status === 'ready' ? { label: t('已连接'), tone: 'ok' } : status;
       const line = node('div', undefined, 'status-line');
       line.append(node('span', undefined, `dot ${display.tone === 'muted' ? '' : display.tone}`), node('span', moduleNames[module.name] ?? module.name), node('span', display.label, 'value'));
       return line;
@@ -1409,11 +1323,7 @@ window.addEventListener('hashchange', () => {
   closeTitlebarSearches();
   state.view = viewFromHash();
   if (state.view !== 'settings-lark') { showLarkSecret(false); if (state.recipientPicker) closeRecipientPicker(); }
-  for (const channel of chatChannels) if (state.view !== `settings-${channel}`) {
-    for (const suffix of channel === 'slack' ? ['bot-token', 'app-token'] : ['bot-token']) showChatSecret(`${channel}-${suffix}`, false);
-  }
   state.settingsNote = undefined;
-  state.confirmChatClear.slack = false; state.confirmChatClear.telegram = false;
   renderAll();
   requestAnimationFrame(revealActiveNavigation);
   if (usesPulls(state.view)) void loadPulls();
@@ -1467,14 +1377,6 @@ $('github-copy').addEventListener('click', () => {
     setTimeout(() => setText('github-copy', t('复制')), 2000);
   }, () => { getSelection()?.selectAllChildren($('github-code')); setText('github-copy', t('已选中，按 ⌘C')); });
 });
-function showChatSecret(id: string, visible: boolean): void {
-  field(id).type = visible ? 'text' : 'password';
-  const label = id.endsWith('app-token') ? 'App-Level Token' : 'Bot Token';
-  const text = visible ? t('隐藏 {p0}', { p0: label }) : t('显示 {p0}', { p0: label });
-  const toggle = $(`${id}-toggle`); toggle.title = text; toggle.setAttribute('aria-label', text);
-  toggle.setAttribute('aria-pressed', String(visible));
-  toggle.querySelector('.secret-slash')?.toggleAttribute('hidden', !visible);
-}
 function showLarkSecret(visible: boolean): void {
   field('lark-app-secret').type = visible ? 'text' : 'password';
   const toggle = $('lark-secret-toggle');
@@ -1629,85 +1531,6 @@ $('lark-clear').addEventListener('click', () => {
     return () => t('已清除保存的凭据');
   });
 });
-$('notification-channel').addEventListener('change', () => { state.channelEdited = true; renderAgents(); });
-$('channel-save').addEventListener('click', () => { void saveChannel(); });
-function saveChat(channel: ChatChannel): void {
-  if (state.settings?.editable !== true || state.pendingSettings.has(channel)) return;
-  state.chatEdited[channel] = true; state.confirmChatClear[channel] = false;
-  void settingsRun(channel, () => t('无法保存 {p0} 配置', { p0: channelNames[channel] }), async () => {
-    await post(`/ui/api/settings/${channel}`, {
-      bot_token: field(`${channel}-bot-token`).value.trim(), user_id: field(`${channel}-user-id`).value.trim(),
-      ...(channel === 'slack' ? { app_token: field('slack-app-token').value.trim(), channel_id: field('slack-channel-id').value.trim() }
-        : { chat_id: field('telegram-chat-id').value.trim() }),
-    });
-    clearChatTokens(channel); state.chatEdited[channel] = false; resetChatDirectory(channel);
-    await Promise.all([loadSettings(), loadAgents()]);
-    return () => t('{p0} 配置已验证并保存', { p0: channelNames[channel] });
-  });
-}
-for (const channel of chatChannels) {
-  for (const suffix of channel === 'slack' ? ['bot-token', 'app-token'] : ['bot-token']) {
-    const id = `${channel}-${suffix}`;
-    $(`${id}-toggle`).addEventListener('click', () => {
-      if (state.settings?.editable !== true || state.pendingSettings.has(channel) || state.pendingSettings.has(`${channel}-secret`)) return;
-      const input = field(id);
-      if (input.type === 'text') { showChatSecret(id, false); return; }
-      if (input.value || !state.settings[channel].saved) { showChatSecret(id, true); return; }
-      void settingsRun(`${channel}-secret`, () => t('无法查看密钥'), async () => {
-        const result = await post<{ secret?: string }>(`/ui/api/settings/${channel}/secret`, { field: suffix.replaceAll('-', '_') });
-        if (state.view !== `settings-${channel}` || input.value) return;
-        if (!result.secret) throw new Error(t('没有已保存的密钥'));
-        input.value = result.secret; showChatSecret(id, true);
-      });
-    });
-  }
-  $(`${channel}-choose`).addEventListener('click', () => {
-    if (state.settings?.editable !== true) return;
-    state.chatPicker[channel] = !state.chatPicker[channel]; renderChat(channel, false);
-    if (state.chatPicker[channel] && !state.chatDirectories[channel]) void loadChatDirectory(channel);
-  });
-  $(`${channel}-picker-close`).addEventListener('click', () => { state.chatPicker[channel] = false; renderChat(channel, state.settings?.editable === false); $(`${channel}-choose`).focus(); });
-  $(`${channel}-reload`).addEventListener('click', () => { void loadChatDirectory(channel); });
-  field(`${channel}-target-search`).addEventListener('input', () => renderChatPicker(channel, state.settings?.editable === false));
-  $(`${channel}-chat-options`).addEventListener('change', () => {
-    const selected = $<HTMLSelectElement>(`${channel}-chat-options`).value;
-    if (!state.chatDirectories[channel]?.chats.some(chat => chat.id === selected)) return;
-    field(`${channel}-${channel === 'slack' ? 'channel-id' : 'chat-id'}`).value = selected;
-    state.chatEdited[channel] = true; resetChatDirectory(channel); void loadChatDirectory(channel);
-  });
-  $(`${channel}-user-options`).addEventListener('change', () => {
-    const selected = $<HTMLSelectElement>(`${channel}-user-options`).value;
-    if (!state.chatDirectories[channel]?.users.some(user => user.id === selected)) return;
-    field(`${channel}-user-id`).value = selected; state.chatEdited[channel] = true;
-  });
-  $(`${channel}-picker`).addEventListener('keydown', event => { if (event.key === 'Escape') $(`${channel}-picker-close`).click(); });
-  $(`${channel}-save`).addEventListener('click', () => saveChat(channel));
-  for (const suffix of chatFields[channel]) {
-    const input = field(`${channel}-${suffix}`);
-    input.addEventListener('input', () => {
-      state.chatEdited[channel] = true;
-      if (suffix !== 'user-id') resetChatDirectory(channel);
-      renderChat(channel, state.settings?.editable === false);
-      if (state.confirmChatClear[channel]) { state.confirmChatClear[channel] = false; renderSettings(); }
-    });
-    input.addEventListener('keydown', event => { if (event.key === 'Enter' && !event.isComposing) { event.preventDefault(); saveChat(channel); } });
-  }
-  $(`${channel}-clear`).addEventListener('click', () => {
-    if (state.settings?.editable !== true || !state.settings[channel].saved || state.pendingSettings.has(channel)) return;
-    if (!state.confirmChatClear[channel]) {
-      state.confirmChatClear[channel] = true; renderSettings();
-      setTimeout(() => { state.confirmChatClear[channel] = false; renderSettings(); }, 4000);
-      return;
-    }
-    state.confirmChatClear[channel] = false;
-    void settingsRun(channel, () => t('无法清除 {p0} 配置', { p0: channelNames[channel] }), async () => {
-      await post(`/ui/api/settings/${channel}`, { clear: true });
-      clearChatTokens(channel); state.chatEdited[channel] = false;
-      await Promise.all([loadSettings(), loadAgents()]);
-      return () => t('已清除 {p0} 配置', { p0: channelNames[channel] });
-    });
-  });
-}
 $('export-config').addEventListener('click', () => {
   void settingsRun('export', () => t('无法导出配置'), async () => { await post('/ui/api/settings/export'); await loadSettings(); return () => t('配置已导出'); });
 });
@@ -1730,10 +1553,9 @@ $('import-apply').addEventListener('click', () => {
   if (!importing) return;
   void settingsRun('import', () => t('无法导入配置'), async () => {
     const result = await post<ImportSummary>('/ui/api/settings/import', { document: importing.content, apply: true });
-    state.importing = undefined; state.larkEdited = false; state.channelEdited = false; invalidateRecipientDirectory();
+    state.importing = undefined; state.larkEdited = false; invalidateRecipientDirectory();
     state.larkConnectionType = undefined; state.larkManual = false;
     state.larkRegistration = undefined; state.larkSetup = undefined;
-    for (const channel of chatChannels) { state.chatEdited[channel] = false; state.confirmChatClear[channel] = false; clearChatTokens(channel); }
     await Promise.all([loadSettings(), loadAgents()]);
     return () => t('配置已导入{p0}', { p0: result.warnings.length ? t('；{p0}', { p0: result.warnings.join(t('；')) }) : '' });
   });
@@ -1793,7 +1615,7 @@ document.addEventListener('keydown', event => {
 });
 
 function renderLanguage(): void {
-  ({ channelNames, channelUnits, views, descriptions, reasons, sourceNames, categories, outcomeTabs, pullTabs, repoTabs, agentNames, promptStates, adapters, availability, reviews, moduleNames, moduleStates, credentialSources, githubErrors, tailscaleErrors } = translatedLabels());
+  ({ views, descriptions, reasons, sourceNames, categories, outcomeTabs, pullTabs, repoTabs, agentNames, promptStates, adapters, availability, reviews, moduleNames, moduleStates, credentialSources, githubErrors, tailscaleErrors } = translatedLabels());
   relative = new Intl.RelativeTimeFormat(locale(), { numeric: 'auto' });
   translateDocument();
   state.signatures.clear();

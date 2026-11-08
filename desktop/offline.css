@@ -1,3 +1,5 @@
+@import url("fonts.css");
+
 :root {
   color-scheme: light dark;
   --bg: #f7f7f8;
@@ -8,7 +10,7 @@
   --muted: #61616b;
   --faint: #6f6f78;
   --brand-filter: brightness(.18);
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", "Helvetica Neue", sans-serif;
+  font-family: var(--font-ui);
   color: var(--text);
   background: var(--bg);
   font-size: 13px;
@@ -28,6 +30,8 @@
 }
 * { box-sizing: border-box; }
 body { min-height: 100vh; margin: 0; display: flex; flex-direction: column; background: var(--bg); }
+:where(h1, h2, .brand) { font-family: var(--font-heading); }
+:where(.local-label, .footnote, footer) { font-family: var(--font-small); }
 .topbar { height: 52px; padding: 0 22px; display: flex; align-items: center; gap: 24px; border-bottom: 1px solid var(--line); background: var(--sidebar); }
 :root[data-nootify-desktop] .topbar { user-select: none; }
 :root[data-nootify-window-controls="macos"] .topbar { padding-left: 96px; }

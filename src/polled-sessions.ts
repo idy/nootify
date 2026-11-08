@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import type { State } from './state.js';
-import { forwardedChatMessage, forwardedLarkMessage, type ForwardingOptions } from './forwarded-messages.js';
+import { forwardedLarkMessage, type ForwardingOptions } from './forwarded-messages.js';
 import { HttpError, SessionUnavailable, isPolledAdapter, type Adapter, type DeliveryResult, type InboxSource, type PolledAdapter, type SessionInbox, type SessionRecord, type StoredInboxMessage } from './types.js';
 
 /** These clients run the notification CLI, but have no verified API for pushing into a selected existing conversation. */
@@ -51,9 +51,7 @@ export function sessionInbox(state: State, adapter: PolledAdapter, id: string, o
   for (const message of state.inboxMessages.values()) {
     if (message.adapter !== adapter || message.session_id !== id) continue;
     const source = message.source;
-    const text = source ? `[Nootify: ${session.session_name}]\n` + (source.channel === 'feishu'
-      ? forwardedLarkMessage(source.delivery, message.text, state.directory, options.port, options.command)
-      : forwardedChatMessage(source.delivery, message.text, state.directory, options.port, options.command)) : message.text;
+    const text = source ? `[Nootify: ${session.session_name}]\n` + forwardedLarkMessage(source.delivery, message.text, state.directory, options.port, options.command) : message.text;
     const size = Buffer.byteLength(text);
     if (messages.length && (bytes + size > 64000 || messages.length >= 20)) break;
     messages.push({ id: message.id, text, created_at: message.created_at }); bytes += size;

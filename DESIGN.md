@@ -40,17 +40,20 @@ colors:
   dark-check-line: "#55555e"
 typography:
   heading:
-    fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", "Helvetica Neue", sans-serif'
+    fontFamily: 'Montserrat, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", "Helvetica Neue", sans-serif'
     fontSize: "16px"
     fontWeight: 600
   primary:
+    fontFamily: 'Monda, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif'
     fontSize: "14px"
     fontWeight: 500
     lineHeight: "20px"
   body:
+    fontFamily: 'Monda, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif'
     fontSize: "13px"
     lineHeight: 1.4
   meta:
+    fontFamily: 'Lato, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif'
     fontSize: "12px"
   code:
     fontFamily: '"SF Mono", ui-monospace, Menlo, Consolas, monospace'
@@ -113,7 +116,7 @@ components:
 
 **Creative North Star: "Local settings"**
 
-This is a descriptive record of the incumbent interface, not a new identity. Nootify uses compact neutral groups, local system typography, its existing penguin identity, and blue actions. Settings prioritize accurate connection and access states in Chinese and English.
+This is a descriptive record of the incumbent interface, not a new identity. Nootify uses compact neutral groups, bundled website typography with system Chinese fallbacks, its existing penguin identity, and blue actions. Settings prioritize accurate connection and access states in Chinese and English.
 
 **Key Characteristics:**
 
@@ -137,7 +140,7 @@ Background and sidebar frame panel groups. Raised surfaces separate footers and 
 
 ## Typography
 
-UI text inherits the heading token's system stack, including Chinese fallbacks. Code uses the separate monospace stack, tabular numerals, and disabled ligatures. There is no display typeface or hero scale.
+English roles follow the website: Montserrat leads headings and the brand, Monda carries body text and controls, and Lato carries notes, metadata, and log actions. The Latin font files are bundled locally through `desktop/fonts.css` and `desktop/fonts/`, shared with the offline page; Chinese keeps the existing system fallback stack. Code retains its separate monospace stack, tabular numerals, and disabled ligatures. The compact fixed type scale and line boxes remain unchanged.
 
 - Heading: page hierarchy; semibold. The modal locally uses (17px/24px), reducing to the heading size on mobile.
 - Primary: row names and settings labels; medium with fixed line boxes.
@@ -177,7 +180,7 @@ Controls use modest curved corners; groups are slightly rounder. The modal uses 
 
 ### Do:
 
-- **Do** inherit system fonts, semantic colors, and automatic appearance from the existing settings.
+- **Do** use the bundled website font roles with system Chinese fallbacks, preserving semantic colors and automatic appearance.
 - **Do** preserve useful loaded contacts and a reachable footer while loading or explaining access.
 - **Do** keep portraits as runtime provider data and the permission QR as locally generated functional imagery.
 

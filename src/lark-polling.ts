@@ -1,4 +1,5 @@
 import { hostname } from 'node:os';
+import { normalizeIncomingMessage, selectIncomingMessage } from './message-ingress.js';
 import { setTimeout as wait } from 'node:timers/promises';
 import { InvalidAnnouncement, parseAnnouncement, readAnnouncement, requestLark, type LarkApi } from './lark-metadata.js';
 import { LarkHistoryBuffer, type LarkHistoryMessage, type LarkHistoryEntry } from './lark-history-buffer.js';
@@ -261,10 +262,9 @@ export class LarkPoller implements LarkReceiver {
         if (time < scan.lower) { if (cursor.container_type === 'thread') { pageToken = undefined; break; } continue; }
         if (time > end) continue;
         scan.covered = Math.max(scan.covered, time);
-        const eligible = !item.deleted && item.sender?.sender_type === 'user' && item.sender.id_type === 'open_id' && item.msg_type === 'text';
-        const dispatch = eligible && !(cursor.container_type === 'thread' && item.message_id === root);
+        const dispatch = !(cursor.container_type === 'thread' && item.message_id === root);
         const known = this.options.state.hasLarkPollReceipt(larkPollCursorKey(cursor), item.message_id);
-        entries.push({ cursor_id: larkPollCursorKey(cursor), item: this.compact(item, dispatch && !known), dispatch: dispatch && !known });
+        entries.push({ cursor_id: larkPollCursorKey(cursor), item: this.compact(item, dispatch && !known && item.msg_type === 'text'), dispatch: dispatch && !known });
       }
       if (cursor.container_type === 'thread' && !cursor.root_message_id && root) {
         cursor = { ...cursor, root_message_id: root }; scan.cursor = cursor; await this.save([cursor]);
@@ -300,11 +300,13 @@ export class LarkPoller implements LarkReceiver {
         for (const record of batch) {
           signal.throwIfAborted();
           const known = record.cursor_ids.some(id => this.options.state.hasLarkPollReceipt(id, record.item.message_id));
-          if (!known && record.dispatch) {
+          // Admit only after histories are merged, preserving the provider's sender identity.
+          const message = !known && record.dispatch ? selectIncomingMessage(normalizeIncomingMessage('feishu', record.item)) : undefined;
+          if (message) {
             const origin = record.cursor_ids.map(id => byId.get(id)!).find(scan => scan.cursor.container_type === 'thread') ?? byId.get(record.cursor_ids[0])!;
-            const accepted = await this.options.receive({ sender: { sender_type: 'user', sender_id: { open_id: record.item.sender?.id } },
-              message: { chat_id: record.item.chat_id, message_id: record.item.message_id, message_type: record.item.msg_type,
-                content: record.item.body?.content, thread_id: record.item.thread_id ?? (origin.cursor.container_type === 'thread' ? origin.cursor.container_id : undefined) } });
+            const accepted = await this.options.receive({ sender: { sender_type: record.item.sender?.sender_type, sender_id: { open_id: message.sender_id } },
+              message: { chat_id: message.chat_id, message_id: message.message_id, message_type: record.item.msg_type,
+                content: record.item.body?.content, thread_id: message.thread_id ?? (origin.cursor.container_type === 'thread' ? origin.cursor.container_id : undefined) } });
             if (!accepted) throw new Error('Feishu message delivery is waiting for a safe retry');
           }
           for (const id of record.cursor_ids) if (!this.options.state.hasLarkPollReceipt(id, record.item.message_id)) {

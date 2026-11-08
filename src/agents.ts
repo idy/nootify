@@ -6,7 +6,6 @@ import { fileURLToPath } from 'node:url';
 import { defaultStateDir } from './state.js';
 import { HttpError, isPolledAdapter, object } from './types.js';
 import type { Adapter, RouteRequest, RouteResponse, ServiceModule } from './types.js';
-import type { NotificationChannel } from './chat-transport.js';
 import { shellCommand, shellForClient, shellQuote } from './shell.js';
 
 export type AgentId = 'claude' | 'codex' | 'opencode' | 'trae' | 'workbuddy';
@@ -52,7 +51,7 @@ export function agentSession(agent: AgentId, env: NodeJS.ProcessEnv = process.en
   return { adapter: agent };
 }
 
-export interface PromptOptions { stateDir: string; port: number; tailnetAddress?: () => string | undefined; notificationChannel?: () => NotificationChannel; command?: string[]; platform?: NodeJS.Platform }
+export interface PromptOptions { stateDir: string; port: number; tailnetAddress?: () => string | undefined; command?: string[]; platform?: NodeJS.Platform }
 
 /** The block for one agent. Commands name this installation's Node and CLI, so they work from any project directory. */
 export function promptBlock(agent: AgentId, options: PromptOptions): string {
@@ -61,20 +60,17 @@ export function promptBlock(agent: AgentId, options: PromptOptions): string {
   const quote = (value: string): string => shellQuote(value, platform, true, shell);
   const base = shellCommand(options.command ?? [process.execPath, fileURLToPath(new URL('./cli.js', import.meta.url))], platform, true, shell);
   const extra = `${options.stateDir !== defaultStateDir() ? ` --state-dir ${quote(options.stateDir)}` : ''}${options.port !== 9417 ? ` --port ${options.port}` : ''}`;
-  const channel = options.notificationChannel?.() ?? 'feishu';
   const polled = isPolledAdapter(agent);
-  const identity = (agent === 'opencode' ? '--agent opencode --session-id <this ses_… session ID>' : `--agent ${agent}`) + (channel === 'feishu' ? '' : ` --channel ${channel}`);
+  const identity = agent === 'opencode' ? '--agent opencode --session-id <this ses_… session ID>' : `--agent ${agent}`;
   const run = (command: string, args = ''): string => `\`${base} ${command} ${identity}${polled && command !== 'thread-open' ? ' --session-id "<returned session_id>"' : ''}${args ? ` ${args}` : ''}${extra}\``;
   const address = options.tailnetAddress?.();
   return [
     BEGIN,
-    `## ${channel === 'feishu' ? 'Feishu' : channel === 'slack' ? 'Slack' : 'Telegram'} updates through Nootify`,
+    '## Feishu updates through Nootify',
     '',
-    channel === 'feishu' ? 'Nootify gives each conversation its own Feishu group, so the user can follow your progress and reply from Feishu.'
-      : `Nootify gives each conversation its own ${channel === 'slack' ? 'Slack thread' : 'Telegram topic'}, so the user can follow your progress and reply there.`,
+    'Nootify gives each conversation its own Feishu group, so the user can follow your progress and reply from Feishu.',
     '',
-    channel === 'feishu' ? "- For work longer than a quick answer, open this conversation's group first. Later calls reuse it; Nootify keeps the session's routing token in the group announcement:"
-      : "- For work longer than a quick answer, open this conversation's thread first. Later calls reuse its local session binding:",
+    "- For work longer than a quick answer, open this conversation's group first. Later calls reuse it; Nootify keeps the session's routing token in the group announcement:",
     `  ${run('thread-open', '--session-name "<short task title>"')}`,
     ...(polled ? ['- Run thread-open once per conversation. Keep the returned session_id in this conversation and replace "<returned session_id>" in all subsequent commands with it. Reuse it with --session-id when retrying thread-open; do not reuse another conversation\'s ID or derive it from a project directory.'] : []),
     "- Post progress, blockers and results as you go, in the user's language. Each message is prefixed with the session name:",
@@ -87,8 +83,7 @@ export function promptBlock(agent: AgentId, options: PromptOptions): string {
       '- Read each returned message.text as user input. Follow its original-channel receipt and reply commands, then acknowledge that inbox item using its returned message.id:',
       `  ${run('thread-ack', '--message-id "<returned message.id>"')}`,
       '- Inbox reads are repeatable until acknowledged. Polling cannot wake an idle or closed conversation; do not busy-poll or claim that queued messages have already been read.',
-    ] : [channel === 'feishu' ? '- Messages from the user in that group arrive here marked 【来自飞书用户的消息】 with `lark-ack` and `lark-reply` commands; answer them when convenient.'
-      : `- Messages arrive here marked 【来自${channel === 'slack' ? 'Slack' : 'Telegram'}用户的消息】 with \`chat-ack\` and \`chat-reply\` commands. Answer when convenient; the reply goes to the original thread or topic.`]),
+    ] : ['- Messages from the user in that group arrive here marked 【来自飞书用户的消息】 with `lark-ack` and `lark-reply` commands; answer them when convenient.']),
     "- Nootify maintains this block; change it on Nootify's Agents page instead of editing it here.",
     END,
   ].join('\n');

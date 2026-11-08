@@ -94,6 +94,11 @@ async function stageService(nodeLicense, tailscale) {
     }
     // dist/src/ui.js serves ../../public/; the Windows CLI resolves ../../windows/.
     for (const file of await files(join(root, 'public'))) await copyInto(join(root, 'public', file), join(staging, 'public', file));
+    // Shared with the embedded offline page; fonts and OFL notices must travel with the HTTP UI.
+    await copyInto(join(root, 'desktop', 'fonts.css'), join(staging, 'desktop', 'fonts.css'));
+    for (const file of await files(join(root, 'desktop', 'fonts'))) {
+      await copyInto(join(root, 'desktop', 'fonts', file), join(staging, 'desktop', 'fonts', file));
+    }
     const windows = join(root, 'windows');
     if (target.platform === 'win32' && !await exists(join(windows, 'service.ps1'))) {
       throw new Error('Missing committed windows/service.ps1');

@@ -3,20 +3,25 @@ import { chmod, link, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { serviceStateDir } from './runtime-paths.js';
 import { join } from 'node:path';
 import type { Adapter, BackendConnection, LarkBinding, LarkDelivery, LarkPollCursor, LarkPollReceipt, PublicSession, SessionRecord, StoredInboxMessage } from './types.js';
-import { HttpError, isAdapter, larkPollCursorKey, larkPollReceiptKey } from './types.js';
-import { isNotificationChannel, validChatConfig, type ChatBinding, type ChatDelivery, type NotificationChannel, type SlackConfig, type TelegramConfig } from './chat-transport.js';
+import { HttpError, isAdapter, isPolledAdapter, larkPollCursorKey, larkPollReceiptKey } from './types.js';
 import { StateDatabase, legacyLarkPollReceipts, validateLarkPollReceipt, type LarkPollPrune, type StateRows } from './state-database.js';
 
 export type LarkConnectionType = 'bot' | 'personal-app';
 export const isLarkConnectionType = (value: unknown): value is LarkConnectionType => value === 'bot' || value === 'personal-app';
-
 /** Owner choices that are not tied to one session or binding. */
 export interface Settings {
   lark_recipient_open_id?: string; lark_app_id?: string; lark_app_secret?: string; lark_connection_type?: LarkConnectionType; github_token?: string; tailscale_enabled?: boolean;
-  notification_channel?: NotificationChannel; slack?: SlackConfig; telegram?: TelegramConfig;
 }
-/** The pre-SQLite format is read only for the first successful database migration. */
-interface StoredState { version: 1; sessions: SessionRecord[]; lark_bindings: LarkBinding[]; backends?: [Adapter, BackendConnection][]; lark_deliveries?: LarkDelivery[]; lark_poll_cursors?: LarkPollCursor[]; lark_poll_receipts?: LarkPollReceipt[]; chat_bindings?: ChatBinding[]; chat_deliveries?: ChatDelivery[]; inbox_messages?: StoredInboxMessage[]; settings?: Settings }
+const settingsKeys = new Set(['lark_recipient_open_id', 'lark_app_id', 'lark_app_secret', 'lark_connection_type', 'github_token', 'tailscale_enabled']);
+const retiredTables = ['chat_bindings', 'chat_deliveries', 'telegram_clients'] as const;
+type LegacyRecord = Record<string, unknown>;
+/** Retired provider data is opaque migration input, never an active transport or inbox. */
+interface StoredState {
+  version: 1; sessions: SessionRecord[]; lark_bindings: LarkBinding[]; backends?: [Adapter, BackendConnection][];
+  lark_deliveries?: LarkDelivery[]; lark_poll_cursors?: LarkPollCursor[]; lark_poll_receipts?: LarkPollReceipt[];
+  chat_bindings?: LegacyRecord[]; chat_deliveries?: LegacyRecord[]; telegram_clients?: LegacyRecord[];
+  inbox_messages?: StoredInboxMessage[]; settings?: Settings & Record<string, unknown>;
+}
 function validateCursor(value: unknown): asserts value is LarkPollCursor {
   const cursor = value as LarkPollCursor | null;
   if (!cursor || typeof cursor !== 'object' || Array.isArray(cursor) ||
@@ -33,7 +38,7 @@ function validate(data: unknown): asserts data is StoredState {
   const state = data as Record<string, unknown>;
   if (state.version !== 1 || !Array.isArray(state.sessions) || !Array.isArray(state.lark_bindings)) return fail();
   for (const [field, identity] of [['sessions', 'session_id'], ['lark_bindings', 'chat_id'], ['lark_deliveries', 'message_id'],
-    ['chat_bindings', 'id'], ['chat_deliveries', 'id'], ['inbox_messages', 'id']] as const) {
+    ['chat_bindings', 'id'], ['chat_deliveries', 'id'], ['telegram_clients', 'key'], ['inbox_messages', 'id']] as const) {
     const records = state[field];
     if (records === undefined) continue;
     if (!Array.isArray(records)) return fail();
@@ -66,10 +71,11 @@ export class State {
   readonly backends = new Map<Adapter, BackendConnection>();
   readonly deliveries = new Map<string, LarkDelivery>();
   readonly larkPollCursors = new Map<string, LarkPollCursor>();
-  readonly chatBindings = new Map<string, ChatBinding>();
-  readonly chatDeliveries = new Map<string, ChatDelivery>();
   readonly inboxMessages = new Map<string, StoredInboxMessage>();
   readonly settings: Settings = {};
+  private readonly retainedTables = Object.fromEntries(retiredTables.map(table => [table, new Map<string, string>()])) as Pick<StateRows, typeof retiredTables[number]>;
+  private readonly retainedSettings = new Map<string, string>();
+  private readonly retainedInbox = new Map<string, string>();
   private readonly pollReceiptRows = new Map<string, string>();
   private readonly pollReceipts = new Map<string, Map<string, number>>();
   private readonly emptyPollReceipts: ReadonlyMap<string, number> = new Map();
@@ -87,7 +93,6 @@ export class State {
       const temporary = join(directory, `.auth-token-${randomUUID()}`);
       try {
         await writeFile(temporary, randomBytes(32).toString('hex'), { flag: 'wx', mode: 0o600 });
-        // Publish a complete file without replacing another opener's token (also atomic on NTFS).
         try { await link(temporary, tokenPath); }
         catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
       } finally { await rm(temporary, { force: true }); }
@@ -110,14 +115,21 @@ export class State {
     const data: StoredState = { version: 1, sessions: decode(rows.sessions), lark_bindings: decode(rows.lark_bindings),
       backends: [...rows.backends].map(([adapter, value]) => [adapter as Adapter, JSON.parse(value) as BackendConnection]),
       lark_deliveries: decode(rows.lark_deliveries), lark_poll_cursors: decode(rows.lark_poll_cursors), lark_poll_receipts: decode(rows.lark_poll_receipts),
-      chat_bindings: decode(rows.chat_bindings), chat_deliveries: decode(rows.chat_deliveries), inbox_messages: decode(rows.inbox_messages),
-      settings: Object.fromEntries([...rows.settings].map(([id, value]) => [id, JSON.parse(value)])) as Settings };
+      inbox_messages: decode(rows.inbox_messages), settings: Object.fromEntries([...rows.settings].map(([id, value]) => [id, JSON.parse(value)])) };
     validate(data); state.restore(data);
+    // Keep retired rows byte-for-byte without interpreting their credentials or delivery state.
+    for (const table of retiredTables) for (const [id, value] of rows[table]) state.retainedTables[table].set(id, value);
+    for (const [id, value] of rows.settings) if (!settingsKeys.has(id)) state.retainedSettings.set(id, value);
+    for (const [id, value] of rows.inbox_messages) if (!state.inboxMessages.has(id)) state.retainedInbox.set(id, value);
     return state;
   }
   private restore(data: StoredState): void {
     this.sessions.clear(); this.bindings.clear(); this.backends.clear(); this.deliveries.clear(); this.larkPollCursors.clear();
-    this.chatBindings.clear(); this.chatDeliveries.clear(); this.inboxMessages.clear(); this.pollReceiptRows.clear(); this.pollReceipts.clear();
+    this.inboxMessages.clear(); this.pollReceiptRows.clear(); this.pollReceipts.clear(); this.retainedSettings.clear(); this.retainedInbox.clear();
+    for (const table of retiredTables) {
+      this.retainedTables[table].clear();
+      for (const row of data[table] ?? []) this.retainedTables[table].set(String(table === 'telegram_clients' ? row.key : row.id), JSON.stringify(row));
+    }
     for (const key of Object.keys(this.settings)) delete this.settings[key as keyof Settings];
     for (const session of data.sessions) this.sessions.set(session.session_id, session);
     for (const binding of data.lark_bindings) this.bindings.set(binding.chat_id, binding);
@@ -133,29 +145,27 @@ export class State {
       if (previous !== undefined && previous !== receipt.create_time) throw new Error('Invalid service state conflicting poll receipts; the original data was not replaced');
       this.storePollReceipt(receipt, JSON.stringify(receipt));
     }
-    for (const binding of data.chat_bindings ?? []) this.chatBindings.set(binding.id, binding);
-    for (const delivery of data.chat_deliveries ?? []) this.chatDeliveries.set(delivery.id, delivery);
     for (const message of data.inbox_messages ?? []) {
+      const channel = (message.source as { channel?: unknown } | undefined)?.channel;
+      if (!isPolledAdapter(message.adapter) || (message.source && channel !== 'feishu')) {
+        this.retainedInbox.set(message.id, JSON.stringify(message)); continue;
+      }
       const source = message.source;
-      // Keep one shared context so receipts/replies stay current even after the bounded ledger evicts it.
-      if (source?.channel === 'feishu') source.delivery = this.larkDelivery(source.delivery.message_id) ?? source.delivery;
-      else if (source) source.delivery = this.chatDelivery(source.delivery.id) ?? source.delivery;
+      if (source) source.delivery = this.larkDelivery(source.delivery.message_id) ?? source.delivery;
       this.inboxMessages.set(message.id, message);
     }
-    if (isNotificationChannel(data.settings?.notification_channel)) this.settings.notification_channel = data.settings.notification_channel;
-    if (validChatConfig('slack', data.settings?.slack)) this.settings.slack = data.settings.slack;
-    if (validChatConfig('telegram', data.settings?.telegram)) this.settings.telegram = data.settings.telegram;
+    for (const [key, value] of encode(Object.entries(data.settings ?? {}))) if (!settingsKeys.has(key)) this.retainedSettings.set(key, value);
     if (typeof data.settings?.tailscale_enabled === 'boolean') this.settings.tailscale_enabled = data.settings.tailscale_enabled;
     if (isLarkConnectionType(data.settings?.lark_connection_type)) this.settings.lark_connection_type = data.settings.lark_connection_type;
     for (const field of ['lark_recipient_open_id', 'lark_app_id', 'lark_app_secret', 'github_token'] as const) {
-      const value = data.settings?.[field];
-      if (typeof value === 'string') this.settings[field] = value;
+      const value = data.settings?.[field]; if (typeof value === 'string') this.settings[field] = value;
     }
   }
   private snapshot(): StateRows {
     return { sessions: encode(this.sessions), lark_bindings: encode(this.bindings), backends: encode(this.backends),
-      lark_deliveries: encode(this.deliveries), lark_poll_cursors: encode(this.larkPollCursors), lark_poll_receipts: new Map(this.pollReceiptRows), chat_bindings: encode(this.chatBindings),
-      chat_deliveries: encode(this.chatDeliveries), inbox_messages: encode(this.inboxMessages), settings: encode(Object.entries(this.settings)) };
+      lark_deliveries: encode(this.deliveries), lark_poll_cursors: encode(this.larkPollCursors), lark_poll_receipts: new Map(this.pollReceiptRows),
+      chat_bindings: new Map(this.retainedTables.chat_bindings), chat_deliveries: new Map(this.retainedTables.chat_deliveries), telegram_clients: new Map(this.retainedTables.telegram_clients),
+      inbox_messages: new Map([...this.retainedInbox, ...encode(this.inboxMessages)]), settings: new Map([...this.retainedSettings, ...encode(Object.entries(this.settings))]) };
   }
   session(id: string): SessionRecord {
     const session = this.sessions.get(id);
@@ -169,18 +179,6 @@ export class State {
     const saved = this.deliveries.get(id);
     if (saved) return saved;
     for (const { source } of this.inboxMessages.values()) if (source?.channel === 'feishu' && source.delivery.message_id === id) return source.delivery;
-  }
-  chatDelivery(id: string): ChatDelivery | undefined {
-    const saved = this.chatDeliveries.get(id);
-    if (saved) return saved;
-    for (const { source } of this.inboxMessages.values()) if (source && source.channel !== 'feishu' && source.delivery.id === id) return source.delivery;
-  }
-  *chatDeliveryRecords(): Generator<ChatDelivery> {
-    yield* this.chatDeliveries.values();
-    const seen = new Set(this.chatDeliveries.keys());
-    for (const { source } of this.inboxMessages.values()) {
-      if (source && source.channel !== 'feishu' && !seen.has(source.delivery.id)) { seen.add(source.delivery.id); yield source.delivery; }
-    }
   }
   hasLarkPollReceipt(cursorId: string, messageId: string): boolean { return this.pollReceipts.get(cursorId)?.has(messageId) ?? false; }
   larkPollReceipts(cursorId: string): ReadonlyMap<string, number> { return this.pollReceipts.get(cursorId) ?? this.emptyPollReceipts; }
@@ -226,10 +224,8 @@ export class State {
   }
   private async enqueue(operation: () => Promise<void>): Promise<void> {
     const pending = this.writes.catch(() => {}).then(operation);
-    this.writes = pending;
-    await pending;
+    this.writes = pending; await pending;
   }
-  /** In-memory changes, one SQLite transaction, and rollback share the same serialized queue. */
   async save(change?: { apply(): void; rollback(): void }): Promise<void> {
     return this.enqueue(async () => {
       try { change?.apply(); await this.database.write(this.snapshot()); }

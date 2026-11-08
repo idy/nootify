@@ -1,5 +1,4 @@
 import { fileURLToPath } from 'node:url';
-import type { ChatDelivery } from './chat-transport.js';
 import type { LarkDelivery } from './types.js';
 import { shellCommand, shellForClient, shellQuote } from './shell.js';
 
@@ -29,19 +28,5 @@ export function forwardedLarkMessage(delivery: LarkDelivery, content: string, st
     `${base} lark-reply ${context} --text '这里填写你的回复'`,
     '多行回复也可用 --text-file <本地文件>；--text-file - 可从标准输入读取。',
     '如果无法执行回执或回复命令，请在当前会话说明原因；不要声称已经回复飞书。',
-  ].join('\n');
-}
-
-export function forwardedChatMessage(delivery: ChatDelivery, content: string, directory: string, port = 9417, command?: string[], platform: NodeJS.Platform = process.platform): string {
-  const name = delivery.channel === 'slack' ? 'Slack' : 'Telegram';
-  const { base, quote } = commands(delivery.adapter, platform, command);
-  const args = `--state-dir ${quote(directory)} --port ${port} --message-id ${quote(delivery.id)}`;
-  return [
-    `【来自${name}用户的消息】`,
-    `这条消息由 Nootify 从 ${name} 转发给你，请在方便时回复原消息。`,
-    `目标会话：${delivery.session_id}`, `发送者：${delivery.sender_id}`, '', '用户原文：', content, '',
-    '先执行回执命令，仅确认收到，不发送远程回复：', `${base} chat-ack ${args}`,
-    '通过下面的命令回复原消息，替换占位文字；不要只在当前终端输出：', `${base} chat-reply ${args} --text '这里填写你的回复'`,
-    '多行回复可用 --text-file <本地文件>，或 --text-file - 从标准输入读取。',
   ].join('\n');
 }

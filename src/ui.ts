@@ -9,8 +9,8 @@ import { LarkPermissionRequiredError } from './lark-permissions.js';
 
 export interface PullsSource { snapshot(): PullSnapshot; refresh(): void; setChoice(repository: string, follow: boolean | null): Promise<RepositoryEntry> }
 export interface AgentsSource { list(): Promise<AgentPrompt[]>; set(agent: AgentId, enabled: boolean): Promise<AgentPrompt> }
-export interface ChannelSummary { name: 'feishu' | 'slack' | 'telegram'; configured: boolean; recipient?: string; groups: number }
-export type SettingsSource = Pick<SettingsService, 'page' | 'github' | 'startGitHubLogin' | 'cancelGitHubLogin' | 'signOutGitHub' | 'saveLark' | 'clearLark' | 'larkSecret' | 'larkRegistration' | 'startLarkRegistration' | 'cancelLarkRegistration' | 'larkSetup' | 'larkRecipients' | 'setRecipient' | 'exportConfig' | 'previewImport' | 'importConfig' | 'reveal' | 'tailscale' | 'setTailscaleEnabled' | 'startTailscaleLogin' | 'cancelTailscaleLogin' | 'logoutTailscale' | 'saveChat' | 'clearChat' | 'chatSecret' | 'chatDirectory' | 'setNotificationChannel'>;
+export interface ChannelSummary { name: 'feishu'; configured: boolean; recipient?: string; groups: number }
+export type SettingsSource = Pick<SettingsService, 'page' | 'github' | 'startGitHubLogin' | 'cancelGitHubLogin' | 'signOutGitHub' | 'saveLark' | 'clearLark' | 'larkSecret' | 'larkRegistration' | 'startLarkRegistration' | 'cancelLarkRegistration' | 'larkSetup' | 'larkRecipients' | 'setRecipient' | 'exportConfig' | 'previewImport' | 'importConfig' | 'reveal' | 'tailscale' | 'setTailscaleEnabled' | 'startTailscaleLogin' | 'cancelTailscaleLogin' | 'logoutTailscale'>;
 export interface UiContext {
   modules: ServiceModule[]; logs: EventLog; pulls?: PullsSource; tailnetUrl?: () => string | undefined;
   agents?: AgentsSource; channel?: () => ChannelSummary | undefined; settings?: SettingsSource;
@@ -22,6 +22,9 @@ const policy = "default-src 'self'; script-src 'self'; style-src 'self'; img-src
 const assets = new Map([
   ['/', { path: new URL('../../public/index.html', import.meta.url), type: 'text/html; charset=utf-8' }],
   ['/ui/styles.css', { path: new URL('../../public/styles.css', import.meta.url), type: 'text/css; charset=utf-8' }],
+  ['/ui/fonts.css', { path: new URL('../../desktop/fonts.css', import.meta.url), type: 'text/css; charset=utf-8' }],
+  ...['montserrat-latin.woff2', 'monda-latin.woff2', 'lato-regular-latin.woff2', 'lato-bold-latin.woff2'].map(name =>
+    [`/ui/fonts/${name}`, { path: new URL(`../../desktop/fonts/${name}`, import.meta.url), type: 'font/woff2' }] as const),
   ['/ui/app.js', { path: new URL('./ui-app.js', import.meta.url), type: 'text/javascript; charset=utf-8' }],
   ['/ui/ui-i18n.js', { path: new URL('./ui-i18n.js', import.meta.url), type: 'text/javascript; charset=utf-8' }],
   ['/ui/lark-profile.js', { path: new URL('./lark-profile.js', import.meta.url), type: 'text/javascript; charset=utf-8' }],
@@ -71,11 +74,6 @@ async function settingsAction(request: IncomingMessage, path: string, settings: 
   if (path === '/ui/api/settings/export') { request.resume(); return settings.exportConfig(); }
   if (path === '/ui/api/settings/reveal') { request.resume(); await settings.reveal(); return { accepted: true }; }
   const body = await smallJson(request, path === '/ui/api/settings/import' ? IMPORT_LIMIT : undefined);
-  const chatAction = /^\/ui\/api\/settings\/(slack|telegram)\/(secret|recipients)$/.exec(path);
-  if (chatAction) {
-    const channel = chatAction[1] as 'slack' | 'telegram';
-    return chatAction[2] === 'secret' ? settings.chatSecret(channel, body.field) : settings.chatDirectory(channel, body);
-  }
   if (path === '/ui/api/settings/lark/registration') {
     if (body.action === 'status') return settings.larkRegistration();
     if (body.action === 'start') return settings.startLarkRegistration();
@@ -96,12 +94,6 @@ async function settingsAction(request: IncomingMessage, path: string, settings: 
     if (body.action === 'logout') { await settings.logoutTailscale(); return { accepted: true }; }
     throw new HttpError(400, 'Expected a Tailscale action: enable, login, cancel or logout');
   }
-  if (path === '/ui/api/settings/slack' || path === '/ui/api/settings/telegram') {
-    const channel = path.endsWith('/slack') ? 'slack' : 'telegram';
-    if (body.clear === true) await settings.clearChat(channel); else await settings.saveChat(channel, body);
-    return { accepted: true };
-  }
-  if (path === '/ui/api/settings/channel') { await settings.setNotificationChannel(body.channel); return { accepted: true }; }
   if (path === '/ui/api/settings/lark') {
     if (body.clear === true) await settings.clearLark(); else await settings.saveLark(body.app_id, body.app_secret, body.connection_type);
     return { accepted: true };

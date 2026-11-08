@@ -92,7 +92,7 @@
   ],
   "narrative": {
     "northStar": "Local settings",
-    "overview": "This is a descriptive record of the incumbent interface, not a new identity. Nootify uses compact neutral groups, local system typography, its existing penguin identity, and blue actions. Settings prioritize accurate connection and access states in Chinese and English.",
+    "overview": "This is a descriptive record of the incumbent interface, not a new identity. Nootify uses compact neutral groups, bundled website typography with system Chinese fallbacks, its existing penguin identity, and blue actions. Settings prioritize accurate connection and access states in Chinese and English.",
     "keyCharacteristics": [
       "Compact rows with names before metadata.",
       "Neutral layers that follow system appearance.",
@@ -103,7 +103,7 @@
       { "name": "The Names First Rule", "body": "Lead contact rows with nickname plus default name, preserving already formatted aliases; show English names or short ID suffixes only as secondary disambiguation.", "section": "typography" }
     ],
     "dos": [
-      "Do inherit system fonts, semantic colors, and automatic appearance from the existing settings.",
+      "Do use Montserrat headings, Monda body text, and Lato metadata with system Chinese fallbacks; preserve semantic colors and automatic appearance.",
       "Do preserve useful loaded contacts and a reachable footer while loading or explaining access.",
       "Do keep portraits as runtime provider data and the permission QR as locally generated functional imagery."
     ],

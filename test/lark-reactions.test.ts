@@ -78,6 +78,18 @@ test('untrusted senders and unsupported messages receive no reaction', async t =
   assert.equal(f.send.mock.calls.length, 0); assert.equal(f.reactions.length, 0);
 });
 
+test('same-app bot messages are ignored before routing without consuming a user message ID', async t => {
+  const f = await fixture(t);
+  const bot = { ...payload(), sender: { sender_type: 'app', sender_id: { open_id: 'ou_owner', app_id: f.api.appId } } };
+  // A matching trusted ID must never turn an application sender into user input.
+  for (const event of [bot, { event: bot }]) assert.equal(await f.lark.enqueue(event), true);
+  assert.equal(f.send.mock.calls.length, 0); assert.equal(f.reactions.length, 0);
+  assert.equal(f.state.deliveries.size, 0); assert.deepEqual(f.reports, []);
+
+  assert.equal(await f.lark.enqueue(payload()), true);
+  assert.equal(f.send.mock.calls.length, 1); assert.equal(f.reactions.length, 1);
+});
+
 test('a safely retried delivery only gets a reaction after the successful attempt', async t => {
   const f = await fixture(t); let attempts = 0;
   t.mock.method(f.sessions, 'send', async () => {

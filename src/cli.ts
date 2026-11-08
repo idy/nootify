@@ -10,7 +10,7 @@ import { manageService, SERVICE_ACTIONS, type ServiceAction } from './service.js
 import type { Adapter, SessionRegistration } from './types.js';
 import { isAdapter, isPolledAdapter } from './types.js';
 import { AGENT_IDS, agentSession, isAgent } from './agents.js';
-import { isNotificationChannel } from './chat-transport.js';
+import { isNotificationChannel } from './types.js';
 
 export async function main(argv = process.argv.slice(2), serviceManager = manageService): Promise<void> {
   const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, options: {
@@ -22,8 +22,8 @@ export async function main(argv = process.argv.slice(2), serviceManager = manage
     'message-id': { type: 'string' }, 'text-file': { type: 'string' }, channel: { type: 'string' },
   } });
   const command = positionals[0];
-  if (values.help) { console.log('Usage: cli.js <service-install|service-start|service-restart|service-stop|service-uninstall|service-status|launchd-install|health|register|sessions|send|thread-open|thread-send|thread-receive|thread-ack|chat-ack|chat-reply|lark-bind|lark-ack|lark-reply|lark-recipient|backend-set> [options] [--channel feishu|slack|telegram]'); return; }
-  if (values.channel !== undefined && !isNotificationChannel(values.channel)) throw new Error('Use --channel feishu, slack or telegram');
+  if (values.help) { console.log('Usage: cli.js <service-install|service-start|service-restart|service-stop|service-uninstall|service-status|launchd-install|health|register|sessions|send|thread-open|thread-send|thread-receive|thread-ack|lark-bind|lark-ack|lark-reply|lark-recipient|backend-set> [options]'); return; }
+  if (values.channel !== undefined && !isNotificationChannel(values.channel)) throw new Error('Only Feishu notifications are supported');
   const channel = isNotificationChannel(values.channel) ? values.channel : undefined;
   const adapter = values.adapter ?? 'claude-desktop';
   const port = Number(values.port);
@@ -118,12 +118,6 @@ export async function main(argv = process.argv.slice(2), serviceManager = manage
           username: process.env.OPENCODE_SERVER_USERNAME, password: process.env.OPENCODE_SERVER_PASSWORD,
         }),
       }); break;
-    }
-    case 'chat-ack': result = await client.acknowledgeChat(required('message-id')); break;
-    case 'chat-reply': {
-      const replyText = await readText();
-      if (!replyText?.trim()) throw new Error('Provide --text or --text-file for the reply');
-      result = await client.replyChat(required('message-id'), replyText); break;
     }
     case 'lark-ack': result = await client.acknowledgeLark(required('message-id')); break;
     case 'lark-reply': {

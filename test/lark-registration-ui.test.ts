@@ -43,7 +43,6 @@ test('the live settings module reconciles committed QR settings after the servic
   let settings: SettingsPage & { editable: boolean } = {
     version: '0.1.13', exports_dir: '/synthetic/exports', editable: true,
     lark: { status: 'disabled', configured: false, saved: false, groups: 0, connection_type: 'bot' },
-    notification_channel: 'feishu', slack: channel, telegram: channel,
   };
   let flow: LarkRegistrationPage = { status: 'idle' };
   let statusReads = 0; let settingsReads = 0; let failedSettingsReads = 0;

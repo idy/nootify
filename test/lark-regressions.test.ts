@@ -95,6 +95,44 @@ const topic = (chatId: string, threadId: string, rootId = `root-${threadId}`, ap
   app_id: appId, chat_id: chatId, container_type: 'thread', container_id: threadId, root_message_id: rootId, started_at: START, through: START,
 });
 
+test('same-app bot messages from another computer are skipped in chats and topics across restart', async t => {
+  const f = await fixture(t); const sent: string[] = [];
+  const send = async (content: string) => { sent.push(content); return { status: 'input_accepted' as const }; };
+  const delivery = realDelivery(f, f.state, send);
+  // These messages exist only in provider history; this computer has never sent them.
+  const sender = { sender_type: 'app', id_type: 'app_id', id: APP };
+  const root = message('om_remote_bot_root', START + 1_000, 'oc_bound', { sender, thread_id: 'omt_shared_app' });
+  const reply = message('om_remote_bot_reply', START + 2_000, 'oc_bound', { sender, thread_id: 'omt_shared_app', root_id: root.message_id });
+  const chat = message('om_remote_bot_chat', START + 3_000, 'oc_bound', { sender });
+  f.model.rows.set('chat:oc_bound', [root, chat]); f.model.rows.set('thread:omt_shared_app', [root, reply]);
+  f.advance(5_000);
+  assert.equal(await delivery.receiver.pollOnce(), true);
+  assert.deepEqual(sent, []); assert.equal(f.state.deliveries.size, 0);
+  assert.ok(!f.calls.some(call => /\/(announcement|reactions)$/.test(call.url.pathname)));
+
+  const reopened = await State.open(f.directory);
+  const threadKey = larkPollCursorKey(topic('oc_bound', 'omt_shared_app', root.message_id));
+  for (const item of [root, chat]) assert.equal(reopened.hasLarkPollReceipt(chatKey('oc_bound'), item.message_id), true);
+  for (const item of [root, reply]) assert.equal(reopened.hasLarkPollReceipt(threadKey, item.message_id), true);
+  assert.equal(reopened.larkPollCursors.get(chatKey('oc_bound'))?.through, START + 3_000);
+  assert.equal(reopened.larkPollCursors.get(threadKey)?.through, START + 3_000);
+
+  const restarted = realDelivery(f, reopened, send);
+  f.model.rows.get('chat:oc_bound')!.push(message('om_user_chat', START + 7_000));
+  f.model.rows.get('thread:omt_shared_app')!.push(message('om_user_reply', START + 8_000, 'oc_bound', {
+    thread_id: 'omt_shared_app', root_id: root.message_id,
+  }), message('om_later_bot_reply', START + 9_000, 'oc_bound', { sender, thread_id: 'omt_shared_app', root_id: root.message_id }));
+  f.advance(5_000);
+  assert.equal(await restarted.receiver.pollOnce(), true);
+  assert.equal(await restarted.receiver.pollOnce(), true);
+  assert.equal(sent.length, 2);
+  assert.match(sent[0], /om_user_chat/); assert.match(sent[1], /om_user_reply/);
+  assert.deepEqual([...reopened.deliveries.keys()], ['om_user_chat', 'om_user_reply']);
+  assert.deepEqual(f.calls.filter(call => call.url.pathname.endsWith('/reactions')).map(call => call.url.pathname), [
+    '/open-apis/im/v1/messages/om_user_chat/reactions', '/open-apis/im/v1/messages/om_user_reply/reactions',
+  ]);
+});
+
 test('a failing announcement head cannot starve later groups or later membership pages', async t => {
   const f = await fixture(t); f.model.chats = ['oc_bad', 'oc_good', 'oc_paged']; f.model.groupPageSize = 2;
   f.model.hook = url => { if (url.pathname === '/open-apis/im/v1/chats/oc_bad/announcement') throw new Error('Generic announcement read failure'); };

@@ -7,7 +7,6 @@ import { test, type TestContext } from 'node:test';
 import { State } from '../src/state.js';
 import { STATE_SCHEMA_VERSION, STATE_TABLES, StateDatabase, emptyStateRows, type StatePatch, type StateRows } from '../src/state-database.js';
 import { larkPollCursorKey, larkPollReceiptKey, type LarkDelivery, type LarkPollCursor, type LarkPollReceipt, type SessionRecord } from '../src/types.js';
-import type { ChatDelivery } from '../src/chat-transport.js';
 import { assertMode } from './platform-fixtures.js';
 
 async function directory(t: TestContext): Promise<string> {
@@ -29,7 +28,8 @@ function legacyState() {
     session_id: 'legacy-session', session_name: 'Old task', adapter: 'trae', created_at: '2026-11-06T00:00:00.000Z',
     transport_status: 'inbox_queued', acknowledged_at: '2026-11-06T00:01:00.000Z',
     replies: [{ digest: 'reply-digest', message_id: 'om_reply', time: '2026-11-06T00:02:00.000Z' }] };
-  const chat: ChatDelivery = { id: 'slack-delivery', channel: 'slack', identity: 'slack:bot:C123', adapter: 'workbuddy', session_id: 'chat-session',
+  // Historical provider payload is a migration fixture, not an active transport type.
+  const chat = { id: 'slack-delivery', channel: 'slack', identity: 'slack:bot:C123', adapter: 'workbuddy', session_id: 'chat-session',
     session_name: 'Chat task', chat_id: 'C123', thread_id: '123.4', sender_id: 'U123', message_id: '123.5', created_at: delivery.created_at,
     transport_status: 'inbox_queued', replies: [{ digest: 'chat-reply-digest', message_id: '123.6', time: delivery.created_at }] };
   const cursor: LarkPollCursor = { app_id: 'cli_legacy', chat_id: 'oc_legacy', container_id: 'omt_legacy', container_type: 'thread',
@@ -121,18 +121,21 @@ test('legacy JSON migrates every collection, credentials, cursors, receipts and 
     assert.equal(db.prepare('SELECT count(*) AS count FROM lark_poll_receipts').get()!.count, 1);
     assert.equal(JSON.parse(String(db.prepare('SELECT value FROM lark_poll_cursors').get()!.value)).recent, undefined);
   });
-  assert.deepEqual([...state.chatBindings.values()], legacy.chat_bindings);
-  assert.deepEqual([...state.chatDeliveries.values()], legacy.chat_deliveries);
-  assert.deepEqual([...state.inboxMessages.values()], legacy.inbox_messages);
-  assert.deepEqual(state.settings, legacy.settings);
+  assert.deepEqual([...state.inboxMessages.values()], legacy.inbox_messages.filter(message => message.source.channel === 'feishu'));
+  const { slack: _retiredSlack, telegram: _retiredTelegram, notification_channel: _retiredDefault, ...activeSettings } = legacy.settings;
+  assert.deepEqual(state.settings, activeSettings);
   assert.equal(state.inboxMessages.get('inbox-feishu')!.source!.delivery, state.larkDelivery('om_original'));
-  assert.equal(state.inboxMessages.get('inbox-slack')!.source!.delivery, state.chatDelivery('slack-delivery'));
+  assert.equal(state.inboxMessages.has('inbox-slack'), false, 'retired input must not enter an active Feishu inbox');
+  inspect(path, db => {
+    assert.deepEqual(JSON.parse(String(db.prepare("SELECT value FROM chat_bindings WHERE id = 'slack-binding'").get()!.value)), legacy.chat_bindings[0]);
+    assert.deepEqual(JSON.parse(String(db.prepare("SELECT value FROM chat_deliveries WHERE id = 'slack-delivery'").get()!.value)), legacy.chat_deliveries[0]);
+  });
   assert.equal(state.larkDelivery('om_retained')?.replies[0].message_id, 'om_reply');
   assert.equal(await readFile(join(path, 'state.json'), 'utf8'), original, 'the pre-migration file is retained byte for byte');
   assert.equal(await readFile(join(path, 'auth-token'), 'utf8'), token + '\n');
   assert.ok(inspect(path, db => db.prepare("SELECT value FROM metadata WHERE key = 'legacy_state_json_imported_at'").get()?.value));
   const reopened = await State.open(path);
-  assert.deepEqual(reopened.settings, legacy.settings);
+  assert.deepEqual(reopened.settings, activeSettings);
   assert.equal(reopened.inboxMessages.get('inbox-feishu')!.source!.delivery, reopened.larkDelivery('om_original'));
 });
 
@@ -194,7 +197,8 @@ test('an interrupted migration rolls back schema, imported rows and version mark
   });
   assert.equal(await readFile(join(path, 'state.json'), 'utf8'), original);
   const restored = await State.open(path);
-  assert.equal(restored.inboxMessages.size, 3);
+  assert.equal(restored.inboxMessages.size, 2, 'only Feishu sources enter the active inbox');
+  assert.equal(inspect(path, db => db.prepare('SELECT count(*) AS count FROM inbox_messages').get()!.count), 3, 'retired input remains preserved as opaque history');
   assert.equal(inspect(path, db => db.prepare('SELECT count(*) AS count FROM schema_migrations').get()!.count), STATE_SCHEMA_VERSION);
 });
 
@@ -429,7 +433,7 @@ test('checkpoint pages encode only new receipts and cursors, without serializing
   const path = await directory(t); await writeLegacy(path); const state = await State.open(path); const progress = cursor('omt_catchup');
   await state.saveLarkPollProgress([progress]);
   const failSerialization = () => { throw new Error('Unrelated payload was serialized'); };
-  for (const record of [...state.sessions.values(), ...state.deliveries.values(), ...state.chatDeliveries.values(), ...state.inboxMessages.values()]) {
+  for (const record of [...state.sessions.values(), ...state.deliveries.values(), ...state.inboxMessages.values()]) {
     Object.defineProperty(record, 'toJSON', { value: failSerialization, configurable: true });
   }
   execute(path, `CREATE TABLE receipt_audit (id TEXT NOT NULL);
@@ -537,21 +541,20 @@ test('a failed checkpoint cannot leak through a queued ordinary snapshot', async
   assert.equal(reopened.hasLarkPollReceipt(id, 'failed'), false);
 });
 
-test('ordinary saves still persist shared source mutations after checkpointing and ledger eviction', async t => {
+test('ordinary saves persist Feishu source mutations after eviction without interpreting retired delivery rows', async t => {
   const path = await directory(t); await writeLegacy(path); const state = await State.open(path);
-  const feishu = state.larkDelivery('om_original')!; const slack = state.chatDelivery('slack-delivery')!;
+  const feishu = state.larkDelivery('om_original')!;
+  const retired = inspect(path, db => db.prepare("SELECT value FROM chat_deliveries WHERE id = 'slack-delivery'").get()!.value);
   await state.saveLarkPollProgress([cursor('omt_source')], [receipt(cursor('omt_source'), 'completed', 1_001)]);
   feishu.acknowledged_at = '2026-11-06T01:00:00.000Z';
   feishu.replies.push({ digest: 'new-feishu-digest', message_id: 'new-feishu-reply', time: feishu.acknowledged_at });
-  slack.acknowledged_at = feishu.acknowledged_at;
-  slack.replies.push({ digest: 'new-slack-digest', message_id: 'new-slack-reply', time: feishu.acknowledged_at });
-  state.deliveries.delete(feishu.message_id); state.chatDeliveries.delete(slack.id); await state.save();
+  state.deliveries.delete(feishu.message_id); await state.save();
   const reopened = await State.open(path);
   assert.equal(reopened.larkDelivery(feishu.message_id), reopened.inboxMessages.get('inbox-feishu')!.source!.delivery);
-  assert.equal(reopened.chatDelivery(slack.id), reopened.inboxMessages.get('inbox-slack')!.source!.delivery);
   assert.equal(reopened.larkDelivery(feishu.message_id)!.acknowledged_at, feishu.acknowledged_at);
   assert.equal(reopened.larkDelivery(feishu.message_id)!.replies.at(-1)!.digest, 'new-feishu-digest');
-  assert.equal(reopened.chatDelivery(slack.id)!.replies.at(-1)!.digest, 'new-slack-digest');
+  assert.equal(reopened.inboxMessages.has('inbox-slack'), false);
+  assert.equal(inspect(path, db => db.prepare("SELECT value FROM chat_deliveries WHERE id = 'slack-delivery'").get()!.value), retired);
 });
 
 test('load returns defensive string maps and key patches preserve unseen rows and live maximum ordinals', async t => {

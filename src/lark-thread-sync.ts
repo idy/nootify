@@ -43,9 +43,9 @@ export class LarkThreadSync {
     }
   }
   async reconcile(signal = new AbortController().signal): Promise<void> {
-    const { state, threads } = this.options;
+    const { threads } = this.options;
     const recipient = threads.recipient()?.open_id;
-    const enrolled = () => (state.settings.notification_channel ?? 'feishu') === 'feishu' && threads.recipient()?.open_id === recipient;
+    const enrolled = () => threads.recipient()?.open_id === recipient;
     if (!recipient || !enrolled()) return;
     const needsGroup = (session: ThreadRequest) => {
       const binding = threads.binding(session.session_id, session.adapter);

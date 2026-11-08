@@ -28,8 +28,6 @@
     <a class="nav-item" href="#/settings/general" data-view="settings-general"><span data-i18n="通用">通用</span></a>
     <a class="nav-item" href="#/settings/github" data-view="settings-github"><span>GitHub</span></a>
     <a class="nav-item" href="#/settings/lark" data-view="settings-lark"><span data-i18n="飞书">飞书</span></a>
-    <a class="nav-item" href="#/settings/slack" data-view="settings-slack"><span>Slack</span></a>
-    <a class="nav-item" href="#/settings/telegram" data-view="settings-telegram"><span>Telegram</span></a>
     <a class="nav-item" href="#/settings/tailscale" data-view="settings-tailscale"><span>Tailscale</span></a>
     <a class="nav-item" href="#/settings/backup" data-view="settings-backup"><span data-i18n="导入导出">导入导出</span></a>
     <a class="nav-item" href="#/settings/about" data-view="settings-about"><span data-i18n="关于">关于</span><span class="update-dot" title="有新版本" data-i18n-title="有新版本" hidden></span></a>
@@ -66,13 +64,13 @@
   <div id="error" class="banner" role="alert" hidden></div>
   <div id="github-signin" class="banner note" role="status" hidden><span data-i18n="还没有登录 GitHub，PR 数据不会更新。">还没有登录 GitHub，PR 数据不会更新。</span><a class="inline-link" href="#/settings/github" data-i18n="去登录">去登录</a></div>
   <section id="logs-view" class="view" aria-label="运行日志" data-i18n-aria-label="运行日志">
-    <p class="hint" data-i18n="待回执：已写入客户端，还没有收到会话回执。已回复：回复已发回原消息。保留最近 1,000 条，最新在前。">待回执：已写入客户端，还没有收到会话回执。已回复：回复已发回原消息。保留最近 1,000 条，最新在前。</p>
-    <div class="list-filters" id="outcome-tabs" role="group" aria-label="按结果筛选" data-i18n-aria-label="按结果筛选"></div>
-    <div class="group"><div class="rows" id="logs-table" role="list"></div><div id="empty" class="empty" hidden><strong data-i18n="没有匹配的日志">没有匹配的日志</strong><span data-i18n="换个筛选条件，或在飞书群、Slack 线程、Telegram 话题里发一条消息。">换个筛选条件，或在飞书群、Slack 线程、Telegram 话题里发一条消息。</span></div></div>
+    <p class="hint" data-i18n="按消息方向和用途查看最近 1,000 条事件，最新在前。发送成功不代表已读，只有收到会话回执才确认接收。">按消息方向和用途查看最近 1,000 条事件，最新在前。发送成功不代表已读，只有收到会话回执才确认接收。</p>
+    <div class="list-filters" id="outcome-tabs" role="group" aria-label="按事件用途筛选" data-i18n-aria-label="按事件用途筛选"></div>
+    <div class="group"><div class="rows" id="logs-table" role="list"></div><div id="empty" class="empty" hidden><strong data-i18n="没有匹配的日志">没有匹配的日志</strong><span data-i18n="换个筛选条件，或在飞书群里发一条消息。">换个筛选条件，或在飞书群里发一条消息。</span></div></div>
   </section>
   <section id="sessions-view" class="view" aria-label="路由会话" hidden data-i18n-aria-label="路由会话">
-    <p class="hint" data-i18n="收到消息时才查找对应的 Claude、Codex 或 OpenCode 会话：飞书按群公告，Slack 线程和 Telegram 话题按本地绑定。这里只列出本次运行遇到的会话和最近一次查找结果。">收到消息时才查找对应的 Claude、Codex 或 OpenCode 会话：飞书按群公告，Slack 线程和 Telegram 话题按本地绑定。这里只列出本次运行遇到的会话和最近一次查找结果。</p>
-    <div class="group"><div class="rows" id="sessions-body" role="list"></div><div id="no-sessions" class="empty" hidden><strong data-i18n="还没有会话路由记录">还没有会话路由记录</strong><span data-i18n="绑定会话的飞书群、Slack 线程或 Telegram 话题收到消息后，这里会显示查找结果。">绑定会话的飞书群、Slack 线程或 Telegram 话题收到消息后，这里会显示查找结果。</span></div></div>
+    <p class="hint" data-i18n="收到消息时才按飞书群公告查找对应的 Claude、Codex 或 OpenCode 会话。这里只列出本次运行遇到的会话和最近一次查找结果。">收到消息时才按飞书群公告查找对应的 Claude、Codex 或 OpenCode 会话。这里只列出本次运行遇到的会话和最近一次查找结果。</p>
+    <div class="group"><div class="rows" id="sessions-body" role="list"></div><div id="no-sessions" class="empty" hidden><strong data-i18n="还没有会话路由记录">还没有会话路由记录</strong><span data-i18n="绑定会话的飞书群收到消息后，这里会显示查找结果。">绑定会话的飞书群收到消息后，这里会显示查找结果。</span></div></div>
   </section>
   <section id="pulls-view" class="view" aria-label="PR" hidden>
     <div id="pull-banner" class="banner" role="status" hidden></div>
@@ -85,12 +83,11 @@
     <details class="warnings" id="pull-warnings" hidden><summary></summary><ul></ul></details>
   </section>
   <section id="agents-view" class="view" aria-label="Agents" hidden>
-    <p class="hint" data-i18n="勾选后，Nootify 会在该 agent 的全局提示词文件末尾写入通知说明，只改动 nootify 标记之间的内容。之后的对话会各自使用一个飞书群、Slack 线程或 Telegram 话题来汇报进度，回复会转发回对应会话。飞书把会话标识写进群公告；Slack 和 Telegram 使用本地绑定。每次修改前都会把原文件备份到 Nootify 的状态目录。">勾选后，Nootify 会在该 agent 的全局提示词文件末尾写入通知说明，只改动 nootify 标记之间的内容。之后的对话会各自使用一个飞书群、Slack 线程或 Telegram 话题来汇报进度，回复会转发回对应会话。飞书把会话标识写进群公告；Slack 和 Telegram 使用本地绑定。每次修改前都会把原文件备份到 Nootify 的状态目录。</p>
+    <p class="hint" data-i18n="勾选后，Nootify 会在该 agent 的全局提示词文件末尾写入飞书通知说明，只改动 nootify 标记之间的内容。之后的对话会各自使用一个飞书群来汇报进度，回复会转发回对应会话，会话标识保存在群公告中。每次修改前都会把原文件备份到 Nootify 的状态目录。">勾选后，Nootify 会在该 agent 的全局提示词文件末尾写入飞书通知说明，只改动 nootify 标记之间的内容。之后的对话会各自使用一个飞书群来汇报进度，回复会转发回对应会话，会话标识保存在群公告中。每次修改前都会把原文件备份到 Nootify 的状态目录。</p>
     <p class="hint" data-i18n="Trae 和 WorkBuddy 会在工作节点主动检查回复，无法自动唤醒空闲或已关闭的会话。">Trae 和 WorkBuddy 会在工作节点主动检查回复，无法自动唤醒空闲或已关闭的会话。</p>
     <div id="agents-banner" class="banner" role="alert" hidden></div>
     <div class="group">
-      <div class="group-head"><div><div class="group-title" id="channel-title" data-i18n="通知渠道">通知渠道</div><div class="group-sub" id="channel-sub"></div></div><div class="group-side" id="channel-side"><a id="channel-settings" class="inline-link" href="#/settings/lark" data-i18n="配置飞书">配置飞书</a></div></div>
-      <div class="setting setting-field-row"><label class="setting-main" for="notification-channel"><span class="setting-title" data-i18n="默认通知渠道">默认通知渠道</span><span class="setting-sub" id="channel-help" data-i18n="先在设置中配置渠道。更改默认渠道后，在「需要更新」的项目中点击「更新为当前内容」，刷新已注入的说明。">先在设置中配置渠道。更改默认渠道后，在「需要更新」的项目中点击「更新为当前内容」，刷新已注入的说明。</span></label><select id="notification-channel" class="setting-field" aria-describedby="channel-help" autocomplete="off" disabled><option value="feishu" data-i18n="飞书">飞书</option><option value="slack">Slack</option><option value="telegram">Telegram</option></select><div class="setting-actions"><button type="button" id="channel-save" class="text-button primary" disabled data-i18n="保存">保存</button></div></div>
+      <div class="group-head"><div><div class="group-title" id="channel-title" data-i18n="飞书通知">飞书通知</div><div class="group-sub" id="channel-sub"></div></div><div class="group-side" id="channel-side"><span id="channel-state"></span><a id="channel-settings" class="inline-link" href="#/settings/lark" data-i18n="配置飞书">配置飞书</a></div></div>
       <div class="rows" id="agent-rows" role="list"></div>
     </div>
   </section>
@@ -163,45 +160,6 @@
       <p class="hint" id="lark-manual-hint" data-i18n="App ID 和 App Secret 在飞书开放平台应用的「凭证与基础信息」页。优先级：环境变量、这里保存的凭据、MCP 配置文件。保存后机器人会用新凭据重新连接；密钥保存在状态目录的 state.sqlite（权限 0600）。">App ID 和 App Secret 在飞书开放平台应用的「凭证与基础信息」页。优先级：环境变量、这里保存的凭据、MCP 配置文件。保存后机器人会用新凭据重新连接；密钥保存在状态目录的 state.sqlite（权限 0600）。</p>
       <p class="hint" id="lark-reuse-hint" data-i18n="个人 App 认证后会自动保存到本机，后续启动继续复用。">个人 App 认证后会自动保存到本机，后续启动继续复用。</p>
     </div>
-    <div data-panel="settings-slack" hidden>
-      <div class="group">
-        <div class="setting"><div class="setting-main"><div class="setting-title" data-i18n="Slack 机器人">Slack 机器人</div><div class="setting-sub" id="slack-status" data-i18n="正在读取设置…">正在读取设置…</div></div><span id="slack-state"></span></div>
-        <div class="setting setting-field-row"><label class="setting-main" for="slack-bot-token"><span class="setting-title">Bot Token</span></label><div class="secret-field"><input id="slack-bot-token" class="setting-field mono" type="password" placeholder="xoxb-…" autocomplete="off" spellcheck="false" disabled><button type="button" id="slack-bot-token-toggle" class="icon-button" aria-label="显示 Bot Token" title="显示 Bot Token" aria-controls="slack-bot-token" aria-pressed="false" disabled><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 8s2.25-4.5 6.5-4.5 6.5 4.5 6.5 4.5-2.25 4.5-6.5 4.5S1.5 8 1.5 8Z"/><circle cx="8" cy="8" r="2"/><path class="secret-slash" d="m2.5 2.5 11 11" hidden/></svg></button></div></div>
-        <div class="setting setting-field-row"><label class="setting-main" for="slack-app-token"><span class="setting-title">App-Level Token</span></label><div class="secret-field"><input id="slack-app-token" class="setting-field mono" type="password" placeholder="xapp-…" autocomplete="off" spellcheck="false" disabled><button type="button" id="slack-app-token-toggle" class="icon-button" aria-label="显示 App-Level Token" title="显示 App-Level Token" aria-controls="slack-app-token" aria-pressed="false" disabled><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 8s2.25-4.5 6.5-4.5 6.5 4.5 6.5 4.5-2.25 4.5-6.5 4.5S1.5 8 1.5 8Z"/><circle cx="8" cy="8" r="2"/><path class="secret-slash" d="m2.5 2.5 11 11" hidden/></svg></button></div></div>
-        <div class="setting setting-field-row"><label class="setting-main" for="slack-channel-id"><span class="setting-title" data-i18n="频道 ID">频道 ID</span><span class="setting-sub" data-i18n="机器人已加入的公开或私有频道">机器人已加入的公开或私有频道</span></label><input id="slack-channel-id" class="setting-field mono" type="text" placeholder="C… 或 G…" autocomplete="off" spellcheck="false" disabled data-i18n-placeholder="C… 或 G…"></div>
-        <div class="setting setting-field-row"><label class="setting-main" for="slack-user-id"><span class="setting-title" data-i18n="信任的用户 ID">信任的用户 ID</span><span class="setting-sub" data-i18n="允许把回复发送回本机会话的人类用户">允许把回复发送回本机会话的人类用户</span></label><input id="slack-user-id" class="setting-field mono" type="text" placeholder="U…" autocomplete="off" spellcheck="false" disabled><div class="setting-actions"><button type="button" id="slack-choose" class="text-button" aria-expanded="false" aria-controls="slack-picker" data-i18n="从列表选择">从列表选择</button></div></div>
-        <div id="slack-picker" class="recipient-picker" hidden>
-          <div class="recipient-toolbar"><span class="setting-title" data-i18n="选择接收目标">选择接收目标</span><div class="setting-actions"><button type="button" id="slack-reload" class="text-button" data-i18n="重新读取">重新读取</button><button type="button" id="slack-picker-close" class="text-button" data-i18n="收起">收起</button></div></div>
-          <label for="slack-chat-options" class="setting-sub" data-i18n="目标频道">目标频道</label><select id="slack-chat-options" class="setting-field" aria-label="目标频道" data-i18n-aria-label="目标频道"></select>
-          <input id="slack-target-search" class="setting-field" type="search" placeholder="搜索姓名或用户 ID" aria-label="搜索姓名或用户 ID" data-i18n-placeholder="搜索姓名或用户 ID" data-i18n-aria-label="搜索姓名或用户 ID" autocomplete="off">
-          <div id="slack-directory-note" class="setting-sub" role="status" aria-live="polite"></div>
-          <select id="slack-user-options" class="recipient-options" size="5" aria-label="信任的用户" data-i18n-aria-label="信任的用户" aria-describedby="slack-directory-note"></select>
-          <p class="setting-sub" data-i18n="选择频道后会重新读取成员；选择用户后点击验证并保存。也可以手动填写 ID。">选择频道后会重新读取成员；选择用户后点击验证并保存。也可以手动填写 ID。</p>
-        </div>
-        <div class="setting"><div class="setting-main"><div class="setting-sub" data-i18n="保存前会向 Slack 验证配置；令牌默认掩码显示，点击眼睛可查看。">保存前会向 Slack 验证配置；令牌默认掩码显示，点击眼睛可查看。</div></div><div class="setting-actions"><button type="button" id="slack-clear" class="text-button" hidden data-i18n="清除 Slack 配置">清除 Slack 配置</button><button type="button" id="slack-save" class="text-button primary" disabled data-i18n="验证并保存">验证并保存</button></div></div>
-      </div>
-      <p class="hint" data-i18n="每个会话在指定频道里使用一个独立线程。先把机器人邀请到频道，启用 Socket Mode；App-Level Token 需要 connections:write。事件订阅启用 message.channels 和 message.groups；Bot Token 需要 chat:write、reactions:write、channels:read、groups:read、users:read；接收公开频道或私有频道的消息事件还需相应的 channels:history 或 groups:history。">每个会话在指定频道里使用一个独立线程。先把机器人邀请到频道，启用 Socket Mode；App-Level Token 需要 connections:write。事件订阅启用 message.channels 和 message.groups；Bot Token 需要 chat:write、reactions:write、channels:read、groups:read、users:read；接收公开频道或私有频道的消息事件还需相应的 channels:history 或 groups:history。</p>
-      <p class="hint" data-i18n="保存后机器人会重新连接。令牌保存在状态目录的 state.sqlite（权限 0600）；已保存时留空则不修改。到 Agents 页面选择默认通知渠道。">保存后机器人会重新连接。令牌保存在状态目录的 state.sqlite（权限 0600）；已保存时留空则不修改。到 Agents 页面选择默认通知渠道。</p>
-    </div>
-    <div data-panel="settings-telegram" hidden>
-      <div class="group">
-        <div class="setting"><div class="setting-main"><div class="setting-title" data-i18n="Telegram 机器人">Telegram 机器人</div><div class="setting-sub" id="telegram-status" data-i18n="正在读取设置…">正在读取设置…</div></div><span id="telegram-state"></span></div>
-        <div class="setting setting-field-row"><label class="setting-main" for="telegram-bot-token"><span class="setting-title">Bot Token</span><span class="setting-sub" data-i18n="由 BotFather 提供">由 BotFather 提供</span></label><div class="secret-field"><input id="telegram-bot-token" class="setting-field mono" type="password" placeholder="123456789:…" autocomplete="off" spellcheck="false" disabled><button type="button" id="telegram-bot-token-toggle" class="icon-button" aria-label="显示 Bot Token" title="显示 Bot Token" aria-controls="telegram-bot-token" aria-pressed="false" disabled><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 8s2.25-4.5 6.5-4.5 6.5 4.5 6.5 4.5-2.25 4.5-6.5 4.5S1.5 8 1.5 8Z"/><circle cx="8" cy="8" r="2"/><path class="secret-slash" d="m2.5 2.5 11 11" hidden/></svg></button></div></div>
-        <div class="setting setting-field-row"><label class="setting-main" for="telegram-chat-id"><span class="setting-title" data-i18n="超级群 ID">超级群 ID</span><span class="setting-sub" data-i18n="已创建并启用话题（Forum）的超级群">已创建并启用话题（Forum）的超级群</span></label><input id="telegram-chat-id" class="setting-field mono" type="text" placeholder="-100…" autocomplete="off" spellcheck="false" disabled></div>
-        <div class="setting setting-field-row"><label class="setting-main" for="telegram-user-id"><span class="setting-title" data-i18n="信任的用户 ID">信任的用户 ID</span><span class="setting-sub" data-i18n="允许把回复发送回本机会话的人类用户，填写数字 ID">允许把回复发送回本机会话的人类用户，填写数字 ID</span></label><input id="telegram-user-id" class="setting-field mono" type="text" inputmode="numeric" placeholder="123456789" autocomplete="off" spellcheck="false" disabled><div class="setting-actions"><button type="button" id="telegram-choose" class="text-button" aria-expanded="false" aria-controls="telegram-picker" data-i18n="从列表选择">从列表选择</button></div></div>
-        <div id="telegram-picker" class="recipient-picker" hidden>
-          <div class="recipient-toolbar"><span class="setting-title" data-i18n="选择接收目标">选择接收目标</span><div class="setting-actions"><button type="button" id="telegram-reload" class="text-button" data-i18n="重新读取">重新读取</button><button type="button" id="telegram-picker-close" class="text-button" data-i18n="收起">收起</button></div></div>
-          <label for="telegram-chat-options" class="setting-sub" data-i18n="目标群组">目标群组</label><select id="telegram-chat-options" class="setting-field" aria-label="目标群组" data-i18n-aria-label="目标群组"></select>
-          <input id="telegram-target-search" class="setting-field" type="search" placeholder="搜索姓名或用户 ID" aria-label="搜索姓名或用户 ID" data-i18n-placeholder="搜索姓名或用户 ID" data-i18n-aria-label="搜索姓名或用户 ID" autocomplete="off">
-          <div id="telegram-directory-note" class="setting-sub" role="status" aria-live="polite"></div>
-          <select id="telegram-user-options" class="recipient-options" size="5" aria-label="信任的用户" data-i18n-aria-label="信任的用户" aria-describedby="telegram-directory-note"></select>
-          <p class="setting-sub" data-i18n="Telegram 只能列出群管理员和机器人已看到的用户、群组，无法枚举全部成员；未找到时可手动填写 ID。">Telegram 只能列出群管理员和机器人已看到的用户、群组，无法枚举全部成员；未找到时可手动填写 ID。</p>
-        </div>
-        <div class="setting"><div class="setting-main"><div class="setting-sub" data-i18n="保存前会向 Telegram 验证配置；令牌默认掩码显示，点击眼睛可查看。">保存前会向 Telegram 验证配置；令牌默认掩码显示，点击眼睛可查看。</div></div><div class="setting-actions"><button type="button" id="telegram-clear" class="text-button" hidden data-i18n="清除 Telegram 配置">清除 Telegram 配置</button><button type="button" id="telegram-save" class="text-button primary" disabled data-i18n="验证并保存">验证并保存</button></div></div>
-      </div>
-      <p class="hint" data-i18n="每个会话在指定超级群中使用一个独立话题。先创建启用话题的超级群，把机器人设为管理员并允许管理话题；只有上面填写的数字用户 ID 可以把回复发送回本机会话。群组需允许 🥰 表情，成功转发后会用它标记原消息。">每个会话在指定超级群中使用一个独立话题。先创建启用话题的超级群，把机器人设为管理员并允许管理话题；只有上面填写的数字用户 ID 可以把回复发送回本机会话。群组需允许 🥰 表情，成功转发后会用它标记原消息。</p>
-      <p class="hint" data-i18n="保存后机器人会重新连接。令牌保存在状态目录的 state.sqlite（权限 0600）；已保存时留空则不修改。到 Agents 页面选择默认通知渠道。">保存后机器人会重新连接。令牌保存在状态目录的 state.sqlite（权限 0600）；已保存时留空则不修改。到 Agents 页面选择默认通知渠道。</p>
-    </div>
     <div data-panel="settings-tailscale" hidden>
       <div class="group">
         <div class="setting setting-with-switch"><div class="setting-main"><label class="setting-title" for="tailscale-enabled" data-i18n="接入 Tailscale 网络">接入 Tailscale 网络</label><div class="setting-sub" id="tailscale-sharing" data-i18n="正在读取设置…">正在读取设置…</div></div><input id="tailscale-enabled" class="switch" type="checkbox" role="switch" aria-describedby="tailscale-sharing" disabled></div>
@@ -217,7 +175,7 @@
         <div class="setting"><div class="setting-main"><div class="setting-title" data-i18n="导入配置">导入配置</div><div class="setting-sub" data-i18n="选择导出的文件，确认内容后再写入">选择导出的文件，确认内容后再写入</div></div><div class="setting-actions"><input id="import-file" type="file" accept=".json,application/json" aria-label="选择配置文件" data-i18n-aria-label="选择配置文件" hidden><button type="button" id="import-choose" class="text-button primary" data-i18n="选择文件…">选择文件…</button></div></div>
         <div class="setting" id="import-preview" hidden><div class="setting-main"><div class="setting-title" id="import-name"></div><div class="setting-sub" id="import-date"></div><ul id="import-lines" class="setting-list"></ul></div><div class="setting-actions"><button type="button" id="import-cancel" class="text-button" data-i18n="取消">取消</button><button type="button" id="import-apply" class="text-button primary" data-i18n="写入这些设置">写入这些设置</button></div></div>
       </div>
-      <p class="hint" data-i18n="配置文件包含默认通知渠道、飞书、Slack、Telegram 的凭据与信任的用户、PR 配置与关注选择、Codex 和 OpenCode 连接、已启用的 Agents。其中有明文密钥，文件权限是 0600，不要提交到仓库或转发。导入只覆盖文件里有的设置；Agents 只会启用，不会关闭。GitHub 登录不在文件里，换机器后重新登录。">配置文件包含默认通知渠道、飞书、Slack、Telegram 的凭据与信任的用户、PR 配置与关注选择、Codex 和 OpenCode 连接、已启用的 Agents。其中有明文密钥，文件权限是 0600，不要提交到仓库或转发。导入只覆盖文件里有的设置；Agents 只会启用，不会关闭。GitHub 登录不在文件里，换机器后重新登录。</p>
+      <p class="hint" data-i18n="配置文件包含飞书凭据与接收人、PR 配置与关注选择、Codex 和 OpenCode 连接、已启用的 Agents。其中有明文密钥，文件权限是 0600，不要提交到仓库或转发。导入只覆盖文件里有的设置；Agents 只会启用，不会关闭。GitHub 登录不在文件里，换机器后重新登录。">配置文件包含飞书凭据与接收人、PR 配置与关注选择、Codex 和 OpenCode 连接、已启用的 Agents。其中有明文密钥，文件权限是 0600，不要提交到仓库或转发。导入只覆盖文件里有的设置；Agents 只会启用，不会关闭。GitHub 登录不在文件里，换机器后重新登录。</p>
     </div>
     <div data-panel="settings-about" hidden>
       <div class="group">
