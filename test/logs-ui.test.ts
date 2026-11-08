@@ -72,6 +72,9 @@ test('Logs separates event purpose from delivery outcome and keeps its controls 
   let editable = true;
   const agentWrites: { agent: string; enabled: boolean }[] = [];
   let reads = 0; let agentReads = 0;
+  let releaseAgentReads!: () => void;
+  const agentsReady = new Promise<void>(resolve => { releaseAgentReads = resolve; });
+  let agentsUnavailable = false; let agentsEmpty = false;
   t.mock.method(globalThis, 'fetch', async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const path = new URL(String(input), 'http://127.0.0.1:9417').pathname;
     if (path === '/ui/api/snapshot') {
@@ -88,7 +91,9 @@ test('Logs separates event purpose from delivery outcome and keeps its controls 
         return Response.json({ ok: true });
       }
       agentReads++;
-      return Response.json({ agents, editable, ...(channel ? { channel } : {}) });
+      await agentsReady;
+      if (agentsUnavailable) return Response.json({ error: 'Unavailable fixture' }, { status: 503 });
+      return Response.json({ agents: agentsEmpty ? [] : agents, editable, ...(channel ? { channel } : {}) });
     }
     assert.fail(`Unexpected UI request: ${path}`);
   });
@@ -101,6 +106,29 @@ test('Logs separates event purpose from delivery outcome and keeps its controls 
   const search = (query: string) => { field('search').value = query; field('search').dispatchEvent(new window.Event('input', { bubbles: true })); };
   await import('../src/ui-app.js');
   await until(() => ids().length === 15, 'Initial Logs fixture did not render');
+
+  await t.test('Agents hides its card while loading, unavailable or empty, then restores it on retry', async () => {
+    location.hash = '#/agents'; window.dispatchEvent(new window.Event('hashchange'));
+    assert.equal(element('agents-card').hidden, true, 'An unfilled card must not show a border strip');
+    agentsUnavailable = true; releaseAgentReads();
+    await until(() => element('agents-banner').textContent!.includes('HTTP 503'), 'Agent load failure did not render');
+    assert.equal(element('agents-card').hidden, true);
+    assert.equal(element('channel-settings').getAttribute('href'), '#/settings/lark');
+
+    const refresh = async () => {
+      const before = agentReads; element('refresh').click();
+      await until(() => agentReads > before, 'Agent request did not retry');
+      await nextTurn();
+    };
+    agentsUnavailable = false; agentsEmpty = true; await refresh();
+    assert.equal(element('agents-card').hidden, true, 'An empty response must not show a border strip');
+    assert.equal(element('agents-banner').hidden, true, 'Retry clears the previous load error');
+    agentsEmpty = false; await refresh();
+    assert.equal(element('agents-card').hidden, false);
+    assert.equal(document.querySelectorAll('#agent-rows .check').length, 5);
+    assert.equal(element('agents-card').contains(element('channel-title')), false, 'The summary stays outside the card');
+    location.hash = '#/logs'; window.dispatchEvent(new window.Event('hashchange'));
+  });
 
   await t.test('one row contains a message-type label, subject title and action on the right without subtitles', () => {
     assert.equal(text('progress-feishu', '.log-type'), 'Progress');
