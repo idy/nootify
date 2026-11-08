@@ -19,6 +19,7 @@ class InactiveTurn extends Error {}
 export class CodexDesktop {
   private socket?: Socket;
   private opening?: Promise<void>;
+  private generation = 0;
   private clientId = 'initializing-client';
   private buffered: Buffer = Buffer.alloc(0);
   private readonly pending = new Map<string, Pending>();
@@ -26,9 +27,14 @@ export class CodexDesktop {
 
   async open(): Promise<void> {
     if (this.opening) return this.opening;
+    const generation = this.generation;
+    const current = () => {
+      if (generation !== this.generation) throw new RetryableDeliveryError('Codex Desktop opening was cancelled');
+    };
     const opening = (async () => {
       try { await checkSocket(this.path); }
       catch { throw new RetryableDeliveryError('Codex Desktop connection is unavailable'); }
+      current();
       const socket = createConnection(this.path);
       this.socket = socket;
       this.buffered = Buffer.alloc(0);
@@ -36,12 +42,18 @@ export class CodexDesktop {
       socket.on('error', () => this.disconnected(socket));
       socket.on('close', () => this.disconnected(socket));
       await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(() => { reject(new RetryableDeliveryError('Codex Desktop connection is unavailable')); socket.destroy(); }, this.timeout);
-        const failed = () => { clearTimeout(timer); reject(new RetryableDeliveryError('Codex Desktop connection is unavailable')); };
-        socket.once('error', failed);
-        socket.once('connect', () => { clearTimeout(timer); socket.off('error', failed); resolve(); });
+        const finish = (error?: Error) => {
+          clearTimeout(timer); socket.off('error', failed); socket.off('close', failed); socket.off('connect', connected);
+          if (error) reject(error); else resolve();
+        };
+        const failed = () => finish(new RetryableDeliveryError('Codex Desktop connection is unavailable'));
+        const connected = () => finish();
+        const timer = setTimeout(() => { failed(); socket.destroy(); }, this.timeout);
+        socket.once('error', failed); socket.once('close', failed); socket.once('connect', connected);
       });
+      current();
       const receipt = await this.request('initialize', 0, { clientType: 'nootify' });
+      current();
       const id = (receipt.result as { clientId?: unknown } | null)?.clientId;
       if (typeof id !== 'string' || !id || receipt.owner !== id) throw new RetryableDeliveryError('Invalid Codex Desktop initialization receipt');
       this.clientId = id;
@@ -49,11 +61,7 @@ export class CodexDesktop {
     this.opening = opening;
     try { await opening; }
     catch (error) {
-      if (this.opening === opening) {
-        // Validation may fail before a socket exists for close() to disconnect.
-        this.opening = undefined;
-        this.close();
-      }
+      if (this.opening === opening) this.close();
       throw error;
     }
   }
@@ -161,6 +169,7 @@ export class CodexDesktop {
 
   private disconnected(socket: Socket): void {
     if (this.socket !== socket) return;
+    this.generation++;
     this.socket = undefined; this.opening = undefined; this.clientId = 'initializing-client'; this.buffered = Buffer.alloc(0);
     for (const request of this.pending.values()) {
       clearTimeout(request.timer);
@@ -169,5 +178,8 @@ export class CodexDesktop {
     }
     this.pending.clear(); socket.destroy();
   }
-  close(): void { if (this.socket) this.disconnected(this.socket); }
+  close(): void {
+    if (this.socket) this.disconnected(this.socket);
+    else { this.generation++; this.opening = undefined; }
+  }
 }

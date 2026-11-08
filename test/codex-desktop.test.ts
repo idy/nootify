@@ -31,8 +31,9 @@ async function fixture(t: TestContext, mode: 'active' | 'idle' | 'timeout' | 'di
   const directory = await mkdtemp(join(tmpdir(), 'ncd-'));
   const path = join(directory, 'ipc.sock');
   const sockets = new Set<Socket>(); const requests: Request[] = [];
-  let resumed = true; let owned = true; let supportsInput = true;
+  let resumed = true; let owned = true; let supportsInput = true; let connections = 0;
   const server = createServer(socket => {
+    connections++;
     sockets.add(socket); socket.on('close', () => sockets.delete(socket));
     let buffered = Buffer.alloc(0);
     socket.on('data', chunk => {
@@ -95,7 +96,7 @@ async function fixture(t: TestContext, mode: 'active' | 'idle' | 'timeout' | 'di
     await rm(directory, { recursive: true, force: true });
   });
   return { directory, path, requests, desktop, setResumed(value: boolean) { resumed = value; }, setOwned(value: boolean) { owned = value; },
-    setSupportsInput(value: boolean) { supportsInput = value; },
+    setSupportsInput(value: boolean) { supportsInput = value; }, connections() { return connections; },
     async stopSocket() {
       for (const socket of sockets) socket.destroy();
       await new Promise<void>(resolve => server.close(() => resolve()));
@@ -137,6 +138,21 @@ for (const initial of ['missing', 'file'] as const) test(`Desktop reconnects aft
   assert.equal(f.requests.length, 0, 'validation failure must not submit any input');
   await f.restoreSocket();
   assert.deepEqual(await f.desktop.send(thread, 'input after recovery'), { status: 'input_accepted' });
+  assert.equal(f.requests.filter(request => request.method === 'initialize').length, 1);
+  assert.equal(f.requests.filter(request => request.method === 'thread-follower-steer-turn').length, 1);
+});
+
+for (const replace of [false, true]) test(replace ? 'closing an opening Desktop client leaves a replacement usable'
+  : 'closing an opening Desktop client cancels socket validation', options, async t => {
+  const f = await fixture(t);
+  const opening = f.desktop.open();
+  // Close synchronously, before asynchronous socket validation can finish.
+  f.desktop.close();
+  const replacement = replace ? f.desktop.ready(thread) : undefined;
+  await assert.rejects(opening, RetryableDeliveryError);
+  if (replacement) await replacement;
+  assert.deepEqual(await f.desktop.send(thread, 'input after cancelled open'), { status: 'input_accepted' });
+  assert.equal(f.connections(), 1, 'the cancelled open must not create an orphaned connection');
   assert.equal(f.requests.filter(request => request.method === 'initialize').length, 1);
   assert.equal(f.requests.filter(request => request.method === 'thread-follower-steer-turn').length, 1);
 });
