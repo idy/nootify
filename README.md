@@ -35,8 +35,9 @@ ad-hoc signed and not notarized; Windows installers are not code-signed.
 
 1. Open Nootify and configure your bot and trusted recipient under
    **Settings → Feishu**.
-2. On the **Agents** page, enable the clients you use. Configure the existing
-   Codex or OpenCode connection when needed.
+2. On the **Agents** page, enable the clients you use. Codex Desktop connects
+   automatically on macOS; configure an existing Codex app-server or OpenCode
+   connection when needed.
 3. Start a new agent conversation. It receives instructions to open its group,
    thread, or topic and post progress; reply there to continue the conversation.
 

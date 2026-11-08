@@ -1,9 +1,10 @@
-import { readdir } from 'node:fs/promises';
+import { readdir, stat } from 'node:fs/promises';
 import { homedir, hostname } from 'node:os';
 import { join } from 'node:path';
 import { createOpencodeClient } from '@opencode-ai/sdk/v2';
 import type { Session as OpenCodeSession } from '@opencode-ai/sdk/v2';
 import { CodexRpc, localEndpoint } from './codex-rpc.js';
+import { CodexDesktop } from './codex-desktop.js';
 import { HttpError, SessionUnavailable, RetryableDeliveryError, UnconfirmedDeliveryError } from './types.js';
 import type { Adapter, BackendConnection, DeliveryResult, PublicSession } from './types.js';
 import type { State } from './state.js';
@@ -29,7 +30,8 @@ export async function findCodexThread(id: string, home = process.env.CODEX_HOME 
 }
 export class ExternalSessions implements ExternalResolver {
   private codex?: { key: string; rpc: CodexRpc };
-  constructor(private readonly state: State, private readonly options: { codexHome?: string } = {}) {}
+  private desktop?: CodexDesktop;
+  constructor(private readonly state: State, private readonly options: { codexHome?: string; codexDesktopSocket?: string } = {}) {}
   private connection(adapter: Adapter): BackendConnection | undefined {
     const configured = this.state.backends.get(adapter);
     if (configured) return configured;
@@ -46,7 +48,25 @@ export class ExternalSessions implements ExternalResolver {
     const blocked = (reason: string): SessionTarget => ({ info, async send() { throw new SessionUnavailable(reason); } });
     if (row.archived) return blocked('session_archived');
     const connection = this.connection('codex');
-    if (!connection) return blocked('backend_unavailable');
+    if (!connection) {
+      // Desktop already owns its stdio app-server. Reuse its local owner router
+      // instead of starting a second app-server or resuming saved history.
+      if (process.platform !== 'darwin' && !this.options.codexDesktopSocket) return blocked('backend_unavailable');
+      const home = this.options.codexHome ?? process.env.CODEX_HOME ?? join(homedir(), '.codex');
+      const path = this.options.codexDesktopSocket ?? join(home, 'ipc', 'ipc.sock');
+      try { await stat(path); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return blocked('backend_unavailable'); throw error; }
+      if (this.desktop?.path !== path) { this.desktop?.close(); this.desktop = new CodexDesktop(path); }
+      const desktop = this.desktop;
+      await desktop.ready(id);
+      info.availability = 'active';
+      return { info, send: async content => {
+        const latest = await findCodexThread(id, this.options.codexHome);
+        if (!latest) throw new SessionUnavailable('session_not_local');
+        if (latest.archived) throw new SessionUnavailable('session_archived');
+        return desktop.send(id, content);
+      } };
+    }
     const key = JSON.stringify(connection);
     if (this.codex?.key !== key) { this.codex?.rpc.close(); this.codex = { key, rpc: new CodexRpc(connection) }; }
     const rpc = this.codex.rpc;
@@ -109,5 +129,5 @@ export class ExternalSessions implements ExternalResolver {
       return { status: 'input_accepted' };
     } };
   }
-  close(): void { this.codex?.rpc.close(); this.codex = undefined; }
+  close(): void { this.codex?.rpc.close(); this.codex = undefined; this.desktop?.close(); this.desktop = undefined; }
 }
