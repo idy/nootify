@@ -12,7 +12,7 @@ import { LarkService } from '../src/lark.js';
 import type { LarkApi } from '../src/lark-metadata.js';
 import { SessionsService } from '../src/sessions.js';
 import { State } from '../src/state.js';
-import { SessionUnavailable, UnconfirmedDeliveryError } from '../src/types.js';
+import { RetryableDeliveryError, UnconfirmedDeliveryError } from '../src/types.js';
 
 const options = { skip: process.platform === 'win32' };
 const thread = 'desktop-existing-thread';
@@ -96,6 +96,10 @@ async function fixture(t: TestContext, mode: 'active' | 'idle' | 'timeout' | 'di
   });
   return { directory, path, requests, desktop, setResumed(value: boolean) { resumed = value; }, setOwned(value: boolean) { owned = value; },
     setSupportsInput(value: boolean) { supportsInput = value; },
+    async stopSocket() {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    },
     async restoreSocket() { await rm(path, { force: true }); await listen(); } };
 }
 
@@ -129,7 +133,7 @@ test('Desktop rejects missing owners, unloaded threads and unsupported owner ver
 
 for (const initial of ['missing', 'file'] as const) test(`Desktop reconnects after ${initial} socket validation fails`, options, async t => {
   const f = await fixture(t, 'active', initial);
-  await assert.rejects(f.desktop.ready(thread), SessionUnavailable);
+  await assert.rejects(f.desktop.ready(thread), RetryableDeliveryError);
   assert.equal(f.requests.length, 0, 'validation failure must not submit any input');
   await f.restoreSocket();
   assert.deepEqual(await f.desktop.send(thread, 'input after recovery'), { status: 'input_accepted' });
@@ -140,10 +144,11 @@ for (const initial of ['missing', 'file'] as const) test(`Desktop reconnects aft
 test('a regular file cannot stand in for the Desktop socket', options, async t => {
   const f = await fixture(t); const path = join(f.directory, 'not-a-socket'); await writeFile(path, 'private data');
   const desktop = new CodexDesktop(path);
-  await assert.rejects(desktop.ready(thread), SessionUnavailable); desktop.close();
+  await assert.rejects(desktop.ready(thread), RetryableDeliveryError); desktop.close();
 });
 
-test('Feishu receives its reaction only after automatic Desktop routing is accepted', options, async t => {
+for (const reconnect of [false, true]) test(reconnect ? 'Feishu safely retries a Desktop reconnect failure before input'
+  : 'Feishu receives its reaction only after automatic Desktop routing is accepted', options, async t => {
   const f = await fixture(t, 'idle');
   const db = new DatabaseSync(join(f.directory, 'state_5.sqlite'));
   db.exec('CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT NOT NULL, archived INTEGER NOT NULL)');
@@ -151,6 +156,19 @@ test('Feishu receives its reaction only after automatic Desktop routing is accep
   const state = await State.open(join(f.directory, 'nootify'));
   state.bindings.set('oc_desktop', { chat_id: 'oc_desktop', session_id: thread, sender_open_id: 'ou_owner', adapter: 'codex' });
   const external = new ExternalSessions(state, { codexHome: f.directory, codexDesktopSocket: f.path });
+  if (reconnect) {
+    const ready = CodexDesktop.prototype.ready;
+    let disconnect = true;
+    t.mock.method(CodexDesktop.prototype, 'ready', async function(this: CodexDesktop, id: string) {
+      const owner = await ready.call(this, id);
+      if (disconnect) {
+        disconnect = false;
+        this.close();
+        await f.stopSocket();
+      }
+      return owner;
+    });
+  }
   const sessions = new SessionsService(state, { async inspect() { assert.fail('Must not route to Claude'); } }, undefined, external);
   const reactions: string[] = [];
   const api: LarkApi = { appId: 'cli_desktop', async request<T>(_method: string, path: string): Promise<T> {
@@ -165,7 +183,17 @@ test('Feishu receives its reaction only after automatic Desktop routing is accep
     assert.equal(state.backends.size, 0, 'no guessed WebSocket endpoint is needed');
     const payload = { sender: { sender_type: 'user', sender_id: { open_id: 'ou_owner' } }, message: {
       chat_id: 'oc_desktop', message_id: 'om_desktop', message_type: 'text', content: JSON.stringify({ text: 'hello' }) } };
+    if (reconnect) {
+      assert.equal(await lark.enqueue(payload), false, 'a disconnect before input must retain the reply for retry');
+      assert.equal(state.larkDelivery('om_desktop')?.transport_status, 'delivery_failed');
+      assert.equal(state.larkDelivery('om_desktop')?.retryable, true);
+      assert.equal(reactions.length, 0);
+      assert.equal(f.requests.filter(request => request.method === 'thread-follower-steer-turn' || request.method === 'thread-follower-start-turn').length, 0);
+      await f.restoreSocket();
+    }
     assert.equal(await lark.enqueue(payload), true); assert.equal(await lark.enqueue(payload), true);
+    assert.equal(state.larkDelivery('om_desktop')?.transport_status, 'input_accepted');
+    assert.equal(state.larkDelivery('om_desktop')?.retryable, undefined);
     assert.equal(reactions.length, 1);
     assert.equal(f.requests.filter(request => request.method === 'thread-follower-start-turn').length, 1);
   } finally { await lark.stop(); await sessions.stop(); }

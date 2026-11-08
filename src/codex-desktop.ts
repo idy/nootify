@@ -28,7 +28,7 @@ export class CodexDesktop {
     if (this.opening) return this.opening;
     const opening = (async () => {
       try { await checkSocket(this.path); }
-      catch { throw new SessionUnavailable('backend_unavailable'); }
+      catch { throw new RetryableDeliveryError('Codex Desktop connection is unavailable'); }
       const socket = createConnection(this.path);
       this.socket = socket;
       this.buffered = Buffer.alloc(0);
@@ -36,14 +36,14 @@ export class CodexDesktop {
       socket.on('error', () => this.disconnected(socket));
       socket.on('close', () => this.disconnected(socket));
       await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(() => { reject(new SessionUnavailable('backend_unavailable')); socket.destroy(); }, this.timeout);
-        const failed = () => { clearTimeout(timer); reject(new SessionUnavailable('backend_unavailable')); };
+        const timer = setTimeout(() => { reject(new RetryableDeliveryError('Codex Desktop connection is unavailable')); socket.destroy(); }, this.timeout);
+        const failed = () => { clearTimeout(timer); reject(new RetryableDeliveryError('Codex Desktop connection is unavailable')); };
         socket.once('error', failed);
         socket.once('connect', () => { clearTimeout(timer); socket.off('error', failed); resolve(); });
       });
       const receipt = await this.request('initialize', 0, { clientType: 'nootify' });
       const id = (receipt.result as { clientId?: unknown } | null)?.clientId;
-      if (typeof id !== 'string' || !id || receipt.owner !== id) throw new Error('Invalid Codex Desktop initialization receipt');
+      if (typeof id !== 'string' || !id || receipt.owner !== id) throw new RetryableDeliveryError('Invalid Codex Desktop initialization receipt');
       this.clientId = id;
     })();
     this.opening = opening;
