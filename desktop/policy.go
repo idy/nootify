@@ -7,8 +7,8 @@ import (
 )
 
 type urlPolicy struct {
-	offline, preview string
-	isolated         bool
+	offline, preview, gateway string
+	isolated                  bool
 }
 
 func documentAt(raw, base string) bool {
@@ -17,7 +17,7 @@ func documentAt(raw, base string) bool {
 	return e == nil && be == nil && u.User == nil && u.Scheme == "http" && u.Host == b.Host && u.EscapedPath() == "/" && !strings.Contains(raw, "\\")
 }
 func (p urlPolicy) allowed(raw string) bool {
-	return (!p.isolated && documentAt(raw, "http://127.0.0.1:9417/")) || documentAt(raw, p.offline) || (p.preview != "" && documentAt(raw, p.preview))
+	return (!p.isolated && p.gateway != "" && documentAt(raw, p.gateway)) || documentAt(raw, p.offline) || (p.preview != "" && documentAt(raw, p.preview))
 }
 func previewURL(raw string) string {
 	u, e := url.Parse(raw)

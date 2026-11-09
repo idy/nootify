@@ -165,15 +165,15 @@ test('new mac management commands reject other install paths, altered arguments 
 
 test('mac stop retains an owned plist; uninstall removes only that plist and is idempotent when absent', async t => {
   const { calls, options, runtime, plist } = await fixture(t);
-  assert.deepEqual(await manageService('stop', options, runtime), { installed: true, status: 'stopped', plist });
+  assert.deepEqual(await manageService('stop', options, runtime), { installed: true, status: 'stopped', plist, was_running: true });
   await stat(plist);
   assert.deepEqual(calls.at(-1), ['/bin/launchctl', ['bootout', `gui/501/${launchdLabel}`]]);
-  assert.deepEqual(await manageService('uninstall', options, runtime), { installed: false, status: 'uninstalled', plist });
+  assert.deepEqual(await manageService('uninstall', options, runtime), { installed: false, status: 'uninstalled', plist, was_running: true });
   await assert.rejects(stat(plist), { code: 'ENOENT' });
   calls.length = 0;
-  assert.deepEqual(await manageService('status', options, runtime), { installed: false });
-  assert.deepEqual(await manageService('uninstall', options, runtime), { installed: false, status: 'uninstalled' });
-  assert.deepEqual(await manageService('stop', options, runtime), { installed: false, status: 'stopped' });
+  assert.deepEqual(await manageService('status', options, runtime), { installed: false, running: false });
+  assert.deepEqual(await manageService('uninstall', options, runtime), { installed: false, status: 'uninstalled', was_running: false });
+  assert.deepEqual(await manageService('stop', options, runtime), { installed: false, status: 'stopped', was_running: false });
   assert.deepEqual(calls, []);
 });
 
@@ -381,6 +381,21 @@ test('Windows status reads management JSON without an auth file, hides its conso
     return { stdout: '﻿{"installed":false}\n' };
   } });
   assert.deepEqual(result, { installed: false });
+});
+
+test('service outcomes distinguish installed stopped and previously running owned services', async t => {
+  for (const loaded of [false, true]) {
+    const f = await fixture(t, loaded);
+    assert.deepEqual(await manageService('status', f.options, f.runtime), { installed: true, running: loaded });
+    assert.equal((await manageService('stop', f.options, f.runtime)).was_running, loaded);
+  }
+  for (const field of ['running', 'was_running']) {
+    for (const value of [false, true]) {
+      const result = await manageService('stop', { port: 9417 }, { platform: 'win32', execute: async () => ({ stdout: JSON.stringify({ installed: true, [field]: value }) }) });
+      assert.equal((result as unknown as Record<string, unknown>)[field], value);
+    }
+    await assert.rejects(manageService('stop', { port: 9417 }, { platform: 'win32', execute: async () => ({ stdout: JSON.stringify({ installed: true, [field]: 'yes' }) }) }), /Invalid Windows service/);
+  }
 });
 
 test('Windows ownership and management errors propagate before any HTTP access', async () => {

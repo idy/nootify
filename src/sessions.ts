@@ -14,6 +14,7 @@ import type { Adapter, BackendConnection, DeliveryResult, InboxOrigin, PublicSes
 import { LocalSessions } from './local-sessions.js';
 import type { SessionCatalog } from './local-sessions.js';
 import { writeWindowsInbox } from './native-transport.js';
+import type { ProviderMessageRef } from './message-ref.js';
 
 export async function writeInbox(path: string, content: string, token?: string, timeout = 5000, expectedPid?: number): Promise<DeliveryResult> {
   try { await checkSocket(path); }
@@ -51,12 +52,14 @@ export async function writeInbox(path: string, content: string, token?: string, 
 export class SessionsService implements ServiceModule {
   readonly name = 'sessions';
   private readonly observed: Map<string, PublicSession>;
+  private inboxConsumer?: (message: ProviderMessageRef) => Promise<void>;
   constructor(readonly state: State, readonly catalog: SessionCatalog = new LocalSessions(),
     private readonly report: (record: Record<string, unknown>) => void = () => {},
     private readonly external: ExternalResolver = new ExternalSessions(state), private readonly forwarding: ForwardingOptions = {}) {
     this.observed = state.sessionObservations;
   }
   status(): string { return 'ready'; }
+  setInboxConsumer(consumer: (message: ProviderMessageRef) => Promise<void>): void { this.inboxConsumer = consumer; }
   sessionName(id: string, adapter: Adapter): string {
     return this.observed.get(`${adapter}:${id}`)?.session_name ?? this.state.sessions.get(id)?.session_name ?? id;
   }
@@ -143,8 +146,10 @@ export class SessionsService implements ServiceModule {
       const id = identifier(decodeURIComponent(inbox[1]), 'session_id');
       const adapter = object(request.body).adapter;
       if (!isPolledAdapter(adapter)) throw new HttpError(400, 'Inbox polling is supported for trae and workbuddy');
-      return { body: inbox[2] ? await acknowledgeInbox(this.state, adapter, id, identifier(decodeURIComponent(inbox[2]), 'message_id'))
-        : sessionInbox(this.state, adapter, id, this.forwarding) };
+      return { body: inbox[2] ? await acknowledgeInbox(this.state, adapter, id, identifier(decodeURIComponent(inbox[2]), 'message_id'), async message => {
+        try { await this.inboxConsumer?.(message); }
+        catch (error) { this.report({ source: 'sessions', status: 'inbox_release_pending', message_id: message.message_id, error: (error as Error).message }); }
+      }) : sessionInbox(this.state, adapter, id, this.forwarding) };
     }
     const match = /^\/v1\/sessions\/([^/]+)(\/messages)?$/.exec(request.path);
     if (!match) return;

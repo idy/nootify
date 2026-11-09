@@ -11,8 +11,8 @@ import (
 )
 
 func TestURLPolicy(t *testing.T) {
-	policy := urlPolicy{offline: "http://127.0.0.1:39847/"}
-	for _, raw := range []string{"http://127.0.0.1:9417/", "http://127.0.0.1:9417/#/settings/general", policy.offline, policy.offline + "#offline"} {
+	policy := urlPolicy{offline: "http://127.0.0.1:39847/", gateway: "http://127.0.0.1:39849/"}
+	for _, raw := range []string{policy.gateway, policy.gateway + "#/settings/general", policy.offline, policy.offline + "#offline"} {
 		if !policy.allowed(raw) {
 			t.Errorf("blocked %q", raw)
 		}

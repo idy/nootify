@@ -133,22 +133,35 @@ func (c *Core) reconfigureRemote(r RemoteConfig, update func(*State) error) erro
 			return err
 		}
 	}
-	if err = c.store.Update(update); err != nil {
+	// Confirmations take this lock for reading through durable persistence.
+	// Take it before the store lock so rotation cannot return while an old
+	// generation is still able to commit a confirmation or peer admission.
+	if old != nil {
+		old.configMu.Lock()
+	}
+	err = c.store.Update(update)
+	if !stateCommitted(err) {
+		if old != nil {
+			old.configMu.Unlock()
+		}
 		if next != nil && next != old {
 			next.stop()
 		}
 		return err
 	}
 	if next != nil && next == old {
-		next.configMu.Lock()
 		if next.config.Token != r.Token {
-			// Preserve token revocation even when the bound socket is retained.
-			// Same-token certificate reloads may keep existing authenticated RPCs.
+			// Same-token certificate reloads may keep authenticated RPCs.
 			next.revokeAuth()
 			next.authContext, next.revokeAuth = context.WithCancel(c.ctx)
 		}
 		next.config, next.certificate = r, cert
-		next.configMu.Unlock()
+	} else if old != nil {
+		old.stopped = true
+		old.revokeAuth()
+	}
+	if old != nil {
+		old.configMu.Unlock()
 	}
 	c.mu.Lock()
 	c.server = next
@@ -159,7 +172,7 @@ func (c *Core) reconfigureRemote(r RemoteConfig, update func(*State) error) erro
 	if old != nil && old != next {
 		old.stop()
 	}
-	return nil
+	return err
 }
 func (s *remoteServer) auth(ctx context.Context) error {
 	s.configMu.RLock()
@@ -185,6 +198,8 @@ func (s *remoteServer) headerAuth(ctx context.Context, _ *tap.Info) (context.Con
 	return ctx, s.auth(ctx)
 }
 
+type remoteAuthGenerationKey struct{}
+
 // Capture the credential generation together with authentication. A concurrent
 // token rotation cancels the captured generation, including RPCs admitted just
 // before rotation; it cannot attach an old bearer to the new generation.
@@ -192,13 +207,33 @@ func (s *remoteServer) authenticatedContext(ctx context.Context) (context.Contex
 	s.configMu.RLock()
 	err := remoteAuth(ctx, s.config.Token)
 	generation := s.authContext
+	if err == nil && (s.stopped || generation.Err() != nil) {
+		err = status.Error(codes.Unauthenticated, "remote credentials have been revoked")
+	}
 	s.configMu.RUnlock()
 	if err != nil {
 		return nil, nil, err
 	}
-	request, cancel := context.WithCancel(ctx)
+	request, cancel := context.WithCancel(context.WithValue(ctx, remoteAuthGenerationKey{}, generation))
 	stop := context.AfterFunc(generation, cancel)
 	return request, func() { stop(); cancel() }, nil
+}
+
+// Persistence and generation revocation share configMu. Checking the captured
+// generation itself does not depend on the scheduling of AfterFunc cancellation.
+// Lock order is configMu -> subscription/store -> core.mu; callers must never
+// hold the store lock while acquiring configMu.
+func (s *remoteServer) withAuthGeneration(ctx context.Context, persist func() error) error {
+	s.configMu.RLock()
+	defer s.configMu.RUnlock()
+	generation, _ := ctx.Value(remoteAuthGenerationKey{}).(context.Context)
+	if generation == nil || generation != s.authContext || generation.Err() != nil || ctx.Err() != nil || s.stopped {
+		return status.Error(codes.Unauthenticated, "remote credentials have been revoked")
+	}
+	return persist()
+}
+func (s *remoteServer) confirmSubscription(ctx context.Context, sub *Subscription, id string) error {
+	return s.withAuthGeneration(ctx, func() error { return sub.Confirm(id) })
 }
 func (s *remoteServer) unaryAuth(ctx context.Context, req any, _ *grpc.UnaryServerInfo, next grpc.UnaryHandler) (any, error) {
 	ctx, cleanup, err := s.authenticatedContext(ctx)
@@ -227,8 +262,16 @@ func (s *remoteServer) Call(ctx context.Context, in *pb.Command) (*pb.Result, er
 	if len(in.ParamsJson) > maxPayload {
 		return nil, status.Error(codes.ResourceExhausted, "request exceeds limit")
 	}
-	if len(in.VisitedNodes) >= 16 || contains(in.VisitedNodes, s.core.node()) {
+	if contains(in.VisitedNodes, s.core.node()) {
+		if in.Method == "message.inbox.release" {
+			// Release fanout may revisit a node through another retained return
+			// route. It has already released locally on this path; skip the cycle.
+			return &pb.Result{ResultJson: []byte(`{"released":true,"skipped":true}`)}, nil
+		}
 		return nil, status.Error(codes.FailedPrecondition, "command routing loop")
+	}
+	if len(in.VisitedNodes) >= 16 {
+		return nil, status.Error(codes.FailedPrecondition, "command hop limit exceeded")
 	}
 	md, _ := metadata.FromIncomingContext(ctx)
 	peer := md.Get("nootify-node-id")[0]
@@ -390,20 +433,22 @@ func (s *remoteServer) authenticatePeer(stream grpc.BidiStreamingServer[pb.Subsc
 	if proof.NodeId != hello.NodeId || proof.Name != hello.Name || !ed25519.Verify(ed25519.PublicKey(hello.PublicKey), peerProof(serverNode, hello.NodeId, hello.Name, hello.PublicKey, challenge), proof.Signature) {
 		return nil, status.Error(codes.PermissionDenied, "invalid subscriber identity proof")
 	}
-	err = s.core.store.Update(func(d *State) error {
-		p, exists := d.Peers[hello.NodeId]
-		if exists && p.PublicKey == "" {
-			return status.Error(codes.FailedPrecondition, "legacy peer requires private-local public-key approval")
-		}
-		if exists && p.PublicKey != pin {
-			return status.Error(codes.PermissionDenied, "subscriber public key does not match peer")
-		}
-		if !exists {
-			p = Peer{NodeID: hello.NodeId, Cursor: d.BroadcastSequence, Pending: []string{}}
-		}
-		p.PublicKey = pin
-		d.Peers[hello.NodeId] = p
-		return nil
+	err = s.withAuthGeneration(stream.Context(), func() error {
+		return s.core.store.Update(func(d *State) error {
+			p, exists := d.Peers[hello.NodeId]
+			if exists && p.PublicKey == "" {
+				return status.Error(codes.FailedPrecondition, "legacy peer requires private-local public-key approval")
+			}
+			if exists && p.PublicKey != pin {
+				return status.Error(codes.PermissionDenied, "subscriber public key does not match peer")
+			}
+			if !exists {
+				p = Peer{NodeID: hello.NodeId, Cursor: d.BroadcastSequence, Pending: []string{}}
+			}
+			p.PublicKey = pin
+			d.Peers[hello.NodeId] = p
+			return nil
+		})
 	})
 	if err != nil {
 		return nil, err
@@ -417,7 +462,12 @@ func (s *remoteServer) Subscribe(stream grpc.BidiStreamingServer[pb.Subscription
 	}
 	ctx, cancel := context.WithCancel(stream.Context())
 	defer cancel()
-	sub, err := s.core.Subscribe(ctx, hello.NodeId, hello.Name)
+	var sub *Subscription
+	err = s.withAuthGeneration(ctx, func() error {
+		var subscribeErr error
+		sub, subscribeErr = s.core.Subscribe(ctx, hello.NodeId, hello.Name)
+		return subscribeErr
+	})
 	if err != nil {
 		return status.Error(codes.InvalidArgument, publicError(err).Message)
 	}
@@ -455,7 +505,11 @@ func (s *remoteServer) Subscribe(stream grpc.BidiStreamingServer[pb.Subscription
 				errors <- status.FromContextError(ctx.Err()).Err()
 				return
 			}
-			if err = sub.Confirm(confirm.EventId); err != nil {
+			if err = s.confirmSubscription(ctx, sub, confirm.EventId); err != nil {
+				if status.Code(err) == codes.Unauthenticated {
+					errors <- err
+					return
+				}
 				errors <- status.Error(codes.ResourceExhausted, "confirmation could not be persisted")
 				return
 			}
@@ -480,10 +534,52 @@ type remoteProvider struct {
 	retryWait func(context.Context, time.Duration) error
 }
 
+func numericLoopbackAddress(address string) bool {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return false
+	}
+	ip, err := netip.ParseAddr(host)
+	return err == nil && ip.Zone() == "" && ip.Unmap().IsLoopback()
+}
+
+// A Tailnet address is only eligible for plaintext over the private embedded
+// bridge. Eligibility never authorizes a direct plaintext network connection.
+func validateRemoteTransport(p ProviderConfig) error {
+	if p.TLS || numericLoopbackAddress(p.Address) || isTailnet(p.Address) {
+		return nil
+	}
+	return fault("invalid_argument", "remote providers require TLS unless using numeric loopback or the embedded encrypted bridge")
+}
+
+// Only the matching private dial.complete path creates this marker. A generic
+// loopback forwarding endpoint or a Tailnet hostname alone proves no encryption.
+type embeddedRemoteConn struct{ net.Conn }
+type guardedRemoteCredentials struct {
+	credentials.TransportCredentials
+	loopback bool
+}
+
+func (g guardedRemoteCredentials) Clone() credentials.TransportCredentials {
+	return guardedRemoteCredentials{TransportCredentials: g.TransportCredentials.Clone(), loopback: g.loopback}
+}
+func (g guardedRemoteCredentials) ClientHandshake(ctx context.Context, authority string, conn net.Conn) (net.Conn, credentials.AuthInfo, error) {
+	_, embedded := conn.(*embeddedRemoteConn)
+	address, tcp := conn.RemoteAddr().(*net.TCPAddr)
+	if !embedded && !(g.loopback && tcp && address.IP.IsLoopback()) {
+		_ = conn.Close()
+		return nil, nil, fault("permission_denied", "plaintext remote transport is not protected by the embedded encrypted bridge")
+	}
+	return g.TransportCredentials.ClientHandshake(ctx, authority, conn)
+}
 func newRemoteProvider(c *Core, p ProviderConfig) *remoteProvider {
 	ctx, cancel := context.WithCancel(c.ctx)
 	r := &remoteProvider{core: c, config: p, ctx: ctx, cancel: cancel}
-	var tc credentials.TransportCredentials = insecure.NewCredentials()
+	if err := validateRemoteTransport(p); err != nil {
+		r.initErr = err
+		return r
+	}
+	var tc credentials.TransportCredentials = guardedRemoteCredentials{TransportCredentials: insecure.NewCredentials(), loopback: numericLoopbackAddress(p.Address)}
 	if p.TLS {
 		host, _, _ := net.SplitHostPort(p.Address)
 		serverName := p.ServerName
@@ -492,7 +588,12 @@ func newRemoteProvider(c *Core, p ProviderConfig) *remoteProvider {
 		}
 		tc = credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12, ServerName: serverName})
 	}
-	r.conn, r.initErr = grpc.NewClient("passthrough:///"+p.Address, grpc.WithTransportCredentials(tc), grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return c.dial(ctx, p.Address) }), grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(2*maxPayload), grpc.MaxCallSendMsgSize(2*maxPayload)))
+	r.conn, r.initErr = grpc.NewClient("passthrough:///"+p.Address, grpc.WithTransportCredentials(tc), grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+		if !p.TLS && !numericLoopbackAddress(p.Address) && (!isTailnet(p.Address) || !c.store.Snapshot().Tailnet) {
+			return nil, fault("permission_denied", "plaintext remote connections require the enabled embedded encrypted bridge")
+		}
+		return c.dial(ctx, p.Address)
+	}), grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(2*maxPayload), grpc.MaxCallSendMsgSize(2*maxPayload)))
 	if r.initErr == nil {
 		r.client = pb.NewNotificationCoreClient(r.conn)
 	}
@@ -612,7 +713,7 @@ func (p *remoteProvider) Close() error {
 }
 func (p *remoteProvider) call(ctx context.Context, method string, params any, out any) error {
 	if p.initErr != nil {
-		return fault("unavailable", "remote connection could not be created")
+		return rejectOperation(true, "remote connection could not be created before submission")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
@@ -627,6 +728,12 @@ func (p *remoteProvider) call(ctx context.Context, method string, params any, ou
 	}
 	result, err := p.client.Call(p.auth(ctx), &pb.Command{Method: method, ParamsJson: raw, VisitedNodes: route})
 	if err != nil {
+		// Our server returns this status only from authentication before Call
+		// dispatch. Deadlines, unavailable transports, and all other statuses
+		// retain uncertain acceptance; they are not proof of non-submission.
+		if status.Code(err) == codes.Unauthenticated {
+			return rejectOperation(true, "remote authentication rejected before submission")
+		}
 		return fault("unavailable", "remote operation failed")
 	}
 	if result.ErrorCode != "" {
@@ -659,6 +766,12 @@ func (p *remoteProvider) Send(ctx context.Context, b Binding, c Content, request
 	err := p.call(ctx, "message.send", map[string]any{"session": b.Session, "content": c, "request_id": request}, &out)
 	if err == nil {
 		err = p.core.store.Update(func(d *State) error { remember(d, out.Message, p.config.ID); return nil })
+		if err != nil && stateCommitted(err) {
+			// Upstream acceptance is known and the reference is committed. Let
+			// the root operation persist its successful result, not uncertainty.
+			p.core.log("state_commit_not_durable", p.config.ID, "")
+			err = nil
+		}
 	}
 	return out, err
 }
@@ -667,11 +780,29 @@ func (p *remoteProvider) Reply(ctx context.Context, m MessageRef, c Content, req
 	err := p.call(ctx, "message.reply", map[string]any{"message": m, "content": c, "request_id": request}, &out)
 	if err == nil {
 		err = p.core.store.Update(func(d *State) error { remember(d, out.Message, p.config.ID); return nil })
+		if err != nil && stateCommitted(err) {
+			// Upstream acceptance is known and the reference is committed. Let
+			// the root operation persist its successful result, not uncertainty.
+			p.core.log("state_commit_not_durable", p.config.ID, "")
+			err = nil
+		}
 	}
 	return out, err
 }
 func (p *remoteProvider) Ack(ctx context.Context, m MessageRef) error {
 	return p.call(ctx, "message.ack", map[string]any{"message": m}, nil)
+}
+func (p *remoteProvider) ReleaseInbox(ctx context.Context, m MessageRef) error {
+	return p.call(ctx, "message.inbox.release", map[string]any{"message": m}, nil)
+}
+func (p *remoteProvider) InboxConsumed(ctx context.Context, m MessageRef) (bool, error) {
+	var out struct {
+		Consumed bool `json:"consumed"`
+	}
+	if err := p.call(ctx, "message.inbox.status", map[string]any{"message": m}, &out); err != nil {
+		return false, err
+	}
+	return out.Consumed, nil
 }
 
 type dialResult struct {
@@ -697,6 +828,7 @@ func isTailnet(address string) bool {
 }
 func (c *Core) dial(ctx context.Context, address string) (net.Conn, error) {
 	target := address
+	embedded := false
 	if c.store.Snapshot().Tailnet && isTailnet(address) {
 		id := uid()
 		ch := make(chan dialResult, 1)
@@ -724,9 +856,17 @@ func (c *Core) dial(ctx context.Context, address string) (net.Conn, error) {
 				return nil, fault("unavailable", "embedded tunnel failed")
 			}
 			target = result.Address
+			embedded = true
 		}
 	}
-	return (&net.Dialer{Timeout: 15 * time.Second}).DialContext(ctx, "tcp", target)
+	conn, err := (&net.Dialer{Timeout: 15 * time.Second}).DialContext(ctx, "tcp", target)
+	if err != nil {
+		return nil, err
+	}
+	if embedded {
+		return &embeddedRemoteConn{Conn: conn}, nil
+	}
+	return conn, nil
 }
 func (c *Core) completeDial(id, address, msg string) error {
 	if msg == "" {

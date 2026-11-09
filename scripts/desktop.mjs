@@ -1,8 +1,9 @@
 // Compile the pinned MyGo module directly. All version metadata comes from the
 // root package.json; --package-version exists only for upgrade test fixtures.
 import { execFile, spawn } from 'node:child_process';
-import { chmod, copyFile, cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { chmod, copyFile, cp, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { join, relative, resolve, sep } from 'node:path';
+import { createHash } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs, promisify } from 'node:util';
 import { buildTarget, sidecarName } from './build-targets.mjs';
@@ -156,11 +157,32 @@ async function packageMac(paths, version, appID, bundles) {
   return archive;
 }
 
+export async function windowsPayloadManifest(payload) {
+  const manifest = {};
+  async function visit(directory) {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) await visit(path);
+      else if (entry.isFile()) manifest[relative(payload, path).split(sep).join('/')] = createHash('sha256').update(await readFile(path)).digest('hex');
+      else throw new Error('Windows installer payload contains a redirected or special entry');
+    }
+  }
+  await visit(payload);
+  return manifest;
+}
+
 async function packageWindows(paths, version) {
   await mkdir(paths.nsis, { recursive: true });
   const installer = join(paths.nsis, `Nootify_${version}_x64-setup.exe`);
+  const helper = join(paths.output, 'nootify-installer-stage.exe');
+  await run('go', ['build', '-mod=readonly', '-trimpath', '-buildvcs=false', '-ldflags=-s -w -H=windowsgui', '-o', helper, './cmd/installer-stage'], {
+    cwd: join(root, 'desktop'), env: { ...process.env, GOOS: 'windows', GOARCH: 'amd64', CGO_ENABLED: '0' }, maxBuffer: 16 << 20,
+  });
+  await verifyWindowsX64(helper);
+  const manifest = join(paths.output, 'installer-payload.json');
+  await writeFile(manifest, JSON.stringify(await windowsPayloadManifest(paths.payload)));
   await withNsisCompiler(root, compiler => run(compiler, ['/V3', `/DVERSION=${version}`, `/DPAYLOAD=${paths.payload}`, `/DOUTPUT=${installer}`,
-    `/DICON=${join(root, 'desktop', 'icons', 'icon.ico')}`, `/DHOOKS=${join(root, 'scripts', 'windows-installer-hooks.nsh')}`, join(root, 'windows', 'installer.nsi')], { cwd: root, maxBuffer: 16 << 20 }));
+    `/DSTAGER=${helper}`, `/DMANIFEST=${manifest}`, `/DICON=${join(root, 'desktop', 'icons', 'icon.ico')}`, `/DHOOKS=${join(root, 'scripts', 'windows-installer-hooks.nsh')}`, join(root, 'windows', 'installer.nsi')], { cwd: root, maxBuffer: 16 << 20 }));
   return installer;
 }
 

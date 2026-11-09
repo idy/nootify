@@ -12,6 +12,11 @@ import type { LarkConnectionType } from './state.js';
 import { mergeRecipients, recipientDisplayName } from './lark-profile.js';
 import { RecipientListRenderer } from './recipient-list.js';
 import { Dropdown } from './dropdown.js';
+import { browserUiTransport } from './ui-transport.js';
+
+const ownerTransport = browserUiTransport(location, history);
+// Every API path, including streamed directories and reads, uses the same protected transport.
+const fetch = ownerTransport.fetch;
 
 interface PullSummary { internal: number; upstream: number; followed: number; running: boolean; lastSuccessAt?: string; error?: string; signedOut?: boolean }
 interface Snapshot {
@@ -153,7 +158,7 @@ const isPullView = (view: View): view is 'pulls-internal' | 'pulls-upstream' => 
 /** Views backed by the GitHub module's snapshot, loaded separately from the two-second page snapshot. */
 const usesPulls = (view: View): boolean => isPullView(view) || view === 'repos';
 const isSettingsView = (view: View): boolean => view.startsWith('settings-');
-const localOwnerLocked = (): boolean => /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname) && state.snapshot.access?.owner_authenticated === false;
+const localOwnerLocked = (): boolean => /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname) && !ownerTransport.authorized;
 
 const state = {
   view: viewFromHash(),
@@ -601,6 +606,7 @@ async function loadProviders(): Promise<void> {
     const response = await fetch('/ui/api/providers', { cache: 'no-store', signal: AbortSignal.timeout(8000) });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const page = await response.json() as ProvidersPage;
+    page.editable = page.editable && !localOwnerLocked();
     if (revision === providersRevision) {
       state.providers = page;
       if (state.providersReadError) { state.providersError = ''; state.providersReadError = false; }
@@ -822,6 +828,7 @@ async function loadRemote(): Promise<void> {
     const response = await fetch('/ui/api/settings/remote', { cache: 'no-store', signal: AbortSignal.timeout(8000) });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const page = await response.json() as RemotePage;
+    page.editable = page.editable && !localOwnerLocked();
     if (revision !== state.remoteRevision) return;
     state.remote = page;
     if (state.remoteReadError) { state.remoteError = ''; state.remoteReadError = false; }
@@ -907,13 +914,19 @@ function agentDetail(agent: AgentPrompt): string {
   if (agent.status === 'outdated') return t('写入内容与当前版本不同');
   return agent.injected ? t('新对话会按说明使用消息接入') : t('勾选后写入通知说明');
 }
+let agentsRevision = 0;
 async function loadAgents(): Promise<void> {
+  const revision = ++agentsRevision;
   try {
     const response = await fetch('/ui/api/agents', { cache: 'no-store', signal: AbortSignal.timeout(8000) });
     if (!response.ok) throw new Error(response.status === 404 ? t('Agents 模块未启用') : `HTTP ${response.status}`);
-    state.agents = await response.json() as AgentsPage;
-  } catch (error) { state.agentsError = () => t('无法读取 agent 状态：{p0}', { p0: (error as Error).message }); }
-  renderChrome(); renderAgents();
+    const page = await response.json() as AgentsPage;
+    if (revision !== agentsRevision) return;
+    state.agents = page;
+    state.agents.editable = state.agents.editable && !localOwnerLocked();
+    state.agentsError = '';
+  } catch (error) { if (revision === agentsRevision) state.agentsError = () => t('无法读取 agent 状态：{p0}', { p0: (error as Error).message }); }
+  if (revision === agentsRevision) { renderChrome(); renderAgents(); }
 }
 async function setAgent(agent: AgentPrompt, enabled: boolean): Promise<void> {
   if (state.agents?.editable !== true || state.pendingAgents.has(agent.agent)) return;
@@ -994,6 +1007,7 @@ async function loadSettings(): Promise<boolean> {
     const response = await fetch('/ui/api/settings', { cache: 'no-store', signal: AbortSignal.timeout(8000) });
     if (!response.ok) throw new Error(response.status === 404 ? t('设置模块未启用') : `HTTP ${response.status}`);
     state.settings = await response.json() as SettingsPage & { editable: boolean };
+    state.settings.editable = state.settings.editable && !localOwnerLocked();
     state.larkConnectionType ??= state.settings.lark.connection_type ?? 'bot';
     if (state.recipientDirectory && state.recipientDirectory.app_id !== state.settings.lark.app_id) invalidateRecipientDirectory();
     if (!state.larkEdited) fillLark();
@@ -1623,7 +1637,8 @@ function renderChrome(): void {
   $('access-label').textContent = local ? location.host : t('经 Tailscale');
   $('owner-access').hidden = !localOwnerLocked();
   $('owner-authorize').hidden = !(window as Window & { __NOOTIFY_PLATFORM__?: string }).__NOOTIFY_PLATFORM__;
-  const ownerCommand = state.snapshot.access?.owner_ui_command;
+  // Never recommend executable commands obtained from an unverified local listener.
+  const ownerCommand = ownerTransport.authorized ? state.snapshot.access?.owner_ui_command : undefined;
   $('owner-auth-command').hidden = !ownerCommand;
   $('owner-auth-command').textContent = ownerCommand ?? '';
   const tailnet = state.snapshot.access?.tailnet_url;
@@ -1648,6 +1663,7 @@ async function loadSnapshot(): Promise<void> {
     state.connected = false; state.connectionError = (error as Error).message;
     $('error').textContent = t('无法连接本机服务：{p0}。正在自动重试。', { p0: (error as Error).message });
     $('error').hidden = false; $('connection').textContent = t('连接中断'); $('connection-dot').className = 'dot error';
+    renderChrome();
   } finally { state.loading = false; }
 }
 async function loadPulls(): Promise<void> {

@@ -122,6 +122,12 @@ type Binding struct {
 	DeletePending      bool    `json:"delete_pending,omitempty"`
 	ResourceNodeID     string  `json:"resource_origin_node_id,omitempty"`
 	ResourceProviderID string  `json:"resource_provider_id,omitempty"`
+	// Aliases retain legacy chats targeting this session. They are leaf bindings,
+	// each with its own provider, sender and announcement metadata.
+	Aliases             []Binding `json:"aliases,omitempty"`
+	Legacy              bool      `json:"legacy,omitempty"`
+	LegacyHost          string    `json:"legacy_host,omitempty"`
+	PreserveDescription bool      `json:"preserve_description,omitempty"`
 }
 type SendResult struct {
 	Message   MessageRef `json:"message"`
@@ -205,6 +211,9 @@ type Event struct {
 	Hops     uint32     `json:"hops_remaining"`
 	SenderID string     `json:"sender_id,omitempty"`
 	ChatID   string     `json:"chat_id,omitempty"`
+	// SourceCreatedAt is retained by the ingress node for history deduplication.
+	// Relays do not need it: only the source's per-chat cursor covers history.
+	SourceCreatedAt int64 `json:"source_created_at,omitempty"`
 }
 type EventRecord struct {
 	Sequence uint64 `json:"broadcast_sequence,omitempty"`
@@ -212,16 +221,21 @@ type EventRecord struct {
 	Outcome  string `json:"outcome"`
 }
 type Delivery struct {
-	ID        string `json:"delivery_id"`
-	EventID   string `json:"event_id"`
-	Status    string `json:"status"`
-	Transport string `json:"transport_status,omitempty"`
-	Error     string `json:"error,omitempty"`
+	ID            string `json:"delivery_id"`
+	EventID       string `json:"event_id"`
+	Status        string `json:"status"`
+	Transport     string `json:"transport_status,omitempty"`
+	Error         string `json:"error,omitempty"`
+	InboxQueuedAt int64  `json:"inbox_queued_at,omitempty"`
 }
 type ReferenceRecord struct {
-	Message        MessageRef `json:"message"`
-	Routes         []string   `json:"routes,omitempty"`
-	AcknowledgedAt string     `json:"acknowledged_at,omitempty"`
+	Message             MessageRef `json:"message"`
+	Routes              []string   `json:"routes,omitempty"`
+	AcknowledgedAt      string     `json:"acknowledged_at,omitempty"`
+	InboxState          string     `json:"inbox_state,omitempty"`
+	InboxNodeID         string     `json:"inbox_node_id,omitempty"`
+	InboxUpdatedAt      int64      `json:"inbox_updated_at,omitempty"`
+	InboxReleasedRoutes []string   `json:"inbox_released_routes,omitempty"`
 }
 type Operation struct {
 	State       string          `json:"state"`
@@ -238,6 +252,10 @@ type rpcError struct {
 func (e *rpcError) Error() string  { return e.Message }
 func fault(code, msg string) error { return &rpcError{code, msg} }
 func publicError(err error) *rpcError {
+	var committed *committedStateError
+	if errors.As(err, &committed) {
+		return &rpcError{Code: "committed_not_durable", Message: "state mutation committed; filesystem durability was not confirmed"}
+	}
 	if rejection, ok := rejectionPublicError(err); ok {
 		return rejection
 	}

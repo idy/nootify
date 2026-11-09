@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import test from 'node:test';
-import { modulesFromGoList, npmPackages, renderNotices, SPDX_LICENSE_LIST, spdxIds } from './third-party-notices.mjs';
+import { goModules, modulesFromGoList, npmPackages, renderNotices, SPDX_LICENSE_LIST, spdxIds } from './third-party-notices.mjs';
 
 async function fixture(files) {
   const dir = await mkdtemp(join(tmpdir(), 'nootify-notices-'));
@@ -37,6 +37,35 @@ test('Go module attribution uses linked dependencies, deduplicates and excludes 
   assert.equal(modules[0].version, 'v0.8.3');
   assert.equal(modules[0].dir, '/cache/mygo');
   assert.equal(modules[0].source, 'https://github.com/egoist/mygo');
+});
+
+test('runtime attribution queries each build module and reproduces every selected toolchain license', async () => {
+  const dir = await fixture({ 'go127/LICENSE': 'Go 1.27 runtime license', 'go128/LICENSE': 'Go 1.28 runtime license' });
+  try {
+    const calls = [];
+    const components = await goModules({ goos: 'windows', goarch: 'amd64' }, async (command, args, options) => {
+      assert.equal(command, 'go');
+      const module = basename(options.cwd);
+      assert.ok(['desktop', 'core', 'tailscale', 'installer-stage'].includes(module), 'root-level toolchain selection must never be used');
+      assert.equal(options.env.GOOS, 'windows'); assert.equal(options.env.GOARCH, 'amd64'); assert.equal(options.env.CGO_ENABLED, '0');
+      calls.push([module, args[0]]);
+      if (args[0] === 'list') return { stdout: 'example.com/shared\tv1.0.0\t/module-cache/shared\n' };
+      assert.deepEqual(args, ['env', '-json', 'GOROOT', 'GOVERSION']);
+      return { stdout: JSON.stringify(module === 'core'
+        ? { GOROOT: join(dir, 'go128'), GOVERSION: 'go1.28.1' }
+        : { GOROOT: join(dir, 'go127'), GOVERSION: 'go1.27.3' }) };
+    });
+    assert.equal(calls.length, 8);
+    for (const module of ['desktop', 'core', 'tailscale', 'installer-stage']) assert.deepEqual(calls.filter(([name]) => name === module).map(([, method]) => method).sort(), ['env', 'list']);
+    const runtimes = components.filter(component => component.kind === 'Go runtime');
+    assert.deepEqual(runtimes.map(component => component.version), ['go1.27.3', 'go1.28.1']);
+    assert.deepEqual(runtimes[0].executables, ['Nootify', 'nootify-tsnet', 'nootify-installer-stage']);
+    assert.deepEqual(runtimes[1].executables, ['nootify-core']);
+    assert.equal(components.filter(component => component.kind === 'Go module').length, 1, 'shared dependencies remain deduplicated');
+    const notices = await renderNotices('x86_64-pc-windows-msvc', runtimes, []);
+    assert.match(notices, /Go standard library go1\.27\.3[\s\S]*Built into: Nootify, nootify-tsnet[\s\S]*Go 1\.27 runtime license/);
+    assert.match(notices, /Go standard library go1\.28\.1[\s\S]*Built into: nootify-core[\s\S]*Go 1\.28 runtime license/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
 test('notices reproduce shipped license files and fall back to SPDX texts of declared licenses', async () => {

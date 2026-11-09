@@ -25,6 +25,11 @@ VIAddVersionKey /LANG=1033 "LegalCopyright" "Copyright Nootify contributors"
 Var UpdateMode
 Var Relaunch
 Var PassiveMode
+Var TransactionStarted
+Var RegistrationChanged
+Var RegisteredLocation
+Var PreviousVersion
+Var InstallerMutex
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\Nootify"
 
 Page directory NootifyDirectoryPre
@@ -38,6 +43,22 @@ UninstPage instfiles
   StrCpy $UpdateMode 0
   StrCpy $Relaunch 0
   StrCpy $PassiveMode 0
+  StrCpy $TransactionStarted 0
+  StrCpy $RegistrationChanged 0
+  ; Hold one kernel mutex for the entire installer/uninstaller lifetime, including
+  ; extraction between helper invocations. A crashed process releases it.
+  System::Call 'kernel32::CreateMutexW(p 0, i 0, w "Global\Nootify.Installer") p.r0 ?e'
+  Pop $1
+  ${If} $0 = 0
+  ${OrIf} $1 = 183
+    SetErrorLevel 1
+    Quit
+  ${EndIf}
+  StrCpy $InstallerMutex $0
+  InitPluginsDir
+  SetOutPath "$PLUGINSDIR"
+  File /oname=nootify-installer-stage.exe "${STAGER}"
+  File /oname=installer-payload.json "${MANIFEST}"
   ${GetParameters} $0
   ; Tauri's legacy passive updater uses /P /UPDATE /R. /P is not an NSIS
   ; built-in: retain the progress page, but require no directory/finish clicks.
@@ -124,6 +145,27 @@ Function NootifyAcknowledgeUpdater
   ${EndIf}
 FunctionEnd
 
+; A new empty destination must not orphan another registered installation's
+; task. This guard runs even when none of the target payload files exist.
+Function NootifyCheckRegisteredDestination
+  ReadRegStr $RegisteredLocation HKCU "${UNINSTALL_KEY}" "InstallLocation"
+  ReadRegStr $PreviousVersion HKCU "${UNINSTALL_KEY}" "DisplayVersion"
+  ${If} $RegisteredLocation != ""
+  ${AndIf} $RegisteredLocation != $INSTDIR
+    SetErrorLevel 1
+    Abort "Nootify is already registered in another directory. Upgrade there, or uninstall it before choosing a new destination."
+  ${EndIf}
+FunctionEnd
+
+!macro NootifyTransaction ACTION
+  nsExec::ExecToLog /TIMEOUT=900000 '"$PLUGINSDIR\nootify-installer-stage.exe" --action ${ACTION} --target "$INSTDIR" --manifest "$PLUGINSDIR\installer-payload.json"'
+  Pop $0
+  ${If} $0 != 0
+    SetErrorLevel 1
+    Abort "Nootify could not ${ACTION} its installer transaction. The previous payload is retained; retry this installer to recover."
+  ${EndIf}
+!macroend
+
 ; Recursive payload replacement is permitted only in a registered installation.
 ; A fresh target containing an unrelated service/ (even an empty one) is refused
 ; before hooks run, and its files remain untouched.
@@ -156,11 +198,22 @@ Function NootifyPreflightPayload
   ${OrIf} ${FileExists} "$INSTDIR\node.exe"
   ${OrIf} ${FileExists} "$INSTDIR\nootify-core.exe"
   ${OrIf} ${FileExists} "$INSTDIR\nootify-tsnet.exe"
+  ${OrIf} ${FileExists} "$INSTDIR\uninstall.exe"
     ReadRegStr $0 HKCU "${UNINSTALL_KEY}" "InstallLocation"
     ${If} $0 != $INSTDIR
       SetErrorLevel 1
       Abort "The target contains files not owned by this registered Nootify installation. Choose an empty directory."
     ${EndIf}
+  ${EndIf}
+  ${If} ${FileExists} "$INSTDIR\.nootify-installer\journal.json"
+  ${AndIf} $RegisteredLocation != $INSTDIR
+    SetErrorLevel 1
+    Abort "Refusing an installer journal outside this registered Nootify installation."
+  ${EndIf}
+FunctionEnd
+
+Function NootifyPreflightInstalledFiles
+  ${If} $RegisteredLocation != ""
     ${IfNot} ${FileExists} "$INSTDIR\Nootify.exe"
     ${OrIfNot} ${FileExists} "$INSTDIR\node.exe"
     ${OrIfNot} ${FileExists} "$INSTDIR\service\dist\src\cli.js"
@@ -214,23 +267,38 @@ Function un.NootifyPreflightDesktop
 FunctionEnd
 
 Section "Nootify" Install
-  ; Check the desktop lock before stopping its independent service or deleting
-  ; resources. Failed upgrades must leave the previous installation operational.
+  Call NootifyCheckRegisteredDestination
   Call NootifyPreflightPayload
+  ; The desktop lock is checked before recovery too: no service changes while
+  ; the user still has a mapped desktop image.
   Call NootifyPreflightDesktop
-  ; The checked, environment-sanitized bundled CLI owns task/process validation.
-  ; Abort on failure before deleting/replacing any payload. Do not invoke the
-  ; old uninstaller during updates: the registered task must retain its identity.
-  !insertmacro NSIS_HOOK_PREINSTALL
-  SetOutPath "$INSTDIR"
+  ; Recover an interrupted exchange before checking completeness. The helper
+  ; refuses redirected or unrecognized journals and never touches private state.
+  !insertmacro NootifyTransaction prepare
+  StrCpy $TransactionStarted 1
+  Call NootifyPreflightInstalledFiles
+  ; Extraction touches only an empty staging tree. Abort on any error before
+  ; querying/stopping the existing service or exchanging package-owned roots.
+  SetOutPath "$INSTDIR\.nootify-installer\new"
   SetOverwrite on
-  RMDir /r "$INSTDIR\service"
+  ClearErrors
   File "${PAYLOAD}\Nootify.exe"
   File "${PAYLOAD}\node.exe"
   File "${PAYLOAD}\nootify-core.exe"
   File "${PAYLOAD}\nootify-tsnet.exe"
   File /r "${PAYLOAD}\service"
-  WriteUninstaller "$INSTDIR\uninstall.exe"
+  WriteUninstaller "$INSTDIR\.nootify-installer\new\uninstall.exe"
+  ${If} ${Errors}
+    SetErrorLevel 1
+    Abort "Nootify could not extract the replacement. The installed files and service have not been changed."
+  ${EndIf}
+  ; Validates every extracted file against a trusted manifest, journals prior
+  ; RUNNING state, then stops/exchanges/restarts via the owned bundled CLI.
+  ; /R controls only desktop launch. Deliberately stopped services stay stopped.
+  SetOutPath "$PLUGINSDIR"
+  !insertmacro NootifyTransaction apply
+  StrCpy $RegistrationChanged 1
+  ClearErrors
   CreateShortcut "$SMPROGRAMS\Nootify.lnk" "$INSTDIR\Nootify.exe"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayName" "Nootify"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayVersion" "${VERSION}"
@@ -242,11 +310,35 @@ Section "Nootify" Install
   WriteRegStr HKCU "${UNINSTALL_KEY}" "AppUserModelId" "dev.idy.nootify"
   WriteRegDWORD HKCU "${UNINSTALL_KEY}" "NoModify" 1
   WriteRegDWORD HKCU "${UNINSTALL_KEY}" "NoRepair" 1
+  ${If} ${Errors}
+    SetErrorLevel 1
+    Abort "Nootify could not update its installation registration. Restoring the previous installation."
+  ${EndIf}
+  !insertmacro NootifyTransaction finish
+  StrCpy $TransactionStarted 0
 SectionEnd
 
+Function .onInstFailed
+  ${If} $TransactionStarted = 1
+    SetOutPath "$PLUGINSDIR"
+    nsExec::ExecToLog /TIMEOUT=900000 '"$PLUGINSDIR\nootify-installer-stage.exe" --action recover --target "$INSTDIR"'
+    Pop $0
+    ${If} $0 = 0
+    ${AndIf} $RegistrationChanged = 1
+      ${If} $RegisteredLocation != ""
+        WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayVersion" "$PreviousVersion"
+      ${Else}
+        DeleteRegKey HKCU "${UNINSTALL_KEY}"
+        Delete "$SMPROGRAMS\Nootify.lnk"
+      ${EndIf}
+    ${EndIf}
+    SetErrorLevel 1
+  ${EndIf}
+FunctionEnd
+
 Function .onInstSuccess
-  ; /R works with /S, /P and /UPDATE too. Only the fully replaced desktop starts
-  ; the task, once, after all files and registration have been written.
+  ; /R works with /S, /P and /UPDATE too, after the independent service's prior
+  ; state has already been restored and all files/registration committed.
   ${If} $Relaunch = 1
     Exec '$\"$INSTDIR\Nootify.exe$\"'
   ${EndIf}
@@ -256,6 +348,7 @@ Section "Uninstall"
   ; The desktop is independent of the owned service job. Refuse a locked image
   ; before stopping that service or removing payload, task or registration.
   Call un.NootifyPreflightDesktop
+  !insertmacro NootifyTransaction recover
   !insertmacro NSIS_HOOK_PREUNINSTALL
   Delete "$INSTDIR\Nootify.exe"
   Delete "$INSTDIR\node.exe"

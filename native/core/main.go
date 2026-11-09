@@ -49,7 +49,7 @@ func (c *Core) Handle(ctx context.Context, method string, raw json.RawMessage, l
 	}
 	if !local {
 		switch method {
-		case "session.ensure", "session.bind", "session.metadata.get", "session.metadata.set", "session.delete", "message.send", "message.reply", "message.ack":
+		case "session.ensure", "session.bind", "session.metadata.get", "session.metadata.set", "session.delete", "message.send", "message.reply", "message.ack", "message.inbox.release", "message.inbox.status":
 		default:
 			return nil, fault("permission_denied", "method is private to the local bridge")
 		}
@@ -119,7 +119,25 @@ func (c *Core) Handle(ctx context.Context, method string, raw json.RawMessage, l
 	case "delivery.complete":
 		return map[string]any{"completed": true}, c.Complete(p.DeliveryID, p.Status, p.Transport, p.Error)
 	case "delivery.retry":
-		return map[string]any{"retried": true}, c.RetryDelivery(p.DeliveryID)
+		return map[string]any{"retried": true}, c.RetryDeliveryContext(ctx, p.DeliveryID)
+	case "message.inbox.release":
+		if p.Message == nil {
+			return nil, fault("invalid_argument", "full message reference is required")
+		}
+		return map[string]any{"released": true}, c.ReleaseInbox(ctx, *p.Message)
+	case "message.inbox.status":
+		if p.Message == nil {
+			return nil, fault("invalid_argument", "full message reference is required")
+		}
+		consumed, err := c.InboxConsumed(ctx, *p.Message)
+		return map[string]any{"consumed": consumed}, err
+	case "delivery.inbox.consume":
+		if p.Message == nil {
+			return nil, fault("invalid_argument", "full message reference is required")
+		}
+		return map[string]any{"consumed": true}, c.ConsumeInbox(ctx, *p.Message)
+	case "delivery.inbox.reconcile":
+		return map[string]any{"reconciled": true}, c.ReconcileInbox(ctx, raw)
 	case "dial.complete":
 		return map[string]any{"completed": true}, c.completeDial(p.RequestID, p.Address, p.Error)
 	case "transport.configure":
@@ -127,7 +145,7 @@ func (c *Core) Handle(ctx context.Context, method string, raw json.RawMessage, l
 		defer c.ops.Unlock()
 		before := c.store.Snapshot().Tailnet
 		err := c.store.Update(func(d *State) error { d.Tailnet = p.Tailnet; return nil })
-		if err == nil && before != p.Tailnet {
+		if stateCommitted(err) && before != p.Tailnet {
 			for _, cfg := range c.store.Snapshot().Providers {
 				if cfg.Type == "remote" {
 					c.startProvider(cfg)

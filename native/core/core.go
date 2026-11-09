@@ -11,20 +11,23 @@ import (
 )
 
 type Core struct {
-	store     *Store
-	ctx       context.Context
-	cancel    context.CancelFunc
-	mu        sync.Mutex
-	ops       *operationGate
-	sessions  sessionGates
-	acks      sessionGates
-	providers map[string]Provider
-	statuses  map[string]string
-	subs      map[string]map[*Subscription]struct{}
-	emit      func(string, any) error
-	server    *remoteServer
-	dialMu    sync.Mutex
-	dials     map[string]chan dialResult
+	store            *Store
+	ctx              context.Context
+	cancel           context.CancelFunc
+	mu               sync.Mutex
+	ops              *operationGate
+	sessions         sessionGates
+	acks             sessionGates
+	inboxReleases    sessionGates
+	inboxReleaseOnce sync.Once
+	inboxReleaseWG   sync.WaitGroup
+	providers        map[string]Provider
+	statuses         map[string]string
+	subs             map[string]map[*Subscription]struct{}
+	emit             func(string, any) error
+	server           *remoteServer
+	dialMu           sync.Mutex
+	dials            map[string]chan dialResult
 }
 
 func NewCore(parent context.Context, s *Store, emit func(string, any) error) (*Core, error) {
@@ -32,10 +35,31 @@ func NewCore(parent context.Context, s *Store, emit func(string, any) error) (*C
 	c := &Core{store: s, ctx: ctx, cancel: cancel, ops: newOperationGate(), providers: map[string]Provider{}, statuses: map[string]string{}, subs: map[string]map[*Subscription]struct{}{}, emit: emit, dials: map[string]chan dialResult{}}
 	err := s.Update(func(d *State) error {
 		// Upgrade deleted bindings written before resource tombstones existed.
-		for _, binding := range d.Bindings {
+		for key, binding := range d.Bindings {
+			retainLegacyIdentity(&binding)
+			for i := range binding.Aliases {
+				retainLegacyIdentity(&binding.Aliases[i])
+			}
+			d.Bindings[key] = binding
 			if binding.Deleted && binding.ChatID != "" {
 				setResourceOrigin(*d, &binding, d.NodeID)
 				d.RetiredBindings[resourceKey(binding)] = binding
+			}
+		}
+		// Retained pre-upgrade polled events also need a hold at every relay.
+		// Existing consumed state is authoritative and must never be reopened.
+		for id, record := range d.Events {
+			e := record.Event
+			if e.SourceCreatedAt == 0 && e.ChatID != "" && e.Message.OriginNodeID == d.NodeID && d.Providers[e.Message.ProviderID].Type == "feishu" {
+				// Older ingress records lacked a provider timestamp. Keep them
+				// through the next reconciliation rather than guessing their age.
+				e.SourceCreatedAt = inboxTimestamp(d)
+				record.Event = e
+				d.Events[id] = record
+			}
+			if polledInbox(e.Session.Adapter) && (record.Outcome == "local" || record.Outcome == "broadcast") && d.References[e.Message.key()].InboxState == "" {
+				remember(d, e.Message, "")
+				holdInbox(d, e, "")
 			}
 		}
 		for id, v := range d.Deliveries {
@@ -53,6 +77,7 @@ func NewCore(parent context.Context, s *Store, emit func(string, any) error) (*C
 	return c, nil
 }
 func (c *Core) Start() error {
+	c.startInboxReleases()
 	d := c.store.Snapshot()
 	for _, p := range d.Providers {
 		c.startProvider(p)
@@ -64,6 +89,7 @@ func (c *Core) Start() error {
 }
 func (c *Core) Close() {
 	c.cancel()
+	c.inboxReleaseWG.Wait()
 	c.mu.Lock()
 	ps := c.providers
 	c.providers = map[string]Provider{}
@@ -198,6 +224,7 @@ func (c *Core) SetMetadata(ctx context.Context, pid string, s Session, m map[str
 		if !c.leaseCurrent(*d, lease) || bindingState(*d, s) != lease.BindingState {
 			return fault("conflict", "provider or session changed while setting metadata")
 		}
+		retainLegacyIdentity(&b)
 		b.Session.Metadata = v
 		d.Bindings[s.key()] = b
 		return nil
@@ -248,11 +275,8 @@ func (c *Core) Delete(ctx context.Context, pid string, s Session) error {
 	if !b.DeletePending {
 		return nil
 	}
-	// Removed providers cannot be contacted. The mapping stays tombstoned and
-	// retired; explicit Ensure/Bind may select an available replacement.
-	if _, configured := d.Providers[b.ProviderID]; !configured {
-		return nil
-	}
+	// Cleanup also covers imported aliases, including aliases whose provider
+	// remains available after the primary provider was removed.
 	return c.cleanupBinding(ctx, &b)
 }
 func (c *Core) operation(ctx context.Context, key, request string, input any, automatic bool, fn func(string) (SendResult, error)) (SendResult, error) {
@@ -377,6 +401,7 @@ func remember(d *State, m MessageRef, route string) {
 		r.Routes = append(r.Routes, route)
 	}
 	d.References[k] = r
+	retainReference(d, k)
 }
 func (c *Core) Resolve(m *MessageRef, id string) (MessageRef, error) {
 	if m != nil {
@@ -514,6 +539,7 @@ func (c *Core) Ingest(ctx context.Context, e Event, route string) error {
 	var wake []string
 	err = c.store.Update(func(d *State) error {
 		remember(d, e.Message, route)
+		holdInbox(d, e, route)
 		if record, ok := d.Events[e.ID]; ok && record.Outcome != "loop_suppressed" {
 			if binding, bound := d.Bindings[record.Event.Session.key()]; bound && binding.Deleted {
 				return nil
@@ -558,7 +584,7 @@ func (c *Core) Ingest(ctx context.Context, e Event, route string) error {
 		d.Events[e.ID] = record
 		return nil
 	})
-	if err != nil {
+	if !stateCommitted(err) {
 		return err
 	}
 	for _, id := range wake {
@@ -570,7 +596,7 @@ func (c *Core) Ingest(ctx context.Context, e Event, route string) error {
 			_ = c.Complete(delivery.ID, "unconfirmed", "", "")
 		}
 	}
-	return nil
+	return err
 }
 func (c *Core) Complete(id, status, transport, msg string) error {
 	switch status {
@@ -588,8 +614,24 @@ func (c *Core) Complete(id, status, transport, msg string) error {
 		}
 		v.Status = status
 		v.Transport = transport
+		if transport == "inbox_queued" {
+			if v.InboxQueuedAt == 0 {
+				v.InboxQueuedAt = inboxTimestamp(d)
+			}
+			if event, ok := d.Events[v.EventID]; ok {
+				r := d.References[event.Event.Message.key()]
+				if r.InboxState == "releasing" || r.InboxState == "consumed" {
+					v.Transport = "inbox_consumed"
+				}
+			}
+		}
 		v.Error = msg
 		d.Deliveries[id] = v
+		if status == "rejected" {
+			if record, ok := d.Events[v.EventID]; ok && record.Event.Session.NodeID == d.NodeID && polledInbox(record.Event.Session.Adapter) {
+				markInboxConsumed(d, record.Event.Message)
+			}
+		}
 		return nil
 	})
 }
@@ -650,7 +692,11 @@ func (s *Subscription) Next() (Event, error) {
 			return Event{}, err
 		}
 		s.mu.Lock()
-		d := s.core.store.Snapshot()
+		d, err := s.core.store.DurableSnapshot()
+		if err != nil {
+			s.mu.Unlock()
+			return Event{}, err
+		}
 		p := d.Peers[s.node]
 		pendingSet := make(map[string]bool, len(p.Pending))
 		for _, id := range p.Pending {
@@ -699,7 +745,7 @@ func (s *Subscription) Confirm(id string) error {
 		}
 		return nil
 	})
-	if err == nil {
+	if stateCommitted(err) {
 		delete(s.offered, id)
 		s.core.wake(s.node)
 	}

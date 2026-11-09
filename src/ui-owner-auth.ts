@@ -1,14 +1,13 @@
-import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import type { IncomingMessage, ServerResponse } from 'node:http';
-import { HttpError, object } from './types.js';
+import { createHmac, timingSafeEqual } from 'node:crypto';
+import { Agent, request as httpRequest, type IncomingMessage, type ServerResponse } from 'node:http';
+import type { Socket } from 'node:net';
+import { HttpError } from './types.js';
+import { limitedJson, privateNonce, UiSessions } from './ui-session-host.js';
+import type { UiCapability } from './ui-transport.js';
 
 const challengeAge = 30_000;
-const grantAge = 30_000;
-const sessionAge = 8 * 60 * 60_000;
-const cookieName = 'nootify_owner';
-const noncePattern = /^[A-Za-z0-9_-]{32,128}$/;
-const nonce = () => randomBytes(32).toString('base64url');
 const mac = (token: string, ...parts: unknown[]) => createHmac('sha256', token).update(JSON.stringify(parts)).digest('base64url');
+const noncePattern = /^[A-Za-z0-9_-]{32,128}$/;
 function equal(first: string, second: string): boolean {
   const a = Buffer.from(first), b = Buffer.from(second);
   return a.length === b.length && timingSafeEqual(a, b);
@@ -17,124 +16,90 @@ function send(response: ServerResponse, status: number, body: unknown): void {
   response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' });
   response.end(JSON.stringify(body));
 }
-async function body(request: IncomingMessage): Promise<Record<string, unknown>> {
-  const parts: Buffer[] = []; let bytes = 0;
-  for await (const part of request) {
-    const chunk = Buffer.isBuffer(part) ? part : Buffer.from(part); bytes += chunk.length;
-    if (bytes > 4096) throw new HttpError(413, 'Authorization request is too large');
-    parts.push(chunk);
-  }
-  try { return object(JSON.parse(Buffer.concat(parts).toString('utf8'))); }
-  catch { throw new HttpError(400, 'Invalid authorization request'); }
-}
-function route(value: unknown): string {
-  if (value === undefined) return '#/settings/general';
+export function ownerUiRoute(value: unknown): string {
+  if (value === undefined) return '#/logs';
   if (typeof value !== 'string' || !/^#\/[a-z-]+(?:\/[a-z-]+)?$/.test(value)) throw new HttpError(400, 'Invalid local UI route');
   return value;
 }
 
-/** One service owner's private bearer and short-lived browser grants; loopback alone is never authority. */
+/** Cookie-free private UI sessions. Bootstrap proofs are bound to the exact accepted TCP socket. */
 export class UiOwnerAuth {
-  private readonly usedProofs = new Map<string, number>();
-  private readonly grants = new Map<string, { host: string; route: string; expires: number }>();
+  readonly sessions = new UiSessions();
+  private readonly challenges = new WeakMap<Socket, { client: string; challenge: string; issued: number; proof: string }>();
   constructor(private readonly token: string) {}
-
   authenticated(request: IncomingMessage): boolean {
-    if (equal(String(request.headers.authorization ?? ''), `Bearer ${this.token}`)) return true;
-    const host = String(request.headers.host ?? '').toLowerCase();
-    const cookies = String(request.headers.cookie ?? '').split(';').map(part => part.trim());
-    const value = cookies.find(part => part.startsWith(`${cookieName}=`))?.slice(cookieName.length + 1);
-    if (!value || value.length > 256) return false;
-    const [id, expires, proof, extra] = value.split('.');
-    return !extra && noncePattern.test(id ?? '') && /^\d{13}$/.test(expires ?? '') && Number(expires) > Date.now()
-      && Number(expires) <= Date.now() + sessionAge && equal(proof ?? '', mac(this.token, 'ui-cookie', host, id, expires));
+    return equal(String(request.headers.authorization ?? ''), `Bearer ${this.token}`);
   }
-
   async handle(request: IncomingMessage, response: ServerResponse, url: URL, local: boolean): Promise<boolean> {
-    const redeem = request.method === 'GET' && url.pathname === '/' && url.searchParams.has('ui-grant');
-    const authorization = url.pathname === '/ui/api/auth/challenge' || url.pathname === '/ui/api/auth/grant';
-    if (!redeem && !authorization) return false;
+    if (url.pathname !== '/ui/api/auth/challenge' && url.pathname !== '/ui/api/auth/grant') return false;
     if (!local) { request.resume(); send(response, 403, { error: 'Owner authorization is local-only' }); return true; }
-    this.prune();
     const host = String(request.headers.host ?? '').toLowerCase();
-    if (redeem) {
-      const key = url.searchParams.get('ui-grant')!; const grant = this.grants.get(key);
-      this.grants.delete(key);
-      if (!grant || grant.host !== host || grant.expires <= Date.now()) { send(response, 403, { error: 'Authorization link expired or already used' }); return true; }
-      const id = nonce(), expires = String(Date.now() + sessionAge);
-      const value = `${id}.${expires}.${mac(this.token, 'ui-cookie', host, id, expires)}`;
-      response.writeHead(303, { location: `/${grant.route}`, 'set-cookie': `${cookieName}=${value}; HttpOnly; SameSite=Strict; Path=/`,
-        'cache-control': 'no-store', 'referrer-policy': 'no-referrer' });
-      response.end(); return true;
-    }
     if (url.pathname.endsWith('/challenge')) {
-      request.resume();
-      const client = url.searchParams.get('nonce') ?? '';
-      if (request.method !== 'GET' || !noncePattern.test(client)) { send(response, 400, { error: 'Invalid authorization challenge' }); return true; }
-      const challenge = nonce(), issued_at = Date.now();
-      send(response, 200, { challenge, issued_at, proof: mac(this.token, 'ui-server', host, client, challenge, issued_at) });
-      return true;
+      request.resume(); const client = url.searchParams.get('nonce') ?? '';
+      if (request.method !== 'GET' || !noncePattern.test(client)) throw new HttpError(400, 'Invalid authorization challenge');
+      const challenge = privateNonce(), issued = Date.now();
+      const proof = mac(this.token, 'ui-server', host, client, challenge, issued);
+      this.challenges.set(request.socket, { client, challenge, issued, proof });
+      send(response, 200, { challenge, issued_at: issued, proof }); return true;
     }
-    if (request.method !== 'POST' || request.headers['x-nootify-ui'] !== '1') { request.resume(); send(response, 403, { error: 'Owner authorization proof required' }); return true; }
-    const fields = await body(request);
-    const target = route(fields.route);
-    if (!equal(String(request.headers.authorization ?? ''), `Bearer ${this.token}`)) {
-      const { client_nonce: client, challenge, issued_at: issued, server_proof: serverProof, proof } = fields;
-      if (typeof client !== 'string' || !noncePattern.test(client) || typeof challenge !== 'string' || !noncePattern.test(challenge)
-        || !Number.isSafeInteger(issued) || Number(issued) > Date.now() || Date.now() - Number(issued) > challengeAge
-        || typeof serverProof !== 'string' || typeof proof !== 'string'
-        || !equal(serverProof, mac(this.token, 'ui-server', host, client, challenge, issued))
-        || !equal(proof, mac(this.token, 'ui-client', host, client, challenge, issued, serverProof))
-        || this.usedProofs.has(serverProof) || this.usedProofs.size >= 256) {
-        send(response, 403, { error: 'Service owner authorization required' }); return true;
-      }
-      this.usedProofs.set(serverProof, Number(issued) + challengeAge);
+    if (request.method !== 'POST' || request.headers['x-nootify-ui'] !== '1') throw new HttpError(403, 'Owner authorization proof required');
+    const expected = this.challenges.get(request.socket); this.challenges.delete(request.socket);
+    const fields = await limitedJson(request, 4096) as Record<string, unknown>;
+    if (!expected || !fields || expected.issued > Date.now() || Date.now() - expected.issued > challengeAge
+      || fields.client_nonce !== expected.client || fields.challenge !== expected.challenge || fields.issued_at !== expected.issued || fields.server_proof !== expected.proof
+      || typeof fields.proof !== 'string' || !equal(fields.proof, mac(this.token, 'ui-client', host, expected.client, expected.challenge, expected.issued, expected.proof))) {
+      throw new HttpError(403, 'Service owner authorization required on the verified connection');
     }
-    if (this.grants.size >= 128) { send(response, 429, { error: 'Too many pending authorization links' }); return true; }
-    const key = nonce(); this.grants.set(key, { host, route: target, expires: Date.now() + grantAge });
-    const grantUrl = `http://${host}/?ui-grant=${key}`;
-    send(response, 200, { url: grantUrl, proof: mac(this.token, 'ui-grant', host, grantUrl) });
+    // A forwarding listener can relay a proof on one backend socket. Derive the
+    // actual traffic key from the private PSK and complete verified transcript;
+    // neither that key nor the PSK is ever returned over the HTTP connection.
+    const session = this.sessions.create((id, expires) => mac(this.token, 'ui-session-key', host, expected.client, expected.challenge, expected.issued, expected.proof, id, expires));
+    send(response, 200, { session: { id: session.id, expires: session.expires }, proof: mac(this.token, 'ui-session', host, expected.client, expected.challenge, expected.issued, session.id, session.expires) });
     return true;
   }
-
-  private prune(): void {
-    for (const [key, expires] of this.usedProofs) if (expires <= Date.now()) this.usedProofs.delete(key);
-    for (const [key, grant] of this.grants) if (grant.expires <= Date.now()) this.grants.delete(key);
-  }
 }
 
-async function readResponse(response: Response): Promise<Record<string, unknown>> {
-  if (!response.ok || !response.body) throw new Error('Cannot authorize local UI');
-  const reader = response.body.getReader(); const chunks: Uint8Array[] = []; let bytes = 0;
-  try {
-    for (;;) {
-      const next = await reader.read(); if (next.done) break;
-      bytes += next.value.byteLength;
-      if (bytes > 4096) { await reader.cancel(); throw new Error('Invalid local authorization response'); }
-      chunks.push(next.value);
-    }
-    return object(JSON.parse(Buffer.concat(chunks).toString('utf8')));
-  } finally { reader.releaseLock(); }
-}
-
-/** Prove the server owns the same private key before signing a one-use browser grant; never send that key over HTTP. */
-export async function requestOwnerUiGrant(baseUrl: string, token: string, target = '#/settings/general'): Promise<string> {
+/** A dedicated keep-alive connection, never automatically replaced between challenge and proof. */
+export async function requestOwnerUiSession(baseUrl: string, token: string): Promise<UiCapability> {
   const base = new URL(baseUrl);
   if (base.protocol !== 'http:' || base.username || base.password || !['127.0.0.1', 'localhost', '[::1]'].includes(base.hostname)
     || base.pathname !== '/' || base.search || base.hash) throw new Error('Owner authorization requires a local service origin');
-  route(target);
-  const host = base.host.toLowerCase(), client = nonce();
-  const challengeUrl = new URL('/ui/api/auth/challenge', base); challengeUrl.searchParams.set('nonce', client);
-  const challenge = await readResponse(await fetch(challengeUrl, { cache: 'no-store', redirect: 'error', signal: AbortSignal.timeout(5000) }));
-  const issued = challenge.issued_at;
-  if (typeof challenge.challenge !== 'string' || !noncePattern.test(challenge.challenge) || !Number.isSafeInteger(issued)
-    || Number(issued) > Date.now() || Date.now() - Number(issued) > challengeAge || typeof challenge.proof !== 'string'
-    || !equal(challenge.proof, mac(token, 'ui-server', host, client, challenge.challenge, issued))) throw new Error('Local service owner identity could not be verified');
-  const result = await readResponse(await fetch(new URL('/ui/api/auth/grant', base), { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(5000),
-    headers: { 'content-type': 'application/json', 'x-nootify-ui': '1' }, body: JSON.stringify({ client_nonce: client, challenge: challenge.challenge,
-      issued_at: issued, server_proof: challenge.proof, proof: mac(token, 'ui-client', host, client, challenge.challenge, issued, challenge.proof), route: target }) }));
-  if (typeof result.url !== 'string' || typeof result.proof !== 'string' || !equal(result.proof, mac(token, 'ui-grant', host, result.url))) throw new Error('Invalid owner authorization grant');
-  const url = new URL(result.url);
-  if (url.origin !== base.origin || url.pathname !== '/' || !noncePattern.test(url.searchParams.get('ui-grant') ?? '') || [...url.searchParams].length !== 1) throw new Error('Invalid owner authorization URL');
-  return url.href;
+  const agent = new Agent({ keepAlive: true, maxSockets: 1, maxFreeSockets: 1 });
+  let socket: Socket | undefined;
+  const exchange = (path: string, body?: unknown): Promise<Record<string, unknown>> => new Promise((resolve, reject) => {
+    const text = body === undefined ? undefined : JSON.stringify(body);
+    const request = httpRequest(new URL(path, base), { agent, method: text === undefined ? 'GET' : 'POST', timeout: 5000,
+      headers: { 'x-nootify-ui': '1', ...(text ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(text) } : {}) } }, response => {
+      const chunks: Buffer[] = []; let size = 0;
+      response.on('data', (chunk: Buffer) => { size += chunk.length; if (size > 4096) request.destroy(new Error('Invalid local authorization response')); else chunks.push(chunk); });
+      response.once('error', reject);
+      response.once('end', () => {
+        try {
+          if (response.statusCode !== 200) throw new Error('Local service owner authorization is unavailable');
+          resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>);
+        } catch (error) { reject(error); }
+      });
+    });
+    request.once('socket', current => {
+      if (socket && (current !== socket || socket.destroyed)) request.destroy(new Error('Local owner authorization connection changed'));
+      else socket = current;
+    });
+    request.once('timeout', () => request.destroy(new Error('Local owner authorization timed out')));
+    request.once('error', reject); request.end(text);
+  });
+  try {
+    const host = base.host.toLowerCase(), client = privateNonce();
+    const challenge = await exchange('/ui/api/auth/challenge?nonce=' + client);
+    const issued = challenge.issued_at;
+    if (typeof challenge.challenge !== 'string' || !noncePattern.test(challenge.challenge) || !Number.isSafeInteger(issued)
+      || Number(issued) > Date.now() || Date.now() - Number(issued) > challengeAge || typeof challenge.proof !== 'string'
+      || !equal(challenge.proof, mac(token, 'ui-server', host, client, challenge.challenge, issued))) throw new Error('Local service owner identity could not be verified');
+    const result = await exchange('/ui/api/auth/grant', { client_nonce: client, challenge: challenge.challenge, issued_at: issued,
+      server_proof: challenge.proof, proof: mac(token, 'ui-client', host, client, challenge.challenge, issued, challenge.proof) });
+    const session = result.session as Pick<UiCapability, 'id' | 'expires'>;
+    if (!session || typeof session.id !== 'string' || !noncePattern.test(session.id)
+      || !Number.isSafeInteger(session.expires) || session.expires <= Date.now() || typeof result.proof !== 'string'
+      || !equal(result.proof, mac(token, 'ui-session', host, client, challenge.challenge, issued, session.id, session.expires))) throw new Error('Invalid owner authorization session');
+    return { ...session, key: mac(token, 'ui-session-key', host, client, challenge.challenge, issued, challenge.proof, session.id, session.expires) };
+  } finally { agent.destroy(); }
 }

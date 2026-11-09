@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import type { State } from './state.js';
 import type { SessionsService } from './sessions.js';
-import { CoreError, ProviderCore, type CoreEvent, type CoreTransport } from './provider-core.js';
+import { CoreError, ProviderCore, coreErrorCode, provenCoreRejection, type CoreEvent, type CoreTransport } from './provider-core.js';
 import { createLarkApi, type Credentials, type LarkApi } from './lark-metadata.js';
 import { LarkReplies } from './lark-replies.js';
 import { HttpError, RetryableDeliveryError, SessionUnavailable, identifier, isAdapter, isPolledAdapter, object, text, type RouteRequest, type RouteResponse, type ServiceModule } from './types.js';
@@ -24,7 +24,10 @@ export interface RemoteSummary {
   tls_cert_file?: string; tls_key_file?: string;
   peers: { node_id: string; name?: string; connected_at: string; connected?: boolean; pending: number; last_ack?: string }[];
 }
-export interface ProviderPage { node_id: string; providers: ProviderSummary[]; default_provider_id?: string; remote: RemoteSummary }
+export interface ProviderPage {
+  node_id: string; providers: ProviderSummary[]; default_provider_id?: string; remote: RemoteSummary;
+  network?: { status: 'retrying' | 'unconfirmed'; error: string };
+}
 export interface ProvidersSource {
   page(): Promise<ProviderPage>;
   action(body: Record<string, unknown>): Promise<ProviderPage>;
@@ -35,13 +38,21 @@ export interface ProvidersSource {
 interface CompatibilityConfig { credentials?: Credentials; recipient?: string }
 interface SessionRef { node_id?: string; adapter: string; session_id: string; name?: string; metadata?: Record<string, unknown> }
 interface Delivery { delivery_id: string; session: SessionRef; message: ProviderMessageRef; content: unknown; text: string }
-interface Binding { provider_id: string; session: SessionRef; created: boolean; chat_id?: string; thread_id?: string; sender_open_id?: string; deleted?: boolean; delete_pending?: boolean }
+interface Binding {
+  provider_id: string; session: SessionRef; created: boolean; chat_id?: string; thread_id?: string; sender_open_id?: string;
+  deleted?: boolean; delete_pending?: boolean; aliases?: Binding[];
+}
+function liveBindingResources(bindings: Binding[]): Binding[] {
+  // Core aliases are leaves with independent trust and session metadata; parent deletion suppresses all of them.
+  return bindings.flatMap(binding => binding.deleted ? [] : [binding, ...(binding.aliases ?? [])]
+    .filter(resource => !resource.deleted && resource.chat_id));
+}
 function publicFailure(error: unknown): HttpError {
   if (error instanceof HttpError) return error;
   const code = error instanceof CoreError ? error.code.toLowerCase() : '';
   const status = code === 'rejection_retryable' ? 503 : code === 'rejection_terminal' ? 422
     : /not.?found/.test(code) ? 404 : /invalid|argument|unsupported/.test(code) ? 400 : /unauth/.test(code) ? 401
-    : /permission/.test(code) ? 403 : /conflict|exist|precondition|unconfirmed|deleted/.test(code) ? 409
+    : /permission/.test(code) ? 403 : /conflict|exist|precondition|unconfirmed|committed_not_durable|deleted/.test(code) ? 409
     : /resource_exhausted/.test(code) ? 429 : /unavailable|timeout|busy/.test(code) ? 503 : 500;
   const failure = new HttpError(status, (error as Error).message); failure.cause = error; return failure;
 }
@@ -54,6 +65,7 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
   api?: LarkApi;
   private connection = 'starting';
   private cached?: ProviderPage;
+  private bindingGroups?: number;
   private readonly deliveries = new Map<string, Promise<void>>();
   private readonly tunnels = new Map<string, EmbeddedTailscaleTunnel>();
   private readonly pendingTunnels = new Map<string, Promise<EmbeddedTailscaleTunnel>>();
@@ -61,10 +73,17 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
   private networkGeneration = 0;
   private published?: number;
   private networkQueue: Promise<void> = Promise.resolve();
+  private networkFailure?: ProviderPage['network'];
+  private networkRetry?: NodeJS.Timeout;
+  private draining = false;
+  private stopping?: Promise<void>;
+  private inboxTimer?: NodeJS.Timeout;
+  private inboxReconciliation?: Promise<void>;
   private discoveryController?: AbortController;
   private discoveryTimer?: NodeJS.Timeout;
   private discovery?: Promise<void>;
   private compatibilitySync?: (update: () => Promise<CompatibilityConfig>) => Promise<void>;
+  private recipientSync?: (openId: string) => Promise<void>;
   constructor(readonly state: State, private readonly sessions: SessionsService,
     credentials: Credentials | undefined, private readonly report: (record: Record<string, unknown>) => void = () => {},
     private readonly port = 9417, private readonly tsnet?: TsnetClient, core?: CoreTransport, private readonly discover?: ThreadDiscovery) {
@@ -76,7 +95,7 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
   channel(): { name: 'feishu'; configured: boolean; recipient?: string; groups: number } {
     const configured = this.cached?.providers.some(provider => provider.enabled) ?? false;
     return { name: 'feishu', configured, recipient: this.credentials ? this.state.settings.lark_recipient_open_id : undefined,
-      groups: this.state.bindings.size };
+      groups: this.bindingGroups ?? this.state.bindings.size };
   }
   async start(): Promise<void> {
     try {
@@ -87,7 +106,11 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
           const observed = [...this.state.sessionObservations.values()].filter(session => session.session_id === binding.session_id);
           const adapters = new Set(observed.map(session => session.adapter));
           const adapter = binding.adapter ?? registered?.adapter ?? (adapters.size === 1 ? observed[0].adapter : undefined);
-          return { ...binding, ...(adapter ? { adapter } : {}), session_name: binding.session_name ?? registered?.session_name };
+          const appId = binding.app_id ?? this.credentials!.appId;
+          const cursor = [...this.state.larkPollCursors.values()].find(cursor => cursor.app_id === appId && cursor.chat_id === binding.chat_id
+            && cursor.container_type === 'chat' && cursor.container_id === binding.chat_id);
+          return { ...binding, ...(adapter ? { adapter } : {}), session_name: binding.session_name ?? registered?.session_name,
+            ...(cursor ? { history_cursor: cursor.through } : {}) };
         });
         const senders = new Set(bindings.filter(binding => !binding.app_id || binding.app_id === this.credentials!.appId).map(binding => binding.sender_open_id));
         const recipient = this.state.settings.lark_recipient_open_id ?? process.env.LARK_NOTIFY_OPEN_ID
@@ -95,6 +118,8 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
         await this.rpc('migration.import', { app_id: this.credentials.appId, app_secret: this.credentials.appSecret,
           recipient_open_id: recipient, legacy_host: hostname(), bindings });
       }
+      await this.reconcileInbox().catch(error => this.report({ source: 'providers', status: 'inbox_reconciliation_pending', error: (error as Error).message }));
+      this.inboxTimer = setInterval(() => { void this.reconcileInbox().catch(error => this.report({ source: 'providers', status: 'inbox_reconciliation_pending', error: (error as Error).message })); }, 30_000).unref();
       this.connection = 'ready'; await this.page();
       if (this.discover) {
         this.discoveryController = new AbortController();
@@ -103,13 +128,36 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
       }
     } catch (error) { this.connection = 'failed'; this.report({ source: 'providers', status: 'core_failed', error: (error as Error).message }); }
   }
-  async stop(): Promise<void> {
-    this.connection = 'stopped';
-    clearInterval(this.discoveryTimer); this.discoveryController?.abort();
+  stop(): Promise<void> { return this.stopping ??= this.shutdown(); }
+  private async shutdown(): Promise<void> {
+    this.draining = true; this.connection = 'stopped';
+    clearInterval(this.discoveryTimer); clearInterval(this.inboxTimer); clearTimeout(this.networkRetry); this.discoveryController?.abort();
     await this.networkQueue.catch(() => {});
+    if (this.discovery) await this.discovery;
+    while (this.deliveries.size) await Promise.allSettled([...this.deliveries.values()]);
+    await this.inboxReconciliation?.catch(() => {});
     await this.core.stop();
     await this.closeNetwork().catch(error => this.report({ source: 'providers', status: 'tailnet_cleanup_failed', error: (error as Error).message }));
-    await Promise.allSettled([...this.deliveries.values(), ...(this.discovery ? [this.discovery] : [])]);
+  }
+  consumeInbox(message: ProviderMessageRef): Promise<void> {
+    const pending = [...this.state.inboxMessages.values()].some(item => item.source?.channel === 'provider'
+      && item.source.delivery.message.origin_node_id === message.origin_node_id && item.source.delivery.message.provider_id === message.provider_id
+      && item.source.delivery.message.message_id === message.message_id);
+    return pending ? Promise.resolve() : this.rpc<void>('delivery.inbox.consume', { message });
+  }
+  reconcileInbox(): Promise<void> {
+    if (this.inboxReconciliation) return this.inboxReconciliation;
+    const task = (async () => {
+      let before = 0; let pending: { inbox_id: string; message: ProviderMessageRef }[] = [];
+      // Capture a committed snapshot in the same queue as inbox enqueue/delete. The cutoff excludes later completions.
+      await this.state.save({ apply: () => {
+        before = Date.now(); pending = [...this.state.inboxMessages.values()].flatMap(item => item.source?.channel === 'provider'
+          ? [{ inbox_id: item.id, message: item.source.delivery.message }] : []);
+      }, rollback: () => {} });
+      await this.rpc('delivery.inbox.reconcile', { pending, before });
+    })();
+    this.inboxReconciliation = task;
+    return task.finally(() => { if (this.inboxReconciliation === task) this.inboxReconciliation = undefined; });
   }
   private scheduleDiscovery(): void {
     if (this.discovery || !this.discover || !this.discoveryController || this.discoveryController.signal.aborted) return;
@@ -140,24 +188,36 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
   private async rpc<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
     try { return await this.core.request<T>(method, params); } catch (error) { throw publicFailure(error); }
   }
+  private async listBindings(): Promise<Binding[]> {
+    const bindings = await this.rpc<Binding[]>('session.list');
+    this.bindingGroups = liveBindingResources(bindings).length;
+    return bindings;
+  }
   async page(): Promise<ProviderPage> {
-    this.cached = await this.rpc<ProviderPage>('status'); return this.cached;
+    const [page] = await Promise.all([this.rpc<ProviderPage>('status'), this.listBindings()]);
+    this.cached = page;
+    return this.networkFailure ? { ...this.cached, network: this.networkFailure } : this.cached;
+  }
+  private async commit(method: string, params: Record<string, unknown>): Promise<HttpError | undefined> {
+    try { await this.rpc(method, params); }
+    catch (error) { if (coreErrorCode(error) !== 'committed_not_durable') throw error; return error as HttpError; }
   }
   async action(body: Record<string, unknown>): Promise<ProviderPage> {
-    let legacyChanged = false; let mutate: () => Promise<unknown>;
+    let legacyChanged = false; let mutate: () => Promise<HttpError | undefined>; let warning: HttpError | undefined;
     if (body.action === 'save') {
       const provider = object(body.provider);
-      mutate = () => this.rpc('provider.save', provider); legacyChanged = provider.id === 'legacy-feishu';
+      mutate = () => this.commit('provider.save', provider); legacyChanged = provider.id === 'legacy-feishu';
     } else if (body.action === 'delete' || body.action === 'default') {
       const id = identifier(body.id, 'id'); const method = `provider.${body.action}`;
-      mutate = () => this.rpc(method, { id }); legacyChanged = body.action === 'delete' && id === 'legacy-feishu';
+      mutate = () => this.commit(method, { id }); legacyChanged = body.action === 'delete' && id === 'legacy-feishu';
     } else throw new HttpError(400, 'Expected a provider action: save, delete or default');
     if (legacyChanged) {
-      const update = async () => { await mutate(); return this.compatibilityConfig(); };
+      const update = async () => { warning = await mutate(); return this.compatibilityConfig(); };
       if (this.compatibilitySync) await this.compatibilitySync(update);
       else this.refreshCompatibilityCredentials((await update()).credentials);
-    } else await mutate();
+    } else warning = await mutate();
     await this.syncNetwork();
+    if (warning) throw warning;
     return this.page();
   }
   /** Settings serializes legacy CRUD with account edits, persistence and directory invalidation. */
@@ -169,30 +229,45 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
     return { credentials: legacy ? { appId: String(legacy.app_id), appSecret: String(legacy.app_secret) } : undefined,
       recipient: typeof legacy?.recipient_open_id === 'string' ? legacy.recipient_open_id : undefined };
   }
-  async remote(): Promise<RemoteSummary & { node_id: string }> { const page = await this.page(); return { ...page.remote, node_id: page.node_id }; }
+  async remote(): Promise<RemoteSummary & { node_id: string }> {
+    const page = await this.page(); return { ...page.remote, node_id: page.node_id, ...(page.network ? { network: page.network } : {}) };
+  }
   async configureRemote(body: Record<string, unknown>): Promise<RemoteSummary & { node_id: string }> {
-    await this.rpc('remote.configure', body); await this.syncNetwork(); return this.remote();
+    const warning = await this.commit('remote.configure', body); await this.syncNetwork(); if (warning) throw warning; return this.remote();
   }
   remoteSecret(): Promise<{ token: string }> { return this.rpc('remote.secret'); }
   exportConfig(): Promise<Record<string, unknown>> { return this.rpc('config.export'); }
-  async importConfig(config: Record<string, unknown>): Promise<void> { await this.rpc('config.import', config); await this.syncNetwork(); }
+  async importConfig(config: Record<string, unknown>): Promise<void> {
+    const warning = await this.commit('config.import', config); await this.syncNetwork(); if (warning) throw warning;
+  }
   /** Compatibility for old single-bot registration and import callers. New configuration uses provider instances. */
   async configure(credentials?: Credentials): Promise<void> {
-    if (credentials) await this.rpc('provider.save', { id: 'legacy-feishu', type: 'feishu', name: 'Feishu', enabled: true,
+    let warning: HttpError | undefined;
+    if (credentials) warning = await this.commit('provider.save', { id: 'legacy-feishu', type: 'feishu', name: 'Feishu', enabled: true,
       app_id: credentials.appId, app_secret: credentials.appSecret, recipient_open_id: this.state.settings.lark_recipient_open_id });
-    else if ((await this.page()).providers.some(provider => provider.id === 'legacy-feishu')) await this.rpc('provider.delete', { id: 'legacy-feishu' });
-    this.refreshCompatibilityCredentials(credentials); await this.page();
+    else if ((await this.page()).providers.some(provider => provider.id === 'legacy-feishu')) warning = await this.commit('provider.delete', { id: 'legacy-feishu' });
+    this.refreshCompatibilityCredentials(credentials);
+    if (warning) throw warning;
+    await this.page().catch(error => this.report({ source: 'providers', status: 'configuration_status_unavailable', error: (error as Error).message }));
   }
   /** Refresh legacy HTTP/directory clients without changing imported provider instances. */
   refreshCompatibilityCredentials(credentials?: Credentials): void {
     if (this.credentials?.appId === credentials?.appId && this.credentials?.appSecret === credentials?.appSecret) return;
     this.credentials = credentials; this.api = credentials ? createLarkApi(credentials) : undefined;
   }
+  setRecipientSync(sync: (openId: string) => Promise<void>): void { this.recipientSync = sync; }
   async setRecipient(open_id: string): Promise<void> {
-    const legacy = (await this.page()).providers.find(provider => provider.id === 'legacy-feishu' && provider.type === 'feishu');
+    let page: ProviderPage;
+    try { page = await this.page(); }
+    catch { throw publicFailure(new CoreError('unavailable', 'Cannot inspect the Feishu provider before recipient submission')); }
+    const legacy = page.providers.find(provider => provider.id === 'legacy-feishu' && provider.type === 'feishu');
     if (!legacy) throw new HttpError(404, 'No migrated Feishu provider; configure the recipient in Providers');
-    await this.rpc('provider.save', { ...legacy, recipient_open_id: open_id });
-    await this.page();
+    let warning: unknown;
+    try { await this.rpc('provider.save', { ...legacy, recipient_open_id: open_id }); }
+    catch (error) { if (coreErrorCode(error) !== 'committed_not_durable') throw error; warning = error; }
+    // The save response already confirms the change. A later status read cannot invalidate it.
+    this.cached = { ...page, providers: page.providers.map(provider => provider.id === legacy.id ? { ...provider, recipient_open_id: open_id } : provider) };
+    if (warning) throw warning;
   }
   networkDisconnected(): void {
     this.networkGeneration++;
@@ -225,8 +300,17 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
       await this.unpublishCurrent();
       await this.tsnet.publish(port, `127.0.0.1:${port}`); this.published = port;
     });
-    this.networkQueue = task;
-    return task;
+    const settled = task.then(() => { this.networkFailure = undefined; clearTimeout(this.networkRetry); this.networkRetry = undefined; }, error => {
+      const unconfirmed = Boolean(coreErrorCode(error)) && !provenCoreRejection(error);
+      this.networkFailure = { status: unconfirmed ? 'unconfirmed' : 'retrying', error: (error as Error).message };
+      this.report({ source: 'providers', status: 'network_reconciliation_failed', network_status: this.networkFailure.status, error: this.networkFailure.error });
+      // Reconcile helper publication only after known outcomes; never resubmit an uncertain core command.
+      if (!unconfirmed && !this.draining && !this.networkRetry) this.networkRetry = setTimeout(() => {
+        this.networkRetry = undefined; void this.syncNetwork();
+      }, 5000).unref();
+    });
+    this.networkQueue = settled;
+    return settled;
   }
   private async unpublishCurrent(): Promise<void> {
     const port = this.published;
@@ -290,6 +374,7 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
   private async deliver(delivery: Delivery): Promise<void> {
     let status = 'rejected'; let transport_status: string | undefined; let failure: string | undefined;
     try {
+      if (this.draining) throw new RetryableDeliveryError('Notification service is stopping before agent submission');
       if (!isAdapter(delivery.session.adapter)) throw new SessionUnavailable('unsupported_adapter');
       if (this.deliveries.size >= 100) throw new RetryableDeliveryError('Agent delivery queue is full');
       const source = { channel: 'provider' as const, delivery: { adapter: delivery.session.adapter,
@@ -304,6 +389,8 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
       failure = (error as Error).message;
     }
     await this.rpc('delivery.complete', { delivery_id: delivery.delivery_id, status, transport_status, ...(failure ? { error: failure } : {}) });
+    if (status === 'rejected' && isPolledAdapter(delivery.session.adapter)) await this.consumeInbox(delivery.message)
+      .catch(error => this.report({ source: 'providers', status: 'inbox_release_pending', message_id: delivery.message.message_id, error: (error as Error).message }));
     this.report({ source: 'providers', status: transport_status ?? status, session_id: delivery.session.session_id,
       message_id: delivery.message.message_id, provider_id: delivery.message.provider_id });
   }
@@ -388,9 +475,11 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
       const body = object(request.body);
       if (body.pin !== undefined && typeof body.pin !== 'boolean') throw new HttpError(400, 'Invalid pin flag');
       if (body.pin === true) throw new HttpError(400, 'Pinning binding messages is not supported by notification providers');
-      if (typeof body.metadata === 'string') throw new HttpError(400, 'Legacy metadata modes are not supported; providers store structured metadata in the group description');
-      if (body.metadata !== undefined && (!body.metadata || typeof body.metadata !== 'object' || Array.isArray(body.metadata))) throw new HttpError(400, 'Invalid binding metadata; expected an object');
-      const metadata = body.metadata as Record<string, unknown> | undefined;
+      // Older CLIs always send this default. The core preserves announcements and stores its route in the description.
+      const value = body.metadata === 'announcement' ? undefined : body.metadata;
+      if (typeof value === 'string') throw new HttpError(400, 'Legacy message metadata is not supported; providers store structured metadata in the group description');
+      if (value !== undefined && (!value || typeof value !== 'object' || Array.isArray(value))) throw new HttpError(400, 'Invalid binding metadata; expected an object');
+      const metadata = value as Record<string, unknown> | undefined;
       const chat_id = identifier(decodeURIComponent(bind[1]), 'chat_id');
       const sender_open_id = identifier(body.sender_open_id, 'sender_open_id');
       const session = await this.localSession(text(body.session_id, 'session_id'), body.adapter ?? 'claude-desktop', body.session_name);
@@ -401,10 +490,10 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
       return { body: { ...result, session_id: session.session_id, adapter: session.adapter, session_name: session.name } };
     }
     if (request.path === '/v1/lark/bindings' && request.method === 'GET') {
-      const bindings = await this.rpc<Binding[]>('session.list');
-      return { body: bindings.filter(binding => !binding.deleted && binding.chat_id).map(binding => ({
-        chat_id: binding.chat_id, provider_id: binding.provider_id, session_id: binding.session.session_id,
-        adapter: binding.session.adapter, session_name: binding.session.name, sender_open_id: binding.sender_open_id,
+      const bindings = await this.listBindings();
+      return { body: liveBindingResources(bindings).map(binding => ({
+        chat_id: binding.chat_id, thread_id: binding.thread_id, provider_id: binding.provider_id, node_id: binding.session.node_id,
+        session_id: binding.session.session_id, adapter: binding.session.adapter, session_name: binding.session.name, sender_open_id: binding.sender_open_id,
         metadata: 'announcement', pin: false,
       })) };
     }
@@ -413,8 +502,18 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
       if (request.method === 'PUT') {
         const open_id = text(object(request.body).open_id, 'open_id');
         if (!/^ou_[A-Za-z0-9]+$/.test(open_id)) throw new HttpError(400, 'Invalid recipient open_id');
-        await this.setRecipient(open_id);
-        this.state.settings.lark_recipient_open_id = open_id; await this.state.save(); return { body: { open_id } };
+        if (this.recipientSync) await this.recipientSync(open_id);
+        else {
+          const previous = this.state.settings.lark_recipient_open_id;
+          const restore = () => { if (previous === undefined) delete this.state.settings.lark_recipient_open_id; else this.state.settings.lark_recipient_open_id = previous; };
+          await this.state.save({ apply: () => { this.state.settings.lark_recipient_open_id = open_id; }, rollback: restore });
+          try { await this.setRecipient(open_id); }
+          catch (error) {
+            if (provenCoreRejection(error) || error instanceof HttpError && error.status === 404) { restore(); await this.state.save(); }
+            throw error;
+          }
+        }
+        return { body: { open_id } };
       }
     }
     return;

@@ -13,7 +13,13 @@ export interface CoreTransport {
 export class CoreError extends Error {
   constructor(readonly code: string, message: string) { super(message); }
 }
-interface Pending { resolve(value: unknown): void; reject(error: Error): void; timer: NodeJS.Timeout }
+export function coreErrorCode(error: unknown): string | undefined {
+  return error instanceof CoreError ? error.code.toLowerCase() : error instanceof Error && error.cause instanceof CoreError ? error.cause.code.toLowerCase() : undefined;
+}
+export function provenCoreRejection(error: unknown): boolean {
+  return /^(?:conflict|invalid(?:_argument)?|not_found|unauthenticated|permission_denied|unsupported_operation|rejection_terminal|rejection_retryable|resource_exhausted|busy|unavailable)$/.test(coreErrorCode(error) ?? '');
+}
+interface Pending { resolve(value: unknown): void; reject(error: Error): void; timer: NodeJS.Timeout; submitted?: boolean }
 interface Run { child: ChildProcessWithoutNullStreams; pending: Map<number, Pending>; closed: Promise<void>; stopping: boolean }
 export function coreBinaryCandidates(platform = process.platform, arch = process.arch): string[] {
   const cpu = arch === 'arm64' ? 'aarch64' : arch === 'x64' ? 'x86_64' : arch;
@@ -54,7 +60,13 @@ export class ProviderCore implements CoreTransport {
     let closed!: () => void;
     const run: Run = { child, pending: new Map(), stopping: false, closed: new Promise(resolveClosed => { closed = resolveClosed; }) };
     this.run = run;
-    const fail = (error: Error) => { for (const pending of run.pending.values()) { clearTimeout(pending.timer); pending.reject(error); } run.pending.clear(); };
+    const fail = (error: Error) => {
+      for (const pending of run.pending.values()) {
+        clearTimeout(pending.timer); pending.reject(pending.submitted
+          ? new CoreError('unconfirmed', 'Notification core disconnected after submission; the request outcome is unconfirmed') : error);
+      }
+      run.pending.clear();
+    };
     const ready = new Promise<void>((resolveReady, reject) => {
       const timer = setTimeout(() => { run.pending.delete(0); reject(new CoreError('timeout', 'Notification core startup timed out')); }, this.timeout).unref();
       run.pending.set(0, { resolve: () => resolveReady(), reject, timer });
@@ -97,24 +109,29 @@ export class ProviderCore implements CoreTransport {
   async request<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
     if (this.starting) await this.starting;
     const run = this.run;
-    if (!run || run.stopping) throw new CoreError('unavailable', 'Notification core is not running');
+    if (!run || run.stopping || run.child.stdin.destroyed || run.child.stdin.writableEnded) throw new CoreError('unavailable', 'Notification core is not running');
     if (run.pending.size >= 256) throw new CoreError('busy', 'Notification core queue is full');
     const id = ++this.sequence;
+    const line = JSON.stringify({ id, method, params }) + '\n';
     return new Promise<T>((resolveReply, reject) => {
       const timer = setTimeout(() => {
         run.pending.delete(id); reject(new CoreError('unconfirmed', 'Notification core request timed out; its outcome is unconfirmed'));
       }, this.timeout).unref();
-      run.pending.set(id, { resolve: value => resolveReply(value as T), reject, timer });
-      run.child.stdin.write(JSON.stringify({ id, method, params }) + '\n', error => {
-        if (!error) return;
-        clearTimeout(timer); run.pending.delete(id); reject(new CoreError('unavailable', 'Notification core connection closed'));
-      });
+      run.pending.set(id, { resolve: value => resolveReply(value as T), reject, timer, submitted: true });
+      const disconnected = () => {
+        clearTimeout(timer); run.pending.delete(id); reject(new CoreError('unconfirmed', 'Notification core connection closed after submission; the request outcome is unconfirmed'));
+      };
+      try { run.child.stdin.write(line, error => { if (error) disconnected(); }); }
+      catch { disconnected(); }
     });
   }
   async stop(): Promise<void> {
     const run = this.run; if (!run) return;
     run.stopping = true;
-    for (const pending of run.pending.values()) { clearTimeout(pending.timer); pending.reject(new CoreError('unavailable', 'Notification core is stopping')); }
+    for (const pending of run.pending.values()) {
+      clearTimeout(pending.timer); pending.reject(new CoreError(pending.submitted ? 'unconfirmed' : 'unavailable',
+        pending.submitted ? 'Notification core stopped after submission; the request outcome is unconfirmed' : 'Notification core is stopping'));
+    }
     run.pending.clear(); run.child.stdin.end();
     const terminate = setTimeout(() => run.child.kill('SIGTERM'), 2000).unref();
     const kill = setTimeout(() => run.child.kill('SIGKILL'), 4000).unref();

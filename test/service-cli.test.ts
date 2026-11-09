@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { once } from 'node:events';
+import { spawn } from 'node:child_process';
+import { createInterface } from 'node:readline';
+import { fileURLToPath } from 'node:url';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -10,7 +13,7 @@ import { UiOwnerAuth } from '../src/ui-owner-auth.js';
 import { main } from '../src/cli.js';
 import type { ServiceAction, ServiceOptions } from '../src/service.js';
 
-test('ui-url CLI reads only synthetic owner state and returns a one-use local grant without a bearer over HTTP', async t => {
+test('managed ui-url CLI owns a trusted asset gateway until stdin closes without exposing the private root', async t => {
   const state = await mkdtemp(join(tmpdir(), 'nootify-ui-url-cli-'));
   t.after(() => rm(state, { recursive: true, force: true }));
   const token = 'synthetic-test-owner-token';
@@ -26,21 +29,24 @@ test('ui-url CLI reads only synthetic owner state and returns a one-use local gr
   t.after(async () => { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); });
   const port = (server.address() as AddressInfo).port;
   for (const target of [undefined, '#/logs', '#/settings/about']) {
-    const lines: string[] = [];
-    const original = console.log;
-    console.log = value => { lines.push(String(value)); };
+    const args = [fileURLToPath(new URL('../src/cli.js', import.meta.url)), 'ui-url', '--ui-managed', '--state-dir', state, '--port', String(port), ...(target ? ['--ui-route', target] : [])];
+    assert.ok(!args.join(' ').includes(token));
+    const child = spawn(process.execPath, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+    const exited = once(child, 'exit');
+    t.after(() => { if (child.exitCode === null) child.kill(); });
+    const lines = createInterface({ input: child.stdout });
+    const timer = setTimeout(() => child.kill(), 10000);
     try {
-      await main(['ui-url', '--state-dir', state, '--port', String(port), ...(target ? ['--ui-route', target] : [])]);
-    } finally { console.log = original; }
-    assert.equal(lines.length, 1);
-    assert.ok(!lines[0]!.includes(token));
-    const result = JSON.parse(lines[0]!) as { url: string };
-    assert.equal(new URL(result.url).origin, `http://127.0.0.1:${port}`);
-    const redeemed = await fetch(result.url, { redirect: 'manual' });
-    assert.equal(redeemed.status, 303);
-    assert.equal(redeemed.headers.get('location'), '/' + (target ?? '#/settings/general'));
-    assert.match(redeemed.headers.get('set-cookie')!, /HttpOnly; SameSite=Strict/);
-    assert.equal((await fetch(result.url, { redirect: 'manual' })).status, 403);
+      const [line] = await once(lines, 'line') as [string];
+      assert.ok(!line.includes(token));
+      const result = JSON.parse(line) as { url: string };
+      assert.notEqual(new URL(result.url).port, String(port));
+      assert.equal(new URLSearchParams(new URL(result.url).hash.slice(1)).get('route'), target ?? '#/logs');
+      const document = await fetch(new URL('/', result.url));
+      assert.equal(document.status, 200); assert.equal(document.headers.get('set-cookie'), null); assert.match(await document.text(), /Nootify/);
+      child.stdin.end();
+      assert.deepEqual(await exited, [0, null]);
+    } finally { clearTimeout(timer); lines.close(); }
   }
   await assert.rejects(main(['ui-url', '--state-dir', state, '--port', String(port), '--ui-route', 'https://example.com/']), /Invalid local UI route/);
 });

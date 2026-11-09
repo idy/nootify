@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"sort"
 	"strings"
+	"time"
 )
 
 func resourceKey(b Binding) string {
@@ -117,7 +118,7 @@ func (c *Core) publishBinding(lease providerLease, b Binding) (Binding, error) {
 			// Retire the result durably; never resurrect a newer binding or tombstone.
 			conflict = true
 			b.Deleted = true
-			b.DeletePending = b.ChatID != ""
+			b.DeletePending = b.Created && b.ChatID != ""
 			if b.ChatID != "" {
 				d.RetiredBindings[resourceKey(b)] = b
 			}
@@ -130,6 +131,15 @@ func (c *Core) publishBinding(lease providerLease, b Binding) (Binding, error) {
 			return fault("conflict", "provider returned a retired notification resource")
 		}
 		d.Bindings[b.Session.key()] = b
+		for _, resource := range bindingResources(b) {
+			cfg := d.Providers[resource.ProviderID]
+			if cfg.Type == "feishu" && resource.ChatID != "" {
+				key := feishuCursorKey(cfg.AppID, resource.ChatID)
+				if d.FeishuCursors[key] == 0 {
+					d.FeishuCursors[key] = time.Now().UnixMilli()
+				}
+			}
+		}
 		return nil
 	})
 	if err != nil {
@@ -189,9 +199,12 @@ func (c *Core) prepareSession(ctx context.Context, pid string, s Session) (Bindi
 			return err
 		}
 		if exists && b.DeletePending {
-			if _, configured := d.Providers[b.ProviderID]; configured {
-				cleanup = true
-			} else if pid == b.ProviderID {
+			for _, resource := range bindingResources(b) {
+				if _, configured := d.Providers[resource.ProviderID]; configured {
+					cleanup = true
+				}
+			}
+			if !cleanup && pid == b.ProviderID {
 				return fault("unavailable", "removed provider cannot reactivate its retired resources")
 			}
 		}
@@ -208,15 +221,21 @@ func (c *Core) prepareSession(ctx context.Context, pid string, s Session) (Bindi
 	return b, pid, reused, nil
 }
 func (c *Core) cleanupBinding(ctx context.Context, b *Binding) error {
-	lease, err := c.captureProvider(ctx, b.ProviderID, b.Session)
-	if err != nil {
-		return err
-	}
-	if err = ctx.Err(); err != nil {
-		return err
-	}
-	if err = lease.Bot.Delete(ctx, *b); err != nil {
-		return err
+	resources := bindingResources(*b)
+	for _, resource := range resources {
+		if _, configured := c.store.Snapshot().Providers[resource.ProviderID]; !configured {
+			continue // Removed credentials cannot be contacted; keep the retirement.
+		}
+		lease, err := c.captureProvider(ctx, resource.ProviderID, resource.Session)
+		if err != nil {
+			return err
+		}
+		if err = ctx.Err(); err != nil {
+			return err
+		}
+		if err = lease.Bot.Delete(ctx, resource); err != nil {
+			return err
+		}
 	}
 	b.DeletePending = false
 	c.ops.Lock()
@@ -228,10 +247,12 @@ func (c *Core) cleanupBinding(ctx context.Context, b *Binding) error {
 			current.DeletePending = false
 			d.Bindings[b.Session.key()] = current
 		}
-		key := resourceKey(*b)
-		if old, ok := d.RetiredBindings[key]; ok {
-			old.DeletePending = false
-			d.RetiredBindings[key] = old
+		for _, resource := range resources {
+			key := resourceKey(resource)
+			if old, ok := d.RetiredBindings[key]; ok {
+				old.DeletePending = false
+				d.RetiredBindings[key] = old
+			}
 		}
 		return nil
 	})

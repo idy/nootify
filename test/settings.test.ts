@@ -22,6 +22,7 @@ import { State } from '../src/state.js';
 import { DIRECTORY_FRESH_MS, LarkDirectoryCache } from '../src/lark-directory-cache.js';
 import type { TailnetAccess } from '../src/tailnet.js';
 import { failSettingsWriteBehindOlderSaves } from './state-failures.js';
+import { HttpError } from '../src/types.js';
 
 const appId = 'cli_0123456789abcdef';
 async function temporary(t: TestContext): Promise<string> {
@@ -141,7 +142,7 @@ for (const existing of [false, true]) {
 }
 
 test('a rejected core configuration cannot partially import legacy settings', async t => {
-  const h = await harness(t, { providers: { async exportConfig() { return {}; }, async importConfig() { throw new Error('invalid provider credentials'); }, async syncNetwork() {} } });
+  const h = await harness(t, { providers: { async exportConfig() { return {}; }, async importConfig() { throw new HttpError(400, 'invalid provider credentials'); }, async syncNetwork() {} } });
   await assert.rejects(h.settings.importConfig({ format: 'nootify-config', version: 1,
     lark: { app_id: appId, app_secret: 'must-not-save' },
     providers: { version: 1, providers: [{ id: 'bad', name: 'Bad', type: 'feishu' }] } }), /invalid provider credentials/);
@@ -334,7 +335,7 @@ for (const previous of [undefined, 'ou_original']) {
     if (previous) state.settings.lark_recipient_open_id = previous;
     await state.save();
     let fail = true;
-    lark.setRecipient = async () => { if (fail) throw new Error('synthetic provider rejection'); };
+    lark.setRecipient = async () => { if (fail) throw new HttpError(400, 'synthetic provider rejection'); };
     await assert.rejects(settings.setRecipient('ou_rejected', appId), /synthetic provider rejection/);
     assert.equal(state.settings.lark_recipient_open_id, previous);
     assert.equal((await State.open(dir)).settings.lark_recipient_open_id, previous);

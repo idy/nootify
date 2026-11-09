@@ -7,6 +7,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"time"
 )
 
 func validateProviderSet(providers map[string]ProviderConfig) error {
@@ -44,6 +45,9 @@ func validateProvider(p ProviderConfig) error {
 		}
 	case "remote":
 		if err := validAddress(p.Address); err != nil {
+			return err
+		}
+		if err := validateRemoteTransport(p); err != nil {
 			return err
 		}
 		if strings.TrimSpace(p.Token) == "" || strings.ContainsAny(p.Token, "\r\n") {
@@ -149,22 +153,23 @@ func (c *Core) SaveProvider(raw json.RawMessage) (ProviderSummary, error) {
 	if err := validateProviderSet(next); err != nil {
 		return ProviderSummary{}, err
 	}
-	if err := c.store.Update(func(d *State) error {
+	persistErr := c.store.Update(func(d *State) error {
 		d.Providers[p.ID] = p
 		delete(d.ProviderTombstones, p.ID)
 		if d.DefaultProvider == "" {
 			d.DefaultProvider = p.ID
 		}
 		return nil
-	}); err != nil {
-		return ProviderSummary{}, err
+	})
+	if !stateCommitted(persistErr) {
+		return ProviderSummary{}, persistErr
 	}
 	c.startProvider(p)
 	status := "disabled"
 	if p.Enabled {
 		status = "connecting"
 	}
-	return summary(p, status), nil
+	return summary(p, status), persistErr
 }
 func (c *Core) DeleteProvider(id string) error {
 	if id == "" {
@@ -172,25 +177,19 @@ func (c *Core) DeleteProvider(id string) error {
 	}
 	c.ops.Lock()
 	defer c.ops.Unlock()
-	if err := c.store.Update(func(d *State) error {
+	persistErr := c.store.Update(func(d *State) error {
 		// Retire notification resources before losing their provider configuration.
 		// Agent conversations stay untouched; automatic discovery cannot move them.
-		for _, binding := range d.Bindings {
-			if binding.ProviderID == id {
-				setResourceOrigin(*d, &binding, d.NodeID)
-				binding.Deleted = true
-				binding.DeletePending = binding.ChatID != ""
-				recordTombstone(d, binding)
-			}
-		}
+		retireProviderResources(d, id)
 		delete(d.Providers, id)
 		d.ProviderTombstones[id] = true
 		if d.DefaultProvider == id {
 			d.DefaultProvider = ""
 		}
 		return nil
-	}); err != nil {
-		return err
+	})
+	if !stateCommitted(persistErr) {
+		return persistErr
 	}
 	c.mu.Lock()
 	p := c.providers[id]
@@ -199,9 +198,11 @@ func (c *Core) DeleteProvider(id string) error {
 	c.mu.Unlock()
 	c.wakePeers()
 	if p != nil {
-		return p.Close()
+		if closeErr := p.Close(); persistErr == nil {
+			return closeErr
+		}
 	}
-	return nil
+	return persistErr
 }
 func (c *Core) ConfigureRemote(raw json.RawMessage) (RemoteSummary, error) {
 	c.ops.Lock()
@@ -304,17 +305,10 @@ func (c *Core) ImportConfig(raw json.RawMessage) error {
 			}
 		}
 	}
-	if err := c.reconfigureRemote(b.Remote, func(d *State) error {
+	persistErr := c.reconfigureRemote(b.Remote, func(d *State) error {
 		for id := range d.Providers {
 			if _, ok := ps[id]; !ok {
-				for _, binding := range d.Bindings {
-					if binding.ProviderID == id {
-						setResourceOrigin(*d, &binding, d.NodeID)
-						binding.Deleted = true
-						binding.DeletePending = binding.ChatID != ""
-						recordTombstone(d, binding)
-					}
-				}
+				retireProviderResources(d, id)
 				d.ProviderTombstones[id] = true
 			}
 		}
@@ -325,8 +319,9 @@ func (c *Core) ImportConfig(raw json.RawMessage) error {
 		d.DefaultProvider = b.Default
 		d.Remote = b.Remote
 		return nil
-	}); err != nil {
-		return err
+	})
+	if !stateCommitted(persistErr) {
+		return persistErr
 	}
 	c.mu.Lock()
 	old := c.providers
@@ -338,7 +333,7 @@ func (c *Core) ImportConfig(raw json.RawMessage) error {
 	for _, p := range ps {
 		c.startProvider(p)
 	}
-	return nil
+	return persistErr
 }
 
 type migration struct {
@@ -356,6 +351,7 @@ type migration struct {
 		Metadata              any    `json:"metadata"`
 		RegistrationMessageID string `json:"registration_message_id"`
 		ActivatedAt           int64  `json:"activated_at"`
+		HistoryCursor         int64  `json:"history_cursor"`
 		Pin                   bool   `json:"pin"`
 	} `json:"bindings"`
 }
@@ -378,16 +374,18 @@ func (c *Core) Migrate(raw json.RawMessage) (map[string]any, error) {
 		return map[string]any{"imported": false}, nil
 	}
 	p := ProviderConfig{ID: "legacy-feishu", Name: "Feishu", Type: "feishu", Enabled: true, AppID: m.AppID, AppSecret: m.AppSecret, Recipient: m.Recipient}
+	owner := p.ID
 	for _, existing := range d.Providers {
 		if existing.Type == "feishu" && existing.Enabled && existing.AppID == p.AppID {
 			p.Enabled = false
+			owner = existing.ID
 		}
 	}
 	err := c.store.Update(func(d *State) error {
 		d.Migrated = true
 		d.Providers[p.ID] = p
 		if d.DefaultProvider == "" {
-			d.DefaultProvider = p.ID
+			d.DefaultProvider = owner
 		}
 		for _, v := range m.Bindings {
 			if v.AppID != "" && v.AppID != m.AppID {
@@ -428,21 +426,43 @@ func (c *Core) Migrate(raw json.RawMessage) (map[string]any, error) {
 				sender = m.Recipient
 			}
 			s := Session{NodeID: d.NodeID, Adapter: adapter, SessionID: v.SessionID, Name: v.Name, Metadata: metadata}
+			imported := Binding{ProviderID: owner, Session: s, ChatID: v.ChatID, SenderID: sender, Legacy: true, LegacyHost: m.LegacyHost, PreserveDescription: true, ResourceNodeID: d.NodeID, ResourceProviderID: owner}
 			if old, exists := d.Bindings[s.key()]; exists {
-				if old.ProviderID == p.ID && old.ChatID != v.ChatID {
-					return fault("conflict", "legacy session has multiple groups")
+				// Keep a later explicit mapping/tombstone. Multiple legacy chats
+				// remain independently authorized aliases of the same session.
+				if !old.Deleted && !wasRetired(*d, imported) {
+					duplicate := false
+					for _, resource := range bindingResources(old) {
+						if resource.ChatID == imported.ChatID && resource.ProviderID == imported.ProviderID {
+							duplicate = true
+						}
+					}
+					if !duplicate {
+						old.Aliases = append(old.Aliases, imported)
+						d.Bindings[s.key()] = old
+					}
 				}
-			} else {
-				d.Bindings[s.key()] = Binding{ProviderID: p.ID, Session: s, ChatID: v.ChatID, SenderID: sender}
+			} else if !wasRetired(*d, imported) {
+				d.Bindings[s.key()] = imported
+			}
+			cursor := v.HistoryCursor
+			if cursor == 0 {
+				// Without a saved whole-chat boundary, begin at migration rather
+				// than replaying already handled legacy agent commands.
+				cursor = time.Now().UnixMilli()
+			}
+			key := feishuCursorKey(m.AppID, v.ChatID)
+			if d.FeishuCursors[key] == 0 {
+				d.FeishuCursors[key] = cursor
 			}
 		}
 		return nil
 	})
-	if err != nil {
+	if !stateCommitted(err) {
 		return nil, err
 	}
 	c.startProvider(p)
-	return map[string]any{"imported": true}, nil
+	return map[string]any{"imported": true}, err
 }
 
 type commandRouteKey struct{}

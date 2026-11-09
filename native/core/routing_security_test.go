@@ -410,8 +410,8 @@ func TestAdoptionRecognizesAllRetainedLegacyDeclarations(t *testing.T) {
 					}
 				} else {
 					must(t, err)
-					if patches.Load() != 1 {
-						t.Fatal("legitimate adoption did not install description metadata")
+					if patches.Load() != 0 {
+						t.Fatal("adoption changed the existing group description")
 					}
 				}
 			})

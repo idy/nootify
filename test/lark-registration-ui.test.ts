@@ -3,11 +3,12 @@ import { readFile } from 'node:fs/promises';
 import { setImmediate as nextTurn } from 'node:timers/promises';
 import { test } from 'node:test';
 import { parseHTML } from 'linkedom';
+import { authorizeUiFixture, settleUiFixture } from './ui-transport-fixture.js';
 import type { SettingsPage } from '../src/settings.js';
 import type { LarkRegistrationPage } from '../src/lark-registration.js';
 
 async function until(check: () => boolean, message: string): Promise<void> {
-  for (let attempt = 0; attempt < 300; attempt++) { if (check()) return; await nextTurn(); }
+  for (let attempt = 0; attempt < 1000; attempt++) { if (check()) return; await new Promise(resolve => setTimeout(resolve, 1)); }
   throw new Error(message);
 }
 
@@ -23,7 +24,8 @@ test('the live settings module reconciles committed QR settings after the servic
   };
   const descriptors = new Map(Object.keys(globals).map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
   for (const [key, value] of Object.entries(globals)) Object.defineProperty(globalThis, key, { configurable: true, value });
-  t.after(() => {
+  t.after(async () => {
+    await settleUiFixture();
     for (const [key, descriptor] of descriptors) {
       if (descriptor) Object.defineProperty(globalThis, key, descriptor); else Reflect.deleteProperty(globalThis, key);
     }
@@ -62,6 +64,7 @@ test('the live settings module reconciles committed QR settings after the servic
   const element = (id: string) => document.getElementById(id)! as unknown as HTMLElement;
   const field = (id: string) => element(id) as HTMLInputElement;
   const button = (id: string) => element(id) as HTMLButtonElement;
+  authorizeUiFixture(t);
   await import('../src/ui-app.js');
   await until(() => statusReads > 0 && !button('lark-type-personal').disabled, 'Initial settings did not load');
   const poll = timers.find(timer => timer.milliseconds === 2000)!.run;
@@ -102,7 +105,7 @@ test('the live settings module reconciles committed QR settings after the servic
     commitAndRestart(app, 'ou_replacement'); failedSettingsReads = 1;
     const before = settingsReads; poll();
     await until(() => settingsReads > before && failedSettingsReads === 0, 'The restarted service did not request saved settings');
-    await nextTurn();
+    await settleUiFixture();
     assert.equal(field('lark-app-id').value, 'cli_0123456789abcdef');
     assert.equal(button('lark-qr-start').disabled, true, 'Do not allow another app setup before reconciliation finishes');
     poll();

@@ -20,7 +20,7 @@ import { inspectLarkSetup, LarkRegistration, type LarkRegistrationOptions, type 
 import { DIRECTORY_FRESH_MS, DIRECTORY_MAX_AGE_MS, LarkDirectoryCache } from './lark-directory-cache.js';
 import { mergeRecipients } from './lark-profile.js';
 import type { ProvidersService } from './providers.js';
-import { CoreError } from './provider-core.js';
+import { coreErrorCode, provenCoreRejection } from './provider-core.js';
 
 const FORMAT = 'nootify-config';
 const EXPORTS_KEPT = 10;
@@ -29,6 +29,8 @@ const packageFile = new URL('../../package.json', import.meta.url);
 /** Reject malformed application IDs before verifying or saving credentials. */
 const isAppId = (value: unknown): value is string => typeof value === 'string' && /^cli_[0-9a-fA-F]{16}$/.test(value);
 const isObject = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
+const rejected = (error: unknown): boolean => provenCoreRejection(error) || error instanceof HttpError && !coreErrorCode(error)
+  && [400, 401, 403, 404, 405, 409, 413, 415, 422, 429].includes(error.status);
 
 /** Public Settings data; secrets are retrieved separately by an explicit local-only action. */
 export interface SettingsPage {
@@ -63,6 +65,7 @@ export interface LarkControl {
   refreshCompatibilityCredentials?(credentials?: Credentials): void;
   setCompatibilitySync?(sync: (update: () => Promise<{ credentials?: Credentials; recipient?: string }>) => Promise<void>): void;
   setRecipient?(openId: string): Promise<void>;
+  setRecipientSync?(sync: (openId: string) => Promise<void>): void;
 }
 export interface PullPreferences {
   preferences(): Promise<{ config?: unknown; follow: { repository: string; follow: boolean }[] }>;
@@ -163,6 +166,7 @@ export class SettingsService {
     this.registration = new LarkRegistration((result, signal) => this.acceptLarkRegistration(result, signal), this.report, options.registration);
     this.directoryStore = new LarkDirectoryCache(options.state.directory);
     options.lark.setCompatibilitySync?.(update => this.syncProviderCompatibility(update));
+    options.lark.setRecipientSync?.(openId => this.setRecipient(openId));
   }
   /** Mirror the core's committed legacy provider without saving it again through the compatibility configure path. */
   private syncProviderCompatibility(update: () => Promise<{ credentials?: Credentials; recipient?: string }>): Promise<void> {
@@ -316,11 +320,20 @@ export class SettingsService {
     });
   }
 
-  private async reloadSettings(rollback: () => void, forceReconnect = false): Promise<void> {
-    try { await this.reload(forceReconnect); }
-    catch (error) {
-      // A proven core conflict made no provider change. Unconfirmed outcomes must retain their candidate configuration.
-      if (error instanceof HttpError && error.cause instanceof CoreError && error.cause.code === 'conflict') await this.persistSettings(rollback);
+  private async reloadSettings(rollback: () => void, forceReconnect = false, recipient?: string): Promise<void> {
+    const current = this.options.lark.credentials;
+    try {
+      await this.reload(forceReconnect);
+      if (recipient && this.options.lark.credentials) await this.options.lark.setRecipient?.(recipient);
+    } catch (error) {
+      if (rejected(error)) await this.persistSettings(rollback);
+      else if (coreErrorCode(error) === 'committed_not_durable') {
+        const resolved = await resolveCredentials(this.env, this.options.state.settings, this.options.mcpConfig);
+        this.options.lark.refreshCompatibilityCredentials?.(resolved?.credentials); this.source = resolved?.source;
+        if (current?.appId !== resolved?.credentials.appId || current?.appSecret !== resolved?.credentials.appSecret) {
+          this.directoryRefresh++; await this.directoryStore.clear();
+        }
+      }
       throw error;
     }
   }
@@ -442,17 +455,9 @@ export class SettingsService {
       if (appId !== undefined && appId !== this.options.lark.credentials?.appId) throw new HttpError(409, 'Feishu credentials changed; reload the directory');
       if (!isOpenId(openId)) throw new HttpError(400, 'Expected a Feishu open_id (ou_…)');
       const { state, lark } = this.options;
-      let previous: string | undefined;
-      await this.persistSettings(() => { previous = state.settings.lark_recipient_open_id; state.settings.lark_recipient_open_id = openId; });
+      const rollback = await this.persistSettings(() => { state.settings.lark_recipient_open_id = openId; });
       try { await lark.setRecipient?.(openId); }
-      catch (error) {
-        await this.persistSettings(() => {
-          if (state.settings.lark_recipient_open_id !== openId) return;
-          if (previous === undefined) delete state.settings.lark_recipient_open_id;
-          else state.settings.lark_recipient_open_id = previous;
-        });
-        throw error;
-      }
+      catch (error) { if (rejected(error)) await this.persistSettings(rollback); throw error; }
     });
   }
 
@@ -490,34 +495,66 @@ export class SettingsService {
     this.registration.cancel();
     return this.serialized(async () => {
       const file = parseConfig(value);
-      const { state, pulls, agents } = this.options;
+      const { state, pulls, agents, lark } = this.options;
       const summary = summarize(file);
+      if (file.providers && !this.options.providers) throw new HttpError(400, 'Provider configuration is not supported by this service');
+      const legacy = (file.providers?.providers as Record<string, unknown>[] | undefined)?.find(provider => provider.id === 'legacy-feishu' && provider.type === 'feishu');
+      const imported = legacy && typeof legacy.app_id === 'string' && typeof legacy.app_secret === 'string'
+        ? { appId: legacy.app_id, appSecret: legacy.app_secret } : undefined;
+      const proposed = { ...state.settings };
       if (file.providers) {
-        if (!this.options.providers) throw new HttpError(400, 'Provider configuration is not supported by this service');
-        await this.options.providers.importConfig(file.providers);
+        delete proposed.lark_app_id; delete proposed.lark_app_secret;
+        if (imported) { proposed.lark_app_id = imported.appId; proposed.lark_app_secret = imported.appSecret; }
+      } else if (file.lark?.app_id) { proposed.lark_app_id = file.lark.app_id; proposed.lark_app_secret = file.lark.app_secret; }
+      // Resolve before changing either store. Environment precedence cannot leave the core and compatibility API using different apps.
+      const effective = await resolveCredentials(this.env, proposed, this.options.mcpConfig);
+      if (file.providers && effective?.source === 'environment' && (!imported || imported.appId !== effective.credentials.appId || imported.appSecret !== effective.credentials.appSecret)) {
+        throw new HttpError(409, 'Imported providers conflict with the active environment Feishu credentials; preserve the environment provider');
       }
-      const effective = file.lark?.app_id ? await resolveCredentials(this.env,
-        { ...state.settings, lark_app_id: file.lark.app_id, lark_app_secret: file.lark.app_secret }, this.options.mcpConfig) : undefined;
+      const previous = lark.credentials;
+      const refreshImported = async (allowConfigure = true) => {
+        if (lark.refreshCompatibilityCredentials) lark.refreshCompatibilityCredentials(imported);
+        else if (allowConfigure && (previous?.appId !== imported?.appId || previous?.appSecret !== imported?.appSecret)) await lark.configure(imported);
+        this.source = imported ? effective?.source ?? 'settings' : undefined;
+        if (previous?.appId !== imported?.appId || previous?.appSecret !== imported?.appSecret) { this.directoryRefresh++; await this.directoryStore.clear(); }
+      };
       const rollback = await this.persistSettings(() => {
-        if (file.lark?.app_id) {
-          const nextAppId = effective?.credentials.appId;
-          this.scopeLarkBindings(nextAppId);
-          if (nextAppId !== this.options.lark.credentials?.appId) delete state.settings.lark_recipient_open_id;
-          state.settings.lark_app_id = file.lark.app_id; state.settings.lark_app_secret = file.lark.app_secret;
-          state.settings.lark_connection_type = file.lark.connection_type ?? 'bot';
+        if (file.providers) {
+          this.scopeLarkBindings(imported?.appId);
+          if (imported) {
+            state.settings.lark_app_id = imported.appId; state.settings.lark_app_secret = imported.appSecret;
+            state.settings.lark_connection_type = file.lark?.app_id === imported.appId ? file.lark.connection_type ?? 'bot' : 'bot';
+          } else { delete state.settings.lark_app_id; delete state.settings.lark_app_secret; delete state.settings.lark_connection_type; }
+          const recipient = typeof legacy?.recipient_open_id === 'string' ? legacy.recipient_open_id : undefined;
+          if (recipient) state.settings.lark_recipient_open_id = recipient; else delete state.settings.lark_recipient_open_id;
+        } else {
+          if (file.lark?.app_id) {
+            const nextAppId = effective?.credentials.appId;
+            this.scopeLarkBindings(nextAppId);
+            if (nextAppId !== lark.credentials?.appId) delete state.settings.lark_recipient_open_id;
+            state.settings.lark_app_id = file.lark.app_id; state.settings.lark_app_secret = file.lark.app_secret;
+            state.settings.lark_connection_type = file.lark.connection_type ?? 'bot';
+          }
+          if (file.lark?.recipient_open_id) state.settings.lark_recipient_open_id = file.lark.recipient_open_id;
         }
-        if (file.lark?.recipient_open_id) state.settings.lark_recipient_open_id = file.lark.recipient_open_id;
         for (const adapter of ['codex', 'opencode'] as const) {
           const connection = file.backends?.[adapter];
           if (connection) state.backends.set(adapter, connection);
         }
       });
+      if (file.providers) {
+        try { await this.options.providers!.importConfig(file.providers); }
+        catch (error) {
+          if (rejected(error)) await this.persistSettings(rollback);
+          else if (coreErrorCode(error) === 'committed_not_durable') await refreshImported(false);
+          throw error;
+        }
+        await refreshImported();
+      } else await this.reloadSettings(rollback, false, file.lark?.recipient_open_id);
       if (file.pulls) await pulls.restore(file.pulls);
       for (const agent of file.agents ?? []) {
         try { await agents.set(agent, true); } catch (error) { summary.warnings.push(`${agent}: ${(error as Error).message}`); }
       }
-      if (file.providers) await this.reload(false, true);
-      else await this.reloadSettings(rollback);
       if (file.lark?.app_id && this.source === 'environment') summary.warnings.push('LARK_APP_ID and LARK_APP_SECRET are set for this process and stay in use');
       this.report({ source: 'host', status: 'config_imported' });
       return summary;

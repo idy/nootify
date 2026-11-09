@@ -7,29 +7,29 @@ import (
 )
 
 func TestLogExportDownloadPolicy(t *testing.T) {
-	policy := urlPolicy{offline: "http://127.0.0.1:39847/"}
+	policy := urlPolicy{offline: "http://127.0.0.1:39847/", gateway: "http://127.0.0.1:39849/"}
 	const object = "/7a96c860-3250-4c38-b957-85e3a7280d9f"
 	const name = "nootify-logs-2026-11-09.ndjson"
 	for _, test := range []struct {
 		name, document, download, filename string
 		allowed                            bool
 	}{
-		{"trusted log export", "http://127.0.0.1:9417/#/logs", "blob:http://127.0.0.1:9417" + object, name, true},
+		{"trusted log export", "http://127.0.0.1:39849/#/logs", "blob:http://127.0.0.1:39849" + object, name, true},
 		{"offline origin", policy.offline, "blob:http://127.0.0.1:39847" + object, name, true},
 		{"untrusted document", "https://example.com/", "blob:https://example.com" + object, name, false},
-		{"wrong document path", "http://127.0.0.1:9417/v1/sessions", "blob:http://127.0.0.1:9417" + object, name, false},
-		{"different blob origin", "http://127.0.0.1:9417/", "blob:http://127.0.0.1:39847" + object, name, false},
-		{"foreign blob", "http://127.0.0.1:9417/", "blob:https://example.com" + object, name, false},
-		{"opaque blob", "http://127.0.0.1:9417/", "blob:null" + object, name, false},
-		{"ordinary URL", "http://127.0.0.1:9417/", "http://127.0.0.1:9417" + object, name, false},
-		{"remote attachment", "http://127.0.0.1:9417/", "https://example.com/export", name, false},
-		{"local file", "http://127.0.0.1:9417/", "blob:file:///etc/passwd", name, false},
-		{"blob credentials", "http://127.0.0.1:9417/", "blob:http://user@127.0.0.1:9417" + object, name, false},
-		{"blob query", "http://127.0.0.1:9417/", "blob:http://127.0.0.1:9417" + object + "?x=1", name, false},
-		{"blob fragment", "http://127.0.0.1:9417/", "blob:http://127.0.0.1:9417" + object + "#", name, false},
-		{"non-object URL", "http://127.0.0.1:9417/", "blob:http://127.0.0.1:9417/exports/logs", name, false},
-		{"wrong filename", "http://127.0.0.1:9417/", "blob:http://127.0.0.1:9417" + object, "download.exe", false},
-		{"filename path", "http://127.0.0.1:9417/", "blob:http://127.0.0.1:9417" + object, "../" + name, false},
+		{"wrong document path", "http://127.0.0.1:39849/v1/sessions", "blob:http://127.0.0.1:39849" + object, name, false},
+		{"different blob origin", "http://127.0.0.1:39849/", "blob:http://127.0.0.1:39847" + object, name, false},
+		{"foreign blob", "http://127.0.0.1:39849/", "blob:https://example.com" + object, name, false},
+		{"opaque blob", "http://127.0.0.1:39849/", "blob:null" + object, name, false},
+		{"ordinary URL", "http://127.0.0.1:39849/", "http://127.0.0.1:39849" + object, name, false},
+		{"remote attachment", "http://127.0.0.1:39849/", "https://example.com/export", name, false},
+		{"local file", "http://127.0.0.1:39849/", "blob:file:///etc/passwd", name, false},
+		{"blob credentials", "http://127.0.0.1:39849/", "blob:http://user@127.0.0.1:39849" + object, name, false},
+		{"blob query", "http://127.0.0.1:39849/", "blob:http://127.0.0.1:39849" + object + "?x=1", name, false},
+		{"blob fragment", "http://127.0.0.1:39849/", "blob:http://127.0.0.1:39849" + object + "#", name, false},
+		{"non-object URL", "http://127.0.0.1:39849/", "blob:http://127.0.0.1:39849/exports/logs", name, false},
+		{"wrong filename", "http://127.0.0.1:39849/", "blob:http://127.0.0.1:39849" + object, "download.exe", false},
+		{"filename path", "http://127.0.0.1:39849/", "blob:http://127.0.0.1:39849" + object, "../" + name, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			event := &mygo.DownloadEvent{URL: test.download, SuggestedName: test.filename, Path: "/synthetic/download/path"}
@@ -43,8 +43,8 @@ func TestLogExportDownloadPolicy(t *testing.T) {
 		})
 	}
 	policy.isolated = true
-	event := &mygo.DownloadEvent{URL: "blob:http://127.0.0.1:9417" + object, SuggestedName: name}
-	policy.download("http://127.0.0.1:9417/", event)
+	event := &mygo.DownloadEvent{URL: "blob:http://127.0.0.1:39849" + object, SuggestedName: name}
+	policy.download("http://127.0.0.1:39849/", event)
 	if !event.DefaultPrevented() {
 		t.Fatal("isolated shell must reject production-service exports")
 	}

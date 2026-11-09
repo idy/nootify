@@ -17,7 +17,7 @@ export interface UiContext {
   agents?: AgentsSource; channel?: () => ChannelSummary | undefined; settings?: SettingsSource; providers?: ProvidersSource;
   /** Tailscale can read public page data, but cannot retrieve secrets or change prompts/settings. */
   via?: 'loopback' | 'tailnet';
-  /** Verified private bearer or owner-authorized browser cookie; never inferred from Host/header alone. */
+  /** Verified private bearer or authenticated encrypted UI operation; never inferred from Host/header/cookie alone. */
   ownerAuthenticated?: boolean;
   ownerUiCommand?: string;
 }
@@ -30,11 +30,20 @@ const assets = new Map([
   ...['montserrat-latin.woff2', 'monda-latin.woff2', 'lato-regular-latin.woff2', 'lato-bold-latin.woff2'].map(name =>
     [`/ui/fonts/${name}`, { path: new URL(`../../desktop/fonts/${name}`, import.meta.url), type: 'font/woff2' }] as const),
   ['/ui/app.js', { path: new URL('./ui-app.js', import.meta.url), type: 'text/javascript; charset=utf-8' }],
+  ['/ui/ui-transport.js', { path: new URL('./ui-transport.js', import.meta.url), type: 'text/javascript; charset=utf-8' }],
   ['/ui/ui-i18n.js', { path: new URL('./ui-i18n.js', import.meta.url), type: 'text/javascript; charset=utf-8' }],
   ['/ui/lark-profile.js', { path: new URL('./lark-profile.js', import.meta.url), type: 'text/javascript; charset=utf-8' }],
   ['/ui/recipient-list.js', { path: new URL('./recipient-list.js', import.meta.url), type: 'text/javascript; charset=utf-8' }],
   ['/ui/dropdown.js', { path: new URL('./dropdown.js', import.meta.url), type: 'text/javascript; charset=utf-8' }],
 ]);
+/** Gateway assets always come from this trusted package, never from the mutable service listener. */
+export async function serveUiAsset(response: ServerResponse, path: string): Promise<boolean> {
+  const asset = assets.get(path);
+  if (!asset) return false;
+  response.writeHead(200, { 'content-type': asset.type, 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'x-content-type-options': 'nosniff', 'content-security-policy': policy });
+  response.end(await readFile(asset.path));
+  return true;
+}
 function json(response: ServerResponse, status: number, body: unknown): void {
   response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
   response.end(JSON.stringify(body));
@@ -177,12 +186,7 @@ export async function serveUi(request: IncomingMessage, response: ServerResponse
     return true;
   }
   if (request.method !== 'GET') return false;
-  const asset = assets.get(path);
-  if (asset) {
-    response.writeHead(200, { 'content-type': asset.type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'content-security-policy': policy });
-    response.end(await readFile(asset.path));
-    return true;
-  }
+  if (await serveUiAsset(response, path)) return true;
   if (path === '/ui/api/settings/tailscale') {
     if (!context.settings) json(response, 404, { error: 'Settings are not enabled' });
     else {

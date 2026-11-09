@@ -10,11 +10,9 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -31,8 +29,9 @@ type Module struct {
 	Status string `json:"status"`
 }
 type Health struct {
-	Service string   `json:"service"`
-	Modules []Module `json:"modules"`
+	Service     string   `json:"service"`
+	Modules     []Module `json:"modules"`
+	UITransport int      `json:"ui_transport"`
 }
 
 func HealthClient() *http.Client {
@@ -215,6 +214,8 @@ type Manager struct {
 	Bundle   *Bundled
 	platform string
 	run      Runner
+	uiLaunch func(context.Context, Command) (*OwnedUI, error)
+	uiBundle func() *Bundled
 	address  string
 	mu       sync.Mutex
 	checked  time.Time
@@ -228,7 +229,7 @@ type drainProcess struct {
 }
 
 func New(home string, bundle *Bundled) *Manager {
-	return &Manager{Home: home, Bundle: bundle, platform: runtime.GOOS, run: Run, address: "127.0.0.1:9417"}
+	return &Manager{Home: home, Bundle: bundle, platform: runtime.GOOS, run: Run, uiLaunch: startOwnedUI, uiBundle: developmentUI, address: "127.0.0.1:9417"}
 }
 func (m *Manager) plist() string {
 	return filepath.Join(m.Home, "Library", "LaunchAgents", Label+".plist")
@@ -295,15 +296,11 @@ func (m *Manager) Request(ctx context.Context, action string) error {
 	_, err := m.execute(ctx, action, false)
 	return err
 }
-func (m *Manager) execute(ctx context.Context, action string, install bool, extra ...string) (Output, error) {
+func (m *Manager) execute(ctx context.Context, action string, install bool) (Output, error) {
 	if m.Bundle == nil {
 		return Output{}, errors.New("development builds do not bundle the service")
 	}
-	command := "service-" + action
-	if action == "ui-url" {
-		command = action
-	}
-	args := append([]string{m.Bundle.CLI, command}, extra...)
+	args := []string{m.Bundle.CLI, "service-" + action}
 	var draining bool
 	if m.platform == "darwin" && (action == "start" || action == "restart" || action == "stop") {
 		m.mu.Lock()
@@ -321,7 +318,7 @@ func (m *Manager) execute(ctx context.Context, action string, install bool, extr
 		}
 	}
 	timeout := 155 * time.Second
-	if action == "status" || action == "ui-url" {
+	if action == "status" {
 		timeout = 10 * time.Second
 	}
 	out := m.run(ctx, Command{m.Bundle.Node, args, cleanEnvironment(m.platform, m.Home, os.Environ()), m.Home, timeout})
@@ -336,35 +333,18 @@ func (m *Manager) execute(ctx context.Context, action string, install bool, extr
 	return out, nil
 }
 
-var ownerRoutePattern = regexp.MustCompile(`^#/[a-z-]+(?:/[a-z-]+)?$`)
-
-// OwnerUIURL obtains a one-use grant from the ownership-authenticated bundled CLI.
-// The root bearer token never enters the page, preload or navigation URL.
-// Native first load opens Logs; reauthorization preserves a valid current route.
-func (m *Manager) OwnerUIURL(ctx context.Context, currentRoute ...string) (string, error) {
-	route := "#/logs"
-	if len(currentRoute) == 1 && ownerRoutePattern.MatchString(currentRoute[0]) {
-		route = currentRoute[0]
-	}
-	out, err := m.execute(ctx, "ui-url", false, "--ui-route", route)
+// QuiesceForRollback proves registration ownership even when a partial start has
+// already unloaded itself. Its success permits resource rollback, not a restart.
+func (m *Manager) QuiesceForRollback(ctx context.Context) error {
+	installed, err := m.Installed(ctx)
 	if err != nil {
-		return "", err
+		return err
 	}
-	var result struct {
-		URL string `json:"url"`
+	if !installed {
+		return errors.New("replacement service registration disappeared before rollback")
 	}
-	if json.Unmarshal([]byte(strings.TrimSpace(out.Stdout)), &result) != nil || len(result.URL) > 2048 {
-		return "", errors.New("invalid owner UI grant response")
-	}
-	u, err := url.Parse(result.URL)
-	if err != nil || u.Scheme != "http" || u.Host != "127.0.0.1:9417" || u.User != nil || u.Path != "/" || u.RawPath != "" || u.Fragment != "" || u.Opaque != "" {
-		return "", errors.New("owner UI grant is not for the local service root")
-	}
-	q, err := url.ParseQuery(u.RawQuery)
-	if err != nil || len(q) != 1 || len(q["ui-grant"]) != 1 || q.Get("ui-grant") == "" {
-		return "", errors.New("invalid owner UI grant query")
-	}
-	return u.String(), nil
+	_, err = m.execute(ctx, "stop", false)
+	return err
 }
 
 // StopForUpdate is deliberately checked by the installation CLI, never by process name.
@@ -408,5 +388,11 @@ func (m *Manager) StopForUpdate(ctx context.Context) (bool, error) {
 		}
 		return false, err
 	}
-	return true, nil
+	var result struct {
+		WasRunning *bool `json:"was_running"`
+	}
+	if json.Unmarshal([]byte(strings.TrimSpace(out.Stdout)), &result) != nil || result.WasRunning == nil {
+		return false, errors.New("background service stop did not report its previous running state")
+	}
+	return *result.WasRunning, nil
 }

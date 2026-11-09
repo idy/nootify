@@ -2,8 +2,8 @@ package service
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -149,7 +149,7 @@ func TestCLIReceivesOnlyOwnedPathsAndCheckedActions(t *testing.T) {
 	}
 }
 func TestStopForUpdateRetainsCLIRegistrationChecks(t *testing.T) {
-	for _, scenario := range []string{"absent", "owned", "foreign", "stop failed", "owned drain failed", "invalid drain marker"} {
+	for _, scenario := range []string{"absent", "owned", "already stopped", "foreign", "stop failed", "owned drain failed", "invalid drain marker"} {
 		t.Run(scenario, func(t *testing.T) {
 			home := t.TempDir()
 			m := New(home, &Bundled{filepath.Join(home, "node"), filepath.Join(home, "cli.js")})
@@ -178,10 +178,13 @@ func TestStopForUpdateRetainsCLIRegistrationChecks(t *testing.T) {
 				if scenario == "invalid drain marker" {
 					return Output{Err: refused, Stderr: `{"error":"no identity","service_unloaded":true}`}
 				}
-				return Output{}
+				if scenario == "already stopped" {
+					return Output{Stdout: `{"was_running":false}`}
+				}
+				return Output{Stdout: `{"was_running":true}`}
 			}
 			stopped, err := m.StopForUpdate(context.Background())
-			if stopped != (scenario == "owned" || scenario == "owned drain failed") || (err != nil) != (scenario != "absent" && scenario != "owned") {
+			if stopped != (scenario == "owned" || scenario == "owned drain failed") || (err != nil) != (scenario != "absent" && scenario != "owned" && scenario != "already stopped") {
 				t.Fatal(stopped, err)
 			}
 			if scenario == "absent" {
@@ -217,46 +220,50 @@ func TestStopForUpdateRetainsCLIRegistrationChecks(t *testing.T) {
 	}
 }
 
-func TestOwnerUIGrantUsesBundledCLIAndFixedServiceRoot(t *testing.T) {
-	m := New(t.TempDir(), &Bundled{"/private/fake/node", "/private/fake/cli.js"})
-	for _, raw := range []string{
-		"http://127.0.0.1:9417/?ui-grant=synthetic",
-		"http://127.0.0.1:9999/?ui-grant=synthetic", "https://127.0.0.1:9417/?ui-grant=synthetic",
-		"http://localhost:9417/?ui-grant=synthetic", "http://127.0.0.1:9417/api?ui-grant=synthetic",
-		"http://user@127.0.0.1:9417/?ui-grant=synthetic", "http://127.0.0.1:9417/?ui-grant=synthetic#fragment",
-		"http://127.0.0.1:9417/", "http://127.0.0.1:9417/?ui-grant=", "http://127.0.0.1:9417/?ui-grant=a&ui-grant=b",
-		"http://127.0.0.1:9417/?ui-grant=synthetic&token=root", "http://127.0.0.1:9417/%2f?ui-grant=synthetic",
-	} {
-		m.run = func(_ context.Context, c Command) Output {
-			if c.Path != m.Bundle.Node || !slices.Equal(c.Args, []string{m.Bundle.CLI, "ui-url", "--ui-route", "#/logs"}) || c.Dir != m.Home || c.Timeout != 10*time.Second {
-				t.Fatal("grant bypassed bundled CLI", c)
+func TestDevelopmentUIBootstrapDoesNotEnableServiceManagement(t *testing.T) {
+	m := New(t.TempDir(), nil)
+	m.uiBundle = func() *Bundled { return &Bundled{"/synthetic/node", "/synthetic/checkout/dist/src/cli.js"} }
+	for _, route := range []string{"#/logs", "#/settings/about", "https://foreign.invalid/"} {
+		want := route
+		if route == "https://foreign.invalid/" {
+			want = "#/logs"
+		}
+		m.uiLaunch = func(_ context.Context, c Command) (*OwnedUI, error) {
+			if c.Path != "/synthetic/node" || c.Dir != m.Home || !slices.Equal(c.Args, []string{"/synthetic/checkout/dist/src/cli.js", "ui-url", "--ui-managed", "--ui-route", want}) {
+				t.Fatal(c)
 			}
-			data, _ := json.Marshal(map[string]string{"url": raw})
-			return Output{Stdout: string(data)}
+			return nil, nil
 		}
-		got, err := m.OwnerUIURL(context.Background())
-		valid := raw == "http://127.0.0.1:9417/?ui-grant=synthetic"
-		if (err == nil) != valid || valid && got != raw {
-			t.Fatal(raw, got, err)
+		if _, err := m.OpenUI(context.Background(), route); err != nil {
+			t.Fatal(err)
 		}
+	}
+	if err := m.Request(context.Background(), "restart"); err == nil {
+		t.Fatal("development UI enabled production controls")
 	}
 }
 
-func TestOwnerUIGrantPreservesOnlySafeCurrentRoutes(t *testing.T) {
-	m := New(t.TempDir(), &Bundled{"/private/fake/node", "/private/fake/cli.js"})
-	for _, current := range []string{"#/logs", "#/settings/about", "#/settings/general", "https://example.com/", "#/logs?token=x", "#/settings/general#extra", "#/%2f", ""} {
-		want := "#/logs"
-		if current == "#/settings/about" || current == "#/settings/general" {
-			want = current
-		}
-		m.run = func(_ context.Context, c Command) Output {
-			if !slices.Equal(c.Args, []string{m.Bundle.CLI, "ui-url", "--ui-route", want}) {
-				t.Fatal("unsafe or lost current view", current, c.Args)
-			}
-			return Output{Stdout: `{"url":"http://127.0.0.1:9417/?ui-grant=synthetic"}`}
-		}
-		if _, err := m.OwnerUIURL(context.Background(), current); err != nil {
-			t.Fatal(err)
+func TestOwnedUIProcessUsesPrivateLifetimeAndValidatedOrigin(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := Command{Path: exe, Args: []string{"-test.run=TestCommandHelper"}, Env: append(os.Environ(), "NOOTIFY_TEST_CHILD=ui"), Dir: t.TempDir()}
+	u, err := startOwnedUI(context.Background(), command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(u.Close)
+	if !u.Alive() || u.Origin() != "http://127.0.0.1:19444/" {
+		t.Fatal("owned UI was not pinned")
+	}
+	u.Close()
+	if u.Alive() {
+		t.Fatal("UI gateway survived stdin lifetime")
+	}
+	for _, raw := range []string{"http://127.0.0.1:9417/", "http://localhost:19444/", "https://127.0.0.1:19444/", "http://user@127.0.0.1:19444/", "http://127.0.0.1:19444/?key=secret", "http://127.0.0.1:19444/#nootify-ui=invalid"} {
+		if _, err := uiOrigin(raw); err == nil {
+			t.Fatal("accepted unowned UI origin", raw)
 		}
 	}
 }
@@ -286,6 +293,10 @@ func TestCommandHelper(t *testing.T) {
 		data := []byte(strings.Repeat("x", 512*1024))
 		_, _ = os.Stdout.Write(data)
 		_, _ = os.Stderr.Write(data)
+		os.Exit(0)
+	case "ui":
+		_, _ = os.Stdout.WriteString(`{"url":"http://127.0.0.1:19444/#nootify-ui=` + strings.Repeat("a", 32) + "." + strings.Repeat("b", 43) + `&route=%23%2Flogs"}` + "\n")
+		_, _ = io.Copy(io.Discard, os.Stdin)
 		os.Exit(0)
 	case "wait":
 		time.Sleep(30 * time.Second)

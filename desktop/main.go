@@ -43,7 +43,8 @@ type shell struct {
 	pageRequests   atomic.Uint64
 	evaluations    pageEvaluator
 	quitting       bool
-	online         bool
+	pageLoadState
+	ui             *service.OwnedUI
 	health         *service.Health
 	healthError    error
 	installed      bool
@@ -130,6 +131,9 @@ func main() {
 	})
 	mygo.App.OnQuit(func() {
 		cancel()
+		if s.ui != nil {
+			s.ui.Close()
+		}
 		if s.tray != nil {
 			s.tray.Destroy()
 		}
@@ -210,9 +214,6 @@ func systemLocale() language.Locale {
 func (s *shell) configureLanguage() { mygo.App.SetLanguages(s.language.View().BridgeTag()) }
 func (s *shell) preload() string {
 	roots := []string{s.policy.offline, s.policy.preview}
-	if !s.policy.isolated {
-		roots = append(roots, service.URL)
-	}
 	data, _ := json.Marshal(roots)
 	titlebar, _ := assets.ReadFile("titlebar.js")
 	probe := ""
@@ -224,11 +225,19 @@ func (s *shell) preload() string {
 		platform = "windows"
 	}
 	return `// nootify-language and fixed titlebar bootstrap
-(()=>{if(window!==window.top)return;const roots=` + string(data) + `;let trusted=false;try{const here=new URL(location.href);trusted=!here.username&&!here.password&&here.pathname==='/'&&roots.filter(Boolean).some(root=>{const u=new URL(root);return here.origin===u.origin;});}catch{}if(!trusted)return;
+(()=>{if(window!==window.top)return;const roots=` + string(data) + `;let trusted=false;try{const here=new URL(location.href);trusted=!here.username&&!here.password&&here.pathname==='/'&&(roots.filter(Boolean).some(root=>{const u=new URL(root);return here.origin===u.origin;})||` + fmt.Sprint(!s.policy.isolated) + `&&here.protocol==='http:'&&here.hostname==='127.0.0.1'&&!!here.port);}catch{}if(!trusted)return;
 ` + s.language.View().SeedScript() + probe + `
 window.__NOOTIFY_PLATFORM__ = '` + platform + `';
 ` + string(titlebar) + `
 })();`
+}
+
+// All callers run on the UI thread; child exit revokes its origin even before the next health poll.
+func (s *shell) trustedDocument(raw string) bool {
+	if !s.policy.allowed(raw) {
+		return false
+	}
+	return s.policy.gateway == "" || !documentAt(raw, s.policy.gateway) || s.ui != nil && s.ui.Alive()
 }
 func (s *shell) createWindow() {
 	session := mygo.DefaultSession()
@@ -251,18 +260,24 @@ func (s *shell) createWindow() {
 		}
 	})
 	page.SetPermissionHandler(func(mygo.PermissionRequest) bool { return false })
-	page.OnWillDownload(func(e *mygo.DownloadEvent) { s.policy.download(page.URL(), e) })
+	page.OnWillDownload(func(e *mygo.DownloadEvent) {
+		if s.trustedDocument(page.URL()) {
+			s.policy.download(page.URL(), e)
+		} else {
+			e.PreventDefault()
+		}
+	})
 	page.OnWillNavigate(func(e *mygo.NavigateEvent) {
 		if action := fixedAction(e.URL); action != "" {
 			e.PreventDefault()
-			if s.policy.allowed(page.URL()) {
+			if s.trustedDocument(page.URL()) {
 				s.handle(action, true)
 			}
 			return
 		}
 		if externalURL(e.URL) {
 			e.PreventDefault()
-			if s.policy.allowed(page.URL()) {
+			if s.trustedDocument(page.URL()) {
 				go func() {
 					if err := mygo.Shell.OpenExternal(e.URL); err != nil {
 						log.Print(err)
@@ -271,28 +286,38 @@ func (s *shell) createWindow() {
 			}
 			return
 		}
-		if !s.policy.allowed(e.URL) {
+		if !s.trustedDocument(e.URL) {
 			e.PreventDefault()
 		}
 	})
 	page.SetWindowOpenHandler(func(req mygo.WindowOpenRequest) *mygo.WindowOptions {
-		if s.policy.allowed(page.URL()) && externalURL(req.URL) {
+		if s.trustedDocument(page.URL()) && externalURL(req.URL) {
 			go func() { _ = mygo.Shell.OpenExternal(req.URL) }()
 		}
 		return nil
 	})
 	page.OnDidFinishLoad(func() {
-		if s.policy.allowed(page.URL()) {
+		s.finish(s.ui != nil && s.ui.Alive() && documentAt(page.URL(), s.policy.gateway))
+		if s.trustedDocument(page.URL()) {
 			s.publish()
 		}
 	})
 	page.OnDidNavigate(func(raw string) {
-		if !s.policy.allowed(raw) {
-			log.Printf("Blocked unexpected document: %s", raw)
+		if !s.trustedDocument(raw) {
+			log.Print("Blocked unexpected document")
+			s.online = false
+			s.loading = false
 			_ = page.LoadURL(s.offline.URL)
 		}
 	})
-	page.OnRenderProcessGone(func(string) { _ = page.LoadURL(s.offline.URL); s.online = false })
+	page.OnDidFailLoad(func(*mygo.LoadError) {
+		s.online = false
+		s.loading = false
+		if s.ctx.Err() == nil && !documentAt(page.URL(), s.offline.URL) {
+			_ = page.LoadURL(s.offline.URL)
+		}
+	})
+	page.OnRenderProcessGone(func(string) { s.online = false; s.loading = false; _ = page.LoadURL(s.offline.URL) })
 	_ = page.LoadURL(s.offline.URL)
 }
 func (s *shell) restore() {
@@ -304,14 +329,16 @@ func (s *shell) restore() {
 	}
 }
 func (s *shell) eval(source string) {
-	if s.window == nil || !s.policy.allowed(s.window.Page().URL()) {
+	if s.window == nil || !s.trustedDocument(s.window.Page().URL()) {
 		return
 	}
 	page := s.window.Page()
 	s.evaluations.submit(s.ctx, source, func(ctx context.Context, source string) {
 		// Navigation may have occurred while this snapshot waited for an earlier
 		// evaluation. Reapply the origin policy at execution time as well.
-		if s.policy.allowed(page.URL()) {
+		trusted := false
+		mygo.RunOnMain(func() { trusted = s.trustedDocument(page.URL()) })
+		if trusted {
 			_, _ = page.EvalContext(ctx, source)
 		}
 	})
@@ -392,34 +419,53 @@ func (s *shell) request(action string) {
 	}
 }
 func (s *shell) setServiceView(online bool, ownerURL string) {
-	if s.online == online {
+	if online {
+		if !s.begin() {
+			return
+		}
+		if err := s.window.Page().LoadURL(ownerURL); err != nil {
+			s.failed()
+		}
 		return
 	}
-	s.online = online
-	target := s.offline.URL
-	if online {
-		target = ownerURL
-	}
-	if err := s.window.Page().LoadURL(target); err != nil {
-		s.online = false
+	s.online = false
+	s.loading = false
+	if !documentAt(s.window.Page().URL(), s.offline.URL) {
+		_ = s.window.Page().LoadURL(s.offline.URL)
 	}
 }
 func (s *shell) serviceWorker(bundleErr error) {
 	client := service.HealthClient()
+	legacyRestarted := false
 	poll := func() {
 		h, err := service.CheckHealth(s.ctx, client, service.URL)
 		installed, inspectErr := s.service.Installed(s.ctx)
-		needsGrant := false
+		// Old independent daemons can outlive a manual app replacement. Health is
+		// advisory only: the bundled CLI still proves exact ownership before restart.
+		if err == nil && h.UITransport == 0 && installed && inspectErr == nil && s.service.Bundle != nil && !legacyRestarted {
+			legacyRestarted = true
+			s.runServiceAction("restart")
+			h, err = service.CheckHealth(s.ctx, client, service.URL)
+		}
+		var owned *service.OwnedUI
 		currentRoute := "#/logs"
 		mygo.RunOnMain(func() {
-			needsGrant = err == nil && !s.online
-			if _, fragment, found := strings.Cut(s.window.Page().URL(), "#"); found {
+			if s.ui != nil && !s.ui.Alive() {
+				s.policy.gateway = ""
+				s.ui = nil
+				s.setServiceView(false, "")
+			}
+			owned = s.ui
+			if _, fragment, found := strings.Cut(s.window.Page().URL(), "#"); found && !strings.Contains(fragment, "nootify-ui=") {
 				currentRoute = "#" + fragment
 			}
 		})
+		if owned == nil && err == nil {
+			owned, err = s.service.OpenUI(s.ctx, currentRoute)
+		}
 		ownerURL := ""
-		if needsGrant {
-			ownerURL, err = s.service.OwnerUIURL(s.ctx, currentRoute)
+		if owned != nil && owned.Alive() {
+			ownerURL = owned.URL
 		}
 		mygo.RunOnMain(func() {
 			if s.ctx.Err() != nil {
@@ -440,7 +486,14 @@ func (s *shell) serviceWorker(bundleErr error) {
 				s.relocalize()
 			}
 			s.renderHealth()
-			s.setServiceView(err == nil, ownerURL)
+			if owned != nil && owned.Alive() {
+				s.ui = owned
+				s.policy.gateway = owned.Origin()
+				s.setServiceView(true, ownerURL)
+			} else {
+				s.policy.gateway = ""
+				s.setServiceView(false, "")
+			}
 		})
 	}
 	if _, err := service.CheckHealth(s.ctx, client, service.URL); err != nil && bundleErr == nil && s.service.Bundle != nil {
@@ -464,7 +517,17 @@ func (s *shell) serviceWorker(bundleErr error) {
 			if action == "authorize_ui" {
 				// Fixed native reauthorization follows the same worker-only CLI grant
 				// path as first load. No page-provided URLs or bearer tokens cross it.
-				mygo.RunOnMain(func() { s.online = false; s.actionPending = false })
+				var retired *service.OwnedUI
+				mygo.RunOnMain(func() {
+					retired = s.ui
+					s.ui = nil
+					s.policy.gateway = ""
+					s.actionPending = false
+					s.setServiceView(false, "")
+				})
+				if retired != nil {
+					retired.Close()
+				}
 			} else if action != "refresh" {
 				s.runServiceAction(action)
 			}

@@ -3,21 +3,23 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"net/url"
 	"os"
 	"regexp"
-	"strings"
 )
 
 // Deletion terminally suppresses queued/retryable events from this activation,
 // including on offline downstreams. Explicit ensure permits new messages only.
 func recordTombstone(d *State, b Binding) {
 	d.Bindings[b.Session.key()] = b
-	if b.ChatID != "" {
-		if d.RetiredBindings == nil {
-			d.RetiredBindings = map[string]Binding{}
+	if d.RetiredBindings == nil {
+		d.RetiredBindings = map[string]Binding{}
+	}
+	for _, resource := range bindingResources(b) {
+		if resource.ChatID != "" {
+			resource.Deleted = true
+			resource.DeletePending = b.DeletePending
+			d.RetiredBindings[resourceKey(resource)] = resource
 		}
-		d.RetiredBindings[resourceKey(b)] = b
 	}
 	for id, record := range d.Events {
 		if record.Event.Session.key() == b.Session.key() {
@@ -60,13 +62,28 @@ func (c *Core) Bind(ctx context.Context, pid string, s Session, chat, sender str
 		return old, err
 	}
 	if reused {
-		if chat != old.ChatID {
-			return old, fault("conflict", "session already has a different notification binding")
+		for _, resource := range bindingResources(old) {
+			if resource.ChatID != chat {
+				continue
+			}
+			if sender != "" && sender != resource.SenderID {
+				return old, fault("conflict", "session already has a different trusted sender")
+			}
+			provider, err := c.provider(resource.ProviderID)
+			if err != nil {
+				return old, err
+			}
+			if validator, ok := provider.(interface {
+				ValidateBinding(context.Context, Binding) error
+			}); ok {
+				if err := validator.ValidateBinding(ctx, resource); err != nil {
+					return old, err
+				}
+			}
+			resource.Created = false
+			return resource, nil
 		}
-		if sender != "" && sender != old.SenderID {
-			return old, fault("conflict", "session already has a different trusted sender")
-		}
-		return old, nil
+		return old, fault("conflict", "session already has a different notification binding")
 	}
 	pid = selected
 	resourceUnlock, err := c.sessions.acquire(ctx, "resource:"+chat)
@@ -86,15 +103,17 @@ func (c *Core) Bind(ctx context.Context, pid string, s Session, chat, sender str
 	if wasRetired(d, candidate) {
 		return candidate, fault("conflict", "retired notification resources cannot be re-adopted")
 	}
-	for _, b := range d.Bindings {
-		sameProvider := b.ProviderID == pid
-		selected := d.Providers[pid]
-		other := d.Providers[b.ProviderID]
-		if selected.Type == "feishu" && other.Type == "feishu" && selected.AppID == other.AppID {
-			sameProvider = true
-		}
-		if sameProvider && b.ChatID == chat && b.Session.key() != s.key() && !b.Deleted {
-			return Binding{}, fault("conflict", "chat is bound to another session")
+	for _, binding := range d.Bindings {
+		for _, b := range bindingResources(binding) {
+			sameProvider := b.ProviderID == pid
+			selected := d.Providers[pid]
+			other := d.Providers[b.ProviderID]
+			if selected.Type == "feishu" && other.Type == "feishu" && selected.AppID == other.AppID {
+				sameProvider = true
+			}
+			if sameProvider && b.ChatID == chat && b.Session.key() != s.key() && !b.Deleted {
+				return Binding{}, fault("conflict", "chat is bound to another session")
+			}
 		}
 	}
 	lease, err := c.captureProvider(ctx, pid, s)
@@ -196,45 +215,26 @@ func (p *feishuProvider) Bind(ctx context.Context, s Session, chat, sender strin
 	if sender == "" {
 		return Binding{}, fault("invalid_argument", "a trusted sender is required")
 	}
-	var existing struct {
-		Description string `json:"description"`
-	}
-	if err := p.api(ctx, "GET", "/open-apis/im/v1/chats/"+url.PathEscape(chat), nil, &existing); err != nil {
+	validated, err := p.validateGroup(ctx, s, chat)
+	if err != nil {
 		return Binding{}, err
 	}
-	if strings.HasPrefix(existing.Description, "nootify-session:v1:") {
-		other, err := parseSessionDescription(existing.Description)
-		if err != nil {
-			return Binding{}, err
-		}
-		if other.key() != s.key() {
-			return Binding{}, fault("conflict", "existing group metadata identifies another agent session")
-		}
-		if s.Metadata == nil {
-			s.Metadata = other.Metadata
-		}
-	} else {
-		announcement, readErr := p.readAnnouncement(ctx, chat)
-		if err := readErr; err != nil {
-			return Binding{}, err
-		}
-		if err := verifyLegacyRoutes(announcement, s); err != nil {
-			return Binding{}, err
-		} // Preserve the original announcement verbatim; route metadata uses description.
-		description := sessionDescription(s)
-		if len(description) > 2048 {
-			return Binding{}, fault("invalid_argument", "session metadata is too large for a Feishu group")
-		}
-		if err := p.api(ctx, "PATCH", "/open-apis/im/v1/chats/"+url.PathEscape(chat), map[string]any{"description": description}, nil); err != nil {
-			return Binding{}, err
-		}
-	}
-	return Binding{ProviderID: p.config.ID, Session: s, ChatID: chat, SenderID: sender}, nil
+	// Routing authority is retained transactionally in the binding. Existing
+	// descriptions and announcements remain untouched, including if persistence
+	// later fails or the provider/session changes while adoption is in flight.
+	b := Binding{ProviderID: p.config.ID, Session: validated, ChatID: chat, SenderID: sender, PreserveDescription: true}
+	retainLegacyIdentity(&b)
+	return b, nil
 }
 
 // RetryDelivery is explicit and only allowed after transport proved the previous
 // attempt was never accepted. Pending and uncertain submissions cannot replay.
-func (c *Core) RetryDelivery(id string) error {
+func (c *Core) RetryDelivery(id string) error { return c.RetryDeliveryContext(c.ctx, id) }
+
+func (c *Core) RetryDeliveryContext(ctx context.Context, id string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	d := c.store.Snapshot()
 	v, ok := d.Deliveries[id]
 	if !ok {
@@ -246,13 +246,16 @@ func (c *Core) RetryDelivery(id string) error {
 	}
 	// Keep the deletion gate through dispatch, not just the durable pending
 	// transition. Once Delete completes, no queued retry can reach the adapter.
-	unlock, err := c.sessions.acquire(c.ctx, record.Event.Session.key())
+	unlock, err := c.sessions.acquire(ctx, record.Event.Session.key())
 	if err != nil {
 		return err
 	}
 	defer unlock()
 	var event Event
 	err = c.store.Update(func(d *State) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		v, ok := d.Deliveries[id]
 		if !ok {
 			return fault("not_found", "delivery does not exist")
@@ -276,6 +279,11 @@ func (c *Core) RetryDelivery(id string) error {
 		return nil
 	})
 	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		// No adapter submission occurred; leave this delivery safely retryable.
+		_ = c.Complete(id, "retryable", "canceled", "")
 		return err
 	}
 	if c.emit == nil {

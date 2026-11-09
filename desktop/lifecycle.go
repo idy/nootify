@@ -81,9 +81,11 @@ func (h *serviceHandoff) beforeRollback() error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), serviceControlTimeout)
 	defer cancel()
-	owned, err := h.service.StopForUpdate(ctx)
-	if err == nil && !owned {
-		err = errors.New("replacement service registration disappeared before rollback")
+	var err error
+	if stopper, ok := h.service.(interface{ QuiesceForRollback(context.Context) error }); ok {
+		err = stopper.QuiesceForRollback(ctx)
+	} else {
+		_, err = h.service.StopForUpdate(ctx)
 	}
 	if err != nil {
 		// Do not retry start or exchange/delete either bundle when the replacement

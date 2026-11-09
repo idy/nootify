@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import type { State } from './state.js';
+import type { ProviderMessageRef } from './message-ref.js';
 import { forwardedLarkMessage, forwardedProviderMessage, type ForwardingOptions } from './forwarded-messages.js';
 import { HttpError, SessionUnavailable, isPolledAdapter, type Adapter, type DeliveryResult, type InboxSource, type PolledAdapter, type SessionInbox, type SessionRecord, type StoredInboxMessage } from './types.js';
 
@@ -61,16 +62,22 @@ export function sessionInbox(state: State, adapter: PolledAdapter, id: string, o
   return { session_id: id, adapter, messages };
 }
 
-export async function acknowledgeInbox(state: State, adapter: PolledAdapter, id: string, messageId: string): Promise<{ status: 'inbox_acknowledged'; message_id: string }> {
-  let before: Map<string, StoredInboxMessage> | undefined;
+export async function acknowledgeInbox(state: State, adapter: PolledAdapter, id: string, messageId: string,
+  consumed?: (message: ProviderMessageRef) => Promise<void>): Promise<{ status: 'inbox_acknowledged'; message_id: string }> {
+  let before: Map<string, StoredInboxMessage> | undefined; let source: ProviderMessageRef | undefined;
   await state.save({
     apply() {
       registered(state, adapter, id);
       const message = state.inboxMessages.get(messageId);
       if (message && (message.adapter !== adapter || message.session_id !== id)) throw new HttpError(404, 'No inbox message with this ID in this session');
-      if (message) { before = new Map(state.inboxMessages); state.inboxMessages.delete(messageId); }
+      if (message) {
+        before = new Map(state.inboxMessages); state.inboxMessages.delete(messageId);
+        if (message.source?.channel === 'provider') source = message.source.delivery.message;
+      }
     },
     rollback() { if (before) { state.inboxMessages.clear(); for (const [key, value] of before) state.inboxMessages.set(key, value); } },
   });
+  // Deletion is already durable. Release is idempotent maintenance; startup reconciliation repairs any lost outcome.
+  if (source && consumed) await consumed(source).catch(() => {});
   return { status: 'inbox_acknowledged', message_id: messageId };
 }

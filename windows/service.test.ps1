@@ -146,7 +146,7 @@ $actions = [pscustomobject]@{ Count = 1; Entry = $entry }
 $actions | Add-Member ScriptMethod Item { param($Index); Assert ($Index -eq 1) 'COM actions are one-based'; return $this.Entry }
 $principal = [pscustomobject]@{ UserId = $ownerSid; LogonType = 3; RunLevel = 0 }
 $definition = [pscustomobject]@{ RegistrationInfo = [pscustomobject]@{ Description = $descriptionPrefix + ($record | ConvertTo-Json -Compress) }; Actions = $actions; Principal = $principal }
-$task = [pscustomobject]@{ Definition = $definition; Enabled = $true; Starts = 0; Stops = 0; Instances = 1; LegacyInstancesOmitted = $false }
+$task = [pscustomobject]@{ Definition = $definition; Enabled = $true; Starts = 0; Stops = 0; Instances = 1; State = 3; LegacyInstancesOmitted = $false }
 $task | Add-Member ScriptMethod GetInstances { param($Flags); return [pscustomobject]@{ Count = $(if ($this.LegacyInstancesOmitted) { 0 } else { $this.Instances }) } }
 $runningTasksBoundary = { param($Flags); Assert ($Flags -eq 1) 'Running task enumeration must include hidden tasks'; return (New-FixtureRunningTasks) }
 $scheduler = [pscustomobject]@{}
@@ -154,6 +154,15 @@ $scheduler | Add-Member ScriptMethod GetRunningTasks $runningTasksBoundary
 $task | Add-Member ScriptMethod Run { param($Args); $this.Starts++; $this.Instances = 1 }
 $task | Add-Member ScriptMethod Stop { param($Flags); $this.Stops++; $this.Instances = 0 }
 $null = Assert-Owned $task
+Assert (Test-OwnedTaskRunning $task) 'An owned hidden running instance must report running'
+$task.Instances = 0; $task.Enabled = $false
+Assert (!(Test-OwnedTaskRunning $task)) 'A deliberately stopped installed task must not report running'
+Assert (!(Test-OwnedTaskRunning $null)) 'An absent task must not report running'
+$task.Enabled = $true; $task.State = 2
+Assert (Test-OwnedTaskRunning $task) 'Queued owned work must retain running intent'
+$task.State = 4
+Assert (Test-OwnedTaskRunning $task) 'Scheduler Running state must retain running intent before enumeration catches up'
+$task.State = 3; $task.Instances = 1
 Assert ($entry.Arguments.Contains('"C:\Nootify Test\server.js"')) 'Space-containing paths must stay one argument'
 Assert ($entry.Arguments.Contains('"C:\Users\O''Brien\MCP settings.json"')) 'Apostrophes must remain literal in -File arguments'
 Assert ((Quote-Argument 'C:\directory\') -eq '"C:\directory\\"') 'Trailing slashes must not escape the closing quote'

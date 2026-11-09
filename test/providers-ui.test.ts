@@ -3,10 +3,11 @@ import { readFile } from 'node:fs/promises';
 import { setImmediate as nextTurn } from 'node:timers/promises';
 import { test } from 'node:test';
 import { parseHTML } from 'linkedom';
+import { authorizeUiFixture, settleUiFixture } from './ui-transport-fixture.js';
 import type { ProviderSummary, RemoteSummary } from '../src/providers.js';
 
 async function until(check: () => unknown, message: string): Promise<void> {
-  for (let attempt = 0; attempt < 300; attempt++) { if (check()) return; await nextTurn(); }
+  for (let attempt = 0; attempt < 1000; attempt++) { if (check()) return; await new Promise(resolve => setTimeout(resolve, 1)); }
   throw new Error(message);
 }
 
@@ -22,7 +23,7 @@ test('provider and remote-access UI performs real mutations, preserves secrets a
   };
   const descriptors = new Map(Object.keys(globals).map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
   for (const [key, value] of Object.entries(globals)) Object.defineProperty(globalThis, key, { configurable: true, value });
-  t.after(() => { for (const [key, descriptor] of descriptors) {
+  t.after(async () => { await settleUiFixture(); for (const [key, descriptor] of descriptors) {
     if (descriptor) Object.defineProperty(globalThis, key, descriptor); else Reflect.deleteProperty(globalThis, key);
   } });
   let focused: HTMLElement | null = null;
@@ -112,6 +113,7 @@ test('provider and remote-access UI performs real mutations, preserves secrets a
   const navigate = (hash: string) => { location.hash = hash; window.dispatchEvent(new window.Event('hashchange')); };
   const providerButton = (id: string, action: string) => document.querySelector<HTMLButtonElement>(`#provider-rows [data-key="provider-${action}-${id}"]`)!;
   const providerRow = (id: string) => document.querySelector<HTMLElement>(`[data-provider-id="${id}"]`)!;
+  authorizeUiFixture(t);
   await import('../src/ui-app.js');
   await until(() => !button('provider-add').disabled, 'Provider settings did not load');
   const poll = timers.find(timer => timer.milliseconds === 2000)!.run;
@@ -217,7 +219,8 @@ test('provider and remote-access UI performs real mutations, preserves secrets a
     failProvider = true; holdProvider = new Promise(resolve => { releaseProvider = resolve; });
     const before = providerWrites.length; submit('provider-editor'); submit('provider-editor');
     assert.equal((element('provider-fields') as HTMLFieldSetElement).disabled, true);
-    assert.equal(button('provider-save').disabled, true); assert.equal(providerWrites.length, before + 1);
+    assert.equal(button('provider-save').disabled, true);
+    await until(() => providerWrites.length === before + 1, 'The encrypted save did not reach the API fixture');
     assert.equal(button('provider-dialog-close').disabled, true); key('provider-name', 'Escape'); assert.equal(providerDialog.open, true, 'A pending mutation retains the dialog');
     releaseProvider!();
     await until(() => !button('provider-save').disabled, 'Save failure left the editor busy');

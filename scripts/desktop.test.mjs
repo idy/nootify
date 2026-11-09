@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import test from 'node:test';
 import { buildTarget, sidecarName } from './build-targets.mjs';
-import { APP_ID, DEV_APP_ID, copyPayload, desktopLinkerFlags, desktopPaths, macInfoPlist, packageVersion, parseDesktopArgs } from './desktop.mjs';
+import { APP_ID, DEV_APP_ID, copyPayload, desktopLinkerFlags, desktopPaths, macInfoPlist, packageVersion, parseDesktopArgs, windowsPayloadManifest } from './desktop.mjs';
 import { NSIS_SHA256, NSIS_URL, NSIS_URLS, downloadNsisArchive, verifyNsisArchive } from './nsis.mjs';
 import { createHash } from 'node:crypto';
 import { verifyWindowsX64 } from './bundle-utils.mjs';
@@ -87,14 +87,21 @@ test('staged payload preserves the paths pinned by existing LaunchAgents and tas
   }
 });
 
-test('production NSIS runs ownership hooks before all replacement/removal and preserves update identity', async () => {
+test('production NSIS stages before transactional replacement and guards uninstall ownership', async () => {
   const installer = await readFile(join(root, 'windows/installer.nsi'), 'utf8');
   const install = installer.slice(installer.indexOf('Section "Nootify"'), installer.indexOf('Function .onInstSuccess'));
   const uninstall = installer.slice(installer.indexOf('Section "Uninstall"'));
-  assert.ok(install.indexOf('Call NootifyPreflightDesktop') >= 0);
-  assert.ok(install.indexOf('Call NootifyPreflightDesktop') < install.indexOf('!insertmacro NSIS_HOOK_PREINSTALL'));
-  assert.ok(install.indexOf('!insertmacro NSIS_HOOK_PREINSTALL') < install.indexOf('RMDir /r'));
-  assert.ok(install.indexOf('!insertmacro NSIS_HOOK_PREINSTALL') < install.indexOf('  File '));
+  assert.ok(install.indexOf('Call NootifyCheckRegisteredDestination') >= 0);
+  assert.ok(install.indexOf('Call NootifyPreflightPayload') < install.indexOf('NootifyTransaction prepare'));
+  assert.ok(install.indexOf('Call NootifyPreflightDesktop') < install.indexOf('NootifyTransaction prepare'));
+  assert.ok(install.indexOf('NootifyTransaction prepare') < install.indexOf('  File '));
+  const staging = install.indexOf(String.raw`SetOutPath "$INSTDIR\.nootify-installer\new"`);
+  assert.ok(staging >= 0 && staging < install.indexOf('  File '));
+  assert.ok(install.indexOf('  File /r') < install.indexOf('NootifyTransaction apply'));
+  assert.ok(install.indexOf('NootifyTransaction apply') < install.indexOf('WriteRegStr HKCU'));
+  assert.ok(install.indexOf('WriteRegStr HKCU') < install.indexOf('NootifyTransaction finish'));
+  assert.doesNotMatch(install, /RMDir \/r|NSIS_HOOK_PREINSTALL/);
+  assert.match(installer, /Function \.onInstFailed[\s\S]*--action recover/);
   assert.ok(uninstall.indexOf('Call un.NootifyPreflightDesktop') >= 0);
   assert.ok(uninstall.indexOf('Call un.NootifyPreflightDesktop') < uninstall.indexOf('!insertmacro NSIS_HOOK_PREUNINSTALL'));
   assert.ok(uninstall.indexOf('!insertmacro NSIS_HOOK_PREUNINSTALL') < uninstall.indexOf('  Delete '));
@@ -129,21 +136,45 @@ test('install and uninstall share a nondestructive desktop preflight with bounde
 test('fresh Windows targets refuse unowned payload before stopping or recursively removing service files', async () => {
   const installer = await readFile(join(root, 'windows/installer.nsi'), 'utf8');
   const install = installer.slice(installer.indexOf('Section "Nootify"'), installer.indexOf('Function .onInstSuccess'));
-  assert.ok(install.indexOf('Call NootifyPreflightPayload') < install.indexOf('!insertmacro NSIS_HOOK_PREINSTALL'));
-  assert.ok(install.indexOf('Call NootifyPreflightPayload') < install.indexOf('RMDir /r'));
+  assert.ok(install.indexOf('Call NootifyPreflightPayload') < install.indexOf('NootifyTransaction prepare'));
+  assert.ok(install.indexOf('Call NootifyPreflightInstalledFiles') < install.indexOf('NootifyTransaction apply'));
   const guard = installer.slice(installer.indexOf('Function NootifyPreflightPayload'), installer.indexOf('!macro NootifyPreflightDesktop'));
   // GetFileAttributes also detects an empty service directory, unlike a glob.
   assert.match(guard, /GetFileAttributesW\(w "\$INSTDIR\\service"\)/);
   assert.match(guard, /IntOp \$1 \$0 & 0x400[\s\S]*reparse point/);
   assert.match(guard, /ReadRegStr \$0 HKCU "\$\{UNINSTALL_KEY\}" "InstallLocation"[\s\S]*\$0 != \$INSTDIR[\s\S]*Abort/);
   assert.match(guard, /IfNot.*FileExists.*Nootify\.exe[\s\S]*OrIfNot.*node\.exe[\s\S]*OrIfNot.*cli\.js[\s\S]*Abort/);
+  const destination = installer.slice(installer.indexOf('Function NootifyCheckRegisteredDestination'), installer.indexOf('!macro NootifyTransaction'));
+  assert.match(destination, /ReadRegStr \$RegisteredLocation[\s\S]*\$RegisteredLocation != ""[\s\S]*\$RegisteredLocation != \$INSTDIR[\s\S]*Abort/);
   assert.doesNotMatch(guard, /RMDir|Delete|service-stop|service-uninstall/);
+});
+
+test('Windows payload manifest verifies exact extracted bytes and excludes generated uninstaller', async t => {
+  const work = await temporary(t);
+  await put(join(work, 'Nootify.exe'), 'desktop');
+  await put(join(work, 'service/dist/src/cli.js'), 'cli');
+  assert.deepEqual(await windowsPayloadManifest(work), {
+    'Nootify.exe': createHash('sha256').update('desktop').digest('hex'),
+    'service/dist/src/cli.js': createHash('sha256').update('cli').digest('hex'),
+  });
+});
+
+test('portable installer transaction regressions pass and helper cross-compiles without execution', { timeout: 180_000 }, async t => {
+  const work = await temporary(t);
+  const env = { ...process.env, CGO_ENABLED: '0' }; delete env.GOOS; delete env.GOARCH;
+  await run('go', ['test', './cmd/installer-stage'], { cwd: join(root, 'desktop'), env });
+  const helper = join(work, 'nootify-installer-stage.exe');
+  await run('go', ['build', '-mod=readonly', '-trimpath', '-buildvcs=false', '-ldflags=-s -w -H=windowsgui', '-o', helper, './cmd/installer-stage'], {
+    cwd: join(root, 'desktop'), env: { ...env, GOOS: 'windows', GOARCH: 'amd64' },
+  });
+  await verifyWindowsX64(helper);
 });
 
 test('Windows installer acknowledges its opened private-cache image without deleting live files', async () => {
   const installer = await readFile(join(root, 'windows/installer.nsi'), 'utf8');
   const cleanup = await readFile(join(root, 'desktop/internal/updater/cleanup.go'), 'utf8');
-  const ack = installer.slice(installer.indexOf('Function NootifyAcknowledgeUpdater'), installer.indexOf('Function NootifyPreflightPayload'));
+  const ackStart = installer.indexOf('Function NootifyAcknowledgeUpdater');
+  const ack = installer.slice(ackStart, installer.indexOf('FunctionEnd', ackStart));
   assert.match(installer, /Function \.onInit[\s\S]*Call NootifyAcknowledgeUpdater[\s\S]*FunctionEnd/);
   assert.match(ack, /\$UpdateMode != 1/);
   assert.match(ack, /\$EXEFILE != "Nootify-setup\.exe"/);

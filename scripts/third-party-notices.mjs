@@ -22,18 +22,33 @@ export async function thirdPartyNotices(triple, modules) {
 }
 
 /** go list -deps selects only linked packages for this platform, excluding tests
- * and unused requirements. Deduplicate modules shared by the three executables. */
-export async function goModules(target) {
+ * and unused requirements. Deduplicate shared modules and selected runtimes. */
+export async function goModules(target, execute = run) {
   const env = { ...process.env, GOOS: target.goos, GOARCH: target.goarch, CGO_ENABLED: '0' };
-  const lists = await Promise.all(['desktop', 'native/core', 'native/tailscale'].map(async directory => {
-    const { stdout } = await run('go', ['list', '-deps', '-mod=readonly', '-f', '{{with .Module}}{{.Path}}\t{{.Version}}\t{{.Dir}}{{end}}', '.'],
-      { cwd: join(root, directory), env, maxBuffer: 16 << 20 });
-    return stdout;
+  const builds = await Promise.all([
+    ['desktop', 'Nootify'], ['native/core', 'nootify-core'], ['native/tailscale', 'nootify-tsnet'],
+    ...(target.goos === 'windows' ? [['desktop/cmd/installer-stage', 'nootify-installer-stage']] : []),
+  ].map(async ([directory, executable]) => {
+    const options = { cwd: join(root, directory), env, maxBuffer: 16 << 20 };
+    // GOTOOLCHAIN=auto consults this module's go.mod, so a root-level go env
+    // can describe a different runtime from the one linked into this binary.
+    const [listed, toolchain] = await Promise.all([
+      execute('go', ['list', '-deps', '-mod=readonly', '-f', '{{with .Module}}{{.Path}}\t{{.Version}}\t{{.Dir}}{{end}}', '.'], options),
+      execute('go', ['env', '-json', 'GOROOT', 'GOVERSION'], options),
+    ]);
+    const { GOROOT, GOVERSION } = JSON.parse(toolchain.stdout);
+    if (typeof GOROOT !== 'string' || !isAbsolute(GOROOT) || typeof GOVERSION !== 'string' || !GOVERSION) {
+      throw new Error(`Could not identify the Go runtime used for ${executable}`);
+    }
+    return { list: listed.stdout, executable, runtime: { kind: 'Go runtime', name: 'Go standard library', version: GOVERSION, authors: [], dir: GOROOT, source: 'https://go.dev/' } };
   }));
-  const { stdout } = await run('go', ['env', '-json', 'GOROOT', 'GOVERSION'], { cwd: root });
-  const { GOROOT, GOVERSION } = JSON.parse(stdout);
-  return [{ kind: 'Go runtime', name: 'Go standard library', version: GOVERSION, authors: [], dir: GOROOT, source: 'https://go.dev/' },
-    ...modulesFromGoList(lists.join('\n'))];
+  const runtimes = new Map();
+  for (const { runtime, executable } of builds) {
+    const key = `${runtime.version}\0${runtime.dir}`;
+    if (!runtimes.has(key)) runtimes.set(key, { ...runtime, executables: [] });
+    runtimes.get(key).executables.push(executable);
+  }
+  return [...runtimes.values(), ...modulesFromGoList(builds.map(build => build.list).join('\n'))];
 }
 
 export function modulesFromGoList(output) {
@@ -79,6 +94,7 @@ export async function renderNotices(target, modules, packages) {
       `${component.kind}: ${component.name} ${component.version}`,
       `License: ${component.license ?? 'not declared'}`,
       `Source: ${component.source}`,
+      ...(component.executables ? [`Built into: ${component.executables.join(', ')}`] : []),
     ];
     if (!included) {
       if (component.authors.length) lines.push(`${component.authors.length === 1 ? 'Author' : 'Authors'}: ${component.authors.join(', ')}`);

@@ -404,6 +404,20 @@ func TestServiceHandoffOnlyRecoversSuccessfullyStoppedService(t *testing.T) {
 	}
 }
 
+func TestCancelledUpdateDoesNotStartDeliberatelyStoppedService(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	starts := 0
+	h := &serviceHandoff{service: fakeControlledService{
+		stop:    func(context.Context) (bool, error) { cancel(); return false, nil }, // installed but already unloaded
+		request: func(context.Context, string) error { starts++; return nil },
+	}}
+	err := h.install(ctx, func(ctx context.Context) error { return h.before(ctx) })
+	if !errors.Is(err, context.Canceled) || starts != 0 {
+		t.Fatal("cancelled update restarted a deliberately stopped service", err, starts)
+	}
+}
+
 func TestOwnedPartialStopRecoversWithoutReplacingBundle(t *testing.T) {
 	drainError := errors.New("owned bootout succeeded but process still draining")
 	starts := 0

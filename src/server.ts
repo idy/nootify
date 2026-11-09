@@ -69,17 +69,24 @@ export function createServiceHost(modules: ServiceModule[], token: string, logs?
         const rejected = options.tailnet ? await options.tailnet.authorize(host, options.peerAddress ? options.peerAddress(request.socket) : request.socket.remoteAddress) : 'Tailnet access is not configured';
         if (rejected) throw new HttpError(403, rejected);
       } else if (!loopback.test(host)) throw new HttpError(403, 'Only loopback hosts are accepted');
-      const url = new URL(request.url ?? '/', 'http://127.0.0.1');
+      let url = new URL(request.url ?? '/', 'http://127.0.0.1');
       const isPageNavigation = request.method === 'GET' && url.pathname === '/' && request.headers['sec-fetch-dest'] === 'document';
       if (!isPageNavigation && request.headers['sec-fetch-site'] && !['same-origin', 'none'].includes(String(request.headers['sec-fetch-site']))) throw new HttpError(403, 'Cross-site requests are not accepted');
       if (request.headers.origin && request.headers.origin !== `http://${host}`) throw new HttpError(403, 'Cross-origin requests are not accepted');
+      let encryptedOwner = false;
+      if (url.pathname === '/ui/api/secure') {
+        if (options.via === 'tailnet' || request.method !== 'POST') throw new HttpError(403, 'Encrypted owner UI is local-only');
+        request = await owner.sessions.open(request, response);
+        url = new URL(request.url!, 'http://127.0.0.1');
+        encryptedOwner = true;
+      }
       if (await owner.handle(request, response, url, options.via !== 'tailnet')) return;
-      const ownerAuthenticated = options.via !== 'tailnet' && owner.authenticated(request);
+      const ownerAuthenticated = options.via !== 'tailnet' && (encryptedOwner || owner.authenticated(request));
       if (logs && await serveUi(request, response, url.pathname, { modules, logs, pulls: options.pulls, tailnetUrl: () => options.tailnet?.url(),
         agents: options.agents, channel: options.channel, settings: options.settings, providers: options.providers, ownerAuthenticated, ownerUiCommand: options.ownerUiCommand, via: options.via ?? 'loopback' })) return;
       if (request.headers.origin) throw new HttpError(403, 'Browser-origin requests are not accepted for control APIs');
       const statuses = () => modules.map(module => ({ name: module.name, status: module.status() }));
-      if (request.method === 'GET' && url.pathname === '/health') { send(200, { ok: true, service: 'nootify', modules: statuses() }); return; }
+      if (request.method === 'GET' && url.pathname === '/health') { send(200, { ok: true, service: 'nootify', ui_transport: 1, modules: statuses() }); return; }
       const actual = Buffer.from(request.headers.authorization ?? '');
       const expected = Buffer.from(`Bearer ${token}`);
       if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw new HttpError(401, 'Unauthorized');
@@ -144,6 +151,7 @@ export async function main(): Promise<void> {
       disconnected: () => networkChanged(false), listen: () => listenTailnetProxy(tailnetServer, peers) });
     const agents = new AgentPrompts({ stateDir: state.directory, port, tailnetAddress: () => { const url = tailnet.url(); return url ? new URL(url).hostname : undefined; } }, report);
     const providers = new ProvidersService(state, sessions, resolved?.credentials, report, port, tsnet, undefined, sessionThreadDiscovery(agents, state, report));
+    sessions.setInboxConsumer(message => providers.consumeInbox(message));
     networkChanged = ready => {
       if (!ready) providers.networkDisconnected();
       else void providers.syncNetwork().catch(error => logs.report({ source: 'providers', status: 'tailnet_publish_failed', error: (error as Error).message }));

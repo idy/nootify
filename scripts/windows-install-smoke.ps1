@@ -316,6 +316,77 @@ try {
             }
         }
     }
+    Test-Step 'Changed installation destination refuses before touching the registered installation' {
+        $other = Join-Path $env:RUNNER_TEMP 'Nootify refused destination'
+        if (Test-Path -LiteralPath $other) { throw 'Refusing an existing alternate installation fixture' }
+        $registrationBefore = Get-ItemProperty -LiteralPath $registryKey | ConvertTo-Json -Compress
+        $previous = Get-ServiceProcess
+        $null = Run-Native $Installer "/S /D=$other" 'refuse-changed-destination' 1
+        if ((Test-Path -LiteralPath $other) -or $previous.HasExited -or !(Test-Health) -or
+            (Get-ItemProperty -LiteralPath $registryKey | ConvertTo-Json -Compress) -cne $registrationBefore) {
+            throw 'Changed destination modified the original installation or created another payload'
+        }
+        Assert-Installation $BaselineVersion
+        Assert-RunningTask
+    }
+    Test-Step 'Normal silent upgrade restores a legacy-status service without relaunching the desktop' {
+        # Match published older CLIs whose Status JSON contains only installed.
+        # Keep real service management and its ownership checks for every action.
+        $legacyCLI = Join-Path (Split-Path -Parent $cli) 'cli-smoke-original.js'
+        if (Test-Path -LiteralPath $legacyCLI) { throw 'Refusing an existing legacy CLI fixture path' }
+        Copy-Item -LiteralPath $cli -Destination $legacyCLI
+        [IO.File]::WriteAllText($cli, @'
+import { main } from './cli-smoke-original.js';
+import { manageService } from './service.js';
+await main(process.argv.slice(2), async (action, options) => {
+  const result = await manageService(action, options);
+  if (action === 'status') delete result.running;
+  return result;
+});
+'@)
+        $previous = Get-ServiceProcess
+        With-NodeStartupOptions { $null = Run-Native $Installer "/S /D=$installDir" 'upgrade-normal-no-relaunch' }
+        Wait-Until 'normal upgrade restores daemon without desktop' { (Test-Health) -and @(Get-TestApps).Count -eq 0 }
+        Assert-Installation $Version
+        if (!$previous.WaitForExit(10000)) { throw 'Normal upgrade did not replace the old daemon' }
+        Assert-RunningTask
+        if ((Get-TestTask).Definition.Data -cne $marker) { throw 'Normal upgrade recreated the registered task' }
+        $script:daemon = Get-ServiceProcess
+    }
+    Test-Step 'Payload exchange failure rolls back old bytes and the running service' {
+        $before = @{}
+        foreach ($file in @(Get-ChildItem -LiteralPath $installDir -Recurse -File)) {
+            $before[$file.FullName] = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
+        }
+        $registrationBefore = Get-ItemProperty -LiteralPath $registryKey | ConvertTo-Json -Compress
+        # Deny FILE_SHARE_DELETE on node.exe. Extraction can still succeed in
+        # staging, but moving this old root fails after Nootify.exe was exchanged.
+        $lock = [IO.File]::Open($node, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        try { $null = Run-Native $Installer "/S /D=$installDir" 'rollback-locked-runtime' 1 }
+        finally { $lock.Dispose() }
+        Wait-Until 'rollback restores old daemon without desktop' { (Test-Health) -and @(Get-TestApps).Count -eq 0 }
+        foreach ($path in $before.Keys) {
+            if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -cne $before[$path]) { throw 'Failed exchange did not restore old payload bytes' }
+        }
+        if ((Test-Path -LiteralPath (Join-Path $installDir '.nootify-installer')) -or
+            (Get-ItemProperty -LiteralPath $registryKey | ConvertTo-Json -Compress) -cne $registrationBefore) { throw 'Failed exchange did not finish rollback' }
+        Assert-RunningTask
+        if ((Get-TestTask).Definition.Data -cne $marker) { throw 'Rollback recreated the registered task' }
+        $script:daemon = Get-ServiceProcess
+    }
+    Test-Step 'Normal silent upgrade preserves a deliberately stopped service' {
+        $null = Invoke-Service 'stop'
+        Wait-Until 'explicitly stopped task and daemon' { (Get-TestInstanceCount) -eq 0 -and (Test-PortFree) }
+        $null = Run-Native $Installer "/S /D=$installDir" 'upgrade-stopped-no-relaunch'
+        Assert-Installation $Version
+        if ((Get-TestTask).Enabled -or (Get-TestInstanceCount) -ne 0 -or !(Test-PortFree) -or @(Get-TestApps).Count -ne 0) {
+            throw 'Upgrade started or enabled a deliberately stopped service'
+        }
+        $null = Invoke-Service 'start'
+        Wait-Until 'explicit service start after stopped upgrade' { Test-Health }
+        Assert-RunningTask
+        $script:daemon = Get-ServiceProcess
+    }
     Test-Step 'Updater-mode upgrade ignores inherited Node options and relaunches the desktop' {
         With-NodeStartupOptions { $null = Run-Native $Installer "/S /UPDATE /R /D=$installDir" 'upgrade-current' }
         Wait-Until 'upgraded app and daemon' { (Test-Health) -and @(Get-TestApps).Count -eq 1 }

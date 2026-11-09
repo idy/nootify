@@ -1,6 +1,7 @@
-; windows/installer.nsi invokes PREINSTALL before all File commands and
-; PREUNINSTALL before any Delete commands. /UPDATE sets $UpdateMode=1 and
-; replaces this installation in place, preserving its registered task and state.
+; The production installer stages and verifies its payload through the transaction
+; helper, which invokes the same owned bundled CLI after recording running state.
+; PREINSTALL remains for compatibility/hook probes; PREUNINSTALL precedes Delete.
+; /UPDATE sets $UpdateMode=1 and preserves this installation's task and state.
 ; Real uninstall removes only the task owned by this exact bundled CLI.
 ;
 ; Only the bundled CLI determines task/process ownership. Never use taskkill by
@@ -89,6 +90,6 @@
   ${EndIf}
 !macroend
 
-; The installer's .onInstSuccess handles /R after successful replacement,
-; including /S /UPDATE. The relaunched app starts the preserved task. Never
-; start it before replacement has finished, or twice.
+; The transaction helper restores a previously running service independently of
+; /R. .onInstSuccess handles optional desktop launch only, including /S /UPDATE.
+; A deliberately stopped service is not started by the transaction helper.

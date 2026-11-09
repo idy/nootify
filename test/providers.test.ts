@@ -12,19 +12,22 @@ import { CoreError, ProviderCore, type CoreEvent, type CoreTransport } from '../
 import { ProvidersService, decodeMessageRef, encodeMessageRef, type ProviderPage } from '../src/providers.js';
 import { SessionsService } from '../src/sessions.js';
 import { registerPolledSession, sessionInbox } from '../src/polled-sessions.js';
-import { RetryableDeliveryError } from '../src/types.js';
+import { RetryableDeliveryError, SessionUnavailable } from '../src/types.js';
 import { createServiceHost } from '../src/server.js';
 import { EventLog } from '../src/events.js';
 import { TailnetAccess } from '../src/tailnet.js';
 import { TailscaleService } from '../src/tailscale.js';
 import { NootifyClient } from '../src/client.js';
-import { SettingsService } from '../src/settings.js';
+import { SettingsService, type SettingsOptions } from '../src/settings.js';
 import { GitHubAuth } from '../src/github-auth.js';
 import { LarkDirectoryCache } from '../src/lark-directory-cache.js';
 import type { TsnetClient } from '../src/tsnet-client.js';
 
 const page: ProviderPage = { node_id: 'local-node', providers: [], remote: { enabled: false, listen: '127.0.0.1:9418', status: 'disabled', tls: false, token_set: false, peers: [] } };
-interface FakeBinding { provider_id: string; session: { node_id: string; adapter: string; session_id: string; name?: string }; created: boolean; deleted?: boolean }
+interface FakeBinding {
+  provider_id: string; session: { node_id: string; adapter: string; session_id: string; name?: string };
+  created: boolean; chat_id?: string; thread_id?: string; sender_open_id?: string; deleted?: boolean; aliases?: FakeBinding[];
+}
 class FakeCore implements CoreTransport {
   snapshot: ProviderPage = structuredClone(page);
   bindings: FakeBinding[] = [];
@@ -68,6 +71,223 @@ async function fixture(t: { after(fn: () => unknown): void }, session?: Partial<
   t.after(async () => { await providers.stop(); await rm(directory, { recursive: true, force: true }); });
   return { directory, state, core, sessions, providers };
 }
+
+function settingsFor(t: { after(fn: () => unknown): void }, f: Awaited<ReturnType<typeof fixture>>, options: Partial<SettingsOptions> = {}): SettingsService {
+  const settings = new SettingsService({ state: f.state, lark: f.providers, providers: f.providers, env: {}, verify: async () => {},
+    github: new GitHubAuth(f.state, () => {}, () => {}, 'synthetic-client'),
+    pulls: { async preferences() { return { follow: [] }; }, async restore() {} },
+    agents: { async list() { return []; }, async set() { throw new Error('No agent edits in this fixture'); } }, ...options });
+  t.after(() => settings.stop()); return settings;
+}
+
+test('core disconnect after accepting a request is unconfirmed while a pre-start request is unavailable', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'nootify-core-outcome-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const script = join(directory, 'fixture.cjs');
+  await writeFile(script, `const readline=require('node:readline');
+process.stdout.write(JSON.stringify({id:0,result:{ready:true}})+'\\n');
+readline.createInterface({input:process.stdin}).once('line',()=>process.exit(0));`);
+  const core = new ProviderCore(join(directory, 'state'), () => {}, { file: process.execPath, args: [script] }, 2000);
+  t.after(() => core.stop());
+  await assert.rejects(core.request('message.send'), error => error instanceof CoreError && error.code === 'unavailable');
+  await core.start();
+  await assert.rejects(core.request('message.send', { content: { text: 'synthetic send' } }), error => error instanceof CoreError && error.code === 'unconfirmed');
+});
+
+test('shutdown records accepted deliveries before stopping the core and refuses new agent submissions', async t => {
+  let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; });
+  let entered!: () => void; const sending = new Promise<void>(resolve => { entered = resolve; });
+  let submissions = 0; let stopped = false;
+  t.after(() => release());
+  const f = await fixture(t, { async send() { submissions++; entered(); await gate; return { status: 'input_accepted' }; } });
+  const request = f.core.request.bind(f.core);
+  t.mock.method(f.core, 'request', async <T>(method: string, params: Record<string, unknown> = {}): Promise<T> => {
+    assert.equal(stopped, false, `${method} must be recorded while the core is alive`); return request<T>(method, params);
+  });
+  t.mock.method(f.core, 'stop', async () => { stopped = true; });
+  const event = { event: 'delivery', data: { delivery_id: 'accepted', session: { adapter: 'codex', session_id: 'session-a' },
+    message: { origin_node_id: 'source', provider_id: 'bot', message_id: 'message-a' }, content: { text: 'hello' }, text: 'hello' } };
+  const deliver = (value: CoreEvent) => (f.providers as unknown as { event(event: CoreEvent): void }).event(value);
+  deliver(event); await sending;
+  const shutdown = f.providers.stop(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(stopped, false, 'the accepted agent write must finish before core shutdown');
+  deliver({ ...event, data: { ...event.data, delivery_id: 'late' } });
+  release(); await shutdown;
+  assert.equal(submissions, 1);
+  assert.equal(f.core.calls.find(call => call.method === 'delivery.complete' && call.params.delivery_id === 'accepted')?.params.status, 'delivered');
+  assert.equal(f.core.calls.find(call => call.method === 'delivery.complete' && call.params.delivery_id === 'late')?.params.status, 'retryable');
+  assert.equal(stopped, true);
+});
+
+test('committed provider remote and import changes survive unavailable publication and expose reconciliation status', async t => {
+  let offline = true; let publications = 0;
+  const f = await fixture(t, undefined, { async publish() { publications++; if (offline) throw new Error('synthetic publication unavailable'); },
+    async unpublish() {}, async closeTunnel() {} } as unknown as TsnetClient);
+  f.state.settings.tailscale_enabled = true; f.core.snapshot.remote.enabled = true;
+  const result = await f.providers.action({ action: 'save', provider: { id: 'upstream', type: 'remote', name: 'Office', enabled: true, address: '100.64.0.9:9418' } });
+  assert.equal(result.providers[0].id, 'upstream');
+  assert.equal((result as ProviderPage & { network?: { status: string } }).network?.status, 'retrying');
+  await f.providers.configureRemote({ enabled: true });
+  const settings = settingsFor(t, f);
+  await settings.importConfig({ format: 'nootify-config', version: 1, providers: { version: 1, providers: [] },
+    backends: { codex: { url: 'ws://127.0.0.1:4500' } } });
+  assert.equal(f.state.backends.get('codex')?.url, 'ws://127.0.0.1:4500', 'publication must not abort the rest of a committed import');
+  assert.equal(f.core.calls.filter(call => call.method === 'provider.save').length, 1);
+  assert.equal(f.core.calls.filter(call => call.method === 'remote.configure').length, 1);
+  assert.equal(f.core.calls.filter(call => call.method === 'config.import').length, 1);
+  offline = false; await f.providers.syncNetwork();
+  assert.ok(publications >= 2); assert.equal((await f.providers.page() as ProviderPage & { network?: unknown }).network, undefined);
+});
+
+for (const outcome of ['status-loss', 'unconfirmed', 'committed_not_durable', 'conflict'] as const) {
+  test(`recipient ${outcome} preserves the correct durable candidate without resubmitting the save`, async t => {
+    const f = await fixture(t); const settings = settingsFor(t, f);
+    await f.providers.action({ action: 'save', provider: { id: 'legacy-feishu', name: 'Migrated', type: 'feishu', enabled: false,
+      app_id: 'cli_0123456789abcdef', app_secret: 'synthetic-secret', recipient_open_id: 'ou_original' } });
+    let applied = false; let submissions = 0; const request = f.core.request.bind(f.core);
+    t.mock.method(f.core, 'request', async <T>(method: string, params: Record<string, unknown> = {}): Promise<T> => {
+      if (method === 'status' && applied && outcome === 'status-loss') throw new CoreError('unavailable', 'synthetic status loss');
+      if (method === 'provider.save' && params.recipient_open_id === 'ou_candidate') {
+        submissions++;
+        if (outcome === 'conflict') throw new CoreError('conflict', 'synthetic proven rejection');
+        const result = await request<T>(method, params); applied = true;
+        if (outcome !== 'status-loss') throw new CoreError(outcome, 'synthetic uncertain save outcome');
+        return result;
+      }
+      return request<T>(method, params);
+    });
+    if (outcome === 'status-loss') await settings.setRecipient('ou_candidate');
+    else await assert.rejects(settings.setRecipient('ou_candidate'), /synthetic/);
+    const expected = outcome === 'conflict' ? 'ou_original' : 'ou_candidate';
+    assert.equal(f.state.settings.lark_recipient_open_id, expected);
+    assert.equal((await State.open(f.directory)).settings.lark_recipient_open_id, expected);
+    assert.equal(f.core.configs.get('legacy-feishu')?.recipient_open_id, expected);
+    assert.equal(submissions, 1, 'an uncertain provider save must never be automatically retried');
+  });
+}
+
+test('legacy recipient-only imports update core routing without replacing provider credentials or configuration', async t => {
+  const f = await fixture(t); const settings = settingsFor(t, f);
+  await f.providers.action({ action: 'save', provider: { id: 'legacy-feishu', name: 'Keep this name', type: 'feishu', enabled: false,
+    app_id: 'cli_0123456789abcdef', app_secret: 'synthetic-secret', recipient_open_id: 'ou_original' } });
+  const api = f.providers.api;
+  await settings.importConfig({ format: 'nootify-config', version: 1, lark: { recipient_open_id: 'ou_imported' } });
+  const provider = f.core.configs.get('legacy-feishu')!;
+  assert.equal(provider.recipient_open_id, 'ou_imported'); assert.equal(provider.name, 'Keep this name'); assert.equal(provider.enabled, false);
+  assert.equal(provider.app_secret, 'synthetic-secret'); assert.strictEqual(f.providers.api, api);
+  assert.equal((await State.open(f.directory)).settings.lark_recipient_open_id, 'ou_imported');
+});
+
+test('provider imports reject conflicting environment credentials before changing either store', async t => {
+  const f = await fixture(t); const credentials = { appId: 'cli_0123456789abcdef', appSecret: 'environment-secret' };
+  f.providers.refreshCompatibilityCredentials(credentials);
+  const settings = settingsFor(t, f, { env: { LARK_APP_ID: credentials.appId, LARK_APP_SECRET: credentials.appSecret }, source: 'environment' });
+  f.state.settings.lark_recipient_open_id = 'ou_original'; await f.state.save();
+  const before = { ...f.state.settings }; const calls = f.core.calls.length;
+  await assert.rejects(settings.importConfig({ format: 'nootify-config', version: 1,
+    providers: { version: 1, providers: [{ id: 'legacy-feishu', type: 'feishu', name: 'Imported', enabled: false,
+      app_id: 'cli_fedcba9876543210', app_secret: 'imported-secret', recipient_open_id: 'ou_foreign' }] },
+    lark: { app_id: 'cli_fedcba9876543210', app_secret: 'imported-secret' } }), /conflict.*environment/i);
+  assert.deepEqual(f.state.settings, before); assert.deepEqual((await State.open(f.directory)).settings, before);
+  assert.deepEqual(f.providers.credentials, credentials);
+  assert.ok(!f.core.calls.slice(calls).some(call => call.method === 'config.import'));
+});
+
+for (const outcome of ['unconfirmed', 'committed_not_durable', 'conflict'] as const) {
+  test(`provider import ${outcome} distinguishes live commit from a proven rejection without automatic retry`, async t => {
+    const f = await fixture(t); const settings = settingsFor(t, f);
+    const initial = { id: 'legacy-feishu', type: 'feishu', name: 'Retained', enabled: false,
+      app_id: 'cli_0123456789abcdef', app_secret: 'original-secret', recipient_open_id: 'ou_original' };
+    await f.providers.action({ action: 'save', provider: initial });
+    const before = { ...f.state.settings }; const api = f.providers.api;
+    const candidate = { ...initial, name: 'Imported name', app_secret: 'imported-secret', recipient_open_id: 'ou_imported' };
+    const request = f.core.request.bind(f.core); let submissions = 0;
+    t.mock.method(f.core, 'request', async <T>(method: string, params: Record<string, unknown> = {}): Promise<T> => {
+      if (method !== 'config.import') return request<T>(method, params);
+      submissions++;
+      if (outcome !== 'conflict') await request<T>(method, params);
+      throw new CoreError(outcome, 'synthetic import outcome');
+    });
+    await assert.rejects(settings.importConfig({ format: 'nootify-config', version: 1,
+      providers: { version: 1, providers: [candidate] } }), /synthetic import outcome/);
+    assert.equal(submissions, 1);
+    const persisted = (await State.open(f.directory)).settings;
+    if (outcome === 'conflict') {
+      assert.deepEqual(persisted, before); assert.strictEqual(f.providers.api, api);
+      assert.equal(f.core.configs.get(initial.id)?.app_secret, initial.app_secret);
+    } else {
+      assert.equal(persisted.lark_app_secret, candidate.app_secret); assert.equal(persisted.lark_recipient_open_id, candidate.recipient_open_id);
+      assert.equal(f.core.configs.get(initial.id)?.app_secret, candidate.app_secret);
+      if (outcome === 'committed_not_durable') {
+        assert.equal(f.providers.credentials?.appSecret, candidate.app_secret); assert.notStrictEqual(f.providers.api, api);
+      }
+    }
+  });
+}
+
+test('migration carries saved adapters and per-chat committed history boundaries', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'nootify-migration-payload-'));
+  const state = await State.open(directory); const core = new FakeCore();
+  const credentials = { appId: 'cli_0123456789abcdef', appSecret: 'synthetic-secret' };
+  for (const adapter of ['codex', 'trae', 'workbuddy'] as const) {
+    const id = `saved-${adapter}`; const chat = `oc_${adapter}`;
+    state.sessions.set(id, { session_id: id, host_id: 'legacy-host', adapter, session_name: `Saved ${adapter}` });
+    state.bindings.set(chat, { chat_id: chat, session_id: id, sender_open_id: 'ou_owner', activated_at: 1000 });
+  }
+  state.larkPollCursors.set('chat', { app_id: credentials.appId, chat_id: 'oc_trae', container_id: 'oc_trae', container_type: 'chat', started_at: 1000, through: 9000 });
+  state.larkPollCursors.set('thread', { app_id: credentials.appId, chat_id: 'oc_workbuddy', container_id: 'omt_thread', container_type: 'thread', started_at: 1000, through: 12000 });
+  const providers = new ProvidersService(state, new SessionsService(state), credentials, undefined, 9417, undefined, core);
+  t.after(async () => { await providers.stop(); await rm(directory, { recursive: true, force: true }); });
+  await providers.start();
+  const bindings = core.calls.find(call => call.method === 'migration.import')!.params.bindings as Record<string, unknown>[];
+  assert.deepEqual(bindings.map(binding => binding.adapter), ['codex', 'trae', 'workbuddy']);
+  assert.equal(bindings.find(binding => binding.chat_id === 'oc_trae')?.history_cursor, 9000);
+  assert.equal(bindings.find(binding => binding.chat_id === 'oc_workbuddy')?.history_cursor, undefined, 'thread-only progress cannot skip unseen chat history');
+  assert.ok(bindings.every(binding => binding.activated_at === 1000));
+});
+
+test('durable inbox acknowledgement releases only the last pending reference and survives an uncertain release', async t => {
+  const f = await fixture(t); f.sessions.setInboxConsumer(message => f.providers.consumeInbox(message));
+  await registerPolledSession(f.state, 'trae', 'queued-session', 'Queued session');
+  const message = { origin_node_id: 'source', provider_id: 'bot', message_id: 'queued-message', opaque: { route: 'preserved' } };
+  const source = { channel: 'provider' as const, delivery: { adapter: 'trae' as const, session_id: 'queued-session', message } };
+  for (let i = 0; i < 2; i++) await f.sessions.send('queued-session', 'input', 'trae', { text: 'input', source });
+  const entries = [...f.state.inboxMessages.values()];
+  await f.providers.reconcileInbox();
+  const snapshot = f.core.calls.filter(call => call.method === 'delivery.inbox.reconcile').at(-1)!.params;
+  assert.equal((snapshot.pending as unknown[]).length, 2); assert.equal(typeof snapshot.before, 'number');
+  const request = f.core.request.bind(f.core);
+  t.mock.method(f.core, 'request', async <T>(method: string, params: Record<string, unknown> = {}): Promise<T> => {
+    const result = await request<T>(method, params);
+    if (method === 'delivery.inbox.consume') throw new CoreError('unconfirmed', 'synthetic lost release response');
+    return result;
+  });
+  for (const entry of entries) {
+    const ack = await f.sessions.handle({ method: 'POST', path: `/v1/sessions/queued-session/inbox/${entry.id}/ack`, body: { adapter: 'trae' } });
+    assert.equal((ack?.body as { status: string }).status, 'inbox_acknowledged');
+  }
+  assert.equal(f.core.calls.filter(call => call.method === 'delivery.inbox.consume').length, 1);
+  assert.deepEqual(f.core.calls.find(call => call.method === 'delivery.inbox.consume')!.params, { message });
+  assert.equal((await State.open(f.directory)).inboxMessages.size, 0, 'lost release confirmation must never restore a deleted inbox entry');
+  const recoveredCore = new FakeCore(); const recoveredState = await State.open(f.directory);
+  const recovered = new ProvidersService(recoveredState, new SessionsService(recoveredState), undefined, undefined, 9417, undefined, recoveredCore);
+  t.after(() => recovered.stop()); await recovered.start();
+  const recovery = recoveredCore.calls.find(call => call.method === 'delivery.inbox.reconcile')!.params;
+  assert.deepEqual(recovery.pending, []); assert.equal(typeof recovery.before, 'number');
+});
+
+test('proven rejected polled delivery releases its hold after recording the terminal result', async t => {
+  const f = await fixture(t, { async send() { throw new SessionUnavailable('session_not_local'); } });
+  const message = { origin_node_id: 'source', provider_id: 'bot', message_id: 'rejected-polled' };
+  (f.providers as unknown as { event(event: CoreEvent): void }).event({ event: 'delivery', data: {
+    delivery_id: 'rejected-polled', session: { adapter: 'workbuddy', session_id: 'missing' }, message, content: { text: 'input' }, text: 'input',
+  } });
+  for (let attempt = 0; attempt < 100 && !f.core.calls.some(call => call.method === 'delivery.inbox.consume'); attempt++) await new Promise(resolve => setImmediate(resolve));
+  const completion = f.core.calls.findIndex(call => call.method === 'delivery.complete');
+  const release = f.core.calls.findIndex(call => call.method === 'delivery.inbox.consume');
+  assert.ok(completion >= 0 && release > completion); assert.equal(f.core.calls[completion].params.status, 'rejected');
+  assert.deepEqual(f.core.calls[release].params, { message });
+});
 
 test('private core bridge handles asynchronous events while a request is outstanding and closes on EOF', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'nootify-core-bridge-'));
@@ -202,7 +422,7 @@ test('manual binding rejects unsupported pin and legacy metadata modes before si
   const { providers, core, state } = await fixture(t);
   const body = { adapter: 'trae', session_id: 'manual-session', session_name: 'Manual session', sender_open_id: 'ou_owner' };
   const calls = core.calls.length;
-  for (const options of [{ pin: true }, { pin: 'yes' }, { metadata: 'message' }, { metadata: 'announcement' }, { metadata: 1 }, { metadata: [] }]) {
+  for (const options of [{ pin: true }, { pin: 'yes' }, { metadata: 'message' }, { metadata: 1 }, { metadata: [] }]) {
     await assert.rejects(providers.handle({ method: 'PUT', path: '/v1/lark/bindings/oc_existing', body: { ...body, ...options } }), /pin|metadata/i);
   }
   assert.equal(core.calls.length, calls);
@@ -212,6 +432,41 @@ test('manual binding rejects unsupported pin and legacy metadata modes before si
   const bind = core.calls.find(call => call.method === 'session.bind')!;
   assert.deepEqual(bind.params.session, { node_id: page.node_id, adapter: 'trae', session_id: body.session_id, name: body.session_name, metadata });
   assert.equal(bind.params.chat_id, 'oc_existing'); assert.equal(bind.params.sender_open_id, body.sender_open_id);
+  await providers.handle({ method: 'PUT', path: '/v1/lark/bindings/oc_legacy', body: { ...body, metadata: 'announcement' } });
+  const legacy = core.calls.at(-1)!;
+  assert.equal(legacy.method, 'session.bind');
+  assert.ok(!Object.hasOwn(legacy.params.session as object, 'metadata'), 'the old CLI default must not overwrite existing structured metadata');
+});
+
+test('legacy binding rows and group counts include live aliases with independent trust and full session identity', async t => {
+  const { providers, core, state } = await fixture(t);
+  const session = { node_id: 'local-node', adapter: 'codex', session_id: 'shared-id', name: 'Primary title' };
+  const alias = { provider_id: 'alias-provider', session: { ...session, name: 'Alias title' }, created: false,
+    chat_id: 'oc_alias', thread_id: 'omt_alias', sender_open_id: 'ou_alias' };
+  const primary: FakeBinding = { provider_id: 'primary-provider', session, created: false, chat_id: 'oc_primary', sender_open_id: 'ou_primary', aliases: [alias,
+    { ...alias, chat_id: 'oc_deleted_alias', deleted: true }] };
+  core.bindings.push(primary,
+    { ...primary, chat_id: 'oc_deleted_parent', deleted: true, aliases: [{ ...alias, chat_id: 'oc_hidden_by_parent' }] },
+    { provider_id: 'foreign-provider', session: { ...session, node_id: 'other-node', adapter: 'workbuddy', name: 'Foreign title' }, created: false,
+      chat_id: 'oc_foreign', sender_open_id: 'ou_foreign' },
+    { provider_id: 'chatless-provider', session: { ...session, session_id: 'chatless-id' }, created: false,
+      aliases: [{ ...alias, session: { ...session, session_id: 'chatless-id', name: 'Retained alias' }, chat_id: 'oc_chatless_alias' }] });
+  state.bindings.set('oc_stale', { chat_id: 'oc_stale', session_id: 'stale-id', sender_open_id: 'ou_stale' });
+  await providers.page();
+  assert.equal(providers.channel().groups, 4, 'group count must follow live core resources rather than stale legacy migration rows');
+  const response = await providers.handle({ method: 'GET', path: '/v1/lark/bindings', body: undefined });
+  const rows = response!.body as Record<string, unknown>[];
+  assert.deepEqual(rows.map(({ chat_id, provider_id, node_id, adapter, session_id, session_name, sender_open_id, thread_id }) =>
+    ({ chat_id, provider_id, node_id, adapter, session_id, session_name, sender_open_id, thread_id })), [
+    { chat_id: 'oc_primary', provider_id: 'primary-provider', node_id: 'local-node', adapter: 'codex', session_id: 'shared-id', session_name: 'Primary title', sender_open_id: 'ou_primary', thread_id: undefined },
+    { chat_id: 'oc_alias', provider_id: 'alias-provider', node_id: 'local-node', adapter: 'codex', session_id: 'shared-id', session_name: 'Alias title', sender_open_id: 'ou_alias', thread_id: 'omt_alias' },
+    { chat_id: 'oc_foreign', provider_id: 'foreign-provider', node_id: 'other-node', adapter: 'workbuddy', session_id: 'shared-id', session_name: 'Foreign title', sender_open_id: 'ou_foreign', thread_id: undefined },
+    { chat_id: 'oc_chatless_alias', provider_id: 'alias-provider', node_id: 'local-node', adapter: 'codex', session_id: 'chatless-id', session_name: 'Retained alias', sender_open_id: 'ou_alias', thread_id: 'omt_alias' },
+  ]);
+  primary.deleted = true;
+  const remaining = await providers.handle({ method: 'GET', path: '/v1/lark/bindings', body: undefined });
+  assert.deepEqual((remaining!.body as { chat_id: string }[]).map(row => row.chat_id), ['oc_foreign', 'oc_chatless_alias']);
+  assert.equal(providers.channel().groups, 2, 'deleting a primary removes its aliases from the count as well');
 });
 
 test('thread operations infer native adapters from durable local bindings and refuse ambiguous IDs', async t => {
@@ -256,7 +511,8 @@ test('changing to a non-loopback listener withdraws the old Tailnet publication 
   assert.deepEqual(network, [{ method: 'publish', port: 9418, target: '127.0.0.1:9418' }]);
   core.snapshot.remote.listen = '192.168.1.5:9443'; core.snapshot.remote.tls = true;
   failCleanup = true;
-  await assert.rejects(providers.syncNetwork(), /cleanup interrupted/);
+  await providers.syncNetwork();
+  assert.equal((await providers.page()).network?.status, 'retrying');
   failCleanup = false;
   await providers.syncNetwork();
   assert.deepEqual(network.slice(1), [{ method: 'unpublish', port: 9418 }, { method: 'unpublish', port: 9418 }]);
@@ -587,7 +843,7 @@ test('failed retired-tunnel cleanup keeps the handle for a subsequent retry', as
   const f = await networkFixture(t);
   await f.save('100.64.0.9:9418'); await f.providers.syncNetwork(); await f.dial('original', '100.64.0.9:9418');
   f.failClose(true);
-  await assert.rejects(f.save('100.64.0.10:9418'), /tunnel cleanup interrupted/);
+  assert.equal((await f.save('100.64.0.10:9418')).network?.status, 'retrying');
   assert.equal(f.open.size, 1);
   f.failClose(false); await f.providers.syncNetwork();
   assert.equal(f.open.size, 0);

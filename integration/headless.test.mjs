@@ -173,7 +173,26 @@ test('headless: real CLI/HTTP/stdio/gRPC delivery, independent broadcast, reply 
     assert.equal(b.events['headless-broadcast'].outcome, 'broadcast');
     assert.equal(Object.values(a.deliveries).filter(value => value.event_id === 'headless-broadcast').length, 1);
     await emit({ session: firstSession, event_id: 'headless-broadcast', message_id: 'source-message', content: { text: 'headless incoming question' } });
-    assert.equal((await first.inbox(firstSession.session_id)).messages.length, 1, 'duplicate source events must not queue duplicate agent input');
+    // Emit returning only proves upstream acceptance. A later event traverses the
+    // same ordered subscription, then its persisted completion drains the async
+    // Node delivery path before inspecting the original event's final inbox.
+    const barrierId = 'headless-dedup-barrier';
+    await emit({ session: firstSession, event_id: barrierId, message_id: 'dedup-barrier-message', content: { text: 'deduplication barrier' } });
+    const settled = await eventually(first.state, value => {
+      const deliveries = Object.values(value.deliveries).filter(item => ['headless-broadcast', barrierId].includes(item.event_id));
+      return value.events[barrierId]?.outcome === 'local' && deliveries.some(item => item.event_id === barrierId)
+        && deliveries.every(item => item.status === 'delivered');
+    }, 'downstream delivery barrier and all preceding completions');
+    await eventually(second.state, value => value.events[barrierId]?.outcome === 'broadcast', 'sibling subscription barrier');
+    assert.equal(Object.values(settled.deliveries).filter(item => item.event_id === 'headless-broadcast').length, 1,
+      'duplicate source events must not admit another local delivery');
+    const afterDuplicate = await first.inbox(firstSession.session_id);
+    assert.equal(afterDuplicate.messages.length, 2, 'only the original and barrier may reach the inbox');
+    assert.equal(afterDuplicate.messages.filter(item => item.id === inboxItem.id).length, 1);
+    const barrier = afterDuplicate.messages.find(item => item.id !== inboxItem.id);
+    assert.match(barrier.text, /deduplication barrier/);
+    await cli(first, 'thread-ack', ['--adapter', 'trae', '--session-id', firstSession.session_id, '--message-id', barrier.id]);
+    assert.equal((await first.inbox(firstSession.session_id)).messages.length, 1, 'only the original remains after consuming the barrier');
   });
 
   await t.test('source acknowledgement and idempotent replies follow their full return reference', async () => {

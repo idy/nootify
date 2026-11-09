@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { NootifyClient } from './client.js';
-import { requestOwnerUiGrant } from './ui-owner-auth.js';
+import { launchOwnerUiGateway, startOwnerUiGateway } from './ui-gateway.js';
 import { defaultStateDir } from './state.js';
 import { installLaunchd } from './launchd.js';
 import { manageService, parseServiceDrain, serviceFailure, SERVICE_ACTIONS, type ServiceAction } from './service.js';
@@ -16,7 +16,7 @@ import { isNotificationChannel } from './types.js';
 export async function main(argv = process.argv.slice(2), serviceManager = manageService): Promise<void> {
   const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, options: {
     'state-dir': { type: 'string' }, 'mcp-config': { type: 'string' }, 'service-drain': { type: 'string' }, 'ui-route': { type: 'string' }, port: { type: 'string', default: '9417' },
-    'peer-node-id': { type: 'string' }, 'public-key': { type: 'string' },
+    'peer-node-id': { type: 'string' }, 'public-key': { type: 'string' }, 'ui-managed': { type: 'boolean' },
     'session-id': { type: 'string' }, 'session-name': { type: 'string' }, adapter: { type: 'string' }, agent: { type: 'string' }, 'open-id': { type: 'string' },
     'chat-id': { type: 'string' }, 'sender-id': { type: 'string' }, pin: { type: 'boolean', default: false },
     metadata: { type: 'string' }, text: { type: 'string' }, help: { type: 'boolean', short: 'h' },
@@ -44,7 +44,17 @@ export async function main(argv = process.argv.slice(2), serviceManager = manage
   }
   const token = (await readFile(join(values['state-dir'] ?? defaultStateDir(), 'auth-token'), 'utf8')).trim();
   if (command === 'ui-url') {
-    console.log(JSON.stringify({ url: await requestOwnerUiGrant(`http://127.0.0.1:${port}`, token, values['ui-route']) }));
+    const baseUrl = `http://127.0.0.1:${port}`;
+    if (values['ui-managed']) {
+      const gateway = await startOwnerUiGateway(baseUrl, token, values['ui-route']);
+      let closing = false;
+      const close = () => {
+        if (closing) return; closing = true; process.stdin.destroy();
+        void gateway.close().catch(error => { process.stderr.write(`${(error as Error).message}\n`); process.exitCode = 1; });
+      };
+      process.stdin.once('end', close); process.once('SIGTERM', close); process.once('SIGINT', close); process.stdin.resume();
+      console.log(JSON.stringify({ url: gateway.url }));
+    } else console.log(JSON.stringify({ url: await launchOwnerUiGateway(baseUrl, token, values['ui-route']) }));
     return;
   }
   const client = new NootifyClient({ token, baseUrl: `http://127.0.0.1:${port}` });

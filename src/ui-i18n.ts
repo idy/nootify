@@ -1,6 +1,6 @@
 /** Chinese source messages are the catalog keys, following the gettext convention. */
 export const english = {
-  '本地设置已锁定。请从 Nootify 桌面端打开，或运行以下命令获取授权链接。': 'Local settings are locked. Open this page from Nootify desktop, or run this command to obtain an authorization link.',
+  '此窗口尚未连接到已验证的本机服务。请从 Nootify 桌面端打开，或在终端运行已安装的 ui-url 命令。': 'This window is not connected to a verified local service. Open it from Nootify desktop, or run the installed ui-url command in your terminal.',
   '授权当前窗口': 'Authorize this window',
   '当前窗口未获授权。请从本机 Nootify 桌面端打开设置。': 'This window is not authorized. Open settings from Nootify desktop on this computer.',
   '远程接入': 'Remote access',

@@ -350,7 +350,7 @@ func TestFeishuAdoptionChecksStyledAnnouncementRoutes(t *testing.T) {
 				}
 			} else {
 				must(t, err)
-				if binding.ChatID != "group" || patches != 1 {
+				if binding.ChatID != "group" || patches != 0 || !binding.PreserveDescription {
 					t.Fatalf("legitimate group was not adopted: %+v patches=%d", binding, patches)
 				}
 			}

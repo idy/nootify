@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gofrs/flock"
 )
@@ -31,12 +31,17 @@ type State struct {
 	References         map[string]ReferenceRecord `json:"references"`
 	Peers              map[string]Peer            `json:"peers"`
 	Operations         map[string]Operation       `json:"operations"`
+	FeishuCursors      map[string]int64           `json:"feishu_history_cursors,omitempty"`
+	Retention          LedgerRetention            `json:"retention,omitempty"`
 }
 type Store struct {
-	mu    sync.Mutex
-	state State
-	dir   string
-	lock  *flock.Flock
+	mu                sync.Mutex
+	state             State
+	dir               string
+	lock              *flock.Flock
+	clock             func() time.Time
+	syncDirectory     func(string) error
+	durabilityPending bool
 }
 
 func OpenStore(dir string) (*Store, error) {
@@ -94,7 +99,7 @@ func OpenStore(dir string) (*Store, error) {
 			}
 		}
 	}
-	s := &Store{dir: dir, lock: l}
+	s := &Store{dir: dir, lock: l, clock: time.Now, syncDirectory: syncStateDirectory}
 	path := filepath.Join(dir, "state.json")
 	if i, e := os.Lstat(path); e == nil {
 		if !i.Mode().IsRegular() || i.Size() > 64<<20 {
@@ -156,27 +161,61 @@ func (s *Store) initMaps() {
 	if d.RetiredBindings == nil {
 		d.RetiredBindings = map[string]Binding{}
 	}
+	if d.FeishuCursors == nil {
+		d.FeishuCursors = map[string]int64{}
+	}
+	d.Retention.init()
 }
 func cloneState(d State) State {
 	b, _ := json.Marshal(d)
 	var n State
 	_ = json.Unmarshal(b, &n)
+	// Empty optional maps disappear in JSON; transaction callbacks may write
+	// their first cursor before any resource has populated the map.
+	if n.FeishuCursors == nil {
+		n.FeishuCursors = map[string]int64{}
+	}
 	return n
 }
 func (s *Store) Snapshot() State { s.mu.Lock(); defer s.mu.Unlock(); return cloneState(s.state) }
 
-// A transaction is published to readers only after fsync + atomic replacement.
-// All ledgers are bounded by refusing new admissions, never evicting a pending
-// peer event or an uncertain agent submission to make room.
+// DurableSnapshot is required before publishing peer events. A downstream may
+// retain a queued callback longer than completed history at this node; its
+// return route must therefore originate in a confirmed durable pending hold.
+func (s *Store) DurableSnapshot() (State, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.durabilityPending {
+		if err := s.syncDirectory(s.dir); err != nil {
+			return State{}, &committedStateError{cause: err}
+		}
+		s.durabilityPending = false
+	}
+	return cloneState(s.state), nil
+}
+
+// Update commits at atomic replacement, after syncing the temporary file. Only
+// a nil error confirms the subsequent directory durability barrier as well.
+// A committedStateError requires callers to reconcile live effects to the new
+// state while preserving the durability warning; other errors publish nothing.
+// Completed ledgers age out before admission. Protected/within-horizon records
+// are never evicted to make room: their limits still reject new admissions.
 func (s *Store) Update(fn func(*State) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	n := cloneState(s.state)
+	at := s.clock().UnixNano()
+	n.Retention.at = at
+	refreshRetention(&n, s.state, at)
+	compactLedgers(&n, at)
 	if err := fn(&n); err != nil {
 		return err
 	}
-	if len(n.Events) > maxRecords || len(n.Bindings) > maxRecords || len(n.References) > maxRecords || len(n.Operations) > maxRecords || len(n.Deliveries) > maxRecords || len(n.Peers) > maxPeers || len(n.ProviderTombstones) > maxRecords || len(n.Providers) > maxRecords || len(n.RetiredBindings) > maxRecords {
-		return fault("resource_exhausted", "durable ledger limit reached")
+	refreshRetention(&n, s.state, at)
+	compactLedgers(&n, at)
+	n.Retention.at = 0
+	if len(n.Events) > maxRecords || len(n.Bindings) > maxRecords || len(n.References) > maxRecords || len(n.Operations) > maxRecords || len(n.Deliveries) > maxRecords || len(n.Peers) > maxPeers || len(n.ProviderTombstones) > maxRecords || len(n.Providers) > maxRecords || len(n.RetiredBindings) > maxRecords || len(n.FeishuCursors) > maxRecords {
+		return fault("resource_exhausted", "durable ledger limit reached; pending work and retention horizons are preserved")
 	}
 	b, err := json.Marshal(n)
 	if err != nil {
@@ -211,17 +250,25 @@ func (s *Store) Update(fn func(*State) error) error {
 		return err
 	}
 	s.state = n
-	if runtime.GOOS != "windows" {
-		d, e := os.Open(s.dir)
-		if e != nil {
-			return e
-		}
-		e = d.Sync()
-		_ = d.Close()
-		if e != nil {
-			return e
-		}
+	s.durabilityPending = true
+	if err = s.syncDirectory(s.dir); err != nil {
+		return &committedStateError{cause: err}
 	}
+	s.durabilityPending = false
 	return nil
 }
+
+// Sync retries the durability barrier for the current committed state, without
+// rerunning a business mutation, issuing a provider call, or changing a cursor.
+func (s *Store) Sync() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.syncDirectory(s.dir); err != nil {
+		s.durabilityPending = true
+		return &committedStateError{cause: err}
+	}
+	s.durabilityPending = false
+	return nil
+}
+
 func (s *Store) Close() error { return s.lock.Unlock() }

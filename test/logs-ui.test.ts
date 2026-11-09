@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { setImmediate as nextTurn } from 'node:timers/promises';
 import { test } from 'node:test';
 import { parseHTML } from 'linkedom';
+import { authorizeUiFixture, settleUiFixture } from './ui-transport-fixture.js';
 import type { LogEntry } from '../src/events.js';
 
 async function until(check: () => boolean, message: string): Promise<void> {
-  for (let attempt = 0; attempt < 300; attempt++) { if (check()) return; await nextTurn(); }
+  for (let attempt = 0; attempt < 1000; attempt++) { if (check()) return; await new Promise(resolve => setTimeout(resolve, 1)); }
   throw new Error(message);
 }
 
@@ -23,7 +23,8 @@ test('Logs separates event purpose from delivery outcome and keeps its controls 
   };
   const descriptors = new Map(Object.keys(globals).map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
   for (const [key, value] of Object.entries(globals)) Object.defineProperty(globalThis, key, { configurable: true, value });
-  t.after(() => {
+  t.after(async () => {
+    await settleUiFixture();
     for (const [key, descriptor] of descriptors) {
       if (descriptor) Object.defineProperty(globalThis, key, descriptor); else Reflect.deleteProperty(globalThis, key);
     }
@@ -98,6 +99,7 @@ test('Logs separates event purpose from delivery outcome and keeps its controls 
   const ids = () => [...document.querySelectorAll<HTMLElement>('#logs-table .log-row')].map(item => item.dataset.key!);
   const tab = (value: string) => document.querySelector<HTMLButtonElement>(`#outcome-tabs [data-value="${value}"]`)!;
   const search = (query: string) => { field('search').value = query; field('search').dispatchEvent(new window.Event('input', { bubbles: true })); };
+  authorizeUiFixture(t);
   await import('../src/ui-app.js');
   await until(() => ids().length === 15, 'Initial Logs fixture did not render');
 
@@ -112,7 +114,7 @@ test('Logs separates event purpose from delivery outcome and keeps its controls 
     const refresh = async () => {
       const before = agentReads; element('refresh').click();
       await until(() => agentReads > before, 'Agent request did not retry');
-      await nextTurn();
+      await settleUiFixture();
     };
     agentsUnavailable = false; agentsEmpty = true; await refresh();
     assert.equal(element('agents-card').hidden, true, 'An empty response must not show a border strip');
@@ -217,7 +219,7 @@ test('Logs separates event purpose from delivery outcome and keeps its controls 
     const before = reads;
     timers.find(timer => timer.milliseconds === 2000)!.run();
     await until(() => reads > before, 'Paused snapshot did not refresh');
-    await nextTurn();
+    await settleUiFixture();
     assert.equal(ids().length, 15);
     element('pause').click(); assert.equal(ids().length, 16);
     tab('progress').click(); search('Build completed');
@@ -264,7 +266,7 @@ test('Logs separates event purpose from delivery outcome and keeps its controls 
       assert.equal(checkbox.getAttribute('aria-label'), `Add notification instructions to ${agent.name}`);
       checkbox.checked = true; checkbox.dispatchEvent(new window.Event('change'));
       await until(() => agentReads > before, `${agent.name} did not refresh after enabling`);
-      await nextTurn();
+      await settleUiFixture();
       assert.deepEqual(agentWrites.at(-1), { agent: agent.agent, enabled: true });
       assert.equal(document.querySelector<HTMLInputElement>(`#agent-rows [data-key="${agent.agent}"]`)!.checked, true);
     }
@@ -281,7 +283,7 @@ test('Logs separates event purpose from delivery outcome and keeps its controls 
     const refresh = async () => {
       const before = agentReads; element('refresh').click();
       await until(() => agentReads > before, 'Agent summary did not refresh');
-      await nextTurn();
+      await settleUiFixture();
     };
     defaultProvider = undefined; await refresh();
     assert.equal(element('channel-state').textContent, 'Not configured');
