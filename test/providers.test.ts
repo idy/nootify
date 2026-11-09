@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
@@ -8,6 +11,7 @@ import { State } from '../src/state.js';
 import { CoreError, ProviderCore, type CoreEvent, type CoreTransport } from '../src/provider-core.js';
 import { ProvidersService, decodeMessageRef, encodeMessageRef, type ProviderPage } from '../src/providers.js';
 import { SessionsService } from '../src/sessions.js';
+import { registerPolledSession, sessionInbox } from '../src/polled-sessions.js';
 import { RetryableDeliveryError } from '../src/types.js';
 import { createServiceHost } from '../src/server.js';
 import { EventLog } from '../src/events.js';
@@ -365,6 +369,68 @@ test('agent delivery returns true transport outcome and retains source reference
   assert.match(received, /message-reply/);
   assert.match(received, new RegExp(encodeMessageRef(delivery.message)));
 });
+
+for (const adapter of ['trae', 'workbuddy'] as const) {
+  test(`${adapter}: queued provider callbacks use the current runtime after state relocation`, async t => {
+    const root = await mkdtemp(join(tmpdir(), 'nootify-provider-relocation-'));
+    const oldDirectory = join(root, 'Old State'), directory = join(root, 'New State');
+    const providersToStop: ProvidersService[] = []; const sessionsToStop: SessionsService[] = [];
+    let server: ReturnType<typeof createServiceHost> | undefined;
+    t.after(async () => {
+      if (server?.listening) { server.closeAllConnections(); await new Promise<void>(resolve => server!.close(() => resolve())); }
+      for (const provider of providersToStop) await provider.stop();
+      for (const sessions of sessionsToStop) await sessions.stop();
+      await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    });
+    const state = await State.open(oldDirectory); const core = new FakeCore();
+    const originalSessions = new SessionsService(state); sessionsToStop.push(originalSessions);
+    const original = new ProvidersService(state, originalSessions, undefined, undefined, 9876, undefined, core);
+    providersToStop.push(original); await original.start();
+    const id = `${adapter}-retained`; await registerPolledSession(state, adapter, id, 'Retained provider conversation');
+    const message = { origin_node_id: 'source-node', provider_id: 'source-bot', message_id: `om_${adapter}`, thread_id: 'omt_original', opaque: { route: 'preserved' } };
+    const originalText = `Retained ${adapter} input\n第二行原文`;
+    (original as unknown as { event(e: CoreEvent): void }).event({ event: 'delivery', data: {
+      delivery_id: 'queued-input', session: { node_id: 'local-node', adapter, session_id: id }, message, content: { text: originalText }, text: originalText,
+    } });
+    for (let i = 0; i < 500 && !core.calls.some(call => call.method === 'delivery.complete'); i++) await new Promise(resolve => setTimeout(resolve, 10));
+    const complete = core.calls.find(call => call.method === 'delivery.complete');
+    assert.equal(complete?.params.status, 'delivered');
+    assert.equal(complete.params.transport_status, 'inbox_queued');
+    const queued = [...state.inboxMessages.values()][0];
+    assert.equal(queued.text, originalText, 'durable provider inboxes store original input, not rendered commands');
+    assert.deepEqual(queued.source, { channel: 'provider', delivery: { adapter, session_id: id, message } });
+    await original.stop(); await originalSessions.stop(); await rename(oldDirectory, directory);
+    const restored = await State.open(directory); const resumedCore = new FakeCore();
+    const cli = fileURLToPath(new URL('../src/cli.js', import.meta.url));
+    const runtime = { port: 0, command: [process.execPath, cli] };
+    const sessions = new SessionsService(restored, undefined, undefined, undefined, runtime); sessionsToStop.push(sessions);
+    const modules = [sessions] as Parameters<typeof createServiceHost>[0];
+    server = createServiceHost(modules, restored.token); server.listen(0, '127.0.0.1'); await once(server, 'listening');
+    runtime.port = (server.address() as { port: number }).port;
+    const resumed = new ProvidersService(restored, sessions, undefined, undefined, runtime.port, undefined, resumedCore);
+    providersToStop.push(resumed); await resumed.start(); modules.push(resumed);
+    const execute = promisify(execFile);
+    const run = async (command: string, ...args: string[]) => JSON.parse((await execute(process.execPath,
+      [cli, command, '--state-dir', directory, '--port', String(runtime.port), ...args], { timeout: 15000, windowsHide: true })).stdout);
+    const inbox = await run('thread-receive', '--agent', adapter, '--session-id', id);
+    assert.equal(inbox.messages.length, 1);
+    const forwarded = inbox.messages[0].text as string;
+    assert.ok(forwarded.includes(originalText)); assert.ok(forwarded.includes(directory)); assert.ok(!forwarded.includes(oldDirectory));
+    assert.ok(forwarded.includes(`--port ${runtime.port} `)); assert.ok(!forwarded.includes('--port 9876 '));
+    const ref = encodeMessageRef(message); assert.ok(forwarded.includes(`--message-ref '${ref}'`) || forwarded.includes(`--message-ref ${ref}`));
+    const movedInstall = sessionInbox(restored, adapter, id, { port: runtime.port, command: ['/Relocated Install/node', '/Relocated Install/cli.js'] });
+    assert.ok(movedInstall.messages[0].text.includes('/Relocated Install/cli.js'));
+    await run('message-ack', '--message-ref', ref);
+    await run('message-reply', '--message-ref', ref, '--text', 'Reply after relocation');
+    const callbacks = resumedCore.calls.filter(call => call.method === 'message.ack' || call.method === 'message.reply');
+    assert.equal(callbacks.length, 2); assert.ok(callbacks.every(call => JSON.stringify(call.params.message) === JSON.stringify(message)));
+    assert.equal((callbacks[1].params.content as { text: string }).text, 'Reply after relocation');
+    const persisted = (await State.open(directory)).inboxMessages.get(queued.id)!;
+    assert.equal(persisted.text, originalText); assert.deepEqual(persisted.source, queued.source);
+    await run('thread-ack', '--agent', adapter, '--session-id', id, '--message-id', queued.id);
+    assert.equal(restored.inboxMessages.size, 0);
+  });
+}
 
 test('safe pre-submission failures and uncertain submissions have different completion states', async t => {
   let uncertain = false;

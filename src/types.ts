@@ -1,3 +1,5 @@
+import type { ProviderMessageRef } from './message-ref.js';
+
 /** Kept as a literal for existing thread clients; Feishu is the only notification transport. */
 export type NotificationChannel = 'feishu';
 export const isNotificationChannel = (value: unknown): value is NotificationChannel => value === 'feishu';
@@ -70,7 +72,8 @@ export interface LarkPollReceipt { readonly cursor_id: string; readonly message_
 export const larkPollReceiptKey = (cursorId: string, messageId: string): string => JSON.stringify([cursorId, messageId]);
 export interface DeliveryResult { status: 'socket_written' | 'input_accepted' | 'inbox_queued' }
 export interface InboxMessage { id: string; text: string; created_at: string }
-export type InboxSource = { channel: 'feishu'; delivery: LarkDelivery };
+export interface ProviderInboxDelivery { adapter: Adapter; session_id: string; message: ProviderMessageRef }
+export type InboxSource = { channel: 'feishu'; delivery: LarkDelivery } | { channel: 'provider'; delivery: ProviderInboxDelivery };
 export interface InboxOrigin { text: string; source: InboxSource }
 export interface StoredInboxMessage extends InboxMessage { session_id: string; adapter: PolledAdapter; source?: InboxSource }
 export interface SessionInbox { session_id: string; adapter: PolledAdapter; messages: InboxMessage[] }

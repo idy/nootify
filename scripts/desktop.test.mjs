@@ -126,6 +126,20 @@ test('install and uninstall share a nondestructive desktop preflight with bounde
   assert.doesNotMatch(guard, /service-stop|RMDir|Delete|taskkill|TerminateProcess|FileOpen/i);
 });
 
+test('legacy /P updater installs skip directory input and close automatically on success', async () => {
+  const installer = await readFile(join(root, 'windows/installer.nsi'), 'utf8');
+  const init = installer.slice(installer.indexOf('Function .onInit'), installer.indexOf('Function un.onInit'));
+  const success = installer.slice(installer.indexOf('Function .onInstSuccess'), installer.indexOf('Section "Uninstall"'));
+  assert.match(installer, /GetOptions.*"\/P"[\s\S]*StrCpy \$PassiveMode 1/);
+  assert.match(installer, /Page directory NootifyDirectoryPre/);
+  assert.match(installer, /Function NootifyDirectoryPre\s+\$\{If\} \$PassiveMode = 1\s+Abort\s+\$\{EndIf\}\s+FunctionEnd/);
+  assert.match(init, /\$PassiveMode = 1\s+SetAutoClose true/);
+  assert.match(success, /\$Relaunch = 1\s+Exec .*Nootify\.exe/);
+  const smoke = await readFile(join(root, 'scripts/windows-install-smoke.ps1'), 'utf8');
+  // Exercise Tauri's exact old argv: no /S or /D to conceal a page/registry bug.
+  assert.match(smoke, /Run-Native \$Installer '\/P \/UPDATE \/R' 'upgrade-legacy-passive'/);
+});
+
 test('NSIS compiler pin rejects corrupt downloads before executable extraction', async t => {
   const work = await temporary(t);
   const path = join(work, 'compiler.zip');

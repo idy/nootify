@@ -4,6 +4,7 @@ import { serviceStateDir } from './runtime-paths.js';
 import { join } from 'node:path';
 import type { Adapter, BackendConnection, LarkBinding, LarkDelivery, LarkPollCursor, LarkPollReceipt, PublicSession, SessionRecord, StoredInboxMessage } from './types.js';
 import { HttpError, isAdapter, isPolledAdapter, larkPollCursorKey, larkPollReceiptKey } from './types.js';
+import { parseMessageRef } from './message-ref.js';
 import { StateDatabase, legacyLarkPollReceipts, validateLarkPollReceipt, type LarkPollPrune, type StateRows } from './state-database.js';
 
 export type LarkConnectionType = 'bot' | 'personal-app';
@@ -154,11 +155,17 @@ export class State {
     }
     for (const message of data.inbox_messages ?? []) {
       const channel = (message.source as { channel?: unknown } | undefined)?.channel;
-      if (!isPolledAdapter(message.adapter) || (message.source && channel !== 'feishu')) {
+      if (!isPolledAdapter(message.adapter) || (message.source && channel !== 'feishu' && channel !== 'provider')) {
         this.retainedInbox.set(message.id, JSON.stringify(message)); continue;
       }
       const source = message.source;
-      if (source) source.delivery = this.larkDelivery(source.delivery.message_id) ?? source.delivery;
+      if (source?.channel === 'provider') {
+        try {
+          if (source.delivery?.adapter !== message.adapter || source.delivery.session_id !== message.session_id) throw new Error('Inbox source belongs to another conversation');
+          parseMessageRef(source.delivery.message);
+        } catch { this.retainedInbox.set(message.id, JSON.stringify(message)); continue; }
+      }
+      if (source?.channel === 'feishu') source.delivery = this.larkDelivery(source.delivery.message_id) ?? source.delivery;
       this.inboxMessages.set(message.id, message);
     }
     for (const [key, value] of encode(Object.entries(data.settings ?? {}))) if (!settingsKeys.has(key)) this.retainedSettings.set(key, value);

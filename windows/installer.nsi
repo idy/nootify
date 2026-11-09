@@ -1,5 +1,5 @@
 ; Nootify's per-user installer. Keep the registration name and installed layout
-; compatible with existing Nootify clients and their /S /UPDATE /R invocation.
+; compatible with existing Nootify clients and /S or /P /UPDATE /R invocations.
 Unicode true
 RequestExecutionLevel user
 SetCompressor /SOLID lzma
@@ -24,9 +24,10 @@ VIAddVersionKey /LANG=1033 "LegalCopyright" "Copyright Nootify contributors"
 
 Var UpdateMode
 Var Relaunch
+Var PassiveMode
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\Nootify"
 
-Page directory
+Page directory NootifyDirectoryPre
 Page instfiles
 UninstPage uninstConfirm
 UninstPage instfiles
@@ -36,7 +37,15 @@ UninstPage instfiles
   SetRegView 64
   StrCpy $UpdateMode 0
   StrCpy $Relaunch 0
+  StrCpy $PassiveMode 0
   ${GetParameters} $0
+  ; Tauri's legacy passive updater uses /P /UPDATE /R. /P is not an NSIS
+  ; built-in: retain the progress page, but require no directory/finish clicks.
+  ClearErrors
+  ${GetOptions} $0 "/P" $1
+  ${IfNot} ${Errors}
+    StrCpy $PassiveMode 1
+  ${EndIf}
   ClearErrors
   ${GetOptions} $0 "/UPDATE" $1
   ${IfNot} ${Errors}
@@ -51,6 +60,9 @@ UninstPage instfiles
 
 Function .onInit
   !insertmacro InitOptions
+  ${If} $PassiveMode = 1
+    SetAutoClose true
+  ${EndIf}
   ${IfNot} ${RunningX64}
     MessageBox MB_OK|MB_ICONSTOP "Nootify requires 64-bit Windows."
     SetErrorLevel 1
@@ -60,6 +72,12 @@ FunctionEnd
 
 Function un.onInit
   !insertmacro InitOptions
+FunctionEnd
+
+Function NootifyDirectoryPre
+  ${If} $PassiveMode = 1
+    Abort
+  ${EndIf}
 FunctionEnd
 
 !macro NootifyPreflightDesktop OPERATION
@@ -136,7 +154,7 @@ Section "Nootify" Install
 SectionEnd
 
 Function .onInstSuccess
-  ; /R works with /S and /UPDATE too. Only the fully replaced desktop starts
+  ; /R works with /S, /P and /UPDATE too. Only the fully replaced desktop starts
   ; the task, once, after all files and registration have been written.
   ${If} $Relaunch = 1
     Exec '$\"$INSTDIR\Nootify.exe$\"'

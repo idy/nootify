@@ -47,25 +47,23 @@ type Content struct {
 }
 
 func (c Content) Plain() string {
-	var walk func([]ContentBlock) string
-	walk = func(bs []ContentBlock) string {
-		var b strings.Builder
+	var b strings.Builder
+	b.WriteString(c.Text)
+	var walk func([]ContentBlock)
+	walk = func(bs []ContentBlock) {
 		for _, v := range bs {
 			b.WriteString(v.Text)
-			b.WriteString(walk(v.Children))
+			walk(v.Children)
 			if v.Type == "paragraph" || v.Type == "code" {
 				b.WriteByte('\n')
 			}
 		}
-		return b.String()
 	}
-	return strings.TrimSuffix(c.Text+walk(c.Blocks), "\n")
+	walk(c.Blocks)
+	return strings.TrimSuffix(b.String(), "\n")
 }
 func (c Content) Validate() error {
-	b, _ := json.Marshal(c)
-	if len(b) > maxPayload || strings.TrimSpace(c.Plain()) == "" {
-		return fault("invalid_argument", "content is empty or too large")
-	}
+	// Reject deep or malformed trees before marshaling or flattening their text.
 	var visit func([]ContentBlock, int) error
 	visit = func(bs []ContentBlock, d int) error {
 		if d > 16 {
@@ -87,7 +85,14 @@ func (c Content) Validate() error {
 		}
 		return nil
 	}
-	return visit(c.Blocks, 0)
+	if err := visit(c.Blocks, 0); err != nil {
+		return err
+	}
+	b, err := json.Marshal(c)
+	if err != nil || len(b) > maxPayload || strings.TrimSpace(c.Plain()) == "" {
+		return fault("invalid_argument", "content is empty or too large")
+	}
+	return nil
 }
 
 type MessageRef struct {

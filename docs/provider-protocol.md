@@ -15,7 +15,7 @@ A session is `{node_id, adapter, session_id, name?, metadata?}`. `node_id` is a 
 
 A message reference contains `{origin_node_id, provider_id, message_id}`; optional `thread_id` preserves the original Feishu reply thread as return-route context without changing message identity. Provider IDs belong to their originating node. The reference survives every relay and durable replay unchanged. Resolving a legacy message ID or a three-field reference recovers retained thread context, and acknowledgement must not erase it.
 
-Content is `{text?: string, blocks?: ContentBlock[]}`. Blocks use `{type, text?, url?, children?}` and support at least paragraph, text, link, and code. Providers must reject unsupported blocks rather than silently discard them. Plain text uses `{text}`. The normalized incoming event carries both this content and a text representation for existing agent adapters.
+Content is `{text?: string, blocks?: ContentBlock[]}`. Blocks use `{type, text?, url?, children?}` and support at least paragraph, text, link, and code. Providers must reject unsupported blocks rather than silently discard them. Plain text uses `{text}`. Depth and block shape are validated before serialization or text flattening; flattening uses a single builder so nested blocks do not repeatedly copy accumulated text. The normalized incoming event carries both this content and a text representation for existing agent adapters.
 
 ## Private stdio RPC
 
@@ -36,7 +36,7 @@ Methods:
 - `session.list` returns an array of bindings `{provider_id,session,created,chat_id?,thread_id?,sender_open_id?,deleted?,delete_pending?}`. Tombstones are included; compatibility callers filter them.
 - `session.bind` accepts `{provider_id?,session,chat_id,sender_open_id}` to validate and adopt an existing Feishu group without replacing conflicting routing metadata.
 - `session.metadata.get` / `session.metadata.set` accept `{provider_id?,session,metadata?}`.
-- `session.delete` accepts `{provider_id?,session}`. It is idempotent. Preserve a tombstone so event replay cannot recreate a deleted session. Explicit ensure can reactivate it.
+- `session.delete` accepts `{provider_id?,session}`. It is idempotent. Feishu's documented already-dissolved application code `232009` completes cleanup; invalid IDs, permission errors and uncertain/transient failures do not prove deletion. Preserve a tombstone so event replay cannot recreate a deleted session. Explicit ensure can reactivate it after proven cleanup.
 - `message.send` accepts `{provider_id?,session,content,request_id?}` -> `{message:MessageRef,chat_id?,message_id}`. Without an explicit ID, the core retains one durable attempt for the same provider/session/content while its outcome is unresolved or proven retryable; a completed send allows a later identical intentional send. An explicit ID remains idempotent.
 - `message.reply` accepts `{message?:MessageRef,message_id?:string,content,request_id?}` -> `{message:MessageRef,message_id}`.
 - `message.ack` accepts `{message?:MessageRef,message_id?:string}` -> `{status:"session_acknowledged",message_id,acknowledged_at}`. Feishu uses a reaction. A plain message ID must fail if ambiguous.
@@ -52,7 +52,10 @@ Outgoing async events:
 
 - `{event:"delivery",data:{delivery_id,session,message,content,text}}`: only emitted for a target whose node ID equals this node's ID. The core persists pending state before emission; it does not treat bridge receipt as agent acceptance. Node calls existing agent transport and completes the delivery with its actual outcome. A resumed uncertain submission must not be automatically submitted again.
 - `{event:"dial",data:{request_id,address}}`: bridge opens a Tailscale tunnel and returns its numeric loopback endpoint using `dial.complete`.
+
 - `{event:"log",data:{status,provider_id?,message_id?,error?}}`: no credentials or auth headers.
+
+Trae and WorkBuddy queue the original input plus the structured provider message reference. Reading their inbox renders callback commands with the current Node/CLI location, state directory and HTTP port, so restarts and relocation do not preserve stale command paths. Thread context and opaque reference fields survive persistence. Legacy Feishu source records remain supported; ordinary source-free inbox text is unchanged.
 
 ## Public summaries and local UI API
 

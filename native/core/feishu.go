@@ -179,8 +179,16 @@ func (p *feishuProvider) Metadata(ctx context.Context, b Binding, m map[string]a
 func (p *feishuProvider) Delete(ctx context.Context, b Binding) error {
 	err := p.api(ctx, "DELETE", "/open-apis/im/v1/chats/"+url.PathEscape(b.ChatID), nil, nil)
 	var apiErr *feishuAPIError
-	if errors.As(err, &apiErr) && apiErr.HTTPStatus == 404 {
-		return nil
+	if errors.As(err, &apiErr) {
+		if apiErr.HTTPStatus == http.StatusNotFound && apiErr.Code == 0 {
+			return nil
+		}
+		// https://open.feishu.cn/document/server-docs/group/chat/delete.md
+		// 232009 proves the group is dissolved. 232006 only means an invalid
+		// chat_id; permissions and transient/unknown failures prove no absence.
+		if (apiErr.HTTPStatus == http.StatusOK || apiErr.HTTPStatus == http.StatusBadRequest) && apiErr.Code == 232009 {
+			return nil
+		}
 	}
 	return err
 }

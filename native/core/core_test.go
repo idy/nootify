@@ -429,6 +429,75 @@ func TestRichTextMapping(t *testing.T) {
 		t.Fatal("unsupported outgoing block accepted")
 	}
 }
+func TestContentRejectsBoundedDeepPayloadBeforeCopyingText(t *testing.T) {
+	block := ContentBlock{Type: "text", Text: strings.Repeat("bounded ", 1024)}
+	for i := 0; i < 256; i++ {
+		block = ContentBlock{Type: "text", Children: []ContentBlock{block}}
+	}
+	content := Content{Blocks: []ContentBlock{block}}
+	encoded, err := json.Marshal(content)
+	must(t, err)
+	if len(encoded) >= maxPayload {
+		t.Fatal("fixture must fit within the payload limit")
+	}
+	var rejection error
+	// A small fixture and two validation calls are enough to detect recursive
+	// text copies. Avoid a load test or machine-dependent timing threshold.
+	allocations := testing.AllocsPerRun(1, func() { rejection = content.Validate() })
+	if rejection == nil || publicError(rejection).Code != "invalid_argument" || rejection.Error() != "content nesting exceeds limit" {
+		t.Fatalf("deep content returned %v; want the nesting rejection", rejection)
+	}
+	if allocations > 8 {
+		t.Fatalf("deep validation allocated %.0f objects; tree should reject before encoding or flattening", allocations)
+	}
+}
+
+func TestContentPlainAndValidationPreserveRichSemantics(t *testing.T) {
+	rich := Content{Text: "intro ", Blocks: []ContentBlock{
+		{Type: "paragraph", Text: "first ", Children: []ContentBlock{
+			{Type: "text", Text: "styled "},
+			{Type: "link", Text: "link", URL: "https://example.com", Children: []ContentBlock{{Type: "text", Text: " label"}}},
+		}},
+		{Type: "code", Text: "x\n", Children: []ContentBlock{{Type: "text", Text: "y"}}},
+		{Type: "paragraph", Children: []ContentBlock{{Type: "paragraph", Text: "nested"}, {Type: "text", Text: "tail"}}},
+	}}
+	must(t, rich.Validate())
+	if got, want := rich.Plain(), "intro first styled link label\nx\ny\nnested\ntail"; got != want {
+		t.Fatalf("rich plain text = %q, want %q", got, want)
+	}
+	if got := (Content{Text: "text\n\n"}).Plain(); got != "text\n" {
+		t.Fatalf("plain text trimmed more than one trailing newline: %q", got)
+	}
+	leaf := ContentBlock{Type: "text", Text: "leaf"}
+	for i := 1; i < 16; i++ {
+		leaf = ContentBlock{Type: "text", Children: []ContentBlock{leaf}}
+	}
+	atLimit := Content{Blocks: []ContentBlock{leaf}}
+	must(t, atLimit.Validate())
+	if atLimit.Plain() != "leaf" {
+		t.Fatal("valid nested text changed")
+	}
+	for _, tc := range []struct {
+		name    string
+		content Content
+		code    string
+	}{
+		{"empty", Content{}, "invalid_argument"},
+		{"unicode whitespace", Content{Text: " \t\n ", Blocks: []ContentBlock{{Type: "paragraph"}}}, "invalid_argument"},
+		{"unsupported shape", Content{Blocks: []ContentBlock{{Type: "image", Text: "x"}}}, "unsupported_content"},
+		{"invalid link", Content{Blocks: []ContentBlock{{Type: "link", Text: "x", URL: "file:///private"}}}, "invalid_argument"},
+		{"empty link label", Content{Blocks: []ContentBlock{{Type: "link", URL: "https://example.com"}}}, "invalid_argument"},
+		{"above depth limit", Content{Blocks: []ContentBlock{{Type: "paragraph", Children: atLimit.Blocks}}}, "invalid_argument"},
+		{"above size limit", Content{Text: strings.Repeat("x", maxPayload)}, "invalid_argument"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.content.Validate(); err == nil || publicError(err).Code != tc.code {
+				t.Fatalf("validation = %v, want %s", err, tc.code)
+			}
+		})
+	}
+}
+
 func TestGRPCAuthenticationAndPrivateMethods(t *testing.T) {
 	c := testCore(t, nil)
 	address, token := testServer(t, c)

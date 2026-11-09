@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -351,6 +352,166 @@ func TestFeishuAdoptionChecksStyledAnnouncementRoutes(t *testing.T) {
 		})
 	}
 }
+func TestFeishuDeleteOfficialSDKOnlyAcceptsProvenAbsence(t *testing.T) {
+	tests := []struct {
+		name         string
+		status, code int
+		absent       bool
+	}{
+		{"success", 200, 0, true},
+		{"http-not-found", 404, 0, true},
+		{"dissolved-http200", 200, 232009, true},
+		{"dissolved-documented-http400", 400, 232009, true},
+		{"invalid-id-http200", 200, 232006, false},
+		{"invalid-id-http400", 400, 232006, false},
+		{"application-missing", 200, 232004, false},
+		{"not-a-member", 200, 232011, false},
+		{"not-an-owner", 200, 232017, false},
+		{"not-an-owner-http400", 400, 232017, false},
+		{"permission", 403, 99991672, false},
+		{"permission-in-not-found-envelope", 404, 99991672, false},
+		{"gateway", 502, 0, false},
+		{"gateway-with-dissolved-code", 502, 232009, false},
+		{"timeout-with-dissolved-code", 408, 232009, false},
+		{"rate-limit", 429, 99991400, false},
+		{"unknown-application-code", 200, 12345, false},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "tenant_access_token") {
+			fmt.Fprint(w, `{"code":0,"tenant_access_token":"delete-fixture-token","expire":3600}`)
+			return
+		}
+		if r.Method == http.MethodDelete {
+			for _, tc := range tests {
+				if r.URL.Path == "/open-apis/im/v1/chats/"+tc.name {
+					w.WriteHeader(tc.status)
+					fmt.Fprintf(w, `{"code":%d,"data":{}}`, tc.code)
+					return
+				}
+			}
+		}
+		t.Errorf("unexpected fixture request: %s %s", r.Method, r.URL.Path)
+		http.Error(w, "unexpected request", http.StatusBadRequest)
+	}))
+	defer server.Close()
+	c := testCore(t, nil)
+	cfg := ProviderConfig{ID: "delete-bot", AppID: "delete-fixture-app", AppSecret: "fixture-secret"}
+	p := newFeishu(c, cfg)
+	defer p.Close()
+	p.client = lark.NewClient(cfg.AppID, cfg.AppSecret, lark.WithOpenBaseUrl(server.URL), lark.WithLogger(quietLogger{}), lark.WithHttpClient(server.Client()))
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := p.Delete(context.Background(), Binding{ChatID: tc.name})
+			if tc.absent {
+				must(t, err)
+				return
+			}
+			var rejection *feishuAPIError
+			if !errors.As(err, &rejection) || rejection.HTTPStatus != tc.status || rejection.Code != tc.code {
+				t.Fatalf("deletion lost its failure: %v; want status %d code %d", err, tc.status, tc.code)
+			}
+		})
+	}
+	t.Run("canceled-request", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if err := p.Delete(ctx, Binding{ChatID: "canceled"}); err == nil {
+			t.Fatal("canceled deletion was treated as absence")
+		}
+	})
+}
+
+func TestFeishuMissingChatExplicitReactivation(t *testing.T) {
+	for _, uncertain := range []bool{false, true} {
+		name := "already-dissolved"
+		if uncertain {
+			name = "uncertain-delete-then-dissolved"
+		}
+		t.Run(name, func(t *testing.T) {
+			var mu sync.Mutex
+			var uuids []string
+			deletes := 0
+			recovered := !uncertain
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if strings.Contains(r.URL.Path, "tenant_access_token") {
+					fmt.Fprint(w, `{"code":0,"tenant_access_token":"reactivation-fixture-token","expire":3600}`)
+					return
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				switch {
+				case r.Method == http.MethodPost && r.URL.Path == "/open-apis/im/v1/chats":
+					uuids = append(uuids, r.URL.Query().Get("uuid"))
+					fmt.Fprintf(w, `{"code":0,"data":{"chat_id":"fixture-group-%d"}}`, len(uuids))
+				case r.Method == http.MethodDelete && r.URL.Path == "/open-apis/im/v1/chats/fixture-group-1":
+					deletes++
+					if !recovered {
+						w.WriteHeader(http.StatusBadGateway)
+						fmt.Fprint(w, `{"code":99999999}`)
+						return
+					}
+					fmt.Fprint(w, `{"code":232009,"msg":"Your request specifies a chat which has already been dissolved."}`)
+				default:
+					t.Errorf("unexpected fixture request: %s %s", r.Method, r.URL.Path)
+					http.Error(w, "unexpected request", http.StatusBadRequest)
+				}
+			}))
+			defer server.Close()
+			c := testCore(t, nil)
+			cfg := ProviderConfig{ID: "reactivation-bot", Type: "feishu", AppID: "reactivation-fixture-app", AppSecret: "fixture-secret", Recipient: "trusted"}
+			p := newFeishu(c, cfg)
+			p.client = lark.NewClient(cfg.AppID, cfg.AppSecret, lark.WithOpenBaseUrl(server.URL), lark.WithLogger(quietLogger{}), lark.WithHttpClient(server.Client()))
+			c.providers[cfg.ID] = p
+			// Disabled configuration prevents a live WebSocket, including on reopen.
+			must(t, c.store.Update(func(d *State) error { d.Providers[cfg.ID] = cfg; d.DefaultProvider = cfg.ID; return nil }))
+			session := Session{Adapter: "codex", SessionID: "reactivate", Name: "Retained name", Metadata: map[string]any{"keep": "metadata"}}
+			original, err := c.Ensure(context.Background(), "", session)
+			must(t, err)
+			err = c.Delete(context.Background(), "", session)
+			if uncertain == (err == nil) {
+				t.Fatalf("delete returned %v, uncertain = %v", err, uncertain)
+			}
+			deleted := c.store.Snapshot().Bindings[original.Session.key()]
+			if !deleted.Deleted || deleted.DeletePending != uncertain {
+				t.Fatal("deletion did not retain the correct cleanup state")
+			}
+			raw, _ := json.Marshal(map[string]any{"session": session, "automatic": true})
+			if _, err := c.Handle(context.Background(), "session.ensure", raw, true); publicError(err).Code != "deleted" {
+				t.Fatal("automatic ensure reactivated a deleted session")
+			}
+			if uncertain {
+				if _, err := c.Ensure(context.Background(), "", session); err == nil {
+					t.Fatal("explicit ensure bypassed uncertain deletion")
+				}
+				mu.Lock()
+				creates := len(uuids)
+				recovered = true
+				mu.Unlock()
+				if creates != 1 || !c.store.Snapshot().Bindings[original.Session.key()].DeletePending {
+					t.Fatal("uncertain cleanup created a replacement or lost pending state")
+				}
+			}
+			replacement, err := c.Ensure(context.Background(), "", Session{Adapter: session.Adapter, SessionID: session.SessionID})
+			must(t, err)
+			retired := c.store.Snapshot().RetiredBindings[resourceKey(original)]
+			if replacement.ChatID == original.ChatID || replacement.Deleted || replacement.DeletePending || replacement.Session.Name != session.Name || replacement.Session.Metadata["keep"] != "metadata" || !retired.Deleted || retired.DeletePending {
+				t.Fatal("explicit reactivation failed to replace the missing chat and retain its tombstone and metadata")
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			wantDeletes := 1
+			if uncertain {
+				wantDeletes = 3
+			}
+			if len(uuids) != 2 || uuids[0] == "" || uuids[0] == uuids[1] || deletes != wantDeletes {
+				t.Fatalf("replacement reused a create UUID or repeated cleanup: creates = %v, deletes = %d", uuids, deletes)
+			}
+		})
+	}
+}
+
 func TestFeishuOfficialSDKRequestsAdoptionAndIngress(t *testing.T) {
 	var mu sync.Mutex
 	description := ""

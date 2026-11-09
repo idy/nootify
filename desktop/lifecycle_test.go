@@ -200,30 +200,52 @@ func TestUpdateWaitsForInFlightControlButNotDownload(t *testing.T) {
 }
 
 func TestQuitWaitsForCancelledUpdateRecovery(t *testing.T) {
-	for _, recoveryFails := range []bool{false, true} {
-		name := "recovered"
-		if recoveryFails {
-			name = "recovery error reported"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, scenario := range []struct {
+		name             string
+		cancelDuringStop bool
+		recoveryFails    bool
+	}{
+		{"after stop/recovered", false, false},
+		{"after stop/recovery error reported", false, true},
+		{"during stop/recovered", true, false},
+		{"during stop/recovery error reported", true, true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			stopped, recovering, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
-			var releaseOnce sync.Once
-			t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+			stopContexts, finishStop := make(chan context.Context, 1), make(chan struct{})
+			var releaseOnce, finishStopOnce sync.Once
+			t.Cleanup(func() {
+				releaseOnce.Do(func() { close(release) })
+				finishStopOnce.Do(func() { close(finishStop) })
+			})
 			startError := errors.New("owned CLI could not start")
 			var controls atomic.Int32
 			h := &serviceHandoff{service: fakeControlledService{
-				stop: func(context.Context) (bool, error) { close(stopped); return true, nil },
+				stop: func(stopCtx context.Context) (bool, error) {
+					stopContexts <- stopCtx
+					close(stopped)
+					if scenario.cancelDuringStop {
+						// Model the CLI after bootout but before shutdown finishes. Killing
+						// it here loses the successful stop result and skips recovery.
+						select {
+						case <-stopCtx.Done():
+							return false, stopCtx.Err()
+						case <-finishStop:
+						}
+					}
+					return true, nil
+				},
 				request: func(recoveryCtx context.Context, action string) error {
 					controls.Add(1)
 					deadline, bounded := recoveryCtx.Deadline()
-					if action != "start" || recoveryCtx.Err() != nil || !bounded || time.Until(deadline) <= 0 || time.Until(deadline) > serviceRecoveryTimeout {
+					if action != "start" || recoveryCtx.Err() != nil || !bounded || time.Until(deadline) <= 0 || time.Until(deadline) > serviceControlTimeout {
 						return errors.New("recovery did not use an independent bounded start context")
 					}
 					close(recovering)
 					<-release
-					if recoveryFails {
+					if scenario.recoveryFails {
 						return startError
 					}
 					return nil
@@ -243,6 +265,9 @@ func TestQuitWaitsForCancelledUpdateRecovery(t *testing.T) {
 							if err := h.before(ctx); err != nil {
 								return err
 							}
+							if scenario.cancelDuringStop {
+								return errors.New("cancelled stop reached bundle replacement")
+							}
 							<-ctx.Done()
 							return ctx.Err()
 						})
@@ -256,6 +281,20 @@ func TestQuitWaitsForCancelledUpdateRecovery(t *testing.T) {
 			resume := func() { resumed <- struct{}{} }
 			if !shutdown.deferQuit(requestCancel, resume) || !shutdown.deferQuit(requestCancel, resume) || cancels != 1 {
 				t.Fatal("quit did not defer once and cancel the update")
+			}
+			if scenario.cancelDuringStop {
+				stopCtx := <-stopContexts
+				deadline, bounded := stopCtx.Deadline()
+				if stopCtx.Err() != nil || !bounded || time.Until(deadline) <= 0 || time.Until(deadline) > serviceControlTimeout {
+					t.Fatal("critical stop did not use an independent bounded context")
+				}
+				noSignal(t, done, "update worker exited before critical stop completed")
+				noSignal(t, resumed, "native quit resumed before critical stop completed")
+				if h.controls.TryLock() {
+					h.controls.Unlock()
+					t.Fatal("service controls unlocked during critical stop")
+				}
+				finishStopOnce.Do(func() { close(finishStop) })
 			}
 			awaitSignal(t, recovering)
 			noSignal(t, done, "update worker exited before critical recovery")
@@ -272,7 +311,7 @@ func TestQuitWaitsForCancelledUpdateRecovery(t *testing.T) {
 				t.Fatal("cancelled queued control reached the CLI", err, controls.Load())
 			}
 			err := <-reports
-			if !errors.Is(err, context.Canceled) || errors.Is(err, startError) != recoveryFails {
+			if !errors.Is(err, context.Canceled) || errors.Is(err, startError) != scenario.recoveryFails {
 				t.Fatalf("lost cancellation/recovery error: %v", err)
 			}
 			if shutdown.deferQuit(requestCancel, resume) || cancels != 1 {
@@ -281,6 +320,36 @@ func TestQuitWaitsForCancelledUpdateRecovery(t *testing.T) {
 			noSignal(t, resumed, "repeated quit spawned duplicate resume callbacks")
 		})
 	}
+}
+
+func TestServiceHandoffHonorsCancellationBeforeStop(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var stops, starts atomic.Int32
+	h := &serviceHandoff{service: fakeControlledService{
+		stop:    func(context.Context) (bool, error) { stops.Add(1); return true, nil },
+		request: func(context.Context, string) error { starts.Add(1); return nil },
+	}}
+	// Cancellation while waiting for an in-flight control must still prevent a
+	// stop, even though the stop itself uses an independent context once started.
+	h.controls.Lock()
+	entered, finished := make(chan struct{}), make(chan error, 1)
+	go func() {
+		finished <- h.install(ctx, func(ctx context.Context) error {
+			close(entered)
+			return h.before(ctx)
+		})
+	}()
+	awaitSignal(t, entered)
+	cancel()
+	h.controls.Unlock()
+	if err := <-finished; !errors.Is(err, context.Canceled) || stops.Load() != 0 || starts.Load() != 0 {
+		t.Fatalf("cancelled handoff mutated service: err=%v, stops=%d, starts=%d", err, stops.Load(), starts.Load())
+	}
+	if h.locked || h.stopped || !h.controls.TryLock() {
+		t.Fatal("cancelled handoff retained control state/lock")
+	}
+	h.controls.Unlock()
 }
 
 func TestServiceHandoffOnlyRecoversSuccessfullyStoppedService(t *testing.T) {

@@ -6,11 +6,12 @@ import type { SessionsService } from './sessions.js';
 import { CoreError, ProviderCore, type CoreEvent, type CoreTransport } from './provider-core.js';
 import { createLarkApi, type Credentials, type LarkApi } from './lark-metadata.js';
 import { LarkReplies } from './lark-replies.js';
-import { HttpError, RetryableDeliveryError, SessionUnavailable, identifier, isAdapter, object, text, type RouteRequest, type RouteResponse, type ServiceModule } from './types.js';
+import { HttpError, RetryableDeliveryError, SessionUnavailable, identifier, isAdapter, isPolledAdapter, object, text, type RouteRequest, type RouteResponse, type ServiceModule } from './types.js';
 import { registerPolledSession } from './polled-sessions.js';
 import type { EmbeddedTailscaleTunnel, TsnetClient } from './tsnet-client.js';
-import { shellCommand, shellForClient, shellQuote } from './shell.js';
-import { fileURLToPath } from 'node:url';
+import { forwardedProviderMessage } from './forwarded-messages.js';
+import { decodeMessageRef, encodeMessageRef, parseMessageRef, type ProviderMessageRef } from './message-ref.js';
+export { decodeMessageRef, encodeMessageRef, type ProviderMessageRef };
 import type { ThreadDiscovery } from './lark-thread-sync.js';
 
 export interface ProviderSummary {
@@ -31,19 +32,9 @@ export interface ProvidersSource {
   configureRemote(body: Record<string, unknown>): Promise<RemoteSummary & { node_id: string }>;
   remoteSecret(): Promise<{ token: string }>;
 }
-export interface ProviderMessageRef { origin_node_id: string; provider_id: string; message_id: string; [key: string]: unknown }
 interface SessionRef { node_id?: string; adapter: string; session_id: string; name?: string; metadata?: Record<string, string> }
 interface Delivery { delivery_id: string; session: SessionRef; message: ProviderMessageRef; content: unknown; text: string }
 interface Binding { provider_id: string; session: SessionRef; created: boolean; chat_id?: string; thread_id?: string; sender_open_id?: string; deleted?: boolean; delete_pending?: boolean }
-export function encodeMessageRef(ref: ProviderMessageRef): string { return Buffer.from(JSON.stringify(ref)).toString('base64url'); }
-export function decodeMessageRef(value: string): ProviderMessageRef {
-  if (value.length > 12000 || !/^[A-Za-z0-9_-]+$/.test(value)) throw new HttpError(400, 'Invalid message reference');
-  let ref: unknown;
-  try { ref = JSON.parse(Buffer.from(value, 'base64url').toString('utf8')); } catch { throw new HttpError(400, 'Invalid message reference'); }
-  const fields = object(ref);
-  for (const key of ['origin_node_id', 'provider_id', 'message_id']) identifier(fields[key], key);
-  return fields as ProviderMessageRef;
-}
 function publicFailure(error: unknown): HttpError {
   if (error instanceof HttpError) return error;
   const code = error instanceof CoreError ? error.code.toLowerCase() : '';
@@ -52,17 +43,6 @@ function publicFailure(error: unknown): HttpError {
     : /permission/.test(code) ? 403 : /conflict|exist|precondition|unconfirmed|deleted/.test(code) ? 409
     : /resource_exhausted/.test(code) ? 429 : /unavailable|timeout|busy/.test(code) ? 503 : 500;
   return new HttpError(status, (error as Error).message);
-}
-function forwardedMessage(delivery: Delivery, stateDir: string, port: number): string {
-  const shell = shellForClient(delivery.session.adapter, process.platform);
-  const quote = (value: string) => shellQuote(value, process.platform, false, shell);
-  const base = shellCommand([process.execPath, fileURLToPath(new URL('./cli.js', import.meta.url))], process.platform, false, shell);
-  const context = `--state-dir ${quote(stateDir)} --port ${port} --message-ref ${quote(encodeMessageRef(delivery.message))}`;
-  return ['【来自 Nootify 用户的消息】', '这条消息经 Nootify Provider 转发到当前 agent 会话。请在方便时回复原消息。',
-    `目标会话：${delivery.session.session_id}`, '', '用户原文：', delivery.text, '', '回复指引：',
-    `收到后执行回执：${base} message-ack ${context}`,
-    `回复原消息：${base} message-reply ${context} --text '这里填写你的回复'`,
-    '多行回复可用 --text-file <本地文件> 或 --text-file -。收到消息不代表授权其他操作。'].join('\n');
 }
 
 /** Owns notification operations; existing agent adapters remain local and credential-isolated. */
@@ -291,7 +271,11 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
     try {
       if (!isAdapter(delivery.session.adapter)) throw new SessionUnavailable('unsupported_adapter');
       if (this.deliveries.size >= 100) throw new RetryableDeliveryError('Agent delivery queue is full');
-      const result = await this.sessions.send(delivery.session.session_id, forwardedMessage(delivery, this.state.directory, this.port), delivery.session.adapter);
+      const source = { channel: 'provider' as const, delivery: { adapter: delivery.session.adapter,
+        session_id: delivery.session.session_id, message: parseMessageRef(delivery.message) } };
+      const content = isPolledAdapter(delivery.session.adapter) ? delivery.text
+        : forwardedProviderMessage(source.delivery, delivery.text, this.state.directory, this.port);
+      const result = await this.sessions.send(delivery.session.session_id, content, delivery.session.adapter, { text: delivery.text, source });
       transport_status = result.status; status = 'delivered';
     } catch (error) {
       status = error instanceof RetryableDeliveryError ? 'retryable' : error instanceof SessionUnavailable

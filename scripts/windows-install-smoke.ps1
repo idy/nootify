@@ -326,6 +326,21 @@ try {
         if ([IO.File]::ReadAllText((Join-Path $stateDir 'install-smoke-marker')) -cne $marker -or
             (Get-FileHash -LiteralPath (Join-Path $stateDir 'auth-token') -Algorithm SHA256).Hash -cne $tokenHash) { throw 'Upgrade did not preserve private state' }
     }
+    Test-Step 'Legacy passive updater closes without input and relaunches from the registered directory' {
+        Stop-TestApps
+        $previous = Get-ServiceProcess
+        # Exact Tauri installMode=passive invocation: /S would hide page bugs,
+        # and /D would hide a failure to reuse the registered path with spaces.
+        # Run-Native waits for exit without sending UI input or clicking Close.
+        With-NodeStartupOptions { $null = Run-Native $Installer '/P /UPDATE /R' 'upgrade-legacy-passive' }
+        Wait-Until 'passively updated app and daemon' { (Test-Health) -and @(Get-TestApps).Count -eq 1 }
+        Assert-Installation $Version
+        if (!$previous.WaitForExit(10000)) { throw 'The old daemon survived the passive update' }
+        Assert-RunningTask
+        if ((Get-TestTask).Definition.Data -cne $marker) { throw 'Passive update did not preserve the existing scheduled task' }
+        if ([IO.File]::ReadAllText((Join-Path $stateDir 'install-smoke-marker')) -cne $marker -or
+            (Get-FileHash -LiteralPath (Join-Path $stateDir 'auth-token') -Algorithm SHA256).Hash -cne $tokenHash) { throw 'Passive update did not preserve private state' }
+    }
     Test-Step 'Installed CLI restarts immediately with an accepted keep-alive connection' {
         $previous = Get-ServiceProcess
         $browser = [Net.Sockets.TcpClient]::new('127.0.0.1', 9417)

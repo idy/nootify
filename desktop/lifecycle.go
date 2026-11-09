@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-const serviceRecoveryTimeout = 155 * time.Second
+const serviceControlTimeout = 155 * time.Second
 
 type controlledService interface {
 	Install(context.Context) error
@@ -45,9 +45,15 @@ func (h *serviceHandoff) before(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	// Once the ownership-checked CLI starts stopping the service, let it finish
+	// even if quit cancels the app: bootout can precede its shutdown-wait result.
+	stopCtx, cancel := context.WithTimeout(context.Background(), serviceControlTimeout)
+	defer cancel()
 	var err error
-	h.stopped, err = h.service.StopForUpdate(ctx)
-	return err
+	h.stopped, err = h.service.StopForUpdate(stopCtx)
+	// Keep the successful stop recorded for deferred recovery, but do not replace
+	// the bundle when cancellation arrived during the critical stop.
+	return errors.Join(err, ctx.Err())
 }
 
 // after runs against the newly exchanged bundle. If starting it fails, the updater
@@ -56,7 +62,7 @@ func (h *serviceHandoff) after() error {
 	if !h.stopped {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), serviceRecoveryTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), serviceControlTimeout)
 	defer cancel()
 	if err := h.service.Request(ctx, "start"); err != nil {
 		return err
