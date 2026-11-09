@@ -20,7 +20,9 @@ $startupVariables = @('NODE_OPTIONS', 'NODE_PATH', 'NODE_EXTRA_CA_CERTS', 'NODE_
 $phase = 'preflight'
 $failure = $null
 $results = New-Object 'Collections.Generic.List[object]'
-$receiptSubkey = 'Software\Nootify\InstallerReceiptProbe.' + [Guid]::NewGuid().ToString('N')
+# New-Item requires an existing parent. A fresh runner has Software, but no
+# Nootify key; keep the random fixture outside the application's registry tree.
+$receiptSubkey = 'Software\NootifyInstallerReceiptProbe.' + [Guid]::NewGuid().ToString('N')
 $receiptKey = 'HKCU:\' + $receiptSubkey
 
 function Quote-Argument([string]$Value) {
