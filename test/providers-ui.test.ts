@@ -25,14 +25,6 @@ test('provider and remote-access UI performs real mutations, preserves secrets a
   t.after(() => { for (const [key, descriptor] of descriptors) {
     if (descriptor) Object.defineProperty(globalThis, key, descriptor); else Reflect.deleteProperty(globalThis, key);
   } });
-  const selectPrototype = window.HTMLSelectElement.prototype;
-  const selectValue = Object.getOwnPropertyDescriptor(selectPrototype, 'value')!;
-  Object.defineProperty(selectPrototype, 'value', { ...selectValue, set(this: HTMLSelectElement, value: string) {
-    const options = [...this.querySelectorAll('option')];
-    for (const option of options) option.selected = false;
-    const selected = options.find(option => option.value === value); if (selected) selected.selected = true;
-  } });
-  t.after(() => Object.defineProperty(selectPrototype, 'value', selectValue));
   let focused: HTMLElement | null = null;
   Object.defineProperty(document, 'activeElement', { configurable: true, get: () => focused });
   t.mock.method(window.HTMLElement.prototype, 'focus', function (this: HTMLElement) { focused = this; });

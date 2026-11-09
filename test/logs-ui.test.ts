@@ -28,15 +28,7 @@ test('Logs separates event purpose from delivery outcome and keeps its controls 
       if (descriptor) Object.defineProperty(globalThis, key, descriptor); else Reflect.deleteProperty(globalThis, key);
     }
   });
-  // Supply browser selection and focus behavior that linkedom does not implement.
-  const selectPrototype = window.HTMLSelectElement.prototype;
-  const selectValue = Object.getOwnPropertyDescriptor(selectPrototype, 'value')!;
-  Object.defineProperty(selectPrototype, 'value', { ...selectValue, set(this: HTMLSelectElement, value: string) {
-    const options = [...this.querySelectorAll('option')];
-    for (const option of options) option.selected = false;
-    const selected = options.find(option => option.value === value); if (selected) selected.selected = true;
-  } });
-  t.after(() => Object.defineProperty(selectPrototype, 'value', selectValue));
+  // Supply browser focus behavior that linkedom does not implement.
   let focused: HTMLElement | null = null;
   Object.defineProperty(document, 'activeElement', { configurable: true, get: () => focused });
   t.mock.method(window.HTMLElement.prototype, 'focus', function (this: HTMLElement) { focused = this; });

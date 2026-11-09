@@ -63,6 +63,7 @@ typography:
     fontSize: "11.5px"
 rounded:
   tag: "5px"
+  menu-option: "6px"
   control: "7px"
   field: "8px"
   person: "10px"
@@ -173,6 +174,7 @@ Controls use modest curved corners; groups are slightly rounder. The modal uses 
 
 - **Buttons:** quiet text actions in settings; blue filled confirmation/retry and bordered panel-colored cancellation in the modal. Dialog buttons have (34px) minimum height. Primary hover uses brightness (.94); disabled primary has opacity (.5). Secondary and text actions use the hover surface. Global keyboard focus remains visible.
 - **Fields:** neutral fill, soft border, field radius; focused settings fields change border color. The modal search uses a stronger blue focus border, (10px) corners, and (11px 12px) padding.
+- **Dropdowns:** web selectors use the authored `Dropdown` component and shared `.dropdown-button`, `.dropdown-menu`, and `.dropdown-option` styles, rather than native select popups. Triggers compose the field surface with a (30px) height and at least (160px) width. Menus use (10px) corners, (4px) padding, (32px) minimum option height, (6px) option corners, and `--dropdown-shadow` (0 8px 24px, black at .12 in light appearance and .32 in dark appearance). Selected options show a blue check; active options use the neutral hover surface. The body-portaled menu stays within the viewport, flips above when needed, and avoids card clipping. Arrow keys, Home/End, and typeahead highlight options; Enter/Space commits, Escape cancels, and Tab/outside interaction/navigation/ancestor scrolling dismisses. Focus remains on the combobox trigger. See `docs/ui-components.md` for the shared markup and API.
 - **Navigation, tags, groups:** navigation uses selected neutral fill; tags are compact metadata; groups contain separated two-line rows rather than individually elevated cards. Agent checkbox rows keep their panel background on hover; keyboard focus and checkbox states remain visible. The Providers list retains a card with centered empty-state text when no providers exist.
 - **Contact rows:** a provider portrait overlays an initial fallback. Images load lazily, decode asynchronously, omit referrers, and fall back on failure. Selected draft has blue tint and a circular SVG check. The saved recipient sorts first when search is empty and carries a current-recipient subtitle. Search includes name, nickname, English name, and ID.
 - **Directory states:** cached contacts appear immediately and remain visible during background refresh. Rows and decoded portraits are keyed by open_id and reused across streamed batches, search, selection, and polling; the visible scroll anchor stays fixed. New avatar URLs replace the old portrait only after decoding. Initial skeletons appear only without usable contacts. Progress remains in a polite status region. Interrupted and partial lists remain selectable, with separate access help. Empty, search-empty, and network errors use the same bounded body.

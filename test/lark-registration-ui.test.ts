@@ -28,13 +28,6 @@ test('the live settings module reconciles committed QR settings after the servic
       if (descriptor) Object.defineProperty(globalThis, key, descriptor); else Reflect.deleteProperty(globalThis, key);
     }
   });
-  // linkedom exposes select.value as getter-only; provide the browser's ordinary setter.
-  const prototype = window.HTMLSelectElement.prototype;
-  const selectValue = Object.getOwnPropertyDescriptor(prototype, 'value')!;
-  Object.defineProperty(prototype, 'value', { ...selectValue, set(this: HTMLSelectElement, value: string) {
-    for (const option of this.querySelectorAll('option')) option.selected = option.value === value;
-  } });
-  t.after(() => Object.defineProperty(prototype, 'value', selectValue));
   const timers: { run: () => void; milliseconds: number }[] = [];
   t.mock.method(globalThis, 'setInterval', ((run: () => void, milliseconds: number) => {
     timers.push({ run, milliseconds }); return {} as NodeJS.Timeout;

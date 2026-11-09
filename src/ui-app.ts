@@ -11,6 +11,7 @@ import type { LarkRegistrationPage, LarkSetup } from './lark-registration.js';
 import type { LarkConnectionType } from './state.js';
 import { mergeRecipients, recipientDisplayName } from './lark-profile.js';
 import { RecipientListRenderer } from './recipient-list.js';
+import { Dropdown } from './dropdown.js';
 
 interface PullSummary { internal: number; upstream: number; followed: number; running: boolean; lastSuccessAt?: string; error?: string; signedOut?: boolean }
 interface Snapshot {
@@ -2010,18 +2011,20 @@ document.addEventListener('keydown', event => {
   }
 });
 
+const languageDropdown = new Dropdown($<HTMLButtonElement>('language'), $('language-options'));
+
 function renderLanguage(): void {
   ({ views, descriptions, reasons, sourceNames, categories, outcomeTabs, pullTabs, repoTabs, agentNames, promptStates, adapters, availability, reviews, moduleNames, moduleStates, credentialSources, githubErrors, tailscaleErrors } = translatedLabels());
   relative = new Intl.RelativeTimeFormat(locale(), { numeric: 'auto' });
   translateDocument();
   state.signatures.clear();
-  $<HTMLSelectElement>('language').value = languagePreference();
+  languageDropdown.value = languagePreference();
   renderAll();
   renderLogs(true); // Paused logs still need their labels refreshed.
   requestAnimationFrame(revealActiveNavigation);
 }
 $('language').addEventListener('change', () => {
-  const value = $<HTMLSelectElement>('language').value;
+  const value = languageDropdown.value;
   if (!isPreference(value)) return;
   setLanguage(value);
   renderLanguage();

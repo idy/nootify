@@ -44,7 +44,10 @@ test('all marked static UI messages and dynamic translation keys have a catalog 
   }
   const script = await readFile(new URL('../../src/ui-app.ts', import.meta.url), 'utf8');
   for (const match of script.matchAll(/\bt\('([^']+)'/g)) assert.ok(Object.hasOwn(english, match[1]), `Missing dynamic translation: ${match[1]}`);
-  assert.match(page, /<select[^>]+id="language"/);
+  const { document } = parseHTML(page);
+  assert.equal(document.querySelector('select'), null, 'UI dropdowns must use the authored control');
+  assert.equal(document.getElementById('language')!.getAttribute('role'), 'combobox');
+  assert.equal(document.querySelectorAll('#language-options [role="option"]').length, 3);
   assert.match(page, /data-view="settings-general"/);
 });
 

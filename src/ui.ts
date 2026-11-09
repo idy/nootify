@@ -30,6 +30,7 @@ const assets = new Map([
   ['/ui/ui-i18n.js', { path: new URL('./ui-i18n.js', import.meta.url), type: 'text/javascript; charset=utf-8' }],
   ['/ui/lark-profile.js', { path: new URL('./lark-profile.js', import.meta.url), type: 'text/javascript; charset=utf-8' }],
   ['/ui/recipient-list.js', { path: new URL('./recipient-list.js', import.meta.url), type: 'text/javascript; charset=utf-8' }],
+  ['/ui/dropdown.js', { path: new URL('./dropdown.js', import.meta.url), type: 'text/javascript; charset=utf-8' }],
 ]);
 function json(response: ServerResponse, status: number, body: unknown): void {
   response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });

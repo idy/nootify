@@ -27,6 +27,9 @@
   --page-gutter: 22px;
   --content-width: 960px;
   --content-gutter: max(var(--page-gutter), calc((100% - var(--content-width)) / 2));
+  --dropdown-radius: 10px;
+  --dropdown-option-height: 32px;
+  --dropdown-shadow: 0 8px 24px rgb(0 0 0 / .12);
   --section-gap: 12px;
   --panel-inset: 16px;
   --font-code: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
@@ -63,6 +66,7 @@
     --banner-text: #ffbab4;
     --focus-line: #4a4a53;
     --check-line: #55555e;
+    --dropdown-shadow: 0 8px 24px rgb(0 0 0 / .32);
   }
 }
 * { box-sizing: border-box; }
@@ -166,7 +170,7 @@ svg { flex: none; }
 /* Lists: one bordered group, two-line rows, quiet metadata, aligned figures on the right. */
 .group { overflow: hidden; border: 1px solid var(--line); border-radius: 11px; background: var(--panel); }
 .list-summary { display: flex; align-items: center; gap: 16px; margin-bottom: 12px; padding: 0 2px; }
-.group-title { font-size: var(--type-primary); font-weight: 600; line-height: 20px; text-wrap: balance; }
+.group-title { margin: 0; font-size: var(--type-primary); font-weight: 600; line-height: 20px; text-wrap: balance; }
 .group-sub { margin-top: 3px; color: var(--muted); font-size: var(--type-meta); line-height: 18px; text-wrap: pretty; }
 .group-side { margin-left: auto; color: var(--muted); font-size: var(--type-meta); line-height: 1.55; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .rows > .entry + .entry { border-top: 1px solid var(--line-soft); }
@@ -282,8 +286,21 @@ label.row { cursor: pointer; }
 .setting-sub.tone-error { color: var(--red); }
 .setting-actions { display: flex; flex: none; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 2px; max-width: 100%; }
 .setting-field { flex: 0 1 320px; min-width: 0; height: 30px; padding: 0 10px; border: 1px solid var(--line-soft); border-radius: 8px; outline: none; background: var(--field); }
-.setting-language select { flex: 0 1 auto; width: auto; max-width: 100%; min-width: 160px; padding-inline-end: 28px; cursor: pointer; }
-.setting-language select:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+/* Authored dropdown buttons and menus share application surfaces in every webview. */
+.dropdown-button { display: inline-flex; flex: 0 1 auto; align-items: center; justify-content: space-between; gap: 12px; min-width: 160px; max-width: 100%; text-align: left; cursor: pointer; }
+.dropdown-button:hover:not(:disabled), .dropdown-button[aria-expanded="true"] { border-color: var(--focus-line); }
+.dropdown-button:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+.dropdown-button:disabled { cursor: default; }
+.dropdown-chevron { flex: none; width: 14px; height: 14px; fill: none; stroke: var(--muted); stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.dropdown-button[aria-expanded="true"] .dropdown-chevron { transform: rotate(180deg); }
+.dropdown-menu { position: fixed; z-index: 20; max-width: calc(100vw - 24px); max-height: min(320px, calc(100dvh - 24px)); overflow-y: auto; overscroll-behavior: contain; padding: 4px; border: 1px solid var(--line); border-radius: var(--dropdown-radius); background: var(--panel); box-shadow: var(--dropdown-shadow); scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+.dropdown-option { display: flex; align-items: center; gap: 8px; width: 100%; min-height: var(--dropdown-option-height); padding: 6px 8px; border-radius: 6px; text-align: left; }
+.dropdown-option > [data-option-label] { min-width: 0; overflow-wrap: anywhere; }
+.dropdown-option:hover:not(:disabled), .dropdown-option[data-active] { background: var(--hover); }
+.dropdown-option[aria-selected="true"] { font-weight: 500; }
+.dropdown-option:disabled { color: var(--faint); cursor: default; }
+.dropdown-check { flex: none; width: 16px; height: 16px; fill: none; stroke: var(--blue); stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; opacity: 0; }
+.dropdown-option[aria-selected="true"] .dropdown-check { opacity: 1; }
 .setting-field::placeholder { color: var(--faint); }
 .setting-field:disabled { color: var(--faint); cursor: default; }
 .secret-field { position: relative; flex: 0 1 320px; min-width: 0; }
@@ -312,8 +329,6 @@ label.row { cursor: pointer; }
 .settings-fields > .settings-fields, .settings-fields + .setting { border-top: 1px solid var(--line-soft); }
 .settings-fields:disabled .setting-field { color: var(--faint); }
 .settings-fields .setting-field:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
-.settings-fields select.setting-field { padding-right: 26px; }
-#remote-title { margin: 0; }
 .provider-dialog.recipient-dialog { width: min(600px, calc(100vw - 32px)); }
 .provider-dialog-head { flex: none; padding-bottom: 16px; }
 .provider-dialog-head > div { flex: 1; min-width: 0; }
@@ -353,7 +368,7 @@ label.row { cursor: pointer; }
 .dialog-primary.danger { border-color: var(--red); background: var(--red); color: var(--panel); }
 .confirmation-dialog { max-width: 440px; }
 .confirmation-dialog .recipient-dialog-foot { justify-content: flex-end; }
-.remote-peers { margin-top: 12px; }
+.remote-peers { margin-top: calc(var(--section-gap) * 2); }
 .remote-peer-row .row-meta { height: auto; white-space: normal; overflow-wrap: anywhere; }
 .remote-peer-row .row-side { flex: none; }
 #remote-state { margin-left: auto; font-size: var(--type-meta); }

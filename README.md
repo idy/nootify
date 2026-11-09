@@ -108,6 +108,7 @@ See [desktop builds](docs/guide.md#build-the-desktop-app).
 | `src/` | Local HTTP service, CLI, TypeScript UI, agent adapters, discovery, and GitHub integration |
 | `native/tailscale/` | Embedded Tailscale identity, browser proxy, and core TCP tunnels/listeners |
 | `public/` | Local application UI |
+| `src/dropdown.ts` | Shared authored dropdown behavior, keyboard navigation, and popup positioning |
 | `desktop/` | Go/MyGo desktop host, native tray, signed updater, and offline assets |
 | `site/` | Public website |
 | `test/` | Node regression checks and test-only headless service wiring |
@@ -120,6 +121,7 @@ See [desktop builds](docs/guide.md#build-the-desktop-app).
 - [Provider core protocol](docs/provider-protocol.md)
 - [Client connections and input transports](docs/guide.md#agent-input-transports)
 - [Settings and troubleshooting](docs/guide.md#settings)
+- [Shared UI controls](docs/ui-components.md)
 - [Tailscale remote access](docs/guide.md#tailscale-access)
 - [TypeScript client and service API](docs/guide.md#typescript-client-and-module-api)
 - [Website preview and deployment](docs/guide.md#project-website)

@@ -25,12 +25,6 @@ test('collapsed titlebar searches handle macOS blur before toggle click and pres
       if (descriptor) Object.defineProperty(globalThis, key, descriptor); else Reflect.deleteProperty(globalThis, key);
     }
   });
-  const prototype = window.HTMLSelectElement.prototype;
-  const selectValue = Object.getOwnPropertyDescriptor(prototype, 'value')!;
-  Object.defineProperty(prototype, 'value', { ...selectValue, set(this: HTMLSelectElement, value: string) {
-    for (const option of this.querySelectorAll('option')) option.selected = option.value === value;
-  } });
-  t.after(() => Object.defineProperty(prototype, 'value', selectValue));
   t.mock.method(globalThis, 'setInterval', (() => 0) as unknown as typeof globalThis.setInterval);
   t.mock.method(globalThis, 'fetch', async (input: string | URL | Request) => {
     const path = new URL(String(input), 'http://127.0.0.1:9417').pathname;

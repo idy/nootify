@@ -14,7 +14,7 @@ Every page uses a content column capped at 960px and centered within the area to
 
 ## Existing commitments
 
-Preserve the application’s penguin identity, compact neutral settings, blue action color, and system light/dark appearance. English typography uses Montserrat for navigation menus, their section labels and counts, and the brand; Lato for body text, controls, content headings, row titles, and metadata. Chinese keeps system-font fallbacks. Support Simplified Chinese and English. Configuration edits, secret reveal, and contact directories remain local to the computer; tailnet access does not grant those capabilities.
+Preserve the application’s penguin identity, compact neutral settings, blue action color, and system light/dark appearance. English typography uses Montserrat for navigation menus, their section labels and counts, and the brand; Lato for body text, controls, content headings, row titles, and metadata. Chinese keeps system-font fallbacks. Support Simplified Chinese and English. Web dropdown buttons and menus use application styling in both appearances, with keyboard selection, visible selected state, and no operating-system select popup. Configuration edits, secret reveal, and contact directories remain local to the computer; tailnet access does not grant those capabilities.
 
 ## Feishu recipient selection
 
