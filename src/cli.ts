@@ -4,9 +4,10 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { NootifyClient } from './client.js';
+import { requestOwnerUiGrant } from './ui-owner-auth.js';
 import { defaultStateDir } from './state.js';
 import { installLaunchd } from './launchd.js';
-import { manageService, SERVICE_ACTIONS, type ServiceAction } from './service.js';
+import { manageService, parseServiceDrain, serviceFailure, SERVICE_ACTIONS, type ServiceAction } from './service.js';
 import type { Adapter, SessionRegistration } from './types.js';
 import { isAdapter, isPolledAdapter } from './types.js';
 import { AGENT_IDS, agentSession, isAgent } from './agents.js';
@@ -14,15 +15,16 @@ import { isNotificationChannel } from './types.js';
 
 export async function main(argv = process.argv.slice(2), serviceManager = manageService): Promise<void> {
   const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, options: {
-    'state-dir': { type: 'string' }, 'mcp-config': { type: 'string' }, port: { type: 'string', default: '9417' },
+    'state-dir': { type: 'string' }, 'mcp-config': { type: 'string' }, 'service-drain': { type: 'string' }, 'ui-route': { type: 'string' }, port: { type: 'string', default: '9417' },
+    'peer-node-id': { type: 'string' }, 'public-key': { type: 'string' },
     'session-id': { type: 'string' }, 'session-name': { type: 'string' }, adapter: { type: 'string' }, agent: { type: 'string' }, 'open-id': { type: 'string' },
     'chat-id': { type: 'string' }, 'sender-id': { type: 'string' }, pin: { type: 'boolean', default: false },
-    metadata: { type: 'string', default: 'announcement' }, text: { type: 'string' }, help: { type: 'boolean', short: 'h' },
+    metadata: { type: 'string' }, text: { type: 'string' }, help: { type: 'boolean', short: 'h' },
     url: { type: 'string' }, directory: { type: 'string' },
     'message-id': { type: 'string' }, 'message-ref': { type: 'string' }, 'provider-id': { type: 'string' }, 'request-id': { type: 'string' }, 'text-file': { type: 'string' }, channel: { type: 'string' },
   } });
   const command = positionals[0];
-  if (values.help) { console.log('Usage: cli.js <service-install|service-start|service-restart|service-stop|service-uninstall|service-status|launchd-install|health|register|sessions|send|thread-open|thread-send|thread-delete|thread-receive|thread-ack|message-ack|message-reply|lark-bind|lark-ack|lark-reply|lark-recipient|backend-set> [options]'); return; }
+  if (values.help) { console.log('Usage: cli.js <service-install|service-start|service-restart|service-stop|service-uninstall|service-status|launchd-install|ui-url|node-identity|peer-bind|health|register|sessions|send|thread-open|thread-send|thread-delete|thread-receive|thread-ack|message-ack|message-reply|lark-bind|lark-ack|lark-reply|lark-recipient|backend-set> [options]'); return; }
   if (values.channel !== undefined && !isNotificationChannel(values.channel)) throw new Error('Only Feishu notifications are supported');
   const channel = isNotificationChannel(values.channel) ? values.channel : undefined;
   const adapter = values.adapter ?? 'claude-desktop';
@@ -35,12 +37,18 @@ export async function main(argv = process.argv.slice(2), serviceManager = manage
   const serviceAction = command?.startsWith('service-') ? command.slice('service-'.length) : undefined;
   if (serviceAction) {
     if (!(SERVICE_ACTIONS as readonly string[]).includes(serviceAction)) throw new Error('Use --help for supported service commands');
-    console.log(JSON.stringify(await serviceManager(serviceAction as ServiceAction, { stateDir: values['state-dir'], port, mcpConfig: values['mcp-config'] })));
+    const drain = values['service-drain'] === undefined ? undefined : parseServiceDrain(JSON.parse(values['service-drain']));
+    if (drain && serviceAction !== 'start' && serviceAction !== 'restart' && serviceAction !== 'stop') throw new Error('Service drain recovery requires service-start, service-restart or service-stop');
+    console.log(JSON.stringify(await serviceManager(serviceAction as ServiceAction, { stateDir: values['state-dir'], port, mcpConfig: values['mcp-config'], ...(drain ? { drain } : {}) })));
     return;
   }
   const token = (await readFile(join(values['state-dir'] ?? defaultStateDir(), 'auth-token'), 'utf8')).trim();
+  if (command === 'ui-url') {
+    console.log(JSON.stringify({ url: await requestOwnerUiGrant(`http://127.0.0.1:${port}`, token, values['ui-route']) }));
+    return;
+  }
   const client = new NootifyClient({ token, baseUrl: `http://127.0.0.1:${port}` });
-  const required = (name: 'session-id' | 'session-name' | 'chat-id' | 'sender-id' | 'text' | 'message-id'): string => {
+  const required = (name: 'session-id' | 'session-name' | 'chat-id' | 'sender-id' | 'text' | 'message-id' | 'peer-node-id' | 'public-key'): string => {
     const value = values[name]; if (!value) throw new Error(`Missing --${name}`); return value;
   };
   async function readText(): Promise<string | undefined> {
@@ -69,6 +77,8 @@ export async function main(argv = process.argv.slice(2), serviceManager = manage
   }
   let result: unknown;
   switch (command) {
+    case 'node-identity': result = await client.nodeIdentity(); break;
+    case 'peer-bind': result = await client.bindPeer(required('peer-node-id'), required('public-key')); break;
     case 'health': result = await client.health(); break;
     case 'sessions': result = await client.listSessions(); break;
     case 'register': {
@@ -142,7 +152,7 @@ export async function main(argv = process.argv.slice(2), serviceManager = manage
       result = await client.replyLark(required('message-id'), replyText); break;
     }
     case 'lark-bind': {
-      if (values.metadata !== 'message' && values.metadata !== 'announcement') throw new Error('Invalid --metadata');
+      if (values.metadata !== undefined && values.metadata !== 'message' && values.metadata !== 'announcement') throw new Error('Invalid --metadata');
       if (!isAdapter(adapter)) throw new Error('Unsupported adapter');
       result = await client.bindLark(required('chat-id'), { session_id: required('session-id'), sender_open_id: required('sender-id'), adapter, session_name: values['session-name'], pin: values.pin, metadata: values.metadata });
       break;
@@ -152,5 +162,5 @@ export async function main(argv = process.argv.slice(2), serviceManager = manage
   console.log(JSON.stringify(result));
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  main().catch(error => { console.error(JSON.stringify({ error: (error as Error).message })); process.exitCode = 1; });
+  main().catch(error => { console.error(JSON.stringify(serviceFailure(error))); process.exitCode = 1; });
 }

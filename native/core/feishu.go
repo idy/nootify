@@ -390,33 +390,24 @@ func (p *feishuProvider) receive(ctx context.Context, in *im.P2MessageReceiveV1)
 	}
 	var session Session
 	found := false
-	allowedSender := p.config.Recipient
+	allowedSender := ""
 	snapshot := p.core.store.Snapshot()
 	for _, b := range snapshot.Bindings {
 		cfg, ok := snapshot.Providers[b.ProviderID]
-		if ok && cfg.Type == "feishu" && cfg.AppID == p.config.AppID && b.ChatID == val(m.ChatId) {
+		if ok && cfg.Type == "feishu" && cfg.AppID == p.config.AppID && b.ChatID == val(m.ChatId) && !b.Deleted {
 			session = b.Session
-			if b.SenderID != "" {
-				allowedSender = b.SenderID
+			allowedSender = b.SenderID
+			if allowedSender == "" {
+				allowedSender = cfg.Recipient
 			}
 			found = true
 			break
 		}
 	}
-	if allowedSender == "" || val(sender.SenderId.OpenId) != allowedSender {
+	// Descriptions identify a resource during explicit adoption; they do not
+	// authorize ingress. Only a retained binding for this app/chat may route it.
+	if !found || allowedSender == "" || val(sender.SenderId.OpenId) != allowedSender {
 		return nil
-	}
-	if !found {
-		var chat struct {
-			Description string `json:"description"`
-		}
-		if err = p.api(ctx, "GET", "/open-apis/im/v1/chats/"+url.PathEscape(val(m.ChatId)), nil, &chat); err != nil {
-			return err
-		}
-		session, err = parseSessionDescription(chat.Description)
-		if err != nil {
-			return nil
-		}
 	}
 	ref := MessageRef{OriginNodeID: p.core.node(), ProviderID: p.config.ID, MessageID: val(m.MessageId), ThreadID: val(m.ThreadId)}
 	hash := sha256.Sum256([]byte("feishu:" + p.config.AppID + ":" + val(m.MessageId)))

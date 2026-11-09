@@ -16,7 +16,7 @@ import { Dropdown } from './dropdown.js';
 interface PullSummary { internal: number; upstream: number; followed: number; running: boolean; lastSuccessAt?: string; error?: string; signedOut?: boolean }
 interface Snapshot {
   time: string; modules: ModuleStatus[]; sessions: PublicSession[]; logs: LogEntry[];
-  pulls?: PullSummary; access?: { tailnet_url?: string };
+  pulls?: PullSummary; access?: { tailnet_url?: string; owner_authenticated?: boolean; owner_ui_command?: string };
 }
 type View = 'logs' | 'sessions' | 'agents' | 'providers' | 'pulls-internal' | 'pulls-upstream' | 'repos' | 'settings-general' | 'settings-github' | 'settings-lark' | 'settings-remote' | 'settings-tailscale' | 'settings-backup' | 'settings-about';
 interface AgentsPage { agents: AgentPrompt[]; editable: boolean }
@@ -153,6 +153,7 @@ const isPullView = (view: View): view is 'pulls-internal' | 'pulls-upstream' => 
 /** Views backed by the GitHub module's snapshot, loaded separately from the two-second page snapshot. */
 const usesPulls = (view: View): boolean => isPullView(view) || view === 'repos';
 const isSettingsView = (view: View): boolean => view.startsWith('settings-');
+const localOwnerLocked = (): boolean => /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname) && state.snapshot.access?.owner_authenticated === false;
 
 const state = {
   view: viewFromHash(),
@@ -931,7 +932,7 @@ function renderAgents(): void {
   $('agents-card').hidden = !page?.agents.length;
   $('agents-count').textContent = page ? (page.agents.some(agent => agent.injected) ? number(page.agents.filter(agent => agent.injected).length) : '') : '';
   const remote = page?.editable !== true;
-  const banner = resolveText(state.agentsError) || (page && remote ? t('通过 Tailscale 访问时只能查看；请在这台 Mac 上修改 agent 提示词。') : '');
+  const banner = resolveText(state.agentsError) || (page && remote ? localOwnerLocked() ? t('当前窗口未获授权。请从本机 Nootify 桌面端打开设置。') : t('通过 Tailscale 访问时只能查看；请在这台 Mac 上修改 agent 提示词。') : '');
   $('agents-banner').hidden = !banner; $('agents-banner').textContent = banner;
   const providers = state.providers;
   const selected = providers?.providers.find(provider => provider.id === providers.default_provider_id);
@@ -1456,7 +1457,7 @@ function renderSettings(): void {
   const note = state.settingsNote ?? (state.view === 'settings-github' && login?.status === 'failed' ? { text: t('GitHub 登录失败：{p0}', { p0: githubErrors[login.error ?? ''] ?? login.error }), error: true }
     : state.view === 'settings-tailscale' && state.tailscaleError ? { text: state.tailscaleError, error: true }
     : state.view === 'settings-tailscale' && state.tailscale?.login.status === 'failed' ? { text: t('Tailscale 登录失败：{p0}', { p0: tailscaleErrors[state.tailscale.login.error ?? ''] ?? t('请重试。') }), error: true }
-    : remote ? { text: t('通过 Tailscale 访问时只能查看；请在这台 Mac 上修改设置。'), error: false } : undefined);
+    : remote ? { text: localOwnerLocked() ? t('当前窗口未获授权。请从本机 Nootify 桌面端打开设置。') : t('通过 Tailscale 访问时只能查看；请在这台 Mac 上修改设置。'), error: false } : undefined);
   const banner = $('settings-banner');
   banner.hidden = !note; banner.className = note && !note.error ? 'banner note' : 'banner';
   setText('settings-banner', resolveText(note?.text));
@@ -1620,6 +1621,11 @@ function renderChrome(): void {
   }
   const local = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
   $('access-label').textContent = local ? location.host : t('经 Tailscale');
+  $('owner-access').hidden = !localOwnerLocked();
+  $('owner-authorize').hidden = !(window as Window & { __NOOTIFY_PLATFORM__?: string }).__NOOTIFY_PLATFORM__;
+  const ownerCommand = state.snapshot.access?.owner_ui_command;
+  $('owner-auth-command').hidden = !ownerCommand;
+  $('owner-auth-command').textContent = ownerCommand ?? '';
   const tailnet = state.snapshot.access?.tailnet_url;
   $('tailnet-line').hidden = !local || !tailnet;
   $('tailnet-url').textContent = tailnet ? tailnet.replace(/^https?:\/\//, '').replace(/\/$/, '') : '';
@@ -1675,6 +1681,7 @@ async function refreshNow(): Promise<void> {
   await loadPulls();
 }
 
+$('owner-authorize').addEventListener('click', () => { location.href = 'nootify://settings/authorize'; });
 $('provider-add').addEventListener('click', () => openProviderEditor());
 $('providers-retry').addEventListener('click', () => { state.providersError = ''; state.providersReadError = false; void loadProviders(); });
 $('provider-tls').addEventListener('change', renderProviderEditor);

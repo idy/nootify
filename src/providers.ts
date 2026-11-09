@@ -32,7 +32,8 @@ export interface ProvidersSource {
   configureRemote(body: Record<string, unknown>): Promise<RemoteSummary & { node_id: string }>;
   remoteSecret(): Promise<{ token: string }>;
 }
-interface SessionRef { node_id?: string; adapter: string; session_id: string; name?: string; metadata?: Record<string, string> }
+interface CompatibilityConfig { credentials?: Credentials; recipient?: string }
+interface SessionRef { node_id?: string; adapter: string; session_id: string; name?: string; metadata?: Record<string, unknown> }
 interface Delivery { delivery_id: string; session: SessionRef; message: ProviderMessageRef; content: unknown; text: string }
 interface Binding { provider_id: string; session: SessionRef; created: boolean; chat_id?: string; thread_id?: string; sender_open_id?: string; deleted?: boolean; delete_pending?: boolean }
 function publicFailure(error: unknown): HttpError {
@@ -42,7 +43,7 @@ function publicFailure(error: unknown): HttpError {
     : /not.?found/.test(code) ? 404 : /invalid|argument|unsupported/.test(code) ? 400 : /unauth/.test(code) ? 401
     : /permission/.test(code) ? 403 : /conflict|exist|precondition|unconfirmed|deleted/.test(code) ? 409
     : /resource_exhausted/.test(code) ? 429 : /unavailable|timeout|busy/.test(code) ? 503 : 500;
-  return new HttpError(status, (error as Error).message);
+  const failure = new HttpError(status, (error as Error).message); failure.cause = error; return failure;
 }
 
 /** Owns notification operations; existing agent adapters remain local and credential-isolated. */
@@ -63,6 +64,7 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
   private discoveryController?: AbortController;
   private discoveryTimer?: NodeJS.Timeout;
   private discovery?: Promise<void>;
+  private compatibilitySync?: (update: () => Promise<CompatibilityConfig>) => Promise<void>;
   constructor(readonly state: State, private readonly sessions: SessionsService,
     credentials: Credentials | undefined, private readonly report: (record: Record<string, unknown>) => void = () => {},
     private readonly port = 9417, private readonly tsnet?: TsnetClient, core?: CoreTransport, private readonly discover?: ThreadDiscovery) {
@@ -142,12 +144,30 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
     this.cached = await this.rpc<ProviderPage>('status'); return this.cached;
   }
   async action(body: Record<string, unknown>): Promise<ProviderPage> {
-    if (body.action === 'save') await this.rpc('provider.save', object(body.provider));
-    else if (body.action === 'delete') await this.rpc('provider.delete', { id: identifier(body.id, 'id') });
-    else if (body.action === 'default') await this.rpc('provider.default', { id: identifier(body.id, 'id') });
-    else throw new HttpError(400, 'Expected a provider action: save, delete or default');
+    let legacyChanged = false; let mutate: () => Promise<unknown>;
+    if (body.action === 'save') {
+      const provider = object(body.provider);
+      mutate = () => this.rpc('provider.save', provider); legacyChanged = provider.id === 'legacy-feishu';
+    } else if (body.action === 'delete' || body.action === 'default') {
+      const id = identifier(body.id, 'id'); const method = `provider.${body.action}`;
+      mutate = () => this.rpc(method, { id }); legacyChanged = body.action === 'delete' && id === 'legacy-feishu';
+    } else throw new HttpError(400, 'Expected a provider action: save, delete or default');
+    if (legacyChanged) {
+      const update = async () => { await mutate(); return this.compatibilityConfig(); };
+      if (this.compatibilitySync) await this.compatibilitySync(update);
+      else this.refreshCompatibilityCredentials((await update()).credentials);
+    } else await mutate();
     await this.syncNetwork();
     return this.page();
+  }
+  /** Settings serializes legacy CRUD with account edits, persistence and directory invalidation. */
+  setCompatibilitySync(sync: (update: () => Promise<CompatibilityConfig>) => Promise<void>): void { this.compatibilitySync = sync; }
+  private async compatibilityConfig(): Promise<CompatibilityConfig> {
+    // Public provider summaries omit secrets, and masked saves retain them inside the core.
+    const config = await this.exportConfig();
+    const legacy = (config.providers as Record<string, unknown>[]).find(provider => provider.id === 'legacy-feishu' && provider.type === 'feishu');
+    return { credentials: legacy ? { appId: String(legacy.app_id), appSecret: String(legacy.app_secret) } : undefined,
+      recipient: typeof legacy?.recipient_open_id === 'string' ? legacy.recipient_open_id : undefined };
   }
   async remote(): Promise<RemoteSummary & { node_id: string }> { const page = await this.page(); return { ...page.remote, node_id: page.node_id }; }
   async configureRemote(body: Record<string, unknown>): Promise<RemoteSummary & { node_id: string }> {
@@ -165,6 +185,7 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
   }
   /** Refresh legacy HTTP/directory clients without changing imported provider instances. */
   refreshCompatibilityCredentials(credentials?: Credentials): void {
+    if (this.credentials?.appId === credentials?.appId && this.credentials?.appSecret === credentials?.appSecret) return;
     this.credentials = credentials; this.api = credentials ? createLarkApi(credentials) : undefined;
   }
   async setRecipient(open_id: string): Promise<void> {
@@ -308,12 +329,18 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
     return this.localSession(session_id, resolved);
   }
   async handle(request: RouteRequest): Promise<RouteResponse | undefined> {
+    if (request.path === '/v1/remote/identity' && request.method === 'GET') return { body: await this.rpc('remote.identity') };
+    const peer = /^\/v1\/remote\/peers\/([^/]+)$/.exec(request.path);
+    if (peer && request.method === 'PUT') return { body: await this.rpc('remote.peer.bind', {
+      node_id: identifier(decodeURIComponent(peer[1]), 'node_id'), public_key: text(object(request.body).public_key, 'public_key'),
+    }) };
     if (request.path === '/v1/providers') {
       if (request.method === 'GET') return { body: await this.page() };
       if (request.method === 'POST') return { body: await this.action(object(request.body)) };
     }
     if (request.path === '/v1/threads' && request.method === 'POST') {
       const body = object(request.body);
+      if (body.channel !== undefined && body.channel !== 'feishu') throw new HttpError(400, 'Only Feishu notifications are supported');
       const session = await this.localSession(text(body.session_id, 'session_id'), body.adapter, body.session_name);
       await registerPolledSession(this.state, session.adapter as Parameters<typeof registerPolledSession>[1], session.session_id, session.name ?? session.session_id);
       const result = await this.rpc<Record<string, unknown>>('session.ensure', { session, ...(body.provider_id ? { provider_id: body.provider_id } : {}) });
@@ -322,6 +349,7 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
     const thread = /^\/v1\/threads\/([^/]+)(?:\/(messages|metadata))?$/.exec(request.path);
     if (thread) {
       const body = request.body === undefined ? {} : object(request.body);
+      if (body.channel !== undefined && body.channel !== 'feishu') throw new HttpError(400, 'Only Feishu notifications are supported');
       const session = await this.threadSession(decodeURIComponent(thread[1]), body.adapter, body.provider_id);
       const provider = body.provider_id ? { provider_id: body.provider_id } : {};
       if (request.method === 'DELETE' && !thread[2]) return { body: await this.rpc('session.delete', { session, ...provider }) };
@@ -358,10 +386,18 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
     const bind = /^\/v1\/lark\/bindings\/([^/]+)$/.exec(request.path);
     if (bind && request.method === 'PUT') {
       const body = object(request.body);
+      if (body.pin !== undefined && typeof body.pin !== 'boolean') throw new HttpError(400, 'Invalid pin flag');
+      if (body.pin === true) throw new HttpError(400, 'Pinning binding messages is not supported by notification providers');
+      if (typeof body.metadata === 'string') throw new HttpError(400, 'Legacy metadata modes are not supported; providers store structured metadata in the group description');
+      if (body.metadata !== undefined && (!body.metadata || typeof body.metadata !== 'object' || Array.isArray(body.metadata))) throw new HttpError(400, 'Invalid binding metadata; expected an object');
+      const metadata = body.metadata as Record<string, unknown> | undefined;
+      const chat_id = identifier(decodeURIComponent(bind[1]), 'chat_id');
+      const sender_open_id = identifier(body.sender_open_id, 'sender_open_id');
       const session = await this.localSession(text(body.session_id, 'session_id'), body.adapter ?? 'claude-desktop', body.session_name);
+      if (metadata) session.metadata = metadata;
       await registerPolledSession(this.state, session.adapter as Parameters<typeof registerPolledSession>[1], session.session_id, session.name ?? session.session_id);
-      const result = await this.rpc<Record<string, unknown>>('session.bind', { session, chat_id: identifier(decodeURIComponent(bind[1]), 'chat_id'),
-        sender_open_id: identifier(body.sender_open_id, 'sender_open_id'), ...(body.provider_id ? { provider_id: body.provider_id } : {}) });
+      const result = await this.rpc<Record<string, unknown>>('session.bind', { session, chat_id, sender_open_id,
+        ...(body.provider_id ? { provider_id: body.provider_id } : {}) });
       return { body: { ...result, session_id: session.session_id, adapter: session.adapter, session_name: session.name } };
     }
     if (request.path === '/v1/lark/bindings' && request.method === 'GET') {

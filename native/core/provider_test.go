@@ -28,8 +28,8 @@ func TestProviderCredentialReplacementAndDuplicateBotValidation(t *testing.T) {
 	_, err := c.SaveProvider(raw)
 	must(t, err)
 	_, err = c.SaveProvider(json.RawMessage(`{"id":"one","name":"Changed","type":"feishu","enabled":false,"app_id":"new-app","app_secret":""}`))
-	if publicError(err).Code != "invalid_argument" {
-		t.Fatal("old app secret was reused with a different app ID")
+	if publicError(err).Code != "conflict" {
+		t.Fatal("existing provider app ID was changed")
 	}
 	if c.store.Snapshot().Providers["one"].AppID != "same-app" {
 		t.Fatal("invalid credentials partially applied")

@@ -17,7 +17,16 @@ message SubscriptionFrame {
     Confirmation confirmation = 3;
   }
 }
-message Hello { string node_id = 1; string name = 2; }
+// Subscribe authenticates a durable peer separately from the shared access token.
+// Client sends its public key; server sends a fresh challenge; client signs the
+// challenge transcript; only the final server Hello admits replay/confirmation.
+message Hello {
+  string node_id = 1;
+  string name = 2;
+  bytes public_key = 3;
+  bytes challenge = 4;
+  bytes signature = 5;
+}
 message Event {
   string event_id = 1;
   bytes session_json = 2;

@@ -68,12 +68,24 @@ func (m *Manager) installMac(ctx context.Context, archive string) error {
 	if err = ctx.Err(); err != nil {
 		return err
 	}
+	// The ownership-checked service stop can take minutes. Revalidate the directory
+	// entry now, immediately before exchange, rather than trusting its earlier inode.
+	current, err = os.Lstat(root)
+	if err != nil || !current.IsDir() || current.Mode()&os.ModeSymlink != 0 || !os.SameFile(original, current) {
+		return errors.New("installed app changed while stopping background service")
+	}
 	// Darwin atomically exchanges both directory entries on the same filesystem.
 	// The original app remains at replacement until successful lifecycle handoff.
 	if err = m.swap(replacement, root); err != nil {
 		return fmt.Errorf("replace installed app: %w", err)
 	}
 	rollback := func(cause error) error {
+		if m.options.BeforeRollback != nil {
+			if stopErr := m.options.BeforeRollback(); stopErr != nil {
+				cleanup = false
+				return fmt.Errorf("%w; rollback blocked because replacement could not be quiesced; original app retained at %s: %v", cause, replacement, stopErr)
+			}
+		}
 		if restoreErr := m.swap(replacement, root); restoreErr != nil {
 			cleanup = false // preserve the original bundle for recovery, never delete it
 			return fmt.Errorf("%w; rollback failed, original app retained at %s: %v", cause, replacement, restoreErr)

@@ -16,6 +16,7 @@ import (
 type State struct {
 	Version            int                        `json:"version"`
 	NodeID             string                     `json:"node_id"`
+	NodePrivateKey     string                     `json:"node_private_key"`
 	Providers          map[string]ProviderConfig  `json:"providers"`
 	ProviderTombstones map[string]bool            `json:"provider_tombstones"`
 	DefaultProvider    string                     `json:"default_provider_id,omitempty"`
@@ -120,7 +121,7 @@ func OpenStore(dir string) (*Store, error) {
 		return nil, err
 	}
 	s.initMaps()
-	if err = s.Update(func(*State) error { return nil }); err != nil {
+	if err = s.Update(ensureNodeIdentity); err != nil {
 		l.Unlock()
 		return nil, err
 	}

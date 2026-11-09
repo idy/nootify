@@ -184,6 +184,11 @@ func TestFeishuRepliesPreserveThreadAcrossRestartAndRemote(t *testing.T) {
 			sub, err := upstream.Subscribe(context.Background(), downstream.node(), "fixture")
 			must(t, err)
 			sub.Close()
+			// This fixture deliberately creates a pre-proof queue; authorize its real key locally.
+			peerIdentity, err := json.Marshal(downstream.RemoteIdentity())
+			must(t, err)
+			_, err = upstream.BindPeer(peerIdentity)
+			must(t, err)
 			payload := &im.P2MessageReceiveV1{Event: &im.P2MessageReceiveV1Data{
 				Sender:  &im.EventSender{SenderType: str("user"), SenderId: &im.UserId{OpenId: str("trusted")}},
 				Message: &im.EventMessage{MessageId: str("incoming"), ChatId: str("ordinary-group"), ChatType: str("group"), ThreadId: str(thread), MessageType: str("text"), Content: str(`{"text":"question"}`)},

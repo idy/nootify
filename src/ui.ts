@@ -17,6 +17,9 @@ export interface UiContext {
   agents?: AgentsSource; channel?: () => ChannelSummary | undefined; settings?: SettingsSource; providers?: ProvidersSource;
   /** Tailscale can read public page data, but cannot retrieve secrets or change prompts/settings. */
   via?: 'loopback' | 'tailnet';
+  /** Verified private bearer or owner-authorized browser cookie; never inferred from Host/header alone. */
+  ownerAuthenticated?: boolean;
+  ownerUiCommand?: string;
 }
 
 const policy = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: https://*.feishucdn.com; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
@@ -106,6 +109,11 @@ async function settingsAction(request: IncomingMessage, path: string, settings: 
 }
 /** Read-only page data plus page actions: a background GitHub refresh, repository follow choices, and (on this Mac only) agent prompts and settings. */
 export async function serveUi(request: IncomingMessage, response: ServerResponse, path: string, context: UiContext): Promise<boolean> {
+  const editable = context.via !== 'tailnet' && context.ownerAuthenticated === true;
+  if (request.method === 'POST' && path.startsWith('/ui/api/') && !editable
+    && (context.via !== 'tailnet' || path.startsWith('/ui/api/settings/') || path === '/ui/api/providers' || path === '/ui/api/agents')) {
+    request.resume(); json(response, 403, { error: 'Service owner authorization is required for local settings' }); return true;
+  }
   const providerRoute = path === '/ui/api/providers' || path === '/ui/api/settings/remote' || path === '/ui/api/settings/remote/secret';
   if (providerRoute && (request.method === 'GET' || request.method === 'POST')) {
     if (!context.providers) { request.resume(); json(response, 404, { error: 'Providers are not enabled' }); }
@@ -113,7 +121,6 @@ export async function serveUi(request: IncomingMessage, response: ServerResponse
       request.resume(); json(response, 403, { error: 'Provider configuration can only be changed through the local UI' });
     } else {
       try {
-        const editable = context.via !== 'tailnet';
         if (path.endsWith('/secret')) {
           request.resume();
           if (request.method !== 'POST') json(response, 405, { error: 'Secret reveal requires a local POST' });
@@ -181,23 +188,23 @@ export async function serveUi(request: IncomingMessage, response: ServerResponse
     else {
       const tailscale = await context.settings.tailscale();
       // An authorization URL can sign this Mac in; only the local UI may receive it.
-      json(response, 200, { ...tailscale, ...(context.via === 'tailnet' ? { login: { status: tailscale.login.status } } : {}), editable: context.via !== 'tailnet' });
+      json(response, 200, { ...tailscale, ...(!editable ? { login: { status: tailscale.login.status } } : {}), editable });
     }
     return true;
   }
   if (path === '/ui/api/settings' || path === '/ui/api/settings/github') {
     if (!context.settings) json(response, 404, { error: 'Settings are not enabled' });
-    else if (path === '/ui/api/settings') json(response, 200, { ...await context.settings.page(), editable: context.via !== 'tailnet' });
+    else if (path === '/ui/api/settings') json(response, 200, { ...await context.settings.page(), editable });
     else {
       const github = await context.settings.github();
       // A device code signs this Mac's Nootify in, so it stays with whoever is sitting at it.
-      json(response, 200, context.via === 'tailnet' ? { ...github, login: { status: github.login.status } } : github);
+      json(response, 200, !editable ? { ...github, login: { status: github.login.status } } : github);
     }
     return true;
   }
   if (path === '/ui/api/agents') {
     if (!context.agents) json(response, 404, { error: 'Agents module is not enabled' });
-    else json(response, 200, { agents: await context.agents.list(), editable: context.via !== 'tailnet', channel: context.channel?.() });
+    else json(response, 200, { agents: await context.agents.list(), editable, channel: context.channel?.() });
     return true;
   }
   if (path === '/ui/api/pulls') {
@@ -214,7 +221,7 @@ export async function serveUi(request: IncomingMessage, response: ServerResponse
     ...(pulls ? { pulls: { internal: pulls.internal.length, upstream: pulls.upstream.length, running: pulls.refresh.running,
       followed: pulls.repositories.filter(entry => entry.followed).length,
       lastSuccessAt: pulls.refresh.lastSuccessAt, error: pulls.refresh.error, signedOut: pulls.refresh.signedOut } } : {}),
-    access: tailnet ? { tailnet_url: tailnet } : {},
+    access: { ...(tailnet ? { tailnet_url: tailnet } : {}), owner_authenticated: context.ownerAuthenticated === true, ...(context.via !== 'tailnet' && context.ownerUiCommand ? { owner_ui_command: context.ownerUiCommand } : {}) },
   });
   return true;
 }

@@ -129,11 +129,11 @@ func (c *Core) SaveProvider(raw json.RawMessage) (ProviderSummary, error) {
 	if exists && old.Type != p.Type {
 		return ProviderSummary{}, fault("conflict", "provider type cannot be changed")
 	}
+	if exists && old.Type == "feishu" && old.AppID != p.AppID {
+		return ProviderSummary{}, fault("conflict", "Feishu app_id cannot be changed; create a new provider instead")
+	}
 	if _, ok := fields["enabled"]; !ok {
 		p.Enabled = true
-	}
-	if exists && p.Type == "feishu" && p.AppID != old.AppID && strings.TrimSpace(p.AppSecret) == "" {
-		return ProviderSummary{}, fault("invalid_argument", "a new application secret is required when app_id changes")
 	}
 	if strings.TrimSpace(p.AppSecret) == "" {
 		p.AppSecret = old.AppSecret
@@ -223,20 +223,8 @@ func (c *Core) ConfigureRemote(raw json.RawMessage) (RemoteSummary, error) {
 	if err := validateRemote(r); err != nil {
 		return RemoteSummary{}, err
 	}
-	if err := c.store.Update(func(d *State) error { d.Remote = r; return nil }); err != nil {
+	if err := c.reconfigureRemote(r, func(d *State) error { d.Remote = r; return nil }); err != nil {
 		return RemoteSummary{}, err
-	}
-	c.mu.Lock()
-	old := c.server
-	c.server = nil
-	c.mu.Unlock()
-	if old != nil {
-		old.stop()
-	}
-	if r.Enabled {
-		if err := c.startServer(r); err != nil {
-			return remoteSummary(c.store.Snapshot(), "failed"), fault("unavailable", "remote listener could not be started")
-		}
 	}
 	status := "disabled"
 	if r.Enabled {
@@ -305,12 +293,18 @@ func (c *Core) ImportConfig(raw json.RawMessage) error {
 	}
 	c.ops.Lock()
 	defer c.ops.Unlock()
-	if err := c.store.Update(func(d *State) error {
-		for id, p := range ps {
-			if old, exists := d.Providers[id]; exists && old.Type != p.Type {
+	before := c.store.Snapshot()
+	for id, p := range ps {
+		if old, exists := before.Providers[id]; exists {
+			if old.Type != p.Type {
 				return fault("conflict", "provider type cannot be changed")
 			}
+			if old.Type == "feishu" && old.AppID != p.AppID {
+				return fault("conflict", "Feishu app_id cannot be changed; create a new provider instead")
+			}
 		}
+	}
+	if err := c.reconfigureRemote(b.Remote, func(d *State) error {
 		for id := range d.Providers {
 			if _, ok := ps[id]; !ok {
 				for _, binding := range d.Bindings {
@@ -337,20 +331,12 @@ func (c *Core) ImportConfig(raw json.RawMessage) error {
 	c.mu.Lock()
 	old := c.providers
 	c.providers = map[string]Provider{}
-	sv := c.server
-	c.server = nil
 	c.mu.Unlock()
 	for _, p := range old {
 		_ = p.Close()
 	}
-	if sv != nil {
-		sv.stop()
-	}
 	for _, p := range ps {
 		c.startProvider(p)
-	}
-	if b.Remote.Enabled {
-		return c.startServer(b.Remote)
 	}
 	return nil
 }

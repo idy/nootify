@@ -76,8 +76,12 @@ func TestServiceControlsWaitForUpdateRecovery(t *testing.T) {
 			fake := fakeControlledService{
 				stop: func(context.Context) (bool, error) {
 					running.Store(0)
-					record("stop")
-					close(stopped)
+					if bundle.Load() == 2 {
+						record("stop replacement")
+					} else {
+						record("stop")
+						close(stopped)
+					}
 					return true, nil
 				},
 				request: func(ctx context.Context, action string) error {
@@ -122,6 +126,9 @@ func TestServiceControlsWaitForUpdateRecovery(t *testing.T) {
 					record("exchange")
 					close(exchanged)
 					if err := h.after(); err != nil {
+						if stopErr := h.beforeRollback(); stopErr != nil {
+							return stopErr
+						}
 						bundle.Store(1)
 						record("rollback")
 						return err
@@ -153,7 +160,7 @@ func TestServiceControlsWaitForUpdateRecovery(t *testing.T) {
 			awaitSignal(t, actionsDone)
 			want := []string{"stop", "exchange", "start new"}
 			if rollback {
-				want = append(want, "rollback", "recover original")
+				want = append(want, "stop replacement", "rollback", "recover original")
 			}
 			want = append(want, "queued start", "queued restart", "queued install")
 			mu.Lock()
@@ -394,6 +401,64 @@ func TestServiceHandoffOnlyRecoversSuccessfullyStoppedService(t *testing.T) {
 			}
 			h.controls.Unlock()
 		})
+	}
+}
+
+func TestOwnedPartialStopRecoversWithoutReplacingBundle(t *testing.T) {
+	drainError := errors.New("owned bootout succeeded but process still draining")
+	starts := 0
+	h := &serviceHandoff{service: fakeControlledService{
+		stop: func(context.Context) (bool, error) { return true, drainError },
+		request: func(ctx context.Context, action string) error {
+			if ctx.Err() != nil || action != "start" {
+				t.Fatal(ctx.Err(), action)
+			}
+			starts++
+			return nil
+		},
+	}}
+	err := h.install(context.Background(), func(ctx context.Context) error {
+		if err := h.before(ctx); err != nil {
+			return err
+		}
+		t.Fatal("partial stop reached bundle replacement")
+		return nil
+	})
+	if !errors.Is(err, drainError) || starts != 1 {
+		t.Fatal(err, starts)
+	}
+}
+
+func TestFailedReplacementQuiescenceBlocksRecovery(t *testing.T) {
+	stops, starts := 0, 0
+	blocked := errors.New("replacement still alive")
+	h := &serviceHandoff{service: fakeControlledService{
+		stop: func(context.Context) (bool, error) {
+			stops++
+			if stops == 2 {
+				return true, blocked
+			}
+			return true, nil
+		},
+		request: func(context.Context, string) error {
+			starts++
+			return errors.New("bootstrap completed but kickstart failed")
+		},
+	}}
+	err := h.install(context.Background(), func(ctx context.Context) error {
+		if err := h.before(ctx); err != nil {
+			return err
+		}
+		if err := h.after(); err == nil {
+			t.Fatal("partial start succeeded")
+		}
+		return h.beforeRollback()
+	})
+	if !errors.Is(err, blocked) || stops != 2 || starts != 1 {
+		t.Fatal("unsafe recovery retried after failed quiescence", err, stops, starts)
+	}
+	if h.locked || h.stopped || h.startAttempted || h.recoveryBlocked {
+		t.Fatal("handoff state leaked")
 	}
 }
 

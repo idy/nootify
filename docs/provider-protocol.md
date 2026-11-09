@@ -26,11 +26,15 @@ The process starts with `--state-dir <private directory>`. It emits a ready fram
 Methods:
 
 - `status` -> `{node_id,providers:ProviderSummary[],default_provider_id?,remote:RemoteSummary}`.
-- `provider.save` accepts a provider config, generates an ID if absent, and returns its redacted summary. Config: `{id?,name,type,enabled,app_id?,app_secret?,recipient_open_id?,address?,token?,tls?,server_name?}`. Blank/omitted existing secrets preserve their values. `address` is host:port for remote providers. An omitted enabled flag means true.
+- `provider.save` accepts a provider config, generates an ID if absent, and returns its redacted summary. Config: `{id?,name,type,enabled,app_id?,app_secret?,recipient_open_id?,address?,token?,tls?,server_name?}`. Blank/omitted existing secrets preserve their values. Existing provider types and Feishu App IDs are immutable, including disabled/unbound instances and configuration imports; create a new provider to use a different app. Same-app secret rotation is supported. `address` is host:port for remote providers. An omitted enabled flag means true.
 - `provider.delete` accepts `{id}`; deletion is persisted and closes that instance. It must not delete agent conversations.
 - `provider.default` accepts `{id}`.
 - `remote.configure` accepts `{enabled,listen,token?,tls_cert_file?,tls_key_file?}`. Default listen is `127.0.0.1:9418`. A token is generated if needed. Default is disabled. Reject an unsafe public plaintext listener; public listeners require certificate/key TLS. Return a redacted remote summary.
 - `remote.secret` -> `{token}`. Only explicitly authorized local UI/control callers may invoke it.
+- `remote.identity` -> `{node_id,public_key}`. The base64 Ed25519 public key is safe to exchange; the private signing key stays in the core's private state.
+- `remote.peer.bind` accepts `{node_id,public_key}` to pin an existing legacy peer through the private local control path. A different already-pinned key is rejected. Neither identity-management method is callable over gRPC.
+
+Listener configuration and imports prepare the candidate socket and TLS certificate before persisting changes. Bind, TLS, and persistence failures retain the previous live listener and configuration. The same address can reload a certificate while preserving authenticated streams; changing its TLS mode requires disabling it first. Token rotation retains the socket but cancels RPCs admitted under the previous token generation.
 - `session.ensure` accepts `{provider_id?,session}` -> `{provider_id,session,created,chat_id?,thread_id?}`. Reuse an existing provider binding; otherwise use the requested/default provider. Remote requests preserve the originating session identity.
 - `session.ensure` additionally accepts `automatic:true` for background enrollment; automatic requests cannot reactivate tombstones, including through remote relays.
 - `session.list` returns an array of bindings `{provider_id,session,created,chat_id?,thread_id?,sender_open_id?,deleted?,delete_pending?}`. Tombstones are included; compatibility callers filter them.
@@ -61,7 +65,7 @@ Trae and WorkBuddy queue the original input plus the structured provider message
 
 `ProviderSummary` contains `{id,name,type,enabled,status,error?,app_id?,recipient_open_id?,address?,tls?,server_name?,secret_set?,token_set?}`. Never include application secrets or tokens.
 
-`RemoteSummary` contains `{enabled,listen,status,tls,token_set,tls_cert_file?,tls_key_file?,peers:[{node_id,name?,connected_at,connected,pending,last_ack?}]}`. TLS file paths are non-secret configuration; omitted paths and tokens are preserved on edit. Never include token or private-key contents.
+`RemoteSummary` contains `{enabled,listen,status,tls,token_set,tls_cert_file?,tls_key_file?,peers:[{node_id,name?,connected_at,connected,pending,last_ack?,public_key?,identity_status}]}`. Peer identity status is `pinned` or `unbound`. TLS file paths are non-secret configuration; omitted paths and tokens are preserved on edit. Never include token or private-key contents.
 
 The Node UI adds:
 
@@ -71,15 +75,25 @@ The Node UI adds:
 - `POST /ui/api/settings/remote` with remote config -> fresh remote summary plus node ID and editable.
 - `POST /ui/api/settings/remote/secret` -> `{token}`.
 
-All POSTs require `X-Nootify-UI: 1` and are local-only, including provider mutations. Tailnet read-only data excludes credentials and authorization URLs. UI strings support Simplified Chinese and English.
+All POSTs require `X-Nootify-UI: 1`, same-origin checks, the local listener, and owner authorization. A forgeable header or loopback reachability alone never permits configuration changes or secret reads. The native desktop obtains a one-use authorization URL through the bundled `ui-url` CLI. CLI bootstrap verifies an HMAC server challenge before signing a fresh client proof; the root bearer is never transmitted by bootstrap or injected into page code. Grants and proofs expire after 30 seconds, and proof/grant replay is rejected. Redemption redirects to a clean root URL and sets an eight-hour, host/port-bound, HttpOnly, SameSite=Strict cookie. The cookie authorizes UI operations only; `/v1/` still needs the actual bearer. Local unauthenticated and Tailnet summaries are read-only and exclude credentials and authorization URLs. UI strings support Simplified Chinese and English.
 
 Navigation adds `Providers` under message bridging. The sidebar's `GitHub` group becomes `Repos`. Settings' Feishu entry is replaced by Remote access (`远程接入`); Feishu configuration lives in each provider editor. Agents remain agent input configuration. Remote access displays listening configuration and the independently subscribed downstream peers.
 
+## Subscription identity and trust
+
+Each core keeps its existing node UUID and a private Ed25519 signing identity. Subscribe requires the listener bearer plus a Hello containing the node ID, name, and public key. The server sends a fresh 32-byte challenge; the client signs the domain-separated server ID, client ID, name, public key, and challenge. No peer queue, replay, or confirmation is exposed before verification. The first successful subscription of a new node durably pins its public key. Other bearer holders cannot impersonate that pinned node or replay captured proofs. Multiple proven subscriptions for one node still share its queue.
+
+Existing peers without a pin remain `unbound` and cannot consume their retained backlog. On the downstream, run `node-identity`; verify the public identity out of band, then run `peer-bind --peer-node-id <node-id> --public-key <public-key>` locally on the upstream. Both endpoints must be upgraded for the challenge protocol. Existing queues, cursors, pins, and node UUIDs survive restart and token rotation.
+
+The proof protects subscription replay and confirmations. General unary `Call` retains the shared-bearer trust model: a listener token grants session/message operations to trusted peers and does not provide complete per-node authorization. Use distinct listeners/nodes for mutually untrusted callers. TLS remains required for public plaintext-unsafe listeners. Connection setup and subscription proof are bounded to five seconds; inactive HTTP/2 connections expire after 30 seconds. A healthy authenticated subscription can stay idle indefinitely.
+
 ## Routing and persistence
+
+Feishu ingress requires a retained, nondeleted binding for the same app and chat, with the binding owner's trusted sender. Description markers alone cannot authorize a new session. Explicit binding rejects conflicting trusted senders; structured session metadata is supported, while legacy pin and string metadata modes fail explicitly. The CLI omits unsupported metadata modes by default.
 
 Only unmatched events are broadcast. Matching uses the full session identity, not just a local agent ID. Locally owned offline/failed sessions are not rerouted as unmatched. Invalid/unauthorized events are rejected at ingress. Every peer has its own bounded delivery window, durable cursor into the shared broadcast ledger, confirmations, and reconnect replay. A full window does not reject other peers' broadcasts; that peer refills its window from the retained backlog independently. Global storage limits remain explicit admission failures. One peer's confirmation cannot consume another peer's event. Keep stable event IDs, origin provider references, hop limits and visited-node information to stop loops and duplicate local execution across multiple routes.
 
-Session operations use per-session synchronization; no node-wide operation lock is held while calling a remote provider. Multiple streams from the same downstream node share that node's durable queue and confirmations without replacing one another. A hop-exhausted or already-visited copy that was not handled does not suppress a later valid route for the same event.
+Session operations use per-session synchronization; deletion is serialized with ingress and explicit retry through delivery emission. Acknowledgements for the same full message reference are serialized through provider RPC and persistence, while unrelated messages can proceed independently. Suppressed hop-exhausted/visited copies cannot install return routes or references. No node-wide operation lock is held while calling a remote provider. Multiple streams from the same downstream node share that node's durable queue and confirmations without replacing one another. A hop-exhausted or already-visited copy that was not handled does not suppress a later valid route for the same event.
 
 Session operations, message sending, replying, metadata and deletion follow their selected provider binding and return path. With multiple retained upstreams, return routing prefers a connected provider before submission; it never switches routes automatically after an uncertain reply. They are not broadcast commands. Delete notification resources and mappings only, never an agent's original conversation. Multiple feeds from the same bot must not independently execute the same source message.
 
@@ -93,6 +107,8 @@ Requests retain the helper's existing flat `{id,method,...fields}` format:
 - `publish` with `{port:number,target:"127.0.0.1:port"}` -> `{port}`; listens on that Tailscale port and forwards raw TCP to the numeric loopback target. It must not inject the existing HTTP PROXY preamble into gRPC. `unpublish` with `{port}` closes it.
 
 All listeners and connections close on EOF/shutdown. Publication and tunnel handles belong to one helper process: intentional disable, enrollment cancellation, logout, and helper failure invalidate those handles. Re-enabling must publish the configured listener and create tunnels in the replacement helper. Disabling downstream access only withdraws its listener publication and preserves outgoing provider tunnels. Provider save/delete/import reconciles tunnels against enabled Remote addresses, retaining shared addresses and retrying failed cleanup; pending dials share one allocation and cannot reintroduce a removed address. Changing to a listener that cannot be reached through numeric loopback withdraws the previous Tailnet publication before reporting the new configuration; failed withdrawal retains its handle for retry. IPv4-mapped IPv6 Tailnet addresses are unmapped before transport selection. Existing port-80 browser proxy behavior and peer verification remain intact.
+
+Raw connections have a shared cap of 128. Each active tunnel/publication reserves two guaranteed slots, shares a 32-slot burst pool, and has a maximum of 16 connections; at most 32 tunnels and 16 publications are admitted. HTTP/PROXY connections retain their independent 128-connection limit. Raw forwarding preserves half-close and healthy idle streams. Unexpected listener Accept failure retains its reservation and retries binding with cancellable exponential backoff from 100 ms to five seconds; existing streams remain intact. Closing or replacing a bridge cancels recovery.
 
 Legacy thread sends and metadata reads may omit the adapter. The Node bridge resolves the full local identity from core notification-session bindings, optionally scoped by provider, and rejects ambiguous IDs instead of assuming a default agent adapter.
 

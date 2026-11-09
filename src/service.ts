@@ -10,13 +10,36 @@ import { defaultStateDir } from './state.js';
 const exec = promisify(execFile);
 export const SERVICE_ACTIONS = ['install', 'start', 'restart', 'stop', 'uninstall', 'status'] as const;
 export type ServiceAction = typeof SERVICE_ACTIONS[number];
-export interface ServiceOptions { stateDir?: string; port: number; mcpConfig?: string }
+export interface ServiceOptions { stateDir?: string; port: number; mcpConfig?: string; drain?: LaunchdProcess }
 export interface ServiceResult { installed: boolean; status?: string; task?: string; plist?: string }
 export type ServiceExecutor = (file: string, args: string[], options?: ExecFileOptions) => Promise<{ stdout: string }>;
 interface ServiceRuntime { execute?: ServiceExecutor; home?: string; platform?: NodeJS.Platform; uid?: number; shutdownTimeout?: number }
 const executeService: ServiceExecutor = (file, args, options) => exec(file, args, { ...options, encoding: 'utf8' });
 
-interface LaunchdProcess { pid: number; started: string }
+export interface LaunchdProcess { pid: number; started: string }
+
+export function parseServiceDrain(value: unknown): LaunchdProcess {
+  const identity = value as Partial<LaunchdProcess> | null;
+  if (!identity || typeof identity !== 'object' || !Number.isSafeInteger(identity.pid) || identity.pid! <= 0
+    || typeof identity.started !== 'string' || !identity.started.trim() || identity.started.length > 128 || /[\r\n]/.test(identity.started)) {
+    throw new Error('Invalid service drain identity');
+  }
+  return { pid: identity.pid!, started: identity.started };
+}
+
+class ServiceUnloadedError extends Error {
+  readonly service_unloaded = true;
+  constructor(error: unknown, readonly service_process: LaunchdProcess) {
+    super((error as Error).message, { cause: error });
+  }
+}
+
+// Only this typed failure proves that ownership checks and bootout succeeded.
+export function serviceFailure(error: unknown): { error: string; service_unloaded?: true; service_process?: LaunchdProcess } {
+  return { error: (error as Error).message, ...(error instanceof ServiceUnloadedError
+    ? { service_unloaded: true as const, service_process: error.service_process } : {}) };
+}
+
 async function launchdProcess(pid: number, run: ServiceExecutor): Promise<LaunchdProcess | undefined> {
   try {
     const { stdout } = await run('/bin/ps', ['-p', String(pid), '-o', 'lstart='], {
@@ -78,6 +101,7 @@ export async function manageService(action: ServiceAction, options: ServiceOptio
   const run = runtime.execute ?? executeService;
   const platform = runtime.platform ?? process.platform;
   const uid = runtime.uid ?? process.getuid?.();
+  if (options.drain && (platform !== 'darwin' || action !== 'start' && action !== 'restart' && action !== 'stop')) throw new Error('Service drain recovery requires macOS service-start, service-restart or service-stop');
   if (platform === 'win32') {
     const { stdout } = await run(windowsPowerShell(), windowsServiceArgs(action, options), {
       windowsHide: true, timeout: action === 'status' ? 5000 : 150_000, maxBuffer: 1024 * 1024, env: serviceEnvironment(process.env),
@@ -103,6 +127,13 @@ export async function manageService(action: ServiceAction, options: ServiceOptio
   if (!installed) {
     if (action === 'uninstall' || action === 'stop') return { installed: false, status: action === 'stop' ? 'stopped' : 'uninstalled' };
     throw new Error('Nootify is not installed; use service-install');
+  }
+  if (options.drain) {
+    // The desktop carries the exact pre-bootout identity across CLI invocations.
+    // Recheck registration ownership first, then prove exit before any bootstrap
+    // or a stop result that could authorize replacement/deletion of its resources.
+    const identity = parseServiceDrain(options.drain);
+    await waitForLaunchdExit(identity, run, runtime.shutdownTimeout ?? 30_000);
   }
   const target = `gui/${uid}/${launchdLabel}`;
   let loaded = true; let job = '';
@@ -133,7 +164,10 @@ export async function manageService(action: ServiceAction, options: ServiceOptio
       if (pid !== undefined && (!Number.isSafeInteger(pid) || pid <= 0)) throw new Error('Cannot verify the Nootify launchd process ID');
       const identity = pid === undefined ? undefined : await launchdProcess(pid, run);
       await run('/bin/launchctl', ['bootout', target]);
-      if (identity) await waitForLaunchdExit(identity, run, runtime.shutdownTimeout ?? 30_000);
+      if (identity) {
+        try { await waitForLaunchdExit(identity, run, runtime.shutdownTimeout ?? 30_000); }
+        catch (error) { throw new ServiceUnloadedError(error, identity); }
+      }
     }
     if (action === 'uninstall') await unlink(plist);
   }

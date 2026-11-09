@@ -10,9 +10,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -217,6 +219,12 @@ type Manager struct {
 	mu       sync.Mutex
 	checked  time.Time
 	present  bool
+	drain    *drainProcess
+}
+
+type drainProcess struct {
+	PID     int    `json:"pid"`
+	Started string `json:"started"`
 }
 
 func New(home string, bundle *Bundled) *Manager {
@@ -287,11 +295,25 @@ func (m *Manager) Request(ctx context.Context, action string) error {
 	_, err := m.execute(ctx, action, false)
 	return err
 }
-func (m *Manager) execute(ctx context.Context, action string, install bool) (Output, error) {
+func (m *Manager) execute(ctx context.Context, action string, install bool, extra ...string) (Output, error) {
 	if m.Bundle == nil {
 		return Output{}, errors.New("development builds do not bundle the service")
 	}
-	args := []string{m.Bundle.CLI, "service-" + action}
+	command := "service-" + action
+	if action == "ui-url" {
+		command = action
+	}
+	args := append([]string{m.Bundle.CLI, command}, extra...)
+	var draining bool
+	if m.platform == "darwin" && (action == "start" || action == "restart" || action == "stop") {
+		m.mu.Lock()
+		if m.drain != nil {
+			data, _ := json.Marshal(m.drain)
+			args = append(args, "--service-drain", string(data))
+			draining = true
+		}
+		m.mu.Unlock()
+	}
 	if install {
 		p := filepath.Join(m.Home, ".claude.json")
 		if info, err := os.Stat(p); err == nil && info.Mode().IsRegular() {
@@ -299,24 +321,91 @@ func (m *Manager) execute(ctx context.Context, action string, install bool) (Out
 		}
 	}
 	timeout := 155 * time.Second
-	if action == "status" {
+	if action == "status" || action == "ui-url" {
 		timeout = 10 * time.Second
 	}
 	out := m.run(ctx, Command{m.Bundle.Node, args, cleanEnvironment(m.platform, m.Home, os.Environ()), m.Home, timeout})
 	if out.Err != nil {
 		return out, commandError(out)
 	}
+	if draining {
+		m.mu.Lock()
+		m.drain = nil
+		m.mu.Unlock()
+	}
 	return out, nil
+}
+
+var ownerRoutePattern = regexp.MustCompile(`^#/[a-z-]+(?:/[a-z-]+)?$`)
+
+// OwnerUIURL obtains a one-use grant from the ownership-authenticated bundled CLI.
+// The root bearer token never enters the page, preload or navigation URL.
+// Native first load opens Logs; reauthorization preserves a valid current route.
+func (m *Manager) OwnerUIURL(ctx context.Context, currentRoute ...string) (string, error) {
+	route := "#/logs"
+	if len(currentRoute) == 1 && ownerRoutePattern.MatchString(currentRoute[0]) {
+		route = currentRoute[0]
+	}
+	out, err := m.execute(ctx, "ui-url", false, "--ui-route", route)
+	if err != nil {
+		return "", err
+	}
+	var result struct {
+		URL string `json:"url"`
+	}
+	if json.Unmarshal([]byte(strings.TrimSpace(out.Stdout)), &result) != nil || len(result.URL) > 2048 {
+		return "", errors.New("invalid owner UI grant response")
+	}
+	u, err := url.Parse(result.URL)
+	if err != nil || u.Scheme != "http" || u.Host != "127.0.0.1:9417" || u.User != nil || u.Path != "/" || u.RawPath != "" || u.Fragment != "" || u.Opaque != "" {
+		return "", errors.New("owner UI grant is not for the local service root")
+	}
+	q, err := url.ParseQuery(u.RawQuery)
+	if err != nil || len(q) != 1 || len(q["ui-grant"]) != 1 || q.Get("ui-grant") == "" {
+		return "", errors.New("invalid owner UI grant query")
+	}
+	return u.String(), nil
 }
 
 // StopForUpdate is deliberately checked by the installation CLI, never by process name.
 // A missing registration needs no stop. An unreadable/foreign registration blocks replacement.
 func (m *Manager) StopForUpdate(ctx context.Context) (bool, error) {
 	installed, err := m.Installed(ctx)
-	if err != nil || !installed {
+	if err != nil {
 		return false, err
 	}
-	if err := m.Request(ctx, "stop"); err != nil {
+	if !installed {
+		m.mu.Lock()
+		draining := m.drain != nil
+		m.mu.Unlock()
+		if draining {
+			return false, errors.New("owned process drain is pending but its service registration disappeared")
+		}
+		return false, nil
+	}
+	out, err := m.execute(ctx, "stop", false)
+	if err != nil {
+		if m.platform == "darwin" {
+			lines := strings.Split(strings.TrimSpace(out.Stderr), "\n")
+			for i := len(lines) - 1; i >= 0; i-- {
+				var failure struct {
+					Error    string        `json:"error"`
+					Unloaded bool          `json:"service_unloaded"`
+					Process  *drainProcess `json:"service_process"`
+				}
+				if json.Unmarshal([]byte(lines[i]), &failure) != nil || failure.Error == "" {
+					continue
+				}
+				p := failure.Process
+				if failure.Unloaded && p != nil && p.PID > 0 && p.Started != "" && len(p.Started) <= 128 && !strings.ContainsAny(p.Started, "\r\n") {
+					m.mu.Lock()
+					m.drain = p
+					m.mu.Unlock()
+					return true, err // owned bootout succeeded; recovery still must drain
+				}
+				break // Only the CLI's final structured error is authoritative.
+			}
+		}
 		return false, err
 	}
 	return true, nil

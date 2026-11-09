@@ -77,6 +77,10 @@ func (c *Core) Handle(ctx context.Context, method string, raw json.RawMessage, l
 		return map[string]any{"default_provider_id": p.ID}, err
 	case "remote.configure":
 		return c.ConfigureRemote(raw)
+	case "remote.identity":
+		return c.RemoteIdentity(), nil
+	case "remote.peer.bind":
+		return c.BindPeer(raw)
 	case "remote.secret":
 		return map[string]any{"token": c.store.Snapshot().Remote.Token}, nil
 	case "session.ensure":

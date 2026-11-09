@@ -2,7 +2,7 @@
 // versions:
 // 	protoc-gen-go v1.36.12
 // 	protoc        v7.36.2
-// source: proto/core.proto
+// source: core.proto
 
 package pb
 
@@ -32,7 +32,7 @@ type Command struct {
 
 func (x *Command) Reset() {
 	*x = Command{}
-	mi := &file_proto_core_proto_msgTypes[0]
+	mi := &file_core_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -44,7 +44,7 @@ func (x *Command) String() string {
 func (*Command) ProtoMessage() {}
 
 func (x *Command) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_core_proto_msgTypes[0]
+	mi := &file_core_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -57,7 +57,7 @@ func (x *Command) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Command.ProtoReflect.Descriptor instead.
 func (*Command) Descriptor() ([]byte, []int) {
-	return file_proto_core_proto_rawDescGZIP(), []int{0}
+	return file_core_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *Command) GetMethod() string {
@@ -92,7 +92,7 @@ type Result struct {
 
 func (x *Result) Reset() {
 	*x = Result{}
-	mi := &file_proto_core_proto_msgTypes[1]
+	mi := &file_core_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -104,7 +104,7 @@ func (x *Result) String() string {
 func (*Result) ProtoMessage() {}
 
 func (x *Result) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_core_proto_msgTypes[1]
+	mi := &file_core_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -117,7 +117,7 @@ func (x *Result) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Result.ProtoReflect.Descriptor instead.
 func (*Result) Descriptor() ([]byte, []int) {
-	return file_proto_core_proto_rawDescGZIP(), []int{1}
+	return file_core_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *Result) GetResultJson() []byte {
@@ -155,7 +155,7 @@ type SubscriptionFrame struct {
 
 func (x *SubscriptionFrame) Reset() {
 	*x = SubscriptionFrame{}
-	mi := &file_proto_core_proto_msgTypes[2]
+	mi := &file_core_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -167,7 +167,7 @@ func (x *SubscriptionFrame) String() string {
 func (*SubscriptionFrame) ProtoMessage() {}
 
 func (x *SubscriptionFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_core_proto_msgTypes[2]
+	mi := &file_core_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -180,7 +180,7 @@ func (x *SubscriptionFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubscriptionFrame.ProtoReflect.Descriptor instead.
 func (*SubscriptionFrame) Descriptor() ([]byte, []int) {
-	return file_proto_core_proto_rawDescGZIP(), []int{2}
+	return file_core_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *SubscriptionFrame) GetBody() isSubscriptionFrame_Body {
@@ -239,17 +239,23 @@ func (*SubscriptionFrame_Event) isSubscriptionFrame_Body() {}
 
 func (*SubscriptionFrame_Confirmation) isSubscriptionFrame_Body() {}
 
+// Subscribe authenticates a durable peer separately from the shared access token.
+// Client sends its public key; server sends a fresh challenge; client signs the
+// challenge transcript; only the final server Hello admits replay/confirmation.
 type Hello struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	NodeId        string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
 	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	PublicKey     []byte                 `protobuf:"bytes,3,opt,name=public_key,json=publicKey,proto3" json:"public_key,omitempty"`
+	Challenge     []byte                 `protobuf:"bytes,4,opt,name=challenge,proto3" json:"challenge,omitempty"`
+	Signature     []byte                 `protobuf:"bytes,5,opt,name=signature,proto3" json:"signature,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Hello) Reset() {
 	*x = Hello{}
-	mi := &file_proto_core_proto_msgTypes[3]
+	mi := &file_core_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -261,7 +267,7 @@ func (x *Hello) String() string {
 func (*Hello) ProtoMessage() {}
 
 func (x *Hello) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_core_proto_msgTypes[3]
+	mi := &file_core_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -274,7 +280,7 @@ func (x *Hello) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Hello.ProtoReflect.Descriptor instead.
 func (*Hello) Descriptor() ([]byte, []int) {
-	return file_proto_core_proto_rawDescGZIP(), []int{3}
+	return file_core_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *Hello) GetNodeId() string {
@@ -289,6 +295,27 @@ func (x *Hello) GetName() string {
 		return x.Name
 	}
 	return ""
+}
+
+func (x *Hello) GetPublicKey() []byte {
+	if x != nil {
+		return x.PublicKey
+	}
+	return nil
+}
+
+func (x *Hello) GetChallenge() []byte {
+	if x != nil {
+		return x.Challenge
+	}
+	return nil
+}
+
+func (x *Hello) GetSignature() []byte {
+	if x != nil {
+		return x.Signature
+	}
+	return nil
 }
 
 type Event struct {
@@ -307,7 +334,7 @@ type Event struct {
 
 func (x *Event) Reset() {
 	*x = Event{}
-	mi := &file_proto_core_proto_msgTypes[4]
+	mi := &file_core_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -319,7 +346,7 @@ func (x *Event) String() string {
 func (*Event) ProtoMessage() {}
 
 func (x *Event) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_core_proto_msgTypes[4]
+	mi := &file_core_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -332,7 +359,7 @@ func (x *Event) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Event.ProtoReflect.Descriptor instead.
 func (*Event) Descriptor() ([]byte, []int) {
-	return file_proto_core_proto_rawDescGZIP(), []int{4}
+	return file_core_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *Event) GetEventId() string {
@@ -402,7 +429,7 @@ type Confirmation struct {
 
 func (x *Confirmation) Reset() {
 	*x = Confirmation{}
-	mi := &file_proto_core_proto_msgTypes[5]
+	mi := &file_core_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -414,7 +441,7 @@ func (x *Confirmation) String() string {
 func (*Confirmation) ProtoMessage() {}
 
 func (x *Confirmation) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_core_proto_msgTypes[5]
+	mi := &file_core_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -427,7 +454,7 @@ func (x *Confirmation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Confirmation.ProtoReflect.Descriptor instead.
 func (*Confirmation) Descriptor() ([]byte, []int) {
-	return file_proto_core_proto_rawDescGZIP(), []int{5}
+	return file_core_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *Confirmation) GetEventId() string {
@@ -437,11 +464,12 @@ func (x *Confirmation) GetEventId() string {
 	return ""
 }
 
-var File_proto_core_proto protoreflect.FileDescriptor
+var File_core_proto protoreflect.FileDescriptor
 
-const file_proto_core_proto_rawDesc = "" +
+const file_core_proto_rawDesc = "" +
 	"\n" +
-	"\x10proto/core.proto\x12\x0fnootify.core.v1\"g\n" +
+	"\n" +
+	"core.proto\x12\x0fnootify.core.v1\"g\n" +
 	"\aCommand\x12\x16\n" +
 	"\x06method\x18\x01 \x01(\tR\x06method\x12\x1f\n" +
 	"\vparams_json\x18\x02 \x01(\fR\n" +
@@ -457,10 +485,14 @@ const file_proto_core_proto_rawDesc = "" +
 	"\x05hello\x18\x01 \x01(\v2\x16.nootify.core.v1.HelloH\x00R\x05hello\x12.\n" +
 	"\x05event\x18\x02 \x01(\v2\x16.nootify.core.v1.EventH\x00R\x05event\x12C\n" +
 	"\fconfirmation\x18\x03 \x01(\v2\x1d.nootify.core.v1.ConfirmationH\x00R\fconfirmationB\x06\n" +
-	"\x04body\"4\n" +
+	"\x04body\"\x8f\x01\n" +
 	"\x05Hello\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x12\n" +
-	"\x04name\x18\x02 \x01(\tR\x04name\"\x8d\x02\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12\x1d\n" +
+	"\n" +
+	"public_key\x18\x03 \x01(\fR\tpublicKey\x12\x1c\n" +
+	"\tchallenge\x18\x04 \x01(\fR\tchallenge\x12\x1c\n" +
+	"\tsignature\x18\x05 \x01(\fR\tsignature\"\x8d\x02\n" +
 	"\x05Event\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12!\n" +
 	"\fsession_json\x18\x02 \x01(\fR\vsessionJson\x12!\n" +
@@ -477,19 +509,19 @@ const file_proto_core_proto_rawDesc = "" +
 	"\tSubscribe\x12\".nootify.core.v1.SubscriptionFrame\x1a\".nootify.core.v1.SubscriptionFrame(\x010\x01B'Z%github.com/idy/nootify/native/core/pbb\x06proto3"
 
 var (
-	file_proto_core_proto_rawDescOnce sync.Once
-	file_proto_core_proto_rawDescData []byte
+	file_core_proto_rawDescOnce sync.Once
+	file_core_proto_rawDescData []byte
 )
 
-func file_proto_core_proto_rawDescGZIP() []byte {
-	file_proto_core_proto_rawDescOnce.Do(func() {
-		file_proto_core_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_proto_core_proto_rawDesc), len(file_proto_core_proto_rawDesc)))
+func file_core_proto_rawDescGZIP() []byte {
+	file_core_proto_rawDescOnce.Do(func() {
+		file_core_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_core_proto_rawDesc), len(file_core_proto_rawDesc)))
 	})
-	return file_proto_core_proto_rawDescData
+	return file_core_proto_rawDescData
 }
 
-var file_proto_core_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
-var file_proto_core_proto_goTypes = []any{
+var file_core_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_core_proto_goTypes = []any{
 	(*Command)(nil),           // 0: nootify.core.v1.Command
 	(*Result)(nil),            // 1: nootify.core.v1.Result
 	(*SubscriptionFrame)(nil), // 2: nootify.core.v1.SubscriptionFrame
@@ -497,7 +529,7 @@ var file_proto_core_proto_goTypes = []any{
 	(*Event)(nil),             // 4: nootify.core.v1.Event
 	(*Confirmation)(nil),      // 5: nootify.core.v1.Confirmation
 }
-var file_proto_core_proto_depIdxs = []int32{
+var file_core_proto_depIdxs = []int32{
 	3, // 0: nootify.core.v1.SubscriptionFrame.hello:type_name -> nootify.core.v1.Hello
 	4, // 1: nootify.core.v1.SubscriptionFrame.event:type_name -> nootify.core.v1.Event
 	5, // 2: nootify.core.v1.SubscriptionFrame.confirmation:type_name -> nootify.core.v1.Confirmation
@@ -512,12 +544,12 @@ var file_proto_core_proto_depIdxs = []int32{
 	0, // [0:3] is the sub-list for field type_name
 }
 
-func init() { file_proto_core_proto_init() }
-func file_proto_core_proto_init() {
-	if File_proto_core_proto != nil {
+func init() { file_core_proto_init() }
+func file_core_proto_init() {
+	if File_core_proto != nil {
 		return
 	}
-	file_proto_core_proto_msgTypes[2].OneofWrappers = []any{
+	file_core_proto_msgTypes[2].OneofWrappers = []any{
 		(*SubscriptionFrame_Hello)(nil),
 		(*SubscriptionFrame_Event)(nil),
 		(*SubscriptionFrame_Confirmation)(nil),
@@ -526,17 +558,17 @@ func file_proto_core_proto_init() {
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_core_proto_rawDesc), len(file_proto_core_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_core_proto_rawDesc), len(file_core_proto_rawDesc)),
 			NumEnums:      0,
 			NumMessages:   6,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
-		GoTypes:           file_proto_core_proto_goTypes,
-		DependencyIndexes: file_proto_core_proto_depIdxs,
-		MessageInfos:      file_proto_core_proto_msgTypes,
+		GoTypes:           file_core_proto_goTypes,
+		DependencyIndexes: file_core_proto_depIdxs,
+		MessageInfos:      file_core_proto_msgTypes,
 	}.Build()
-	File_proto_core_proto = out.File
-	file_proto_core_proto_goTypes = nil
-	file_proto_core_proto_depIdxs = nil
+	File_core_proto = out.File
+	file_core_proto_goTypes = nil
+	file_core_proto_depIdxs = nil
 }

@@ -1,5 +1,8 @@
 /** Chinese source messages are the catalog keys, following the gettext convention. */
 export const english = {
+  '本地设置已锁定。请从 Nootify 桌面端打开，或运行以下命令获取授权链接。': 'Local settings are locked. Open this page from Nootify desktop, or run this command to obtain an authorization link.',
+  '授权当前窗口': 'Authorize this window',
+  '当前窗口未获授权。请从本机 Nootify 桌面端打开设置。': 'This window is not authorized. Open settings from Nootify desktop on this computer.',
   '远程接入': 'Remote access',
   '换个筛选条件，或通过已连接的 Provider 发一条消息。': 'Try a different filter or send a message through a connected provider.',
   '收到消息后，Nootify 按 Provider 的会话绑定查找对应的 agent 会话。这里保留最近 1,000 个路由会话及最后一次查找结果，重启后仍可查看。': 'When a message arrives, Nootify looks up the agent session using its provider binding. The latest 1,000 routed sessions and their last lookup results are retained across restarts.',

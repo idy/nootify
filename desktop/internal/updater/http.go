@@ -165,7 +165,18 @@ func (m *Manager) download(ctx context.Context, update release) (_ download, res
 	if response.ContentLength > maxArtifact {
 		return download{}, errors.New("update artifact exceeds size limit")
 	}
-	directory, err := os.MkdirTemp("", "nootify-update-")
+	parent, prefix := "", "nootify-update-"
+	if m.options.Platform == "windows-x86_64-nsis" {
+		parent, err = m.installerCache()
+		if err != nil {
+			return download{}, err
+		}
+		if err = os.MkdirAll(parent, 0700); err != nil {
+			return download{}, err
+		}
+		prefix = "installer-"
+	}
+	directory, err := os.MkdirTemp(parent, prefix)
 	if err != nil {
 		return download{}, err
 	}
@@ -176,7 +187,7 @@ func (m *Manager) download(ctx context.Context, update release) (_ download, res
 	}()
 	name := "Nootify.app.tar.gz"
 	if m.options.Platform == "windows-x86_64-nsis" {
-		name = "Nootify-setup.exe"
+		name = installerName
 	}
 	path := filepath.Join(directory, name)
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)

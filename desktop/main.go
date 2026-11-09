@@ -41,6 +41,7 @@ type shell struct {
 	requests       chan string
 	updateRequests chan string
 	pageRequests   atomic.Uint64
+	evaluations    pageEvaluator
 	quitting       bool
 	online         bool
 	health         *service.Health
@@ -306,11 +307,14 @@ func (s *shell) eval(source string) {
 	if s.window == nil || !s.policy.allowed(s.window.Page().URL()) {
 		return
 	}
-	go func() {
-		ctx, cancel := context.WithTimeout(s.ctx, 2*time.Second)
-		defer cancel()
-		_, _ = s.window.Page().EvalContext(ctx, source)
-	}()
+	page := s.window.Page()
+	s.evaluations.submit(s.ctx, source, func(ctx context.Context, source string) {
+		// Navigation may have occurred while this snapshot waited for an earlier
+		// evaluation. Reapply the origin policy at execution time as well.
+		if s.policy.allowed(page.URL()) {
+			_, _ = page.EvalContext(ctx, source)
+		}
+	})
 }
 func (s *shell) publish() { s.eval(s.language.View().Script() + updateScript(s.update)) }
 func updateScript(view updater.View) string {
@@ -387,22 +391,36 @@ func (s *shell) request(action string) {
 		s.actionPending = false
 	}
 }
-func (s *shell) setServiceView(online bool) {
+func (s *shell) setServiceView(online bool, ownerURL string) {
 	if s.online == online {
 		return
 	}
 	s.online = online
 	target := s.offline.URL
 	if online {
-		target = service.URL
+		target = ownerURL
 	}
-	_ = s.window.Page().LoadURL(target)
+	if err := s.window.Page().LoadURL(target); err != nil {
+		s.online = false
+	}
 }
 func (s *shell) serviceWorker(bundleErr error) {
 	client := service.HealthClient()
 	poll := func() {
 		h, err := service.CheckHealth(s.ctx, client, service.URL)
 		installed, inspectErr := s.service.Installed(s.ctx)
+		needsGrant := false
+		currentRoute := "#/logs"
+		mygo.RunOnMain(func() {
+			needsGrant = err == nil && !s.online
+			if _, fragment, found := strings.Cut(s.window.Page().URL(), "#"); found {
+				currentRoute = "#" + fragment
+			}
+		})
+		ownerURL := ""
+		if needsGrant {
+			ownerURL, err = s.service.OwnerUIURL(s.ctx, currentRoute)
+		}
 		mygo.RunOnMain(func() {
 			if s.ctx.Err() != nil {
 				return
@@ -422,7 +440,7 @@ func (s *shell) serviceWorker(bundleErr error) {
 				s.relocalize()
 			}
 			s.renderHealth()
-			s.setServiceView(err == nil)
+			s.setServiceView(err == nil, ownerURL)
 		})
 	}
 	if _, err := service.CheckHealth(s.ctx, client, service.URL); err != nil && bundleErr == nil && s.service.Bundle != nil {
@@ -443,7 +461,11 @@ func (s *shell) serviceWorker(bundleErr error) {
 		case <-s.ctx.Done():
 			return
 		case action := <-s.requests:
-			if action != "refresh" {
+			if action == "authorize_ui" {
+				// Fixed native reauthorization follows the same worker-only CLI grant
+				// path as first load. No page-provided URLs or bearer tokens cross it.
+				mygo.RunOnMain(func() { s.online = false; s.actionPending = false })
+			} else if action != "refresh" {
 				s.runServiceAction(action)
 			}
 			poll()
@@ -478,6 +500,9 @@ func (s *shell) configureUpdater() {
 	platform := "darwin-aarch64"
 	if runtime.GOOS == "windows" {
 		platform = "windows-x86_64-nsis"
+		if err := updater.CleanupInstallers(); err != nil {
+			log.Printf("Clean up completed update installers: %v", err)
+		}
 	}
 	s.updates = updater.New(updater.Options{Version: version, ManifestURL: updater.DefaultManifestURL, PublicKey: updater.DefaultPublicKey, Platform: platform, Executable: exe,
 		BeforeInstall: func(ctx context.Context) error {
@@ -489,7 +514,7 @@ func (s *shell) configureUpdater() {
 			}
 			return s.serviceHandoff.before(ctx)
 		},
-		AfterInstall: s.serviceHandoff.after})
+		AfterInstall: s.serviceHandoff.after, BeforeRollback: s.serviceHandoff.beforeRollback})
 	s.update = s.updates.View()
 	s.updates.SetListener(func(v updater.View) {
 		mygo.RunOnMain(func() {

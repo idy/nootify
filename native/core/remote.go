@@ -2,12 +2,16 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/subtle"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"net"
 	"net/netip"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/idy/nootify/native/core/pb"
@@ -15,53 +19,157 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/grpc/tap"
 )
+
+const remoteHandshakeTimeout = 5 * time.Second
+const remoteConnectionIdle = 30 * time.Second
 
 type remoteServer struct {
 	pb.UnimplementedNotificationCoreServer
-	core     *Core
-	server   *grpc.Server
-	listener net.Listener
-	token    string
+	core        *Core
+	server      *grpc.Server
+	listener    net.Listener
+	configMu    sync.RWMutex
+	config      RemoteConfig
+	certificate *tls.Certificate
+	authContext context.Context
+	revokeAuth  context.CancelFunc
+	stopped     bool
 }
 
-func (s *remoteServer) stop() { s.server.Stop(); _ = s.listener.Close() }
-func (c *Core) startServer(r RemoteConfig) error {
+func (s *remoteServer) stop() {
+	s.configMu.Lock()
+	s.stopped = true
+	s.revokeAuth()
+	s.configMu.Unlock()
+	s.server.Stop()
+	_ = s.listener.Close()
+}
+func loadRemoteCertificate(r RemoteConfig) (*tls.Certificate, error) {
+	if r.CertFile == "" {
+		return nil, nil
+	}
+	cert, err := tls.LoadX509KeyPair(r.CertFile, r.KeyFile)
+	return &cert, err
+}
+
+// prepareServer owns a bound socket but does not expose it until state commits.
+func (c *Core) prepareServer(r RemoteConfig) (*remoteServer, error) {
 	if err := validateRemote(r); err != nil {
-		return err
+		return nil, err
+	}
+	cert, err := loadRemoteCertificate(r)
+	if err != nil {
+		return nil, err
 	}
 	listener, err := net.Listen("tcp", r.Listen)
 	if err != nil {
-		return err
+		return nil, fault("unavailable", "remote listener could not be started")
 	}
-	s := &remoteServer{core: c, listener: listener, token: r.Token}
-	options := []grpc.ServerOption{grpc.MaxRecvMsgSize(2 * maxPayload), grpc.MaxSendMsgSize(2 * maxPayload), grpc.MaxConcurrentStreams(128), grpc.UnaryInterceptor(s.unaryAuth), grpc.StreamInterceptor(s.streamAuth)}
-	if r.CertFile != "" {
-		cert, err := tls.LoadX509KeyPair(r.CertFile, r.KeyFile)
-		if err != nil {
-			listener.Close()
-			return err
-		}
-		options = append(options, grpc.Creds(credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{cert}})))
+	authContext, revokeAuth := context.WithCancel(c.ctx)
+	s := &remoteServer{core: c, listener: listener, config: r, certificate: cert, authContext: authContext, revokeAuth: revokeAuth}
+	options := []grpc.ServerOption{grpc.MaxRecvMsgSize(2 * maxPayload), grpc.MaxSendMsgSize(2 * maxPayload), grpc.MaxConcurrentStreams(128), grpc.ConnectionTimeout(remoteHandshakeTimeout), grpc.KeepaliveParams(keepalive.ServerParameters{MaxConnectionIdle: remoteConnectionIdle}), grpc.InTapHandle(s.headerAuth), grpc.UnaryInterceptor(s.unaryAuth), grpc.StreamInterceptor(s.streamAuth)}
+	if cert != nil {
+		options = append(options, grpc.Creds(credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12, GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+			s.configMu.RLock()
+			defer s.configMu.RUnlock()
+			return s.certificate, nil
+		}})))
 	}
 	s.server = grpc.NewServer(options...)
 	pb.RegisterNotificationCoreServer(s.server, s)
+	return s, nil
+}
+func (s *remoteServer) serve() {
+	go func() {
+		if err := s.server.Serve(s.listener); err != nil && s.core.ctx.Err() == nil {
+			s.core.log("remote_listener_stopped", "", "")
+		}
+	}()
+}
+func (c *Core) startServer(r RemoteConfig) error {
+	s, err := c.prepareServer(r)
+	if err != nil {
+		return err
+	}
 	c.mu.Lock()
 	c.server = s
 	c.mu.Unlock()
-	go func() {
-		if err := s.server.Serve(listener); err != nil && c.ctx.Err() == nil {
-			c.log("remote_listener_stopped", "", "")
+	s.serve()
+	return nil
+}
+
+// reconfigureRemote runs under c.ops. A rejected bind, TLS setup, or persistence
+// operation leaves the old socket, subscriptions, and durable state untouched.
+func (c *Core) reconfigureRemote(r RemoteConfig, update func(*State) error) error {
+	c.mu.Lock()
+	old := c.server
+	c.mu.Unlock()
+	var next *remoteServer
+	var cert *tls.Certificate
+	var err error
+	if r.Enabled {
+		reuse := false
+		if old != nil {
+			old.configMu.RLock()
+			reuse = !old.stopped && old.config.Listen == r.Listen
+			oldTLS := old.certificate != nil
+			old.configMu.RUnlock()
+			if reuse && oldTLS != (r.CertFile != "") {
+				return fault("conflict", "disable the listener before changing TLS mode on the same address")
+			}
 		}
-	}()
+		if reuse {
+			cert, err = loadRemoteCertificate(r)
+			next = old
+		} else {
+			next, err = c.prepareServer(r)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	if err = c.store.Update(update); err != nil {
+		if next != nil && next != old {
+			next.stop()
+		}
+		return err
+	}
+	if next != nil && next == old {
+		next.configMu.Lock()
+		if next.config.Token != r.Token {
+			// Preserve token revocation even when the bound socket is retained.
+			// Same-token certificate reloads may keep existing authenticated RPCs.
+			next.revokeAuth()
+			next.authContext, next.revokeAuth = context.WithCancel(c.ctx)
+		}
+		next.config, next.certificate = r, cert
+		next.configMu.Unlock()
+	}
+	c.mu.Lock()
+	c.server = next
+	c.mu.Unlock()
+	if next != nil && next != old {
+		next.serve()
+	}
+	if old != nil && old != next {
+		old.stop()
+	}
 	return nil
 }
 func (s *remoteServer) auth(ctx context.Context) error {
+	s.configMu.RLock()
+	defer s.configMu.RUnlock()
+	return remoteAuth(ctx, s.config.Token)
+}
+func remoteAuth(ctx context.Context, token string) error {
 	md, _ := metadata.FromIncomingContext(ctx)
 	values := md.Get("authorization")
-	if len(values) != 1 || subtle.ConstantTimeCompare([]byte(values[0]), []byte("Bearer "+s.token)) != 1 {
+	if len(values) != 1 || subtle.ConstantTimeCompare([]byte(values[0]), []byte("Bearer "+token)) != 1 {
 		return status.Error(codes.Unauthenticated, "authentication required")
 	}
 	node := md.Get("nootify-node-id")
@@ -70,17 +178,50 @@ func (s *remoteServer) auth(ctx context.Context) error {
 	}
 	return nil
 }
+
+// Authenticate headers before gRPC waits for a unary request body. Otherwise a
+// tokenless client can keep a stream active forever and bypass connection idle.
+func (s *remoteServer) headerAuth(ctx context.Context, _ *tap.Info) (context.Context, error) {
+	return ctx, s.auth(ctx)
+}
+
+// Capture the credential generation together with authentication. A concurrent
+// token rotation cancels the captured generation, including RPCs admitted just
+// before rotation; it cannot attach an old bearer to the new generation.
+func (s *remoteServer) authenticatedContext(ctx context.Context) (context.Context, func(), error) {
+	s.configMu.RLock()
+	err := remoteAuth(ctx, s.config.Token)
+	generation := s.authContext
+	s.configMu.RUnlock()
+	if err != nil {
+		return nil, nil, err
+	}
+	request, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(generation, cancel)
+	return request, func() { stop(); cancel() }, nil
+}
 func (s *remoteServer) unaryAuth(ctx context.Context, req any, _ *grpc.UnaryServerInfo, next grpc.UnaryHandler) (any, error) {
-	if err := s.auth(ctx); err != nil {
+	ctx, cleanup, err := s.authenticatedContext(ctx)
+	if err != nil {
 		return nil, err
 	}
+	defer cleanup()
 	return next(ctx, req)
 }
+
+type authenticatedServerStream struct {
+	grpc.ServerStream
+	ctx context.Context
+}
+
+func (s *authenticatedServerStream) Context() context.Context { return s.ctx }
 func (s *remoteServer) streamAuth(srv any, stream grpc.ServerStream, _ *grpc.StreamServerInfo, next grpc.StreamHandler) error {
-	if err := s.auth(stream.Context()); err != nil {
+	ctx, cleanup, err := s.authenticatedContext(stream.Context())
+	if err != nil {
 		return err
 	}
-	return next(srv, stream)
+	defer cleanup()
+	return next(srv, &authenticatedServerStream{ServerStream: stream, ctx: ctx})
 }
 func (s *remoteServer) Call(ctx context.Context, in *pb.Command) (*pb.Result, error) {
 	if len(in.ParamsJson) > maxPayload {
@@ -124,18 +265,155 @@ func parseEvent(e *pb.Event) (Event, error) {
 	err := json.Unmarshal(e.ContentJson, &v.Content)
 	return v, err
 }
-func (s *remoteServer) Subscribe(stream grpc.BidiStreamingServer[pb.SubscriptionFrame, pb.SubscriptionFrame]) error {
-	first, err := stream.Recv()
-	if err != nil {
-		return err
+
+// ensureNodeIdentity upgrades private state without changing any routing UUID.
+// The signing key stays outside config backups, just like the peer replay ledger.
+func ensureNodeIdentity(d *State) error {
+	if d.NodePrivateKey == "" {
+		_, private, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			return err
+		}
+		d.NodePrivateKey = base64.StdEncoding.EncodeToString(private)
 	}
-	hello := first.GetHello()
-	if hello == nil {
-		return status.Error(codes.InvalidArgument, "first frame must identify the subscriber")
+	key, err := base64.StdEncoding.DecodeString(d.NodePrivateKey)
+	if err != nil || len(key) != ed25519.PrivateKeySize {
+		return fault("invalid_argument", "invalid persisted node signing key")
+	}
+	expected := ed25519.NewKeyFromSeed(key[:ed25519.SeedSize])
+	if subtle.ConstantTimeCompare(key, expected) != 1 {
+		return fault("invalid_argument", "invalid persisted node signing key")
+	}
+	return nil
+}
+func peerIdentityStatus(p Peer) string {
+	if p.PublicKey == "" {
+		return "legacy_unbound"
+	}
+	return "pinned"
+}
+func (c *Core) RemoteIdentity() map[string]string {
+	d := c.store.Snapshot()
+	key, _ := base64.StdEncoding.DecodeString(d.NodePrivateKey)
+	return map[string]string{"node_id": d.NodeID, "public_key": base64.StdEncoding.EncodeToString(ed25519.PrivateKey(key).Public().(ed25519.PublicKey))}
+}
+
+// BindPeer is private-local owner approval for pre-proof peer records. It never
+// replaces a pin or drops a queue; obtain the key from the owner's other node.
+func (c *Core) BindPeer(raw json.RawMessage) (PeerSummary, error) {
+	var in struct {
+		NodeID    string `json:"node_id"`
+		PublicKey string `json:"public_key"`
+	}
+	if err := json.Unmarshal(raw, &in); err != nil {
+		return PeerSummary{}, fault("invalid_argument", "invalid peer binding")
+	}
+	key, err := base64.StdEncoding.DecodeString(in.PublicKey)
+	if err != nil || len(key) != ed25519.PublicKeySize || in.NodeID == "" || in.NodeID == c.node() {
+		return PeerSummary{}, fault("invalid_argument", "node identity and Ed25519 public key are required")
+	}
+	pin := base64.StdEncoding.EncodeToString(key)
+	err = c.store.Update(func(d *State) error {
+		p, exists := d.Peers[in.NodeID]
+		if !exists {
+			return fault("not_found", "legacy peer does not exist")
+		}
+		if p.PublicKey != "" && p.PublicKey != pin {
+			return fault("conflict", "peer public key cannot be replaced")
+		}
+		p.PublicKey = pin
+		d.Peers[in.NodeID] = p
+		return nil
+	})
+	if err != nil {
+		return PeerSummary{}, err
+	}
+	p := c.store.Snapshot().Peers[in.NodeID]
+	return PeerSummary{NodeID: p.NodeID, Name: p.Name, ConnectedAt: p.ConnectedAt, Pending: len(p.Pending), LastAck: p.LastAck, PublicKey: p.PublicKey, IdentityStatus: "pinned"}, nil
+}
+func peerProof(server, node, name string, key, challenge []byte) []byte {
+	b, _ := json.Marshal([]string{"nootify-subscription-proof-v1", server, node, name, base64.StdEncoding.EncodeToString(key), base64.StdEncoding.EncodeToString(challenge)})
+	return b
+}
+func receivePeerHello(ctx context.Context, recv func() (*pb.SubscriptionFrame, error)) (*pb.Hello, error) {
+	type result struct {
+		frame *pb.SubscriptionFrame
+		err   error
+	}
+	ch := make(chan result, 1)
+	go func() { frame, err := recv(); ch <- result{frame, err} }()
+	select {
+	case <-ctx.Done():
+		return nil, status.Error(codes.DeadlineExceeded, "subscriber handshake timed out")
+	case r := <-ch:
+		if r.err != nil {
+			return nil, r.err
+		}
+		if r.frame.GetHello() == nil {
+			return nil, status.Error(codes.InvalidArgument, "expected subscriber identity proof")
+		}
+		return r.frame.GetHello(), nil
+	}
+}
+func (s *remoteServer) authenticatePeer(stream grpc.BidiStreamingServer[pb.SubscriptionFrame, pb.SubscriptionFrame]) (*pb.Hello, error) {
+	ctx, cancel := context.WithTimeout(stream.Context(), remoteHandshakeTimeout)
+	defer cancel()
+	hello, err := receivePeerHello(ctx, stream.Recv)
+	if err != nil {
+		return nil, err
 	}
 	md, _ := metadata.FromIncomingContext(stream.Context())
-	if hello.NodeId != md.Get("nootify-node-id")[0] {
-		return status.Error(codes.PermissionDenied, "subscriber identity does not match authenticated connection")
+	if hello.NodeId != md.Get("nootify-node-id")[0] || hello.NodeId == s.core.node() || len(hello.Name) > 256 || len(hello.PublicKey) != ed25519.PublicKeySize || len(hello.Signature) != 0 || len(hello.Challenge) != 0 {
+		return nil, status.Error(codes.Unauthenticated, "subscriber identity proof required")
+	}
+	pin := base64.StdEncoding.EncodeToString(hello.PublicKey)
+	if p, exists := s.core.store.Snapshot().Peers[hello.NodeId]; exists {
+		if p.PublicKey == "" {
+			return nil, status.Error(codes.FailedPrecondition, "legacy peer requires private-local public-key approval")
+		}
+		if p.PublicKey != pin {
+			return nil, status.Error(codes.PermissionDenied, "subscriber public key does not match peer")
+		}
+	}
+	challenge := make([]byte, 32)
+	if _, err = rand.Read(challenge); err != nil {
+		return nil, status.Error(codes.Internal, "challenge unavailable")
+	}
+	serverNode := s.core.node()
+	if err = stream.Send(&pb.SubscriptionFrame{Body: &pb.SubscriptionFrame_Hello{Hello: &pb.Hello{NodeId: serverNode, Challenge: challenge}}}); err != nil {
+		return nil, err
+	}
+	proof, err := receivePeerHello(ctx, stream.Recv)
+	if err != nil {
+		return nil, err
+	}
+	if proof.NodeId != hello.NodeId || proof.Name != hello.Name || !ed25519.Verify(ed25519.PublicKey(hello.PublicKey), peerProof(serverNode, hello.NodeId, hello.Name, hello.PublicKey, challenge), proof.Signature) {
+		return nil, status.Error(codes.PermissionDenied, "invalid subscriber identity proof")
+	}
+	err = s.core.store.Update(func(d *State) error {
+		p, exists := d.Peers[hello.NodeId]
+		if exists && p.PublicKey == "" {
+			return status.Error(codes.FailedPrecondition, "legacy peer requires private-local public-key approval")
+		}
+		if exists && p.PublicKey != pin {
+			return status.Error(codes.PermissionDenied, "subscriber public key does not match peer")
+		}
+		if !exists {
+			p = Peer{NodeID: hello.NodeId, Cursor: d.BroadcastSequence, Pending: []string{}}
+		}
+		p.PublicKey = pin
+		d.Peers[hello.NodeId] = p
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return hello, nil
+}
+func (s *remoteServer) Subscribe(stream grpc.BidiStreamingServer[pb.SubscriptionFrame, pb.SubscriptionFrame]) error {
+	hello, err := s.authenticatePeer(stream)
+	if err != nil {
+		return err
 	}
 	ctx, cancel := context.WithCancel(stream.Context())
 	defer cancel()
@@ -173,13 +451,22 @@ func (s *remoteServer) Subscribe(stream grpc.BidiStreamingServer[pb.Subscription
 				errors <- status.Error(codes.InvalidArgument, "expected confirmation")
 				return
 			}
+			if ctx.Err() != nil {
+				errors <- status.FromContextError(ctx.Err()).Err()
+				return
+			}
 			if err = sub.Confirm(confirm.EventId); err != nil {
 				errors <- status.Error(codes.ResourceExhausted, "confirmation could not be persisted")
 				return
 			}
 		}
 	}()
-	return <-errors
+	select {
+	case <-ctx.Done():
+		return status.FromContextError(ctx.Err()).Err()
+	case err := <-errors:
+		return err
+	}
 }
 
 type remoteProvider struct {
@@ -256,19 +543,43 @@ func (p *remoteProvider) consume(ctx context.Context, receive EventHandler, conn
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	timer := time.AfterFunc(remoteHandshakeTimeout, cancel)
+	defer timer.Stop()
 	stream, err := p.client.Subscribe(p.auth(ctx))
 	if err != nil {
 		return err
 	}
-	if err = stream.Send(&pb.SubscriptionFrame{Body: &pb.SubscriptionFrame_Hello{Hello: &pb.Hello{NodeId: p.core.node(), Name: p.config.Name}}}); err != nil {
+	d := p.core.store.Snapshot()
+	private, err := base64.StdEncoding.DecodeString(d.NodePrivateKey)
+	if err != nil || len(private) != ed25519.PrivateKeySize {
+		return fault("unavailable", "node signing identity is unavailable")
+	}
+	key := ed25519.PrivateKey(private).Public().(ed25519.PublicKey)
+	if err = stream.Send(&pb.SubscriptionFrame{Body: &pb.SubscriptionFrame_Hello{Hello: &pb.Hello{NodeId: d.NodeID, Name: p.config.Name, PublicKey: key}}}); err != nil {
 		return err
 	}
 	frame, err := stream.Recv()
 	if err != nil {
 		return err
 	}
-	if frame.GetHello() == nil || frame.GetHello().NodeId == p.core.node() {
-		return fault("loop", "remote subscription loops to this node")
+	hello := frame.GetHello()
+	if hello == nil || hello.NodeId == "" || hello.NodeId == d.NodeID || len(hello.Challenge) != 32 {
+		return fault("permission_denied", "remote subscription requires an identity challenge")
+	}
+	serverNode := hello.NodeId
+	signature := ed25519.Sign(ed25519.PrivateKey(private), peerProof(serverNode, d.NodeID, p.config.Name, key, hello.Challenge))
+	if err = stream.Send(&pb.SubscriptionFrame{Body: &pb.SubscriptionFrame_Hello{Hello: &pb.Hello{NodeId: d.NodeID, Name: p.config.Name, Signature: signature}}}); err != nil {
+		return err
+	}
+	frame, err = stream.Recv()
+	if err != nil {
+		return err
+	}
+	if frame.GetHello() == nil || frame.GetHello().NodeId != serverNode || len(frame.GetHello().Challenge) != 0 {
+		return fault("permission_denied", "remote subscriber identity was not accepted")
+	}
+	if !timer.Stop() || ctx.Err() != nil {
+		return fault("unavailable", "remote identity handshake timed out")
 	}
 	p.core.setStatus(p.config.ID, "connected")
 	connected()

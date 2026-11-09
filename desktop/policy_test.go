@@ -32,7 +32,7 @@ func TestURLPolicy(t *testing.T) {
 	}
 }
 func TestFixedNativeActions(t *testing.T) {
-	actions := []string{"window/drag", "window/zoom", "update/check", "update/install", "update/details", "language/system", "language/zh-CN", "language/en", "service/start", "service/restart", "service/install", "service/refresh"}
+	actions := []string{"window/drag", "window/zoom", "update/check", "update/install", "update/details", "language/system", "language/zh-CN", "language/en", "service/start", "service/restart", "service/install", "service/refresh", "settings/authorize"}
 	for _, action := range actions {
 		if fixedAction("nootify://"+action) == "" {
 			t.Errorf("missing %s", action)

@@ -192,13 +192,14 @@ func TestRawTransportsPreserveBytesAndHalfClose(t *testing.T) {
 			if got, err := io.ReadAll(client); err != nil || !bytes.Equal(got, response) {
 				t.Fatalf("response after half-close = %q, %v", got, err)
 			}
+			b := bridgeFor(t, m, closeRequest.TunnelID, closeRequest.Port)
 			for range 2 { // Closing an already-closed allocation is idempotent.
 				if got := d.dispatch(context.Background(), closeRequest); got.Error != "" {
 					t.Fatal(got)
 				}
 			}
 			assertNotListening(t, address)
-			if len(m.slots) != 0 {
+			if len(m.sharedSlots)+len(b.limit.reserved)+len(b.limit.burst) != 0 {
 				t.Fatal("connection slot leaked after EOF/close")
 			}
 		})
@@ -273,7 +274,11 @@ func TestTunnelCloseCancelsPendingDialAndDialErrorsCloseClient(t *testing.T) {
 
 func TestRawListenerFailuresAreRedactedAndReleaseReservations(t *testing.T) {
 	for _, method := range []string{"tunnel", "publish"} {
-		for _, failure := range []string{"nil", "error", "error-with-listener", "accept"} {
+		failures := []string{"nil", "error", "error-with-listener"}
+		if method == "tunnel" { // Published listeners retain their reservation and retry.
+			failures = append(failures, "accept")
+		}
+		for _, failure := range failures {
 			t.Run(method+"/"+failure, func(t *testing.T) {
 				listener := newTestListener()
 				secret := errors.New("https://login.tailscale.com/a/must-not-escape")
@@ -374,32 +379,409 @@ func TestRawTransportAllocationLimitsAndReuse(t *testing.T) {
 	}
 }
 
-func TestRawConnectionLimitSharedAcrossTransports(t *testing.T) {
+func TestRawConnectionCapacityBoundedAndReserved(t *testing.T) {
+	m := testTCPTransport(t, nil, nil)
+	var bridges []*tcpBridge
+	var releases []func()
+	t.Cleanup(func() {
+		for _, release := range releases {
+			release()
+		}
+		for _, b := range bridges {
+			if len(b.limit.reserved)+len(b.limit.burst) != 0 {
+				t.Error("bridge slot leaked")
+			}
+			m.finish(b)
+		}
+		if len(m.sharedSlots) != 0 {
+			t.Error("shared slot leaked")
+		}
+	})
+	for i := range maxTunnels + maxPublications {
+		port := 0
+		if i >= maxTunnels {
+			port = 7443 + i - maxTunnels
+		}
+		b, err := m.reserve(context.Background(), port)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bridges = append(bridges, b)
+		for range reservedBridgeConnections {
+			release := b.limit.acquire()
+			if release == nil {
+				t.Fatal("bridge lost reserved capacity")
+			}
+			releases = append(releases, release)
+		}
+	}
+	for _, b := range bridges {
+		for {
+			release := b.limit.acquire()
+			if release == nil {
+				break
+			}
+			releases = append(releases, release)
+		}
+		if len(b.limit.reserved)+len(b.limit.burst) > maxBridgeConnections {
+			t.Fatal("per-bridge connection limit exceeded")
+		}
+	}
+	if len(releases) != maxRawConnections || len(m.sharedSlots) != sharedBurstConnections {
+		t.Fatalf("raw connection bound: total=%d burst=%d", len(releases), len(m.sharedSlots))
+	}
+	// Even while the burst pool is full, releasing a bridge's reserved slot
+	// makes it immediately reusable by that bridge.
+	releases[0]()
+	releases[0] = bridges[0].limit.acquire()
+	if releases[0] == nil {
+		t.Fatal("reserved slot could not be reused with burst pool full")
+	}
+}
+
+func TestIdlePublicationCannotStarveOtherBridges(t *testing.T) {
 	backend := backendListener(t)
-	listener := backendListener(t)
-	entered := make(chan struct{})
+	listeners := map[int]*testListener{7443: newTestListener(), 7444: newTestListener()}
 	m := testTCPTransport(t, func(ctx context.Context, _, _ string) (net.Conn, error) {
-		close(entered)
-		<-ctx.Done()
-		return nil, ctx.Err()
-	}, func(int) (net.Listener, error) { return listener, nil })
-	m.slots = make(chan struct{}, 1)
-	reply := m.dispatch(context.Background(), request{ID: 1, Method: "tunnel", Address: "100.64.0.2:7443"})
-	result := reply.Result.(tunnelResult)
-	client := dialLoopback(t, result.Address)
-	await(t, entered)
-	if reply := m.dispatch(context.Background(), request{ID: 2, Method: "publish", Port: 7443, Target: backend.Addr().String()}); reply.Error != "" {
+		return (&net.Dialer{}).DialContext(ctx, "tcp", backend.Addr().String())
+	}, func(port int) (net.Listener, error) { return listeners[port], nil })
+	// Exercise exhaustion with three private fixture connections, rather than
+	// a load test. Production capacity and the aggregate bound are checked above.
+	m.sharedSlots = make(chan struct{}, 1)
+	if reply := m.dispatch(context.Background(), request{ID: 1, Method: "publish", Port: 7443, Target: backend.Addr().String()}); reply.Error != "" {
 		t.Fatal(reply)
 	}
-	rejected := dialLoopback(t, listener.Addr().String())
+	var idleClients, idleServers []net.Conn
+	acceptPublished := func(port int) {
+		t.Helper()
+		client, peer := tcpPair(t)
+		sendPeer(t, listeners[port], peer)
+		idleClients = append(idleClients, client)
+		idleServers = append(idleServers, acceptBackend(t, backend))
+	}
+	for range reservedBridgeConnections + 1 {
+		acceptPublished(7443)
+	}
+	if len(m.sharedSlots) != 1 {
+		t.Fatal("fixture did not exhaust burst capacity")
+	}
+	rejected, peer := tcpPair(t)
+	sendPeer(t, listeners[7443], peer)
 	assertSocketClosed(t, rejected)
-	m.dispatch(context.Background(), request{ID: 3, Method: "close_tunnel", TunnelID: result.ID})
-	assertSocketClosed(t, client)
-	accepted := dialLoopback(t, listener.Addr().String())
+	// Bridges allocated after exhaustion receive their reserved capacity too.
+	if reply := m.dispatch(context.Background(), request{ID: 2, Method: "publish", Port: 7444, Target: backend.Addr().String()}); reply.Error != "" {
+		t.Fatal(reply)
+	}
+	for range reservedBridgeConnections {
+		acceptPublished(7444)
+	}
+	reply := m.dispatch(context.Background(), request{ID: 2, Method: "tunnel", Address: "100.64.0.2:7443"})
+	if reply.Error != "" {
+		t.Fatal(reply)
+	}
+	for range reservedBridgeConnections {
+		idleClients = append(idleClients, dialLoopback(t, reply.Result.(tunnelResult).Address))
+		idleServers = append(idleServers, acceptBackend(t, backend))
+	}
+	// Previously idle streams remain usable after other bridges reach capacity.
+	for i, client := range idleClients {
+		if _, err := client.Write([]byte{byte(i)}); err != nil {
+			t.Fatal(err)
+		}
+		var payload [1]byte
+		if _, err := io.ReadFull(idleServers[i], payload[:]); err != nil || payload[0] != byte(i) {
+			t.Fatalf("idle stream %d disrupted: %v", i, err)
+		}
+	}
+	// The port-80 HTTP/PROXY forwarder retains its separate 128-slot budget.
+	httpListener := newTestListener()
+	httpForwarder := newForwarder(httpListener, backend.Addr().String())
+	_, _ = startForwarder(t, httpForwarder)
+	_, httpPeer := tcpPair(t)
+	sendPeer(t, httpListener, httpPeer)
+	httpServer := acceptBackend(t, backend)
+	header := make([]byte, len("PROXY TCP4 100.64.0.2 100.64.0.1 54321 80\r\n"))
+	if _, err := io.ReadFull(httpServer, header); err != nil || string(header) != "PROXY TCP4 100.64.0.2 100.64.0.1 54321 80\r\n" {
+		t.Fatalf("HTTP/PROXY capacity or identity affected: %q, %v", header, err)
+	}
+	if cap(httpForwarder.limit.reserved) != maxForwardConnections {
+		t.Fatal("HTTP capacity changed")
+	}
+	if reply := m.dispatch(context.Background(), request{ID: 3, Method: "unpublish", Port: 7443}); reply.Error != "" {
+		t.Fatal(reply)
+	}
+	// Closing the saturated publication returns its shared burst capacity.
+	acceptPublished(7444)
+	m.close()
+	for _, conn := range append(idleClients, idleServers...) {
+		assertSocketClosed(t, conn)
+	}
+	if len(m.sharedSlots) != 0 {
+		t.Fatal("shared capacity leaked on shutdown")
+	}
+}
+
+// Each retry is released explicitly, so backoff and cancellation tests never
+// sleep or depend on scheduler timing. A full channel also cannot block cleanup.
+func controlledPublicationRetries(t *testing.T, m *tcpTransport) (<-chan time.Duration, chan<- struct{}) {
+	t.Helper()
+	waits := make(chan time.Duration, 16)
+	proceed := make(chan struct{})
+	m.retryWait = func(ctx context.Context, delay time.Duration) bool {
+		select {
+		case waits <- delay:
+		case <-ctx.Done():
+			return false
+		}
+		select {
+		case <-proceed:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+	return waits, proceed
+}
+
+func expectPublicationRetry(t *testing.T, waits <-chan time.Duration, want time.Duration) {
+	t.Helper()
+	select {
+	case got := <-waits:
+		if got != want {
+			t.Fatalf("retry delay = %v, want %v", got, want)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("publication did not enter retry backoff")
+	}
+}
+
+func resumePublicationRetry(t *testing.T, proceed chan<- struct{}) {
+	t.Helper()
+	select {
+	case proceed <- struct{}{}:
+	case <-time.After(3 * time.Second):
+		t.Fatal("publication did not resume retry")
+	}
+}
+
+func TestPublicationAcceptFailureRebindsAndPreservesStreams(t *testing.T) {
+	backend := backendListener(t)
+	first, failed, flapping, recovered := newTestListener(), newTestListener(), newTestListener(), newTestListener()
+	secret := errors.New("https://login.tailscale.com/a/must-not-escape")
+	calls := 0 // Reads below follow retry/accept synchronization.
+	m := testTCPTransport(t, nil, func(port int) (net.Listener, error) {
+		if port != 7443 {
+			t.Error("rebind changed publication port")
+		}
+		calls++
+		switch calls {
+		case 1:
+			return first, nil
+		case 2:
+			return nil, secret
+		case 3:
+			return failed, secret
+		case 4:
+			return nil, nil
+		case 5:
+			return flapping, nil
+		default:
+			return recovered, nil
+		}
+	})
+	waits, proceed := controlledPublicationRetries(t, m)
+	ctx, cancel := context.WithCancel(context.Background())
+	req := request{ID: 1, Method: "publish", Port: 7443, Target: backend.Addr().String()}
+	if reply := m.dispatch(ctx, req); reply.Error != "" {
+		t.Fatal(reply)
+	}
+	cancel() // The allocating RPC must not own later rebinds.
+	b := bridgeFor(t, m, "", 7443)
+	client, peer := tcpPair(t)
+	sendPeer(t, first, peer)
 	server := acceptBackend(t, backend)
-	m.dispatch(context.Background(), request{ID: 4, Method: "unpublish", Port: 7443})
-	assertSocketClosed(t, accepted)
-	assertSocketClosed(t, server)
+	first.fail <- secret
+	expectPublicationRetry(t, waits, publicationRetryMin)
+	await(t, first.closed)
+	if reply := m.dispatch(context.Background(), req); reply.Error != "port_in_use" {
+		t.Fatalf("recovering publication lost its reservation: %+v", reply)
+	}
+	select {
+	case <-b.done:
+		t.Fatal("Accept failure ended the publication")
+	default:
+	}
+	// Existing connections, including half-closed ones, outlive failed accepts.
+	payload := []byte("\x00grpc-request\xff")
+	if _, err := client.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := io.ReadAll(server); err != nil || !bytes.Equal(got, payload) {
+		t.Fatalf("stream lost during backoff: %q, %v", got, err)
+	}
+	for _, delay := range []time.Duration{200 * time.Millisecond, 400 * time.Millisecond, 800 * time.Millisecond} {
+		resumePublicationRetry(t, proceed)
+		expectPublicationRetry(t, waits, delay)
+	}
+	await(t, failed.closed)
+	resumePublicationRetry(t, proceed)
+	await(t, flapping.accepting)
+	flapping.fail <- secret
+	expectPublicationRetry(t, waits, 1600*time.Millisecond)
+	await(t, flapping.closed)
+	resumePublicationRetry(t, proceed)
+	await(t, recovered.accepting)
+	newClient, newPeer := tcpPair(t)
+	sendPeer(t, recovered, newPeer)
+	newServer := acceptBackend(t, backend)
+	if calls != 6 {
+		t.Fatalf("rebind attempts = %d", calls)
+	}
+	response := []byte("\x00grpc-response\xff")
+	if _, err := server.Write(response); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := io.ReadAll(client); err != nil || !bytes.Equal(got, response) {
+		t.Fatalf("response after listener recovery = %q, %v", got, err)
+	}
+	if reply := m.dispatch(context.Background(), request{ID: 2, Method: "unpublish", Port: 7443}); reply.Error != "" {
+		t.Fatal(reply)
+	}
+	await(t, recovered.closed)
+	for _, conn := range []net.Conn{newClient, newServer} {
+		assertSocketClosed(t, conn)
+	}
+	if len(b.limit.reserved)+len(b.limit.burst)+len(m.sharedSlots) != 0 {
+		t.Fatal("recovered publication leaked capacity")
+	}
+}
+
+func TestPublicationRetryBackoffIsCappedAndResetsAfterAccept(t *testing.T) {
+	backend := backendListener(t)
+	first, recovered, next := newTestListener(), newTestListener(), newTestListener()
+	calls := 0
+	m := testTCPTransport(t, nil, func(int) (net.Listener, error) {
+		calls++
+		if calls == 1 {
+			return first, nil
+		}
+		if calls < 9 {
+			return nil, errors.New("private_listener_error")
+		}
+		if calls == 9 {
+			return recovered, nil
+		}
+		return next, nil
+	})
+	waits, proceed := controlledPublicationRetries(t, m)
+	if reply := m.dispatch(context.Background(), request{ID: 1, Method: "publish", Port: 7443, Target: backend.Addr().String()}); reply.Error != "" {
+		t.Fatal(reply)
+	}
+	first.fail <- errors.New("accept_failed")
+	for _, delay := range []time.Duration{
+		100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond,
+		800 * time.Millisecond, 1600 * time.Millisecond, 3200 * time.Millisecond,
+		5 * time.Second, 5 * time.Second,
+	} {
+		expectPublicationRetry(t, waits, delay)
+		resumePublicationRetry(t, proceed)
+	}
+	await(t, recovered.accepting)
+	client, peer := net.Pipe()
+	defer client.Close()
+	sendPeer(t, recovered, peer)
+	recovered.fail <- errors.New("accept_failed_again")
+	expectPublicationRetry(t, waits, publicationRetryMin)
+	resumePublicationRetry(t, proceed)
+	await(t, next.accepting)
+	m.close()
+	await(t, next.closed)
+}
+
+func TestPublicationRetryCancellationReleasesReservation(t *testing.T) {
+	for _, operation := range []string{"unpublish", "shutdown"} {
+		t.Run(operation, func(t *testing.T) {
+			listener := newTestListener()
+			calls := 0
+			m := testTCPTransport(t, nil, func(int) (net.Listener, error) {
+				calls++
+				return listener, nil
+			})
+			waits, _ := controlledPublicationRetries(t, m)
+			if reply := m.dispatch(context.Background(), request{ID: 1, Method: "publish", Port: 7443, Target: "127.0.0.1:1"}); reply.Error != "" {
+				t.Fatal(reply)
+			}
+			b := bridgeFor(t, m, "", 7443)
+			listener.fail <- errors.New("accept_failed")
+			expectPublicationRetry(t, waits, publicationRetryMin)
+			if operation == "unpublish" {
+				if reply := m.dispatch(context.Background(), request{ID: 2, Method: operation, Port: 7443}); reply.Error != "" {
+					t.Fatal(reply)
+				}
+			} else {
+				m.close()
+			}
+			await(t, b.done)
+			await(t, listener.closed)
+			if calls != 1 || len(m.publications) != 0 {
+				t.Fatalf("cancellation restarted publication: calls=%d publications=%d", calls, len(m.publications))
+			}
+		})
+	}
+}
+
+func TestPublicationCancellationClosesLateRebind(t *testing.T) {
+	first, late := newTestListener(), newTestListener()
+	entered, release := make(chan struct{}), make(chan struct{})
+	calls := 0
+	m := testTCPTransport(t, nil, func(int) (net.Listener, error) {
+		calls++
+		if calls == 1 {
+			return first, nil
+		}
+		close(entered)
+		<-release
+		return late, nil
+	})
+	waits, proceed := controlledPublicationRetries(t, m)
+	if reply := m.dispatch(context.Background(), request{ID: 1, Method: "publish", Port: 7443, Target: "127.0.0.1:1"}); reply.Error != "" {
+		t.Fatal(reply)
+	}
+	b := bridgeFor(t, m, "", 7443)
+	first.fail <- errors.New("accept_failed")
+	expectPublicationRetry(t, waits, publicationRetryMin)
+	resumePublicationRetry(t, proceed)
+	await(t, entered)
+	closed := make(chan struct{})
+	go func() {
+		m.dispatch(context.Background(), request{ID: 2, Method: "unpublish", Port: 7443})
+		close(closed)
+	}()
+	await(t, b.ctx.Done())
+	// A new publisher cannot race a still-returning listener allocation.
+	if reply := m.dispatch(context.Background(), request{ID: 3, Method: "publish", Port: 7443, Target: "127.0.0.1:1"}); reply.Error != "port_in_use" {
+		t.Fatal(reply)
+	}
+	close(release)
+	await(t, closed)
+	await(t, late.closed)
+	if len(m.publications) != 0 {
+		t.Fatal("late rebind retained reservation")
+	}
+}
+
+func TestPublicationRetryTimerCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if waitPublicationRetry(ctx, publicationRetryMax) {
+		t.Fatal("canceled retry timer allowed another listen attempt")
+	}
 }
 
 func TestRawAllocationCancellationClosesLateListener(t *testing.T) {

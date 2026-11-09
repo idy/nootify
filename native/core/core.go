@@ -17,6 +17,7 @@ type Core struct {
 	mu        sync.Mutex
 	ops       *operationGate
 	sessions  sessionGates
+	acks      sessionGates
 	providers map[string]Provider
 	statuses  map[string]string
 	subs      map[string]map[*Subscription]struct{}
@@ -456,13 +457,18 @@ func (c *Core) Ack(ctx context.Context, m MessageRef) (map[string]any, error) {
 	if !m.valid() {
 		return nil, fault("invalid_argument", "full message reference is required")
 	}
-	p, err := c.returnProvider(m)
+	unlock, err := c.acks.acquire(ctx, m.key())
 	if err != nil {
 		return nil, err
 	}
+	defer unlock()
 	r := c.store.Snapshot().References[m.key()]
 	at := r.AcknowledgedAt
 	if at == "" {
+		p, err := c.returnProvider(m)
+		if err != nil {
+			return nil, err
+		}
 		if err = p.Ack(ctx, m); err != nil {
 			return nil, err
 		}
@@ -494,15 +500,20 @@ func (c *Core) Ingest(ctx context.Context, e Event, route string) error {
 		return fault("invalid_argument", "invalid event route")
 	}
 	node := c.node()
+	// A suppressed copy proves no return path. It must neither retain a route
+	// nor reserve the stable ID needed by a later valid, shorter path.
+	if contains(e.Visited, node) || e.Hops == 0 {
+		return nil
+	}
+	unlock, err := c.sessions.acquire(ctx, e.Session.key())
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	var delivery *Delivery
 	var wake []string
-	err := c.store.Update(func(d *State) error {
+	err = c.store.Update(func(d *State) error {
 		remember(d, e.Message, route)
-		// A route that did not handle the event cannot reserve its stable ID.
-		// A later shorter path must still be eligible to deliver or broadcast it.
-		if contains(e.Visited, node) || e.Hops == 0 {
-			return nil
-		}
 		if record, ok := d.Events[e.ID]; ok && record.Outcome != "loop_suppressed" {
 			if binding, bound := d.Bindings[record.Event.Session.key()]; bound && binding.Deleted {
 				return nil
@@ -746,7 +757,7 @@ func remoteSummary(d State, status string) RemoteSummary {
 	r := RemoteSummary{Enabled: d.Remote.Enabled, Listen: d.Remote.Listen, Status: status, TLS: d.Remote.CertFile != "", TokenSet: d.Remote.Token != "", CertFile: d.Remote.CertFile, KeyFile: d.Remote.KeyFile, Peers: []PeerSummary{}}
 	log := broadcastLog(&d)
 	for _, p := range d.Peers {
-		r.Peers = append(r.Peers, PeerSummary{NodeID: p.NodeID, Name: p.Name, ConnectedAt: p.ConnectedAt, Pending: pendingCount(p, log), LastAck: p.LastAck})
+		r.Peers = append(r.Peers, PeerSummary{NodeID: p.NodeID, Name: p.Name, ConnectedAt: p.ConnectedAt, Pending: pendingCount(p, log), LastAck: p.LastAck, PublicKey: p.PublicKey, IdentityStatus: peerIdentityStatus(p)})
 	}
 	sort.Slice(r.Peers, func(i, j int) bool { return r.Peers[i].NodeID < r.Peers[j].NodeID })
 	return r

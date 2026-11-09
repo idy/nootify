@@ -246,6 +246,8 @@ func TestVerifiedWindowsHandoffAndErrors(t *testing.T) {
 				}
 				return nil
 			}})
+			cache := t.TempDir()
+			m.installerCache = func() (string, error) { return cache, nil }
 			m.pending = &release{Version: "2.0.0", URL: "https://github.com/artifact", Signature: signature}
 			m.client = doerFunc(func(r *http.Request) (*http.Response, error) {
 				deadline, ok := r.Context().Deadline()
@@ -260,7 +262,7 @@ func TestVerifiedWindowsHandoffAndErrors(t *testing.T) {
 			m.launch = func(path string, args []string) error {
 				calls = append(calls, "launch")
 				retained = path
-				if !reflect.DeepEqual(args, []string{"/UPDATE", "/R"}) {
+				if !reflect.DeepEqual(args, []string{"/P", "/UPDATE", "/R"}) {
 					t.Fatal(args)
 				}
 				data, _ := os.ReadFile(path)
@@ -309,6 +311,8 @@ func TestProgressConcurrencyAndRunCancellation(t *testing.T) {
 	public, _, key := syntheticKey(t)
 	data := bytes.Repeat([]byte("x"), 3<<20)
 	m := New(Options{Version: "1.0.0", PublicKey: public, Platform: "windows-x86_64-nsis"})
+	cache := t.TempDir()
+	m.installerCache = func() (string, error) { return cache, nil }
 	m.pending = &release{Version: "2.0.0", URL: "https://github.com/artifact", Signature: signedBytes(t, key, data)}
 	started := make(chan struct{})
 	releaseRequest := make(chan struct{})

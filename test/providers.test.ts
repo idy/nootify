@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
@@ -20,6 +20,7 @@ import { TailscaleService } from '../src/tailscale.js';
 import { NootifyClient } from '../src/client.js';
 import { SettingsService } from '../src/settings.js';
 import { GitHubAuth } from '../src/github-auth.js';
+import { LarkDirectoryCache } from '../src/lark-directory-cache.js';
 import type { TsnetClient } from '../src/tsnet-client.js';
 
 const page: ProviderPage = { node_id: 'local-node', providers: [], remote: { enabled: false, listen: '127.0.0.1:9418', status: 'disabled', tls: false, token_set: false, peers: [] } };
@@ -27,18 +28,29 @@ interface FakeBinding { provider_id: string; session: { node_id: string; adapter
 class FakeCore implements CoreTransport {
   snapshot: ProviderPage = structuredClone(page);
   bindings: FakeBinding[] = [];
+  configs = new Map<string, Record<string, unknown>>();
   calls: { method: string; params: Record<string, unknown> }[] = [];
   async start(): Promise<void> {}
   async stop(): Promise<void> {}
   async request<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
     this.calls.push({ method, params });
     if (method === 'provider.save') {
+      const old = this.configs.get(String(params.id));
+      if (old?.type === 'feishu' && old.app_id !== params.app_id) throw new CoreError('conflict', 'Feishu app_id cannot be changed; create a new provider instead');
+      const config = { ...params, app_secret: params.app_secret || old?.app_secret, token: params.token || old?.token };
+      this.configs.set(String(params.id), config);
       const provider = { id: String(params.id), name: String(params.name), type: params.type as 'remote' | 'feishu', enabled: params.enabled !== false,
-        status: 'connected', ...(typeof params.address === 'string' ? { address: params.address } : {}) };
+        status: 'connected', ...(typeof params.address === 'string' ? { address: params.address } : {}),
+        ...(typeof params.app_id === 'string' ? { app_id: params.app_id, secret_set: Boolean(config.app_secret) } : {}),
+        ...(typeof params.recipient_open_id === 'string' ? { recipient_open_id: params.recipient_open_id } : {}) };
       this.snapshot.providers = [...this.snapshot.providers.filter(item => item.id !== provider.id), provider];
-    } else if (method === 'provider.delete') this.snapshot.providers = this.snapshot.providers.filter(item => item.id !== params.id);
-    else if (method === 'remote.configure') this.snapshot.remote = { ...this.snapshot.remote, ...params };
-    else if (method === 'config.import') this.snapshot.providers = params.providers as ProviderPage['providers'];
+    } else if (method === 'provider.delete') {
+      this.configs.delete(String(params.id)); this.snapshot.providers = this.snapshot.providers.filter(item => item.id !== params.id);
+    } else if (method === 'remote.configure') this.snapshot.remote = { ...this.snapshot.remote, ...params };
+    else if (method === 'config.import') {
+      this.snapshot.providers = params.providers as ProviderPage['providers'];
+      this.configs = new Map((params.providers as Record<string, unknown>[]).map(provider => [String(provider.id), provider]));
+    } else if (method === 'config.export') return { version: 1, providers: [...this.configs.values()] } as T;
     const binding = method === 'session.ensure' ? { provider_id: String(params.provider_id ?? 'remote-one'), session: params.session as FakeBinding['session'], created: true } : undefined;
     if (binding) this.bindings.push(binding);
     const result = method === 'status' ? this.snapshot : method === 'session.list' ? this.bindings : binding
@@ -114,6 +126,27 @@ readline.createInterface({input:process.stdin}).on('line', line => {
   assert.ok(clientTimeout > Math.max(...timers), 'HTTP must outlive the stdio request');
 });
 
+test('peer migration routes map public identity and binding requests to private core methods', async t => {
+  const { providers, core } = await fixture(t);
+  const request = core.request.bind(core);
+  const identity = { node_id: page.node_id, public_key: 'synthetic-node-public-key' };
+  const bound = { node_id: 'peer-node', public_key: 'synthetic-peer-public-key', pending: 0 };
+  t.mock.method(core, 'request', async <T>(method: string, params: Record<string, unknown> = {}): Promise<T> => {
+    const result = await request<T>(method, params);
+    return (method === 'remote.identity' ? identity : method === 'remote.peer.bind' ? bound : result) as T;
+  });
+  assert.deepEqual(await providers.handle({ method: 'GET', path: '/v1/remote/identity', body: undefined }), { body: identity });
+  assert.deepEqual(core.calls.at(-1), { method: 'remote.identity', params: {} });
+  assert.deepEqual(await providers.handle({ method: 'PUT', path: '/v1/remote/peers/peer-node', body: { public_key: bound.public_key } }), { body: bound });
+  assert.deepEqual(core.calls.at(-1), { method: 'remote.peer.bind', params: { node_id: 'peer-node', public_key: bound.public_key } });
+  const calls = core.calls.length;
+  await assert.rejects(providers.handle({ method: 'PUT', path: '/v1/remote/peers/invalid%20node', body: { public_key: bound.public_key } }), /Invalid node_id/);
+  await assert.rejects(providers.handle({ method: 'PUT', path: '/v1/remote/peers/peer-node', body: { public_key: '' } }), /Invalid public_key/);
+  assert.equal(await providers.handle({ method: 'POST', path: '/v1/remote/identity', body: {} }), undefined);
+  assert.equal(await providers.handle({ method: 'GET', path: '/v1/remote/peers/peer-node', body: undefined }), undefined);
+  assert.equal(core.calls.length, calls, 'invalid parameters and unsupported methods must not reach the core');
+});
+
 test('thread-send leaves automatic retry identity with the durable core and preserves explicit IDs', async t => {
   const { providers, core } = await fixture(t, { sessionName: id => id });
   const request = { method: 'POST', path: '/v1/threads/session-a/messages', body: { adapter: 'codex', text: 'progress' } };
@@ -144,6 +177,41 @@ test('legacy session commands use full local identity and preserve explicit prov
   assert.equal(ensure.params.provider_id, 'remote-one');
   await providers.handle({ method: 'DELETE', path: '/v1/threads/agent-session', body: { adapter: 'codex', provider_id: 'remote-one' } });
   assert.equal(core.calls.at(-1)?.method, 'session.delete');
+});
+
+test('unsupported thread channels fail before core requests or cooperative session registration', async t => {
+  const { providers, core, state } = await fixture(t);
+  const calls = core.calls.length;
+  for (const channel of ['slack', '', null, 42, {}]) {
+    for (const path of ['/v1/threads', '/v1/threads/session-channel/messages']) {
+      await assert.rejects(providers.handle({ method: 'POST', path, body: {
+        channel, adapter: 'trae', session_id: 'session-channel', session_name: 'Rejected channel', text: 'must not send',
+      } }), /Only Feishu notifications are supported/);
+    }
+  }
+  assert.equal(core.calls.length, calls, 'channel validation must precede status, ensure and send requests');
+  assert.equal(state.sessions.size, 0);
+  assert.equal((await State.open(state.directory)).sessions.size, 0);
+  await providers.handle({ method: 'POST', path: '/v1/threads', body: {
+    channel: 'feishu', adapter: 'trae', session_id: 'session-channel', session_name: 'Accepted channel',
+  } });
+  assert.equal(state.sessions.get('session-channel')?.adapter, 'trae');
+});
+
+test('manual binding rejects unsupported pin and legacy metadata modes before side effects', async t => {
+  const { providers, core, state } = await fixture(t);
+  const body = { adapter: 'trae', session_id: 'manual-session', session_name: 'Manual session', sender_open_id: 'ou_owner' };
+  const calls = core.calls.length;
+  for (const options of [{ pin: true }, { pin: 'yes' }, { metadata: 'message' }, { metadata: 'announcement' }, { metadata: 1 }, { metadata: [] }]) {
+    await assert.rejects(providers.handle({ method: 'PUT', path: '/v1/lark/bindings/oc_existing', body: { ...body, ...options } }), /pin|metadata/i);
+  }
+  assert.equal(core.calls.length, calls);
+  assert.equal(state.sessions.size, 0);
+  const metadata = { project: 'Synthetic project', nested: { retained: true } };
+  await providers.handle({ method: 'PUT', path: '/v1/lark/bindings/oc_existing', body: { ...body, pin: false, metadata } });
+  const bind = core.calls.find(call => call.method === 'session.bind')!;
+  assert.deepEqual(bind.params.session, { node_id: page.node_id, adapter: 'trae', session_id: body.session_id, name: body.session_name, metadata });
+  assert.equal(bind.params.chat_id, 'oc_existing'); assert.equal(bind.params.sender_open_id, body.sender_open_id);
 });
 
 test('thread operations infer native adapters from durable local bindings and refuse ambiguous IDs', async t => {
@@ -266,6 +334,176 @@ test('provider imports refresh real compatibility clients without rewriting impo
   providers.refreshCompatibilityCredentials();
   assert.equal(providers.credentials, undefined); assert.equal(providers.api, undefined);
   assert.equal(core.calls.filter(call => call.method === 'provider.delete').length, 0, 'clearing compatibility clients must not remove a provider');
+});
+
+test('legacy provider CRUD synchronizes retained secrets, compatibility exports and directory caches without rewriting providers', async t => {
+  const { providers, core, state, directory } = await fixture(t);
+  const settings = new SettingsService({ state, lark: providers, providers, env: {},
+    github: new GitHubAuth(state, () => {}, () => {}, 'synthetic-client'),
+    pulls: { async preferences() { return { follow: [] }; }, async restore() {} },
+    agents: { async list() { return []; }, async set() { throw new Error('No agent edits in this fixture'); } } });
+  t.after(() => settings.stop());
+  const app_id = 'cli_0123456789abcdef';
+  const initial = { id: 'legacy-feishu', name: 'Custom migrated provider', type: 'feishu', enabled: false,
+    app_id, app_secret: 'synthetic-original-secret', recipient_open_id: 'ou_original' };
+  const save = (provider: Record<string, unknown>) => providers.action({ action: 'save', provider });
+  await save(initial);
+  assert.deepEqual(providers.credentials, { appId: app_id, appSecret: initial.app_secret });
+  assert.equal((await settings.page()).lark.source, 'settings');
+  const originalApi = providers.api!;
+  t.mock.method(originalApi, 'request', async <T>(_method: string, path: string): Promise<T> =>
+    (path.includes('/scopes') ? { user_ids: ['ou_cached'] } : { items: [{ open_id: 'ou_cached', name: 'Cached synthetic user' }] }) as T);
+  await settings.larkRecipients();
+  assert.ok(await new LarkDirectoryCache(directory).read(providers.credentials!));
+  const oldCredentials = providers.credentials!;
+  const rotated = { ...initial, app_secret: 'synthetic-rotated-secret', recipient_open_id: 'ou_rotated' };
+  await save(rotated);
+  assert.deepEqual(providers.credentials, { appId: app_id, appSecret: rotated.app_secret });
+  assert.notStrictEqual(providers.api, originalApi, 'secret rotation replaces the SDK token client');
+  assert.equal(await new LarkDirectoryCache(directory).read(oldCredentials), undefined);
+  assert.equal((await State.open(directory)).settings.lark_app_secret, rotated.app_secret);
+  assert.deepEqual(settings.larkSecret(), { app_id, app_secret: rotated.app_secret });
+  let reads = 0;
+  t.mock.method(providers.api!, 'request', async <T>(_method: string, path: string): Promise<T> => {
+    reads++; return (path.includes('/scopes') ? { user_ids: ['ou_rotated'] } : { items: [{ open_id: 'ou_rotated', name: 'Rotated synthetic user' }] }) as T;
+  });
+  assert.deepEqual((await settings.larkRecipients()).users.map(user => user.open_id), ['ou_rotated']);
+  assert.ok(reads > 0, 'SettingsService must not reuse its old in-memory directory');
+  const { app_secret: _masked, ...retained } = { ...rotated, name: 'Retained custom name' };
+  const api = providers.api;
+  await save(retained);
+  assert.equal(providers.credentials?.appSecret, rotated.app_secret, 'a masked provider save uses the core retained secret');
+  assert.strictEqual(providers.api, api, 'unchanged credentials preserve in-flight directory requests');
+  const exported = JSON.parse(await readFile((await settings.exportConfig()).path, 'utf8'));
+  assert.deepEqual(exported.lark, { app_id, app_secret: rotated.app_secret, recipient_open_id: 'ou_rotated', connection_type: 'bot' });
+  assert.equal(exported.providers.providers[0].name, retained.name);
+  assert.equal(exported.providers.providers[0].enabled, false);
+  assert.equal(core.calls.filter(call => call.method === 'provider.save').length, 3, 'compatibility synchronization must not issue extra provider saves');
+  assert.ok(!JSON.stringify(await providers.page()).includes(rotated.app_secret));
+  state.bindings.set('oc_previous', { chat_id: 'oc_previous', session_id: 'previous-app-session', sender_open_id: 'ou_rotated' });
+  const switched = { ...rotated, app_id: 'cli_fedcba9876543210', app_secret: 'synthetic-other-app-secret', recipient_open_id: 'ou_otherapp' };
+  await assert.rejects(save(switched), /app_id cannot be changed/);
+  assert.equal(providers.credentials?.appSecret, rotated.app_secret);
+  await providers.action({ action: 'delete', id: initial.id });
+  await save(switched);
+  assert.equal(providers.api?.appId, switched.app_id);
+  assert.deepEqual(providers.credentials, { appId: switched.app_id, appSecret: switched.app_secret });
+  const switchedState = await State.open(directory);
+  assert.equal(switchedState.settings.lark_app_id, switched.app_id);
+  assert.equal(switchedState.settings.lark_recipient_open_id, switched.recipient_open_id);
+  assert.equal(switchedState.bindings.get('oc_previous')?.app_id, app_id, 'legacy ownership remains scoped to the previous application');
+  const switchedExport = JSON.parse(await readFile((await settings.exportConfig()).path, 'utf8'));
+  assert.equal(switchedExport.lark.app_id, switched.app_id); assert.equal(switchedExport.lark.app_secret, switched.app_secret);
+  await providers.action({ action: 'delete', id: initial.id });
+  assert.equal(providers.credentials, undefined); assert.equal(providers.api, undefined);
+  assert.deepEqual(settings.larkSecret(), {});
+  const removed = await State.open(directory);
+  assert.equal(removed.settings.lark_app_id, undefined); assert.equal(removed.settings.lark_app_secret, undefined);
+  assert.equal(removed.settings.lark_recipient_open_id, undefined);
+  const deletedExport = JSON.parse(await readFile((await settings.exportConfig()).path, 'utf8'));
+  assert.deepEqual(deletedExport.lark, {}); assert.deepEqual(deletedExport.providers.providers, []);
+});
+
+for (const operation of ['save', 'registration', 'clear', 'import'] as const) {
+  test(`an immutable core app ID rejection rolls back ${operation} credentials, recipient and legacy binding ownership`, async t => {
+    const { providers, core, state, directory } = await fixture(t);
+    const candidate = { appId: 'cli_fedcba9876543210', appSecret: 'synthetic-rejected-secret' };
+    const mcpConfig = join(directory, 'synthetic-mcp.json');
+    await writeFile(mcpConfig, JSON.stringify({ mcpServers: { lark: { env: { LARK_APP_ID: candidate.appId, LARK_APP_SECRET: candidate.appSecret } } } }));
+    const settings = new SettingsService({ state, lark: providers, providers, env: {}, mcpConfig, verify: async () => {},
+      registration: { fetch: async (_url, init) => Response.json(new URLSearchParams(String(init?.body)).get('action') === 'begin'
+        ? { device_code: 'synthetic-device', user_code: 'ABCD-1234', expire_in: 60 }
+        : { client_id: candidate.appId, client_secret: candidate.appSecret, user_info: { open_id: 'ou_rejected' } }) },
+      github: new GitHubAuth(state, () => {}, () => {}, 'synthetic-client'),
+      pulls: { async preferences() { return { follow: [] }; }, async restore() {} },
+      agents: { async list() { return []; }, async set() { throw new Error('No agent edits in this fixture'); } } });
+    t.mock.method(settings, 'larkSetup', async () => ({ app_id: candidate.appId, status: 'ready' as const, missing: [], mention_only: false }));
+    t.after(() => settings.stop());
+    const initial = { id: 'legacy-feishu', name: 'Migrated provider', type: 'feishu', enabled: false,
+      app_id: 'cli_0123456789abcdef', app_secret: 'synthetic-retained-secret', recipient_open_id: 'ou_original' };
+    await providers.action({ action: 'save', provider: initial });
+    state.settings.lark_connection_type = 'personal-app';
+    const binding = { chat_id: 'oc_original', session_id: 'original-session', sender_open_id: 'ou_original' };
+    state.bindings.set(binding.chat_id, binding); await state.save();
+    const before = { ...state.settings }; const credentials = providers.credentials!; const api = providers.api;
+    await new LarkDirectoryCache(directory).write(credentials, { app_id: credentials.appId,
+      users: [{ open_id: 'ou_original', name: 'Synthetic original user' }], truncated: false, permission_limited: false });
+    if (operation === 'registration') {
+      settings.startLarkRegistration();
+      for (let attempt = 0; attempt < 500 && !['failed', 'complete'].includes(settings.larkRegistration().status); attempt++) await new Promise(resolve => setTimeout(resolve, 10));
+      assert.deepEqual(settings.larkRegistration(), { status: 'failed', error: 'save_failed' });
+    } else {
+      const change = operation === 'save' ? settings.saveLark(candidate.appId, candidate.appSecret, 'bot')
+        : operation === 'clear' ? settings.clearLark()
+        : settings.importConfig({ format: 'nootify-config', version: 1,
+          lark: { app_id: candidate.appId, app_secret: candidate.appSecret, recipient_open_id: 'ou_rejected', connection_type: 'bot' } });
+      await assert.rejects(change, /app_id cannot be changed/);
+    }
+    assert.deepEqual(state.settings, before);
+    assert.deepEqual((await State.open(directory)).settings, before);
+    assert.equal(state.bindings.get(binding.chat_id)?.app_id, undefined);
+    assert.equal((await State.open(directory)).bindings.get(binding.chat_id)?.app_id, undefined);
+    assert.strictEqual(providers.credentials, credentials); assert.strictEqual(providers.api, api);
+    assert.equal(core.configs.get(initial.id)?.app_id, initial.app_id);
+    assert.equal(core.configs.get(initial.id)?.app_secret, initial.app_secret);
+    assert.ok(await new LarkDirectoryCache(directory).read(credentials), 'a rejected credential edit preserves its directory cache');
+    const exported = JSON.parse(await readFile((await settings.exportConfig()).path, 'utf8'));
+    assert.equal(exported.lark.app_id, initial.app_id); assert.equal(exported.lark.app_secret, initial.app_secret);
+    assert.equal(exported.lark.recipient_open_id, initial.recipient_open_id);
+    await state.save(); assert.deepEqual((await State.open(directory)).settings, before);
+    await settings.saveLark(initial.app_id, 'synthetic-retried-secret');
+    assert.equal((await State.open(directory)).settings.lark_app_secret, 'synthetic-retried-secret');
+    assert.equal(core.configs.get(initial.id)?.app_secret, 'synthetic-retried-secret');
+    assert.equal(await new LarkDirectoryCache(directory).read(credentials), undefined);
+  });
+}
+
+test('legacy provider CRUD serializes with Settings credential edits before mutating the core', async t => {
+  const { providers, core, state, directory } = await fixture(t);
+  let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; });
+  let verifying!: () => void; const entered = new Promise<void>(resolve => { verifying = resolve; });
+  t.after(() => release());
+  const settings = new SettingsService({ state, lark: providers, providers, env: {},
+    verify: async () => { verifying(); await gate; },
+    github: new GitHubAuth(state, () => {}, () => {}, 'synthetic-client'),
+    pulls: { async preferences() { return { follow: [] }; }, async restore() {} },
+    agents: { async list() { return []; }, async set() { throw new Error('No agent edits in this fixture'); } } });
+  t.after(() => settings.stop());
+  const app_id = 'cli_0123456789abcdef';
+  const savingSettings = settings.saveLark(app_id, 'synthetic-settings-secret');
+  await entered;
+  const savingProvider = providers.action({ action: 'save', provider: { id: 'legacy-feishu', name: 'Concurrent provider', type: 'feishu', enabled: false,
+    app_id, app_secret: 'synthetic-crud-secret', recipient_open_id: 'ou_latest' } });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(!core.calls.some(call => call.method === 'provider.save'), 'CRUD must wait before changing the core, not only before updating its legacy mirror');
+  release(); await Promise.all([savingSettings, savingProvider]);
+  assert.equal(providers.credentials?.appSecret, 'synthetic-crud-secret');
+  assert.equal(core.configs.get('legacy-feishu')?.app_secret, 'synthetic-crud-secret');
+  assert.equal((await State.open(directory)).settings.lark_app_secret, 'synthetic-crud-secret');
+});
+
+test('rejected legacy provider mutations preserve compatibility credentials and persisted settings', async t => {
+  const { providers, core, state, directory } = await fixture(t);
+  const settings = new SettingsService({ state, lark: providers, providers, env: {},
+    github: new GitHubAuth(state, () => {}, () => {}, 'synthetic-client'),
+    pulls: { async preferences() { return { follow: [] }; }, async restore() {} },
+    agents: { async list() { return []; }, async set() { throw new Error('No agent edits in this fixture'); } } });
+  t.after(() => settings.stop());
+  const credentials = { appId: 'cli_0123456789abcdef', appSecret: 'synthetic-retained-secret' };
+  providers.refreshCompatibilityCredentials(credentials);
+  Object.assign(state.settings, { lark_app_id: credentials.appId, lark_app_secret: credentials.appSecret, lark_recipient_open_id: 'ou_original' });
+  await state.save();
+  const api = providers.api;
+  const request = core.request.bind(core);
+  t.mock.method(core, 'request', async <T>(method: string, params: Record<string, unknown> = {}): Promise<T> => {
+    if (method === 'provider.save' || method === 'provider.delete') throw new CoreError('unavailable', 'synthetic provider rejection');
+    return request<T>(method, params);
+  });
+  for (const action of [{ action: 'save', provider: { id: 'legacy-feishu', type: 'feishu', app_id: credentials.appId, app_secret: 'must-not-save' } },
+    { action: 'delete', id: 'legacy-feishu' }]) await assert.rejects(providers.action(action), /synthetic provider rejection/);
+  assert.strictEqual(providers.credentials, credentials); assert.strictEqual(providers.api, api);
+  assert.deepEqual((await State.open(directory)).settings, state.settings);
+  assert.equal(state.settings.lark_app_secret, credentials.appSecret);
 });
 
 async function networkFixture(t: Parameters<typeof fixture>[0]) {
@@ -457,24 +695,28 @@ test('tailnet browser clients cannot mutate providers or retrieve the remote acc
   const read = await fetch(`${base}/ui/api/providers`);
   assert.equal((await read.json() as { editable: boolean }).editable, false);
   for (const path of ['/ui/api/providers', '/ui/api/settings/remote', '/ui/api/settings/remote/secret']) {
-    const response = await fetch(base + path, { method: 'POST', headers: { 'x-nootify-ui': '1' }, body: '{}' });
+    const response = await fetch(base + path, { method: 'POST', headers: { 'x-nootify-ui': '1', authorization: `Bearer ${state.token}` }, body: '{}' });
     assert.equal(response.status, 403);
   }
   assert.ok(!core.calls.some(call => ['provider.save', 'remote.configure', 'remote.secret'].includes(call.method)));
 });
 
-test('provider UI mutations and remote token reveal require local origin and the UI header', async t => {
+test('provider UI mutations and remote token reveal require owner authentication, local origin and the UI header', async t => {
   const { providers, state, directory } = await fixture(t, { sessionName: id => id });
   const logs = await EventLog.open(directory);
   const server = createServiceHost([], state.token, logs, { providers });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   t.after(async () => { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); });
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
-  const read = await fetch(`${base}/ui/api/providers`); assert.equal(read.status, 200); assert.equal((await read.json() as { editable: boolean }).editable, true);
-  const denied = await fetch(`${base}/ui/api/providers`, { method: 'POST', body: JSON.stringify({ action: 'delete', id: 'bot-a' }) });
+  const owner = { authorization: `Bearer ${state.token}` };
+  const read = await fetch(`${base}/ui/api/providers`, { headers: owner }); assert.equal(read.status, 200); assert.equal((await read.json() as { editable: boolean }).editable, true);
+  assert.equal((await (await fetch(`${base}/ui/api/providers`)).json() as { editable: boolean }).editable, false);
+  const denied = await fetch(`${base}/ui/api/providers`, { method: 'POST', headers: owner, body: JSON.stringify({ action: 'delete', id: 'bot-a' }) });
   assert.equal(denied.status, 403);
+  const unauthenticated = await fetch(`${base}/ui/api/settings/remote/secret`, { method: 'POST', headers: { 'x-nootify-ui': '1' } });
+  assert.equal(unauthenticated.status, 403);
   const secretGet = await fetch(`${base}/ui/api/settings/remote/secret`); assert.equal(secretGet.status, 405);
-  const secret = await fetch(`${base}/ui/api/settings/remote/secret`, { method: 'POST', headers: { 'x-nootify-ui': '1' } });
+  const secret = await fetch(`${base}/ui/api/settings/remote/secret`, { method: 'POST', headers: { 'x-nootify-ui': '1', authorization: `Bearer ${state.token}` } });
   assert.deepEqual(await secret.json(), { token: 'private-peer-token' });
   assert.equal(JSON.stringify(await (await fetch(`${base}/ui/api/settings/remote`)).json()).includes('private-peer-token'), false);
 });

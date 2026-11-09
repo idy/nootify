@@ -29,6 +29,12 @@ func (s *recoveringRemote) Subscribe(stream grpc.BidiStreamingServer[pb.Subscrip
 	if s.attempts.Add(1) <= s.failures {
 		return status.Error(codes.Unavailable, "temporarily unavailable")
 	}
+	if err := stream.Send(&pb.SubscriptionFrame{Body: &pb.SubscriptionFrame_Hello{Hello: &pb.Hello{NodeId: "upstream", Challenge: make([]byte, 32)}}}); err != nil {
+		return err
+	}
+	if _, err := stream.Recv(); err != nil {
+		return err
+	}
 	if err := stream.Send(&pb.SubscriptionFrame{Body: &pb.SubscriptionFrame_Hello{Hello: &pb.Hello{NodeId: "upstream"}}}); err != nil {
 		return err
 	}

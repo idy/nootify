@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
@@ -148,7 +149,7 @@ func TestCLIReceivesOnlyOwnedPathsAndCheckedActions(t *testing.T) {
 	}
 }
 func TestStopForUpdateRetainsCLIRegistrationChecks(t *testing.T) {
-	for _, scenario := range []string{"absent", "owned", "foreign", "stop failed"} {
+	for _, scenario := range []string{"absent", "owned", "foreign", "stop failed", "owned drain failed", "invalid drain marker"} {
 		t.Run(scenario, func(t *testing.T) {
 			home := t.TempDir()
 			m := New(home, &Bundled{filepath.Join(home, "node"), filepath.Join(home, "cli.js")})
@@ -171,10 +172,16 @@ func TestStopForUpdateRetainsCLIRegistrationChecks(t *testing.T) {
 				if scenario == "stop failed" {
 					return Output{Err: refused}
 				}
+				if scenario == "owned drain failed" {
+					return Output{Err: refused, Stderr: `{"error":"owned process still draining","service_unloaded":true,"service_process":{"pid":12345,"started":"Sat Nov 7 12:00:00 2026"}}`}
+				}
+				if scenario == "invalid drain marker" {
+					return Output{Err: refused, Stderr: `{"error":"no identity","service_unloaded":true}`}
+				}
 				return Output{}
 			}
 			stopped, err := m.StopForUpdate(context.Background())
-			if stopped != (scenario == "owned") || (err != nil) != (scenario == "foreign" || scenario == "stop failed") {
+			if stopped != (scenario == "owned" || scenario == "owned drain failed") || (err != nil) != (scenario != "absent" && scenario != "owned") {
 				t.Fatal(stopped, err)
 			}
 			if scenario == "absent" {
@@ -187,7 +194,70 @@ func TestStopForUpdateRetainsCLIRegistrationChecks(t *testing.T) {
 			if scenario == "foreign" && err.Error() != "Refusing to control another installation" {
 				t.Fatal("ownership refusal was hidden", err)
 			}
+			if scenario == "owned drain failed" {
+				attempts := 0
+				m.run = func(_ context.Context, c Command) Output {
+					if !slices.Equal(c.Args, []string{m.Bundle.CLI, "service-start", "--service-drain", `{"pid":12345,"started":"Sat Nov 7 12:00:00 2026"}`}) {
+						t.Fatal("recovery lost the owned process identity", c.Args)
+					}
+					attempts++
+					if attempts == 1 {
+						return Output{Err: refused}
+					}
+					return Output{}
+				}
+				if m.Request(context.Background(), "start") == nil || m.drain == nil {
+					t.Fatal("failed recovery discarded drain identity")
+				}
+				if err := m.Request(context.Background(), "start"); err != nil || m.drain != nil {
+					t.Fatal("successful recovery retained stale drain identity", err)
+				}
+			}
 		})
+	}
+}
+
+func TestOwnerUIGrantUsesBundledCLIAndFixedServiceRoot(t *testing.T) {
+	m := New(t.TempDir(), &Bundled{"/private/fake/node", "/private/fake/cli.js"})
+	for _, raw := range []string{
+		"http://127.0.0.1:9417/?ui-grant=synthetic",
+		"http://127.0.0.1:9999/?ui-grant=synthetic", "https://127.0.0.1:9417/?ui-grant=synthetic",
+		"http://localhost:9417/?ui-grant=synthetic", "http://127.0.0.1:9417/api?ui-grant=synthetic",
+		"http://user@127.0.0.1:9417/?ui-grant=synthetic", "http://127.0.0.1:9417/?ui-grant=synthetic#fragment",
+		"http://127.0.0.1:9417/", "http://127.0.0.1:9417/?ui-grant=", "http://127.0.0.1:9417/?ui-grant=a&ui-grant=b",
+		"http://127.0.0.1:9417/?ui-grant=synthetic&token=root", "http://127.0.0.1:9417/%2f?ui-grant=synthetic",
+	} {
+		m.run = func(_ context.Context, c Command) Output {
+			if c.Path != m.Bundle.Node || !slices.Equal(c.Args, []string{m.Bundle.CLI, "ui-url", "--ui-route", "#/logs"}) || c.Dir != m.Home || c.Timeout != 10*time.Second {
+				t.Fatal("grant bypassed bundled CLI", c)
+			}
+			data, _ := json.Marshal(map[string]string{"url": raw})
+			return Output{Stdout: string(data)}
+		}
+		got, err := m.OwnerUIURL(context.Background())
+		valid := raw == "http://127.0.0.1:9417/?ui-grant=synthetic"
+		if (err == nil) != valid || valid && got != raw {
+			t.Fatal(raw, got, err)
+		}
+	}
+}
+
+func TestOwnerUIGrantPreservesOnlySafeCurrentRoutes(t *testing.T) {
+	m := New(t.TempDir(), &Bundled{"/private/fake/node", "/private/fake/cli.js"})
+	for _, current := range []string{"#/logs", "#/settings/about", "#/settings/general", "https://example.com/", "#/logs?token=x", "#/settings/general#extra", "#/%2f", ""} {
+		want := "#/logs"
+		if current == "#/settings/about" || current == "#/settings/general" {
+			want = current
+		}
+		m.run = func(_ context.Context, c Command) Output {
+			if !slices.Equal(c.Args, []string{m.Bundle.CLI, "ui-url", "--ui-route", want}) {
+				t.Fatal("unsafe or lost current view", current, c.Args)
+			}
+			return Output{Stdout: `{"url":"http://127.0.0.1:9417/?ui-grant=synthetic"}`}
+		}
+		if _, err := m.OwnerUIURL(context.Background(), current); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

@@ -21,10 +21,12 @@ type controlledService interface {
 // Download and validation stay outside controls; replacement, rollback and recovery
 // retain it until install returns. The CLI still makes all ownership decisions.
 type serviceHandoff struct {
-	service  controlledService
-	controls sync.Mutex
-	locked   bool
-	stopped  bool
+	service         controlledService
+	controls        sync.Mutex
+	locked          bool
+	stopped         bool
+	startAttempted  bool
+	recoveryBlocked bool
 }
 
 func (h *serviceHandoff) action(ctx context.Context, action string) error {
@@ -56,18 +58,40 @@ func (h *serviceHandoff) before(ctx context.Context) error {
 	return errors.Join(err, ctx.Err())
 }
 
-// after runs against the newly exchanged bundle. If starting it fails, the updater
-// rolls back before install's deferred recovery retries against the original bundle.
+// after runs against the newly exchanged bundle. A failed start may have loaded
+// its job already; beforeRollback must quiesce it before resources move again.
 func (h *serviceHandoff) after() error {
 	if !h.stopped {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), serviceControlTimeout)
 	defer cancel()
+	h.startAttempted = true
 	if err := h.service.Request(ctx, "start"); err != nil {
 		return err
 	}
 	h.stopped = false
+	h.startAttempted = false
+	return nil
+}
+
+func (h *serviceHandoff) beforeRollback() error {
+	if !h.startAttempted {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), serviceControlTimeout)
+	defer cancel()
+	owned, err := h.service.StopForUpdate(ctx)
+	if err == nil && !owned {
+		err = errors.New("replacement service registration disappeared before rollback")
+	}
+	if err != nil {
+		// Do not retry start or exchange/delete either bundle when the replacement
+		// could still be running. The retained original is available for recovery.
+		h.recoveryBlocked = true
+		return err
+	}
+	h.startAttempted = false
 	return nil
 }
 
@@ -77,13 +101,17 @@ func (h *serviceHandoff) install(ctx context.Context, install func(context.Conte
 			defer func() {
 				h.locked = false
 				h.stopped = false
+				h.startAttempted = false
+				h.recoveryBlocked = false
 				h.controls.Unlock()
 			}()
 		}
 		// Cancellation after a successful stop is also a failed handoff. Never use
 		// the cancelled application context to recover the independent service.
-		if recoveryErr := h.after(); recoveryErr != nil {
-			err = errors.Join(err, fmt.Errorf("recover background service after update: %w", recoveryErr))
+		if !h.recoveryBlocked {
+			if recoveryErr := h.after(); recoveryErr != nil {
+				err = errors.Join(err, fmt.Errorf("recover background service after update: %w", recoveryErr))
+			}
 		}
 	}()
 	return install(ctx)

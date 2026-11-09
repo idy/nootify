@@ -22,6 +22,8 @@ export class NootifyClient {
     if (!response.ok) throw new Error(data.error ?? `HTTP ${response.status}`);
     return data;
   }
+  nodeIdentity(): Promise<{ node_id: string; public_key: string }> { return this.request('GET', '/v1/remote/identity'); }
+  bindPeer(nodeId: string, publicKey: string): Promise<unknown> { return this.request('PUT', `/v1/remote/peers/${encodeURIComponent(nodeId)}`, { public_key: publicKey }); }
   health(): Promise<Health> { return this.request('GET', '/health'); }
   services(): Promise<ModuleStatus[]> { return this.request('GET', '/v1/services'); }
   listSessions(): Promise<PublicSession[]> { return this.request('GET', '/v1/sessions'); }

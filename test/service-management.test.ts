@@ -10,7 +10,7 @@ import { test, type TestContext } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { launchdLabel } from '../src/launchd.js';
-import { assertLaunchdOwnership, manageService, windowsPowerShell, type ServiceExecutor } from '../src/service.js';
+import { assertLaunchdOwnership, manageService, serviceFailure, windowsPowerShell, type ServiceExecutor } from '../src/service.js';
 
 const exec = promisify(execFile);
 const absentLaunchdJob = () => Object.assign(new Error('fixture missing service'), {
@@ -273,6 +273,55 @@ test('mac shutdown times out without success or plist deletion while the owned i
     assert.equal(bootedOut, true);
     assert.equal(await readFile(f.plist, 'utf8'), 'fixture-owned-plist');
   }
+});
+
+test('owned post-bootout failure carries a drain identity and recovery waits before bootstrap', async t => {
+  const free = await listener(t); await free.close();
+  const f = await fixture(t, true, free.port);
+  const started = 'Sat Nov  7 12:00:00 2026';
+  let unloaded = false; let alive = true; let bootstraps = 0;
+  const execute: ServiceExecutor = async (file, args, options) => {
+    if (file === '/bin/ps') return { stdout: alive ? started : 'Sat Nov  7 12:00:01 2026' };
+    if (file === '/bin/launchctl' && args[0] === 'print' && unloaded) throw absentLaunchdJob();
+    const result = await f.runtime.execute(file, args, options);
+    if (args[0] === 'print') return { stdout: `pid = ${process.pid}\n` };
+    if (args[0] === 'bootout') unloaded = true;
+    if (args[0] === 'bootstrap') { bootstraps++; unloaded = false; }
+    return result;
+  };
+  const runtime = { ...f.runtime, execute, shutdownTimeout: 1 };
+  let failure: ReturnType<typeof serviceFailure> | undefined;
+  await assert.rejects(manageService('stop', f.options, runtime), error => {
+    failure = serviceFailure(error);
+    return /not finished shutting down/.test(failure.error);
+  });
+  assert.deepEqual(failure, { error: 'The Nootify process has not finished shutting down; the LaunchAgent plist was retained',
+    service_unloaded: true, service_process: { pid: process.pid, started } });
+  const recovery = { ...f.options, drain: failure!.service_process! };
+  await assert.rejects(manageService('start', recovery, runtime), /not finished shutting down/);
+  assert.equal(bootstraps, 0, 'an unloaded job is not proof its old process exited');
+  // Changed ownership blocks recovery before even querying the supplied process.
+  const previousNode = f.data.ProgramArguments[0]; f.data.ProgramArguments[0] = '/foreign/node';
+  await assert.rejects(manageService('start', recovery, runtime), error => {
+    assert.deepEqual(serviceFailure(error), { error: 'Refusing to control a LaunchAgent owned by another installation or with modified arguments' });
+    return true;
+  });
+  f.data.ProgramArguments[0] = previousNode!;
+  alive = false; // PID reuse proves the exact owned identity exited; never signal it.
+  assert.equal((await manageService('start', recovery, runtime)).status, 'started');
+  assert.equal(bootstraps, 1);
+});
+
+test('a bootout refusal cannot claim an owned unloaded service', async t => {
+  const f = await fixture(t);
+  const execute: ServiceExecutor = async (file, args, options) => {
+    if (args[0] === 'bootout') throw new Error('bootout refused');
+    return f.runtime.execute(file, args, options);
+  };
+  await assert.rejects(manageService('stop', f.options, { ...f.runtime, execute }), error => {
+    assert.deepEqual(serviceFailure(error), { error: 'bootout refused' });
+    return true;
+  });
 });
 
 test('mac shutdown fails closed on denied or empty identity queries before or after bootout', async t => {

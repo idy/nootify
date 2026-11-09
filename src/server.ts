@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import type { IncomingMessage, Server } from 'node:http';
 import type { Socket } from 'node:net';
 import { join, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { State } from './state.js';
 import { SessionsService } from './sessions.js';
@@ -23,6 +23,9 @@ import { AgentPrompts } from './agents.js';
 import { sessionThreadDiscovery } from './session-threads.js';
 import { GitHubAuth } from './github-auth.js';
 import { SettingsService } from './settings.js';
+import { UiOwnerAuth } from './ui-owner-auth.js';
+import { CoreFailureSupervisor } from './core-supervisor.js';
+import { shellCommand } from './shell.js';
 import type { AgentsSource, ChannelSummary, SettingsSource } from './ui.js';
 
 async function readBody(request: IncomingMessage): Promise<unknown> {
@@ -43,6 +46,7 @@ export interface HostOptions {
   pulls?: PullsSource; tailnet?: TailnetAccess; via?: 'loopback' | 'tailnet';
   peerAddress?: (socket: Socket) => string | undefined;
   agents?: AgentsSource; channel?: () => ChannelSummary | undefined; settings?: SettingsSource; providers?: ProvidersService;
+  ownerUiCommand?: string;
 }
 const loopback = /^(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/;
 function listen(server: Server, port: number, host: string): Promise<void> {
@@ -52,6 +56,7 @@ function listen(server: Server, port: number, host: string): Promise<void> {
   });
 }
 export function createServiceHost(modules: ServiceModule[], token: string, logs?: EventLog, options: HostOptions = {}, server: Server = createServer()): Server {
+  const owner = new UiOwnerAuth(token);
   server.on('request', async (request, response) => {
     const send = (status: number, body: unknown) => {
       response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
@@ -64,12 +69,14 @@ export function createServiceHost(modules: ServiceModule[], token: string, logs?
         const rejected = options.tailnet ? await options.tailnet.authorize(host, options.peerAddress ? options.peerAddress(request.socket) : request.socket.remoteAddress) : 'Tailnet access is not configured';
         if (rejected) throw new HttpError(403, rejected);
       } else if (!loopback.test(host)) throw new HttpError(403, 'Only loopback hosts are accepted');
-      const isPageNavigation = request.method === 'GET' && request.url === '/' && request.headers['sec-fetch-dest'] === 'document';
+      const url = new URL(request.url ?? '/', 'http://127.0.0.1');
+      const isPageNavigation = request.method === 'GET' && url.pathname === '/' && request.headers['sec-fetch-dest'] === 'document';
       if (!isPageNavigation && request.headers['sec-fetch-site'] && !['same-origin', 'none'].includes(String(request.headers['sec-fetch-site']))) throw new HttpError(403, 'Cross-site requests are not accepted');
       if (request.headers.origin && request.headers.origin !== `http://${host}`) throw new HttpError(403, 'Cross-origin requests are not accepted');
-      const url = new URL(request.url ?? '/', 'http://127.0.0.1');
+      if (await owner.handle(request, response, url, options.via !== 'tailnet')) return;
+      const ownerAuthenticated = options.via !== 'tailnet' && owner.authenticated(request);
       if (logs && await serveUi(request, response, url.pathname, { modules, logs, pulls: options.pulls, tailnetUrl: () => options.tailnet?.url(),
-        agents: options.agents, channel: options.channel, settings: options.settings, providers: options.providers, via: options.via ?? 'loopback' })) return;
+        agents: options.agents, channel: options.channel, settings: options.settings, providers: options.providers, ownerAuthenticated, ownerUiCommand: options.ownerUiCommand, via: options.via ?? 'loopback' })) return;
       if (request.headers.origin) throw new HttpError(403, 'Browser-origin requests are not accepted for control APIs');
       const statuses = () => modules.map(module => ({ name: module.name, status: module.status() }));
       if (request.method === 'GET' && url.pathname === '/health') { send(200, { ok: true, service: 'nootify', modules: statuses() }); return; }
@@ -77,6 +84,7 @@ export function createServiceHost(modules: ServiceModule[], token: string, logs?
       const expected = Buffer.from(`Bearer ${token}`);
       if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw new HttpError(401, 'Unauthorized');
       if (request.method === 'GET' && url.pathname === '/v1/services') { send(200, statuses()); return; }
+      if (url.pathname.startsWith('/v1/remote/') && options.via === 'tailnet') throw new HttpError(403, 'Peer identity management is local-only');
       const input = { method: request.method ?? 'GET', path: url.pathname, body: await readBody(request) };
       for (const module of modules) {
         const result = await module.handle(input);
@@ -112,8 +120,11 @@ export async function main(): Promise<void> {
     const state = await State.open(values['state-dir']);
     const logs = await EventLog.open(state.directory);
     let networkChanged: (ready: boolean) => void = () => {};
+    let coreSupervisor: CoreFailureSupervisor | undefined;
     const report = (record: Record<string, unknown>) => {
       logs.report(record);
+      coreSupervisor?.observe(record);
+      if (coreSupervisor?.failed) process.exitCode = 1;
       if (record.status === 'tailnet_listening') networkChanged(true);
       else if (record.status === 'tailnet_failed') networkChanged(false);
     };
@@ -141,26 +152,34 @@ export async function main(): Promise<void> {
     const github = new GitHubAuth(state, report, () => pulls.refreshSoon());
     const settings = new SettingsService({ state, lark: providers, github, pulls, agents, tailscale, providers, mcpConfig: values['mcp-config'], source: resolved?.source, report });
     const channel = (): ChannelSummary => providers.channel();
-    const page = { pulls, tailnet, agents, channel, settings, providers };
+    const ownerUiCommand = shellCommand([process.execPath, fileURLToPath(new URL('./cli.js', import.meta.url)), 'ui-url', '--state-dir', state.directory, '--port', String(port)], process.platform);
+    const page = { pulls, tailnet, agents, channel, settings, providers, ownerUiCommand };
     const tailnetServer = createServiceHost(modules, state.token, logs, { ...page, via: 'tailnet', peerAddress: socket => peers.get(socket) });
     server.off('request', starting);
     createServiceHost(modules, state.token, logs, page, server);
-    let stopping = false;
-    const stop = async () => {
-      if (stopping) return;
-      stopping = true;
-      await settings.stop();
-      for (const module of [...modules].reverse()) await module.stop?.();
-      await tailscale.stop();
-      await logs.flush();
-      await closeServer();
-    };
+    let stopping: Promise<void> | undefined;
+    const stop = (): Promise<void> => stopping ??= (async () => {
+      coreSupervisor?.beginShutdown();
+      const failures: unknown[] = [];
+      const attempt = async (action: () => unknown) => { try { await action(); } catch (error) { failures.push(error); } };
+      await attempt(() => settings.stop());
+      for (const module of [...modules].reverse()) await attempt(() => module.stop?.());
+      await attempt(() => tailscale.stop());
+      await attempt(() => logs.flush());
+      await attempt(closeServer);
+      if (failures.length) throw new AggregateError(failures, 'Service shutdown failed');
+    })();
+    coreSupervisor = new CoreFailureSupervisor(stop);
     shutdown = stop;
-    report({ status: 'ready', service: 'nootify', port });
-    for (const module of modules) await module.start?.();
+    for (const module of modules) {
+      await module.start?.();
+      if (coreSupervisor.failed || (module === providers && providers.status() !== 'ready')) throw new Error('Notification core failed during startup');
+    }
     // The embedded device owns tailnet port 80; its private backend preserves the original peer address.
     await tailscale.start();
     await providers.syncNetwork().catch(error => report({ source: 'providers', status: 'tailnet_publish_failed', error: (error as Error).message }));
+    if (coreSupervisor.failed) throw new Error('Notification core stopped during startup');
+    report({ status: 'ready', service: 'nootify', port });
     process.once('SIGTERM', () => { void stop(); });
     process.once('SIGINT', () => { void stop(); });
   } catch (error) {

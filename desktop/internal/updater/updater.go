@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -51,6 +52,9 @@ type Options struct {
 	Executable    string
 	BeforeInstall func(context.Context) error
 	AfterInstall  func() error
+	// BeforeRollback must quiesce a replacement that may have partially started.
+	// Failure preserves both bundles in place instead of deleting live resources.
+	BeforeRollback func() error
 }
 
 type release struct{ Version, URL, Signature string }
@@ -65,6 +69,7 @@ type Manager struct {
 	client          httpDoer
 	now             func() time.Time
 	launch          func(string, []string) error
+	installerCache  func() (string, error)
 	swap            func(string, string) error
 	scheduleChanged chan bool
 	runMu           sync.Mutex
@@ -89,7 +94,7 @@ func New(options Options) *Manager {
 		options.Executable, _ = os.Executable()
 	}
 	return &Manager{options: options, view: View{Phase: "idle", Current: options.Version},
-		client: newHTTPClient(options.ManifestURL), now: time.Now, launch: launchInstaller, swap: swapBundles,
+		client: newHTTPClient(options.ManifestURL), now: time.Now, launch: launchInstaller, swap: swapBundles, installerCache: installerCache,
 		scheduleChanged: make(chan bool, 1)}
 }
 
@@ -263,7 +268,10 @@ func (m *Manager) install(ctx context.Context, update release) error {
 	if err = ctx.Err(); err != nil {
 		return err
 	}
-	if err = m.launch(artifact.path, []string{"/UPDATE", "/R"}); err != nil {
+	if err = os.WriteFile(filepath.Join(artifact.directory, installerReceipt), []byte(installerPending), 0600); err != nil {
+		return fmt.Errorf("record installer handoff: %w", err)
+	}
+	if err = m.launch(artifact.path, []string{"/P", "/UPDATE", "/R"}); err != nil {
 		return fmt.Errorf("launch update installer: %w", err)
 	}
 	keep = true

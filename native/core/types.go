@@ -172,6 +172,9 @@ type Peer struct {
 	// skipped because it was deleted/visited). Later events remain in the ledger.
 	Cursor  uint64 `json:"broadcast_cursor,omitempty"`
 	LastAck string `json:"last_ack,omitempty"`
+	// PublicKey pins the independently proven subscription identity. An empty
+	// legacy pin must be approved over the private local management bridge.
+	PublicKey string `json:"public_key,omitempty"`
 }
 type RemoteSummary struct {
 	Enabled  bool          `json:"enabled"`
@@ -184,12 +187,14 @@ type RemoteSummary struct {
 	Peers    []PeerSummary `json:"peers"`
 }
 type PeerSummary struct {
-	Connected   bool   `json:"connected"`
-	NodeID      string `json:"node_id"`
-	Name        string `json:"name,omitempty"`
-	ConnectedAt string `json:"connected_at"`
-	Pending     int    `json:"pending"`
-	LastAck     string `json:"last_ack,omitempty"`
+	Connected      bool   `json:"connected"`
+	NodeID         string `json:"node_id"`
+	Name           string `json:"name,omitempty"`
+	ConnectedAt    string `json:"connected_at"`
+	Pending        int    `json:"pending"`
+	LastAck        string `json:"last_ack,omitempty"`
+	PublicKey      string `json:"public_key,omitempty"`
+	IdentityStatus string `json:"identity_status"`
 }
 type Event struct {
 	ID       string     `json:"event_id"`

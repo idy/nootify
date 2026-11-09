@@ -60,12 +60,44 @@ func proxyHeader(remote, local net.Addr) (string, error) {
 	return header, nil
 }
 
+// A bridge keeps its own reserved capacity even when other bridges exhaust the
+// shared burst pool. Neither admission nor release changes a stream's lifetime.
+// HTTP uses only reserved slots, independently of the raw bridge limits.
+type connectionLimit struct {
+	reserved chan struct{}
+	burst    chan struct{}
+	shared   chan struct{}
+}
+
+func (l connectionLimit) acquire() func() {
+	select {
+	case l.reserved <- struct{}{}:
+		return func() { <-l.reserved }
+	default:
+	}
+	if l.shared == nil {
+		return nil
+	}
+	select {
+	case l.burst <- struct{}{}:
+	default:
+		return nil
+	}
+	select {
+	case l.shared <- struct{}{}:
+		return func() { <-l.shared; <-l.burst }
+	default:
+		<-l.burst
+		return nil
+	}
+}
+
 type forwarder struct {
 	listener  net.Listener
 	target    string
 	dial      func(context.Context, string, string) (net.Conn, error)
 	raw       bool // raw RPC transports never emit an HTTP PROXY preamble
-	slots     chan struct{}
+	limit     connectionLimit
 	listening atomic.Bool
 
 	mu          sync.Mutex
@@ -79,7 +111,7 @@ func newForwarder(listener net.Listener, target string) *forwarder {
 		listener:    listener,
 		target:      target,
 		dial:        dialer.DialContext,
-		slots:       make(chan struct{}, maxForwardConnections),
+		limit:       connectionLimit{reserved: make(chan struct{}, maxForwardConnections)},
 		connections: make(map[net.Conn]struct{}),
 	}
 }
@@ -135,7 +167,6 @@ func (f *forwarder) serve(parent context.Context) error {
 	f.listening.Store(true)
 	f.mu.Unlock()
 
-	slots := f.slots
 	for {
 		conn, err := f.listener.Accept()
 		if err != nil {
@@ -144,22 +175,22 @@ func (f *forwarder) serve(parent context.Context) error {
 			}
 			return err
 		}
-		select {
-		case slots <- struct{}{}:
-			if !f.track(conn) {
-				<-slots
-				return nil
-			}
-			workers.Add(1)
-			go func() {
-				defer workers.Done()
-				defer func() { <-slots }()
-				defer f.release(conn)
-				f.forward(ctx, conn)
-			}()
-		default:
+		release := f.limit.acquire()
+		if release == nil {
 			conn.Close()
+			continue
 		}
+		if !f.track(conn) {
+			release()
+			return nil
+		}
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			defer release()
+			defer f.release(conn)
+			f.forward(ctx, conn)
+		}()
 	}
 }
 

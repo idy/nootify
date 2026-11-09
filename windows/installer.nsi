@@ -68,6 +68,7 @@ Function .onInit
     SetErrorLevel 1
     Quit
   ${EndIf}
+  Call NootifyAcknowledgeUpdater
 FunctionEnd
 
 Function un.onInit
@@ -77,6 +78,95 @@ FunctionEnd
 Function NootifyDirectoryPre
   ${If} $PassiveMode = 1
     Abort
+  ${EndIf}
+FunctionEnd
+
+; This acknowledges only the updater's exact private cache layout and receipt.
+; No image is deleted here: the next desktop start retries unlocked images and
+; removes their directories nonrecursively. A pending ShellExecute is never swept.
+Function NootifyAcknowledgeUpdater
+  ${If} $UpdateMode != 1
+    Return
+  ${EndIf}
+  ${If} $EXEFILE != "Nootify-setup.exe"
+    Return
+  ${EndIf}
+  ${GetParent} "$EXEDIR" $0
+  ${If} $0 != "$LOCALAPPDATA\dev.idy.nootify\updates"
+    Return
+  ${EndIf}
+  ${GetFileName} "$EXEDIR" $0
+  StrCpy $0 $0 10
+  ${If} $0 != "installer-"
+    Return
+  ${EndIf}
+  ; Refuse directories/reparse points in the receipt location.
+  System::Call 'kernel32::GetFileAttributesW(w "$EXEDIR\handoff") i.r0'
+  IntOp $0 $0 & 0x410
+  ${If} $0 != 0
+    Return
+  ${EndIf}
+  ClearErrors
+  FileOpen $0 "$EXEDIR\handoff" r
+  ${If} ${Errors}
+    Return
+  ${EndIf}
+  FileRead $0 $1
+  FileClose $0
+  ${If} $1 != "nootify-installer-pending-v1$\n"
+    Return
+  ${EndIf}
+  ClearErrors
+  FileOpen $0 "$EXEDIR\handoff" w
+  ${IfNot} ${Errors}
+    FileWrite $0 "nootify-installer-opened-v1$\n"
+    FileClose $0
+  ${EndIf}
+FunctionEnd
+
+; Recursive payload replacement is permitted only in a registered installation.
+; A fresh target containing an unrelated service/ (even an empty one) is refused
+; before hooks run, and its files remain untouched.
+Function NootifyPreflightPayload
+  System::Call 'kernel32::GetFileAttributesW(w "$INSTDIR") i.r0'
+  ${If} $0 != -1
+    IntOp $1 $0 & 0x400
+    ${If} $1 != 0
+      SetErrorLevel 1
+      Abort "The installation target is a reparse point. Choose an empty directory."
+    ${EndIf}
+  ${EndIf}
+  System::Call 'kernel32::GetFileAttributesW(w "$INSTDIR\service") i.r0 ?e'
+  Pop $1
+  ${If} $0 = -1
+  ${AndIf} $1 != 2
+  ${AndIf} $1 != 3
+    SetErrorLevel 1
+    Abort "Cannot inspect the target service directory. Its files have not been changed."
+  ${EndIf}
+  ${If} $0 != -1
+    IntOp $1 $0 & 0x400
+    ${If} $1 != 0
+      SetErrorLevel 1
+      Abort "The target service directory is a reparse point. Choose an empty directory."
+    ${EndIf}
+  ${EndIf}
+  ${If} $0 != -1
+  ${OrIf} ${FileExists} "$INSTDIR\Nootify.exe"
+  ${OrIf} ${FileExists} "$INSTDIR\node.exe"
+  ${OrIf} ${FileExists} "$INSTDIR\nootify-core.exe"
+  ${OrIf} ${FileExists} "$INSTDIR\nootify-tsnet.exe"
+    ReadRegStr $0 HKCU "${UNINSTALL_KEY}" "InstallLocation"
+    ${If} $0 != $INSTDIR
+      SetErrorLevel 1
+      Abort "The target contains files not owned by this registered Nootify installation. Choose an empty directory."
+    ${EndIf}
+    ${IfNot} ${FileExists} "$INSTDIR\Nootify.exe"
+    ${OrIfNot} ${FileExists} "$INSTDIR\node.exe"
+    ${OrIfNot} ${FileExists} "$INSTDIR\service\dist\src\cli.js"
+      SetErrorLevel 1
+      Abort "Nootify's installed files are incomplete. Repair the installation before continuing."
+    ${EndIf}
   ${EndIf}
 FunctionEnd
 
@@ -126,6 +216,7 @@ FunctionEnd
 Section "Nootify" Install
   ; Check the desktop lock before stopping its independent service or deleting
   ; resources. Failed upgrades must leave the previous installation operational.
+  Call NootifyPreflightPayload
   Call NootifyPreflightDesktop
   ; The checked, environment-sanitized bundled CLI owns task/process validation.
   ; Abort on failure before deleting/replacing any payload. Do not invoke the

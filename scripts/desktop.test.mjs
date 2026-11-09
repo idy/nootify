@@ -126,6 +126,37 @@ test('install and uninstall share a nondestructive desktop preflight with bounde
   assert.doesNotMatch(guard, /service-stop|RMDir|Delete|taskkill|TerminateProcess|FileOpen/i);
 });
 
+test('fresh Windows targets refuse unowned payload before stopping or recursively removing service files', async () => {
+  const installer = await readFile(join(root, 'windows/installer.nsi'), 'utf8');
+  const install = installer.slice(installer.indexOf('Section "Nootify"'), installer.indexOf('Function .onInstSuccess'));
+  assert.ok(install.indexOf('Call NootifyPreflightPayload') < install.indexOf('!insertmacro NSIS_HOOK_PREINSTALL'));
+  assert.ok(install.indexOf('Call NootifyPreflightPayload') < install.indexOf('RMDir /r'));
+  const guard = installer.slice(installer.indexOf('Function NootifyPreflightPayload'), installer.indexOf('!macro NootifyPreflightDesktop'));
+  // GetFileAttributes also detects an empty service directory, unlike a glob.
+  assert.match(guard, /GetFileAttributesW\(w "\$INSTDIR\\service"\)/);
+  assert.match(guard, /IntOp \$1 \$0 & 0x400[\s\S]*reparse point/);
+  assert.match(guard, /ReadRegStr \$0 HKCU "\$\{UNINSTALL_KEY\}" "InstallLocation"[\s\S]*\$0 != \$INSTDIR[\s\S]*Abort/);
+  assert.match(guard, /IfNot.*FileExists.*Nootify\.exe[\s\S]*OrIfNot.*node\.exe[\s\S]*OrIfNot.*cli\.js[\s\S]*Abort/);
+  assert.doesNotMatch(guard, /RMDir|Delete|service-stop|service-uninstall/);
+});
+
+test('Windows installer acknowledges its opened private-cache image without deleting live files', async () => {
+  const installer = await readFile(join(root, 'windows/installer.nsi'), 'utf8');
+  const cleanup = await readFile(join(root, 'desktop/internal/updater/cleanup.go'), 'utf8');
+  const ack = installer.slice(installer.indexOf('Function NootifyAcknowledgeUpdater'), installer.indexOf('Function NootifyPreflightPayload'));
+  assert.match(installer, /Function \.onInit[\s\S]*Call NootifyAcknowledgeUpdater[\s\S]*FunctionEnd/);
+  assert.match(ack, /\$UpdateMode != 1/);
+  assert.match(ack, /\$EXEFILE != "Nootify-setup\.exe"/);
+  assert.match(ack, /\$LOCALAPPDATA\\dev\.idy\.nootify\\updates/);
+  assert.match(ack, /GetParent.*\$EXEDIR[\s\S]*GetFileName.*\$EXEDIR[\s\S]*installer-/);
+  for (const state of ['pending', 'opened']) {
+    assert.ok(ack.includes(`nootify-installer-${state}-v1$\\n`));
+    assert.ok(cleanup.includes(`nootify-installer-${state}-v1\\n`));
+  }
+  assert.doesNotMatch(ack, /RMDir|Delete|MoveFileEx|Exec/);
+  assert.doesNotMatch(cleanup, /RemoveAll/);
+});
+
 test('legacy /P updater installs skip directory input and close automatically on success', async () => {
   const installer = await readFile(join(root, 'windows/installer.nsi'), 'utf8');
   const init = installer.slice(installer.indexOf('Function .onInit'), installer.indexOf('Function un.onInit'));

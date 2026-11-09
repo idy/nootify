@@ -80,6 +80,8 @@ func fixedAction(raw string) string {
 		return "install_service"
 	case "nootify://service/refresh":
 		return "refresh"
+	case "nootify://settings/authorize":
+		return "authorize_ui"
 	}
 	return ""
 }

@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"tailscale.com/net/tsaddr"
 	"tailscale.com/util/dnsname"
@@ -16,6 +17,17 @@ import (
 const (
 	maxTunnels      = 32
 	maxPublications = 16
+
+	// Two slots per allocation cannot be consumed by other bridges. A bridge
+	// may borrow up to fourteen more from the shared pool; all 48 allocations
+	// together still admit at most 128 raw connections (96 reserved + 32 burst).
+	maxRawConnections         = 128
+	reservedBridgeConnections = 2
+	maxBridgeConnections      = 16
+	sharedBurstConnections    = maxRawConnections - (maxTunnels+maxPublications)*reservedBridgeConnections
+
+	publicationRetryMin = 100 * time.Millisecond
+	publicationRetryMax = 5 * time.Second
 )
 
 type tunnelResult struct {
@@ -83,17 +95,104 @@ type tcpBridge struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	done   chan struct{}
+	limit  connectionLimit
 }
+
+// A publication belongs to its bridge until unpublish or service shutdown. A
+// failed Accept must not silently remove it while the parent still caches it.
+// Rebinding the listener here also leaves established forwarding streams alive.
+type publicationListener struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	addr   net.Addr
+	listen func() (net.Listener, error)
+	wait   func(context.Context, time.Duration) bool
+
+	mu       sync.Mutex
+	listener net.Listener
+}
+
+func newPublicationListener(ctx context.Context, listener net.Listener, listen func() (net.Listener, error), wait func(context.Context, time.Duration) bool) *publicationListener {
+	ctx, cancel := context.WithCancel(ctx)
+	return &publicationListener{ctx: ctx, cancel: cancel, addr: listener.Addr(), listen: listen, wait: wait, listener: listener}
+}
+
+func waitPublicationRetry(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return ctx.Err() == nil
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (l *publicationListener) Accept() (net.Conn, error) {
+	delay := publicationRetryMin
+	for {
+		l.mu.Lock()
+		listener := l.listener
+		l.mu.Unlock()
+		if l.ctx.Err() != nil {
+			return nil, net.ErrClosed
+		}
+		if listener != nil {
+			conn, err := listener.Accept()
+			if err == nil {
+				return conn, nil
+			}
+			listener.Close()
+			l.mu.Lock()
+			l.listener = nil
+			l.mu.Unlock()
+		}
+		if !l.wait(l.ctx, delay) || l.ctx.Err() != nil {
+			return nil, net.ErrClosed
+		}
+		listener, err := l.listen()
+		if err != nil || listener == nil {
+			if listener != nil {
+				listener.Close()
+			}
+		} else {
+			l.mu.Lock()
+			if l.ctx.Err() != nil {
+				l.mu.Unlock()
+				listener.Close()
+				return nil, net.ErrClosed
+			}
+			l.listener = listener
+			l.mu.Unlock()
+		}
+		// Reset only after accepting a connection. A listener that repeatedly
+		// binds successfully but fails Accept must not spin at the minimum.
+		delay = min(2*delay, publicationRetryMax)
+	}
+}
+
+func (l *publicationListener) Close() error {
+	l.cancel()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.listener != nil {
+		return l.listener.Close()
+	}
+	return nil
+}
+
+func (l *publicationListener) Addr() net.Addr { return l.addr }
 
 // tcpTransport owns raw listeners, independent of the HTTP/PROXY listener. The
 // maps include pending allocations and closing bridges, bounding both. No dial,
 // listen, or copy error is logged or returned as arbitrary backend text.
 type tcpTransport struct {
-	ctx        context.Context
-	dial       func(context.Context, string, string) (net.Conn, error)
-	listenPort func(int) (net.Listener, error)
-	listen     func(context.Context) (net.Listener, error)
-	slots      chan struct{}
+	ctx         context.Context
+	dial        func(context.Context, string, string) (net.Conn, error)
+	listenPort  func(int) (net.Listener, error)
+	listen      func(context.Context) (net.Listener, error)
+	retryWait   func(context.Context, time.Duration) bool
+	sharedSlots chan struct{}
 
 	mu           sync.Mutex
 	closed       bool
@@ -108,8 +207,9 @@ func newTCPTransport(ctx context.Context, dial func(context.Context, string, str
 		listen: func(ctx context.Context) (net.Listener, error) {
 			return (&net.ListenConfig{}).Listen(ctx, "tcp4", "127.0.0.1:0")
 		},
-		slots:   make(chan struct{}, maxForwardConnections),
-		tunnels: make(map[string]*tcpBridge), publications: make(map[int]*tcpBridge),
+		retryWait:   waitPublicationRetry,
+		sharedSlots: make(chan struct{}, sharedBurstConnections),
+		tunnels:     make(map[string]*tcpBridge), publications: make(map[int]*tcpBridge),
 	}
 }
 
@@ -135,7 +235,14 @@ func (m *tcpTransport) reserve(ctx context.Context, port int) (*tcpBridge, error
 		}
 	}
 	bridgeCtx, cancel := context.WithCancel(m.ctx)
-	b := &tcpBridge{port: port, ctx: bridgeCtx, cancel: cancel, done: make(chan struct{})}
+	b := &tcpBridge{
+		port: port, ctx: bridgeCtx, cancel: cancel, done: make(chan struct{}),
+		limit: connectionLimit{
+			reserved: make(chan struct{}, reservedBridgeConnections),
+			burst:    make(chan struct{}, maxBridgeConnections-reservedBridgeConnections),
+			shared:   m.sharedSlots,
+		},
+	}
 	if port == 0 {
 		m.sequence++
 		b.id = strconv.FormatUint(m.sequence, 10)
@@ -182,15 +289,21 @@ func (m *tcpTransport) start(ctx context.Context, b *tcpBridge, target string) (
 		m.finish(b)
 		return nil, errors.New(contextError(err, "listener_failed"))
 	}
+	if b.port != 0 {
+		listener = newPublicationListener(b.ctx, listener, func() (net.Listener, error) {
+			return m.listenPort(b.port)
+		}, m.retryWait)
+	}
 	f := newForwarder(listener, target)
 	f.raw = true
-	f.slots = m.slots
+	f.limit = b.limit
 	if b.port == 0 {
 		f.dial = m.dial
 	}
 	go func() {
-		// serve closes the listener and all tracked sockets, including on an
-		// unexpected Accept failure, before releasing this allocation's slot.
+		// Publications recover Accept failures without ending serve. Cancellation
+		// closes their current listener and every tracked socket before releasing
+		// the reservation; tunnel listener failures still end their allocation.
 		_ = f.serve(b.ctx)
 		m.finish(b)
 	}()

@@ -69,21 +69,7 @@ func testServer(t *testing.T, c *Core) (string, string) {
 	return c.server.listener.Addr().String(), r.Token
 }
 func streamClient(t *testing.T, address, token, node string) (pb.NotificationCore_SubscribeClient, *grpc.ClientConn, context.CancelFunc) {
-	t.Helper()
-	conn, err := grpc.NewClient("passthrough:///"+address, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	must(t, err)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+token, "nootify-node-id", node)
-	stream, err := pb.NewNotificationCoreClient(conn).Subscribe(ctx)
-	must(t, err)
-	must(t, stream.Send(&pb.SubscriptionFrame{Body: &pb.SubscriptionFrame_Hello{Hello: &pb.Hello{NodeId: node}}}))
-	hello, err := stream.Recv()
-	must(t, err)
-	if hello.GetHello() == nil {
-		t.Fatal("missing server hello")
-	}
-	t.Cleanup(func() { cancel(); conn.Close() })
-	return stream, conn, cancel
+	return authenticatedStreamClient(t, address, token, node)
 }
 func TestGRPCBroadcastIndependentConfirmationAndReconnect(t *testing.T) {
 	c := testCore(t, nil)

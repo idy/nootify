@@ -63,6 +63,9 @@ func (c *Core) Bind(ctx context.Context, pid string, s Session, chat, sender str
 		if chat != old.ChatID {
 			return old, fault("conflict", "session already has a different notification binding")
 		}
+		if sender != "" && sender != old.SenderID {
+			return old, fault("conflict", "session already has a different trusted sender")
+		}
 		return old, nil
 	}
 	pid = selected
@@ -126,18 +129,61 @@ func (p *remoteProvider) Bind(ctx context.Context, s Session, chat, sender strin
 	return b, err
 }
 
-var legacyRoutePattern = regexp.MustCompile(`agent-session:v1:([A-Za-z0-9._-]+):([A-Za-z0-9._-]+):([A-Za-z0-9._-]+)`)
+// JavaScript's retained parser accepts Unicode whitespace as well as ASCII.
+const legacyWhitespace = `[\s\v\p{Zs}\x{2028}\x{2029}\x{FEFF}]`
+
+var (
+	legacyRoutePattern    = regexp.MustCompile(`agent-session:v1:([A-Za-z0-9._-]+):([A-Za-z0-9._-]+):([A-Za-z0-9._-]+)`)
+	legacyDesktopPattern  = regexp.MustCompile(`(?i)\blocal_[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\b`)
+	legacyCodexPattern    = regexp.MustCompile(`(?i)\bCodex` + legacyWhitespace + `*(?:thread|session|会话)?` + legacyWhitespace + `*[:：]?` + legacyWhitespace + `*([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})\b`)
+	legacyOpenCodePattern = regexp.MustCompile(`(?i)\bOpen` + legacyWhitespace + `?Code` + legacyWhitespace + `*(?:thread|session|会话)?` + legacyWhitespace + `*[:：]?` + legacyWhitespace + `*(ses_[A-Za-z0-9]+)\b`)
+)
 
 func verifyLegacyRoutes(raw []byte, s Session) error {
 	var content any
 	if err := json.Unmarshal(raw, &content); err != nil {
 		return fault("unavailable", "invalid announcement content")
 	}
-	routes := legacyRoutePattern.FindAllStringSubmatch(announcementText(content), -1)
+	// Mirror the retained TypeScript parser: explicit markers, Desktop IDs,
+	// labeled Codex UUIDs and labeled OpenCode IDs all declare routes. A label
+	// repeating an explicit identity adds no ambiguity, but distinct declarations
+	// (including different explicit hosts) must not be silently overwritten.
+	type route struct{ host, adapter, session string }
+	routes := map[route]bool{}
+	text := announcementText(content)
+	for _, match := range legacyRoutePattern.FindAllStringSubmatch(text, -1) {
+		routes[route{match[1], match[2], match[3]}] = true
+	}
+	declared := func(adapter, session string) bool {
+		for r := range routes {
+			if r.session == session && (adapter == "" || r.adapter == adapter) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, id := range legacyDesktopPattern.FindAllString(text, -1) {
+		if !declared("", id) {
+			routes[route{"", "claude-desktop", id}] = true
+		}
+	}
+	for _, label := range []struct {
+		adapter string
+		pattern *regexp.Regexp
+	}{{"codex", legacyCodexPattern}, {"opencode", legacyOpenCodePattern}} {
+		for _, match := range label.pattern.FindAllStringSubmatch(text, -1) {
+			if !declared(label.adapter, match[1]) {
+				routes[route{"", label.adapter, match[1]}] = true
+			}
+		}
+	}
+	if len(routes) > 1 {
+		return fault("conflict", "existing group metadata declares multiple agent sessions")
+	}
 	host, _ := os.Hostname()
-	for _, match := range routes {
-		legacyHost, _ := s.Metadata["legacy_host"].(string)
-		if match[2] != s.Adapter || match[3] != s.SessionID || (match[1] != s.NodeID && match[1] != host && match[1] != legacyHost) {
+	legacyHost, _ := s.Metadata["legacy_host"].(string)
+	for r := range routes {
+		if r.adapter != s.Adapter || r.session != s.SessionID || (r.host != "" && r.host != s.NodeID && r.host != host && r.host != legacyHost) {
 			return fault("conflict", "existing group metadata identifies another agent session")
 		}
 	}
@@ -189,8 +235,24 @@ func (p *feishuProvider) Bind(ctx context.Context, s Session, chat, sender strin
 // RetryDelivery is explicit and only allowed after transport proved the previous
 // attempt was never accepted. Pending and uncertain submissions cannot replay.
 func (c *Core) RetryDelivery(id string) error {
+	d := c.store.Snapshot()
+	v, ok := d.Deliveries[id]
+	if !ok {
+		return fault("not_found", "delivery does not exist")
+	}
+	record, ok := d.Events[v.EventID]
+	if !ok {
+		return fault("not_found", "source event is missing")
+	}
+	// Keep the deletion gate through dispatch, not just the durable pending
+	// transition. Once Delete completes, no queued retry can reach the adapter.
+	unlock, err := c.sessions.acquire(c.ctx, record.Event.Session.key())
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	var event Event
-	err := c.store.Update(func(d *State) error {
+	err = c.store.Update(func(d *State) error {
 		v, ok := d.Deliveries[id]
 		if !ok {
 			return fault("not_found", "delivery does not exist")

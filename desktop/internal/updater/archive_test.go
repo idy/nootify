@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -285,6 +286,91 @@ func TestMacCancellationAfterServiceStop(t *testing.T) {
 			leftovers, _ := filepath.Glob(filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(exe))), "..", ".nootify-update-*"))
 			if len(leftovers) != 0 {
 				t.Fatal("cancelled update left staging directories", leftovers)
+			}
+		})
+	}
+}
+
+func TestMacRechecksBundleEntryAfterStop(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("macOS directory semantics")
+	}
+	for _, symlink := range []bool{false, true} {
+		t.Run(fmt.Sprint("symlink=", symlink), func(t *testing.T) {
+			exe := installedFakeApp(t)
+			root := filepath.Dir(filepath.Dir(filepath.Dir(exe)))
+			moved := root + ".moved"
+			m := New(Options{Executable: exe, BeforeInstall: func(context.Context) error {
+				if err := os.Rename(root, moved); err != nil {
+					return err
+				}
+				if symlink {
+					return os.Symlink(moved, root)
+				}
+				if err := os.MkdirAll(filepath.Dir(exe), 0755); err != nil {
+					return err
+				}
+				return os.WriteFile(exe, []byte("other installation"), 0755)
+			}})
+			m.swap = func(string, string) error { t.Fatal("changed app entry reached exchange"); return nil }
+			if err := m.installMac(context.Background(), appArchive(t, bundleEntries())); err == nil || !strings.Contains(err.Error(), "changed while stopping") {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(filepath.Join(moved, "Contents", "MacOS", "Nootify"))
+			if err != nil || string(data) != "original" {
+				t.Fatal("lost original", err)
+			}
+		})
+	}
+}
+
+func TestMacRollbackQuiescesReplacementOrRetainsBothBundles(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("macOS directory semantics")
+	}
+	for _, stopFails := range []bool{false, true} {
+		t.Run(fmt.Sprint("stopFails=", stopFails), func(t *testing.T) {
+			exe := installedFakeApp(t)
+			running := false
+			m := New(Options{Executable: exe, AfterInstall: func() error {
+				running = true // bootstrap succeeded before kickstart failed
+				return errors.New("kickstart failed")
+			}, BeforeRollback: func() error {
+				if stopFails {
+					return errors.New("owned replacement still draining")
+				}
+				running = false
+				return nil
+			}})
+			swaps := 0
+			m.swap = func(a, b string) error {
+				if running {
+					t.Fatal("moved resources out from under replacement job")
+				}
+				swaps++
+				return testSwap(a, b)
+			}
+			if err := m.installMac(context.Background(), appArchive(t, bundleEntries())); err == nil {
+				t.Fatal("partial start reported success")
+			}
+			root := filepath.Dir(filepath.Dir(filepath.Dir(exe)))
+			leftovers, _ := filepath.Glob(filepath.Join(filepath.Dir(root), ".nootify-update-*"))
+			want := "original"
+			if stopFails {
+				want = "new-Nootify"
+				if swaps != 1 || len(leftovers) != 1 {
+					t.Fatal("failed quiescence did not preserve both bundles", swaps, leftovers)
+				}
+				old, err := os.ReadFile(filepath.Join(leftovers[0], "Nootify.app", "Contents", "MacOS", "Nootify"))
+				if err != nil || string(old) != "original" {
+					t.Fatal("lost recovery bundle", err)
+				}
+			} else if swaps != 2 || len(leftovers) != 0 {
+				t.Fatal(swaps, leftovers)
+			}
+			data, err := os.ReadFile(exe)
+			if err != nil || string(data) != want {
+				t.Fatal(string(data), err)
 			}
 		})
 	}

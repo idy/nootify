@@ -86,7 +86,8 @@ async function serve(t: TestContext, logs: EventLog, options: HostOptions): Prom
   t.after(() => { server.closeAllConnections(); server.close(); });
   return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 }
-const action = (origin: string, path: string, body?: unknown, headers: Record<string, string> = { 'x-nootify-ui': '1' }) => fetch(origin + path,
+const ownerHeaders = { 'x-nootify-ui': '1', authorization: 'Bearer test-token' };
+const action = (origin: string, path: string, body?: unknown, headers: Record<string, string> = ownerHeaders) => fetch(origin + path,
   { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
 
 test('provider configuration backups keep every secret on disk and restore without importing node identity', async t => {
@@ -308,7 +309,8 @@ test('recipient directory reads are local-only and selections refuse a changed a
   const local = await serve(t, logs, { settings });
   const remote = await serve(t, logs, { settings, via: 'tailnet', tailnet: { authorize: async () => undefined, url: () => undefined } as unknown as TailnetAccess });
   const path = '/ui/api/settings/lark/recipients';
-  assert.equal((await action(local, path, undefined, {})).status, 403);
+  assert.equal((await action(local, path, undefined, { authorization: ownerHeaders.authorization })).status, 403);
+  assert.equal((await action(local, path, undefined, { 'x-nootify-ui': '1' })).status, 403);
   assert.equal((await action(remote, path)).status, 403);
   assert.equal(reads, 0);
   const result = await action(local, path);
@@ -323,6 +325,36 @@ test('recipient directory reads are local-only and selections refuse a changed a
   assert.equal(state.settings.lark_recipient_open_id, 'ou_owner');
   lark.credentials = undefined;
   await assert.rejects(settings.larkRecipients(), /Configure/);
+});
+
+for (const previous of [undefined, 'ou_original']) {
+  test(`a core recipient rejection preserves ${previous ? 'the existing selection' : 'an unset selection'} in memory and on disk`, async t => {
+    const { state, lark, settings, dir } = await harness(t);
+    lark.credentials = { appId, appSecret: 'synthetic-secret' };
+    if (previous) state.settings.lark_recipient_open_id = previous;
+    await state.save();
+    let fail = true;
+    lark.setRecipient = async () => { if (fail) throw new Error('synthetic provider rejection'); };
+    await assert.rejects(settings.setRecipient('ou_rejected', appId), /synthetic provider rejection/);
+    assert.equal(state.settings.lark_recipient_open_id, previous);
+    assert.equal((await State.open(dir)).settings.lark_recipient_open_id, previous);
+    await state.save();
+    assert.equal((await State.open(dir)).settings.lark_recipient_open_id, previous, 'a later unrelated save cannot persist a rejected recipient');
+    fail = false;
+    await settings.setRecipient('ou_accepted', appId);
+    assert.equal((await State.open(dir)).settings.lark_recipient_open_id, 'ou_accepted');
+  });
+}
+
+test('recipient persistence failures never update the core provider', async t => {
+  const { state, lark, settings, dir } = await harness(t);
+  state.settings.lark_recipient_open_id = 'ou_original'; await state.save();
+  const updates: string[] = [];
+  lark.setRecipient = async openId => { updates.push(openId); };
+  await failSettingsWriteBehindOlderSaves(t, state, () => settings.setRecipient('ou_rejected'));
+  assert.deepEqual(updates, []);
+  assert.equal(state.settings.lark_recipient_open_id, 'ou_original');
+  assert.equal((await State.open(dir)).settings.lark_recipient_open_id, 'ou_original');
 });
 
 test('recipient snapshots are cached, while an explicit retry reads fresh provider data', async t => {
@@ -648,7 +680,8 @@ test('settings pages never carry secrets, and only this Mac can change anything'
   const remote = await serve(t, logs, { settings, via: 'tailnet', tailnet: { authorize: async () => undefined, url: () => undefined } as unknown as TailnetAccess });
   const save = { app_id: appId, app_secret: 'page-secret' };
 
-  assert.equal((await action(local, '/ui/api/settings/lark', save, {})).status, 403, 'needs the UI header');
+  assert.equal((await action(local, '/ui/api/settings/lark', save, { authorization: ownerHeaders.authorization })).status, 403, 'needs the UI header');
+  assert.equal((await action(local, '/ui/api/settings/lark', save, { 'x-nootify-ui': '1' })).status, 403, 'needs owner authentication');
   assert.equal((await action(remote, '/ui/api/settings/lark', save)).status, 403, 'refused on the Tailscale listener');
   assert.equal((await action(remote, '/ui/api/settings/export')).status, 403);
   assert.equal((await action(remote, '/ui/api/settings/github/login', { action: 'start' })).status, 403);
@@ -659,10 +692,10 @@ test('settings pages never carry secrets, and only this Mac can change anything'
   assert.equal((await action(local, '/ui/api/settings/lark', save)).status, 200);
   assert.equal(configured.length, 1);
   const revealPath = '/ui/api/settings/lark/secret';
-  assert.equal((await action(local, revealPath, undefined, {})).status, 403, 'revealing needs the UI header');
+  assert.equal((await action(local, revealPath, undefined, { authorization: ownerHeaders.authorization })).status, 403, 'revealing needs the UI header');
   assert.equal((await action(remote, revealPath)).status, 403, 'remote browsers cannot reveal secrets');
-  assert.equal((await action(local, revealPath, undefined, { 'x-nootify-ui': '1', origin: 'http://attacker.test' })).status, 403);
-  assert.equal((await action(local, revealPath, undefined, { 'x-nootify-ui': '1', 'sec-fetch-site': 'cross-site' })).status, 403);
+  assert.equal((await action(local, revealPath, undefined, { ...ownerHeaders, origin: 'http://attacker.test' })).status, 403);
+  assert.equal((await action(local, revealPath, undefined, { ...ownerHeaders, 'sec-fetch-site': 'cross-site' })).status, 403);
   assert.notEqual((await fetch(local + revealPath)).status, 200, 'GET cannot reveal a secret');
   const revealed = await action(local, revealPath);
   assert.equal(revealed.status, 200);
@@ -674,7 +707,7 @@ test('settings pages never carry secrets, and only this Mac can change anything'
   assert.equal((await action(local, '/ui/api/settings/recipient', { open_id: 'ou_owner' })).status, 200);
   assert.equal(((await (await action(local, '/ui/api/settings/recipient', { open_id: 'bad' })).json()) as { error: string }).error, 'Expected a Feishu open_id (ou_…)');
 
-  const page = await (await fetch(`${local}/ui/api/settings`)).json() as { editable: boolean; lark: { recipient?: string } };
+  const page = await (await fetch(`${local}/ui/api/settings`, { headers: ownerHeaders })).json() as { editable: boolean; lark: { recipient?: string } };
   assert.deepEqual([page.editable, page.lark.recipient], [true, 'ou_owner']);
   assert.equal(((await (await fetch(`${remote}/ui/api/settings`)).json()) as { editable: boolean }).editable, false);
   const exported = await action(local, '/ui/api/settings/export');
@@ -687,12 +720,12 @@ test('settings pages never carry secrets, and only this Mac can change anything'
   assert.equal((await action(local, '/ui/api/settings/github/login', { action: 'other' })).status, 400);
   assert.equal((await action(local, '/ui/api/settings/github/login', { action: 'start' })).status, 200);
   await until(() => settings.startGitHubLogin().status === 'waiting');
-  assert.equal(((await (await fetch(`${local}/ui/api/settings/github`)).json()) as { login: { code?: string } }).login.code, 'ABCD-1234');
+  assert.equal(((await (await fetch(`${local}/ui/api/settings/github`, { headers: ownerHeaders })).json()) as { login: { code?: string } }).login.code, 'ABCD-1234');
   assert.deepEqual(((await (await fetch(`${remote}/ui/api/settings/github`)).json()) as { login: unknown }).login, { status: 'waiting' }, 'the code stays on this Mac');
   assert.equal((await action(local, '/ui/api/settings/github/login', { action: 'cancel' })).status, 200);
   await settings.stop();
   state.settings.github_token = github.token;
-  const account = await (await fetch(`${local}/ui/api/settings/github`)).text();
+  const account = await (await fetch(`${local}/ui/api/settings/github`, { headers: ownerHeaders })).text();
   assert.equal((JSON.parse(account) as { account: { login: string } }).account.login, 'octo');
   for (const path of ['/ui/api/settings', '/ui/api/settings/github', '/ui/api/snapshot']) assert.ok(!(await (await fetch(local + path)).text()).includes(github.token), path);
   assert.equal((await action(local, '/ui/api/settings/github/login', { action: 'sign-out' })).status, 200);

@@ -20,6 +20,7 @@ import { inspectLarkSetup, LarkRegistration, type LarkRegistrationOptions, type 
 import { DIRECTORY_FRESH_MS, DIRECTORY_MAX_AGE_MS, LarkDirectoryCache } from './lark-directory-cache.js';
 import { mergeRecipients } from './lark-profile.js';
 import type { ProvidersService } from './providers.js';
+import { CoreError } from './provider-core.js';
 
 const FORMAT = 'nootify-config';
 const EXPORTS_KEPT = 10;
@@ -60,6 +61,7 @@ export interface LarkControl {
   channel(): { recipient?: string; groups: number };
   configure(credentials?: Credentials): Promise<void>;
   refreshCompatibilityCredentials?(credentials?: Credentials): void;
+  setCompatibilitySync?(sync: (update: () => Promise<{ credentials?: Credentials; recipient?: string }>) => Promise<void>): void;
   setRecipient?(openId: string): Promise<void>;
 }
 export interface PullPreferences {
@@ -160,6 +162,30 @@ export class SettingsService {
     this.source = options.source; this.env = options.env ?? process.env; this.report = options.report ?? (() => {});
     this.registration = new LarkRegistration((result, signal) => this.acceptLarkRegistration(result, signal), this.report, options.registration);
     this.directoryStore = new LarkDirectoryCache(options.state.directory);
+    options.lark.setCompatibilitySync?.(update => this.syncProviderCompatibility(update));
+  }
+  /** Mirror the core's committed legacy provider without saving it again through the compatibility configure path. */
+  private syncProviderCompatibility(update: () => Promise<{ credentials?: Credentials; recipient?: string }>): Promise<void> {
+    return this.serialized(async () => {
+      const { lark, state } = this.options;
+      const current = lark.credentials;
+      const { credentials, recipient } = await update();
+      await this.persistSettings(() => {
+        this.scopeLarkBindings(credentials?.appId);
+        if (credentials) {
+          if (state.settings.lark_app_id !== credentials.appId) state.settings.lark_connection_type = 'bot';
+          state.settings.lark_app_id = credentials.appId; state.settings.lark_app_secret = credentials.appSecret;
+        } else {
+          delete state.settings.lark_app_id; delete state.settings.lark_app_secret; delete state.settings.lark_connection_type;
+        }
+        if (recipient) state.settings.lark_recipient_open_id = recipient; else delete state.settings.lark_recipient_open_id;
+      });
+      this.source = credentials ? 'settings' : undefined;
+      lark.refreshCompatibilityCredentials?.(credentials);
+      if (current?.appId !== credentials?.appId || current?.appSecret !== credentials?.appSecret) {
+        this.directoryRefresh++; await this.directoryStore.clear();
+      }
+    });
   }
   private get exportsDir(): string { return join(this.options.state.directory, 'exports'); }
   private serialized<T>(operation: () => Promise<T>): Promise<T> {
@@ -168,12 +194,31 @@ export class SettingsService {
     return pending;
   }
   /** Apply local configuration only when its State write starts; failed writes cannot leak into another queued snapshot. */
-  private persistSettings(change: () => void): Promise<void> {
+  private async persistSettings(change: () => void): Promise<() => void> {
     const { state } = this.options;
     let before: typeof state.settings | undefined; let applied: typeof state.settings | undefined;
     let beforeBackends: typeof state.backends = new Map(); let appliedBackends: typeof state.backends = new Map();
     let owners: { binding: LarkBinding; before?: string; applied?: string }[] = [];
-    return state.save({
+    const rollback = () => {
+      if (!before || !applied) return;
+      const keys = new Set([...Object.keys(before), ...Object.keys(applied)] as (keyof typeof state.settings)[]);
+      for (const key of keys) {
+        // Preserve an unrelated writer's newer value while reverting this transaction's changes.
+        if (before[key] === applied[key] || state.settings[key] !== applied[key]) continue;
+        if (before[key] === undefined) delete state.settings[key];
+        else Object.assign(state.settings, { [key]: before[key] });
+      }
+      for (const adapter of new Set([...beforeBackends.keys(), ...appliedBackends.keys()])) {
+        if (beforeBackends.get(adapter) === appliedBackends.get(adapter) || state.backends.get(adapter) !== appliedBackends.get(adapter)) continue;
+        const previous = beforeBackends.get(adapter);
+        if (previous) state.backends.set(adapter, previous); else state.backends.delete(adapter);
+      }
+      for (const owner of owners) {
+        if (owner.before === owner.applied || owner.binding.app_id !== owner.applied) continue;
+        if (owner.before === undefined) delete owner.binding.app_id; else owner.binding.app_id = owner.before;
+      }
+    };
+    await state.save({
       apply: () => {
         before = { ...state.settings }; beforeBackends = new Map(state.backends);
         owners = [...state.bindings.values()].map(binding => ({ binding, before: binding.app_id }));
@@ -182,27 +227,9 @@ export class SettingsService {
           applied = { ...state.settings }; appliedBackends = new Map(state.backends);
           for (const owner of owners) owner.applied = owner.binding.app_id;
         }
-      },
-      rollback: () => {
-        if (!before || !applied) return;
-        const keys = new Set([...Object.keys(before), ...Object.keys(applied)] as (keyof typeof state.settings)[]);
-        for (const key of keys) {
-          // Preserve an unrelated writer's newer value while reverting this transaction's changes.
-          if (before[key] === applied[key] || state.settings[key] !== applied[key]) continue;
-          if (before[key] === undefined) delete state.settings[key];
-          else Object.assign(state.settings, { [key]: before[key] });
-        }
-        for (const adapter of new Set([...beforeBackends.keys(), ...appliedBackends.keys()])) {
-          if (beforeBackends.get(adapter) === appliedBackends.get(adapter) || state.backends.get(adapter) !== appliedBackends.get(adapter)) continue;
-          const previous = beforeBackends.get(adapter);
-          if (previous) state.backends.set(adapter, previous); else state.backends.delete(adapter);
-        }
-        for (const owner of owners) {
-          if (owner.before === owner.applied || owner.binding.app_id !== owner.applied) continue;
-          if (owner.before === undefined) delete owner.binding.app_id; else owner.binding.app_id = owner.before;
-        }
-      },
+      }, rollback,
     });
+    return rollback;
   }
   private larkConnectionType(): LarkConnectionType {
     return this.source === 'settings' ? this.options.state.settings.lark_connection_type ?? 'bot' : 'bot';
@@ -274,7 +301,7 @@ export class SettingsService {
       await (this.options.verify ?? verifyCredentials)(result.credentials);
       signal.throwIfAborted();
       const { state, lark } = this.options;
-      await this.persistSettings(() => {
+      const rollback = await this.persistSettings(() => {
         signal.throwIfAborted();
         // An open_id belongs to an app. Never carry an old app's trusted recipient into the new one.
         this.scopeLarkBindings(result.credentials.appId);
@@ -284,20 +311,28 @@ export class SettingsService {
         state.settings.lark_connection_type = 'personal-app';
         if (result.recipient) state.settings.lark_recipient_open_id = result.recipient;
       });
-      await this.reload(true);
+      await this.reloadSettings(rollback, true);
       return this.larkSetup(result.credentials.appId, signal);
     });
   }
 
+  private async reloadSettings(rollback: () => void, forceReconnect = false): Promise<void> {
+    try { await this.reload(forceReconnect); }
+    catch (error) {
+      // A proven core conflict made no provider change. Unconfirmed outcomes must retain their candidate configuration.
+      if (error instanceof HttpError && error.cause instanceof CoreError && error.cause.code === 'conflict') await this.persistSettings(rollback);
+      throw error;
+    }
+  }
   /** Re-derives the active bot from its sources and moves the connection only if that changed it. */
   private async reload(forceReconnect = false, preserveProviders = false): Promise<void> {
     const { lark, state, mcpConfig } = this.options;
     const resolved = await resolveCredentials(this.env, state.settings, mcpConfig);
-    this.source = resolved?.source;
     const current = lark.credentials;
-    if (!forceReconnect && current?.appId === resolved?.credentials.appId && current?.appSecret === resolved?.credentials.appSecret) return;
+    if (!forceReconnect && current?.appId === resolved?.credentials.appId && current?.appSecret === resolved?.credentials.appSecret) { this.source = resolved?.source; return; }
     if (preserveProviders && lark.refreshCompatibilityCredentials) lark.refreshCompatibilityCredentials(resolved?.credentials);
     else await lark.configure(resolved?.credentials);
+    this.source = resolved?.source;
     if (current?.appId !== resolved?.credentials.appId || current?.appSecret !== resolved?.credentials.appSecret) { this.directoryRefresh++; await this.directoryStore.clear(); }
     this.report({ source: 'lark', status: 'lark_configured', reason: resolved ? resolved.credentials.appId : undefined });
   }
@@ -322,13 +357,13 @@ export class SettingsService {
       const credentials = { appId, appSecret: secret.trim() };
       try { await (this.options.verify ?? verifyCredentials)(credentials); }
       catch (error) { throw new HttpError(400, `Could not verify these credentials with Feishu: ${(error as Error).message}`); }
-      await this.persistSettings(() => {
+      const rollback = await this.persistSettings(() => {
         this.scopeLarkBindings(credentials.appId);
         if (lark.credentials?.appId !== credentials.appId) delete state.settings.lark_recipient_open_id;
         state.settings.lark_connection_type = connectionType ?? (state.settings.lark_app_id === credentials.appId ? state.settings.lark_connection_type ?? 'bot' : 'bot');
         state.settings.lark_app_id = credentials.appId; state.settings.lark_app_secret = credentials.appSecret;
       });
-      await this.reload(true);
+      await this.reloadSettings(rollback, true);
     });
   }
   /** Falls back to the MCP file, if any, and refuses rather than leaving saved credentials half removed if it is unreadable. */
@@ -338,12 +373,12 @@ export class SettingsService {
       const { state, mcpConfig } = this.options;
       const { lark_app_id: _id, lark_app_secret: _secret, ...rest } = state.settings;
       const fallback = await resolveCredentials(this.env, rest, mcpConfig);
-      await this.persistSettings(() => {
+      const rollback = await this.persistSettings(() => {
         this.scopeLarkBindings(fallback?.credentials.appId);
         if (fallback?.credentials.appId !== this.options.lark.credentials?.appId) delete state.settings.lark_recipient_open_id;
         delete state.settings.lark_app_id; delete state.settings.lark_app_secret; delete state.settings.lark_connection_type;
       });
-      await this.reload();
+      await this.reloadSettings(rollback);
     });
   }
   async larkRecipients(onProgress?: (page: LarkRecipientsPage) => void, signal?: AbortSignal, refresh = false): Promise<LarkRecipientsPage> {
@@ -406,8 +441,18 @@ export class SettingsService {
     return this.serialized(async () => {
       if (appId !== undefined && appId !== this.options.lark.credentials?.appId) throw new HttpError(409, 'Feishu credentials changed; reload the directory');
       if (!isOpenId(openId)) throw new HttpError(400, 'Expected a Feishu open_id (ou_…)');
-      await this.persistSettings(() => { this.options.state.settings.lark_recipient_open_id = openId; });
-      await this.options.lark.setRecipient?.(openId);
+      const { state, lark } = this.options;
+      let previous: string | undefined;
+      await this.persistSettings(() => { previous = state.settings.lark_recipient_open_id; state.settings.lark_recipient_open_id = openId; });
+      try { await lark.setRecipient?.(openId); }
+      catch (error) {
+        await this.persistSettings(() => {
+          if (state.settings.lark_recipient_open_id !== openId) return;
+          if (previous === undefined) delete state.settings.lark_recipient_open_id;
+          else state.settings.lark_recipient_open_id = previous;
+        });
+        throw error;
+      }
     });
   }
 
@@ -453,7 +498,7 @@ export class SettingsService {
       }
       const effective = file.lark?.app_id ? await resolveCredentials(this.env,
         { ...state.settings, lark_app_id: file.lark.app_id, lark_app_secret: file.lark.app_secret }, this.options.mcpConfig) : undefined;
-      await this.persistSettings(() => {
+      const rollback = await this.persistSettings(() => {
         if (file.lark?.app_id) {
           const nextAppId = effective?.credentials.appId;
           this.scopeLarkBindings(nextAppId);
@@ -471,7 +516,8 @@ export class SettingsService {
       for (const agent of file.agents ?? []) {
         try { await agents.set(agent, true); } catch (error) { summary.warnings.push(`${agent}: ${(error as Error).message}`); }
       }
-      await this.reload(false, Boolean(file.providers));
+      if (file.providers) await this.reload(false, true);
+      else await this.reloadSettings(rollback);
       if (file.lark?.app_id && this.source === 'environment') summary.warnings.push('LARK_APP_ID and LARK_APP_SECRET are set for this process and stay in use');
       this.report({ source: 'host', status: 'config_imported' });
       return summary;

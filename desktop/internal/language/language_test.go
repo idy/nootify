@@ -1,11 +1,15 @@
 package language
 
 import (
+	"context"
+	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestPreferencePersistenceAndValidation(t *testing.T) {
@@ -87,6 +91,25 @@ func TestDocumentStartBridgeContract(t *testing.T) {
 		}
 	}
 }
+func TestCapturedSeedUsesRegeneratedBridgeLocaleAfterPreferenceChanges(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("Node is required for the headless document-start JavaScript regression")
+	}
+	// Capture the preload once, as MyGo WindowOptions does. Each fresh synthetic
+	// document receives MyGo's current bridge locale before that same old preload.
+	seed := NewView(English, EN).SeedScript()
+	for _, view := range []View{NewView(Chinese, EN), NewView(System, ZH), NewView(System, EN), NewView(English, ZH)} {
+		want, _ := json.Marshal(view)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		out, err := exec.CommandContext(ctx, node, "-e", `const vm=require('node:vm');const page={window:{mygo:{locale:process.argv[2]}}};vm.runInNewContext(process.argv[1],page);process.stdout.write(JSON.stringify(page.window.__NOOTIFY_LANGUAGE__));`, seed, view.BridgeTag()).CombinedOutput()
+		cancel()
+		if err != nil || string(out) != string(want) {
+			t.Fatalf("captured seed with %s: %s, %v", view.BridgeTag(), out, err)
+		}
+	}
+}
+
 func TestResolveAndLiteralInterpolation(t *testing.T) {
 	for _, s := range []string{"zh", "ZH-sg", "zh-Hant-TW", "zh_HK"} {
 		if Resolve(s) != ZH {
