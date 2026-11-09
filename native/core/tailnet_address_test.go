@@ -42,7 +42,7 @@ func TestMappedTailnetDialUsesEmbeddedTunnel(t *testing.T) {
 		}
 		fields := data.(map[string]any)
 		requested = fields["address"].(string)
-		return core.completeDial(fields["request_id"].(string), bridge, "", fixtureTunnelToken)
+		return core.completeDial(fields["request_id"].(string), bridge, "", fixtureTunnelToken, localTunnelNetwork)
 	})
 	must(t, core.store.Update(func(state *State) error { state.Tailnet = true; return nil }))
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

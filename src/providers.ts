@@ -28,6 +28,7 @@ export interface RemoteSummary {
 export interface ProviderPage {
   node_id: string; providers: ProviderSummary[]; default_provider_id?: string; remote: RemoteSummary;
   network?: { status: 'retrying' | 'unconfirmed'; error: string };
+  compatibility?: { status: 'conflict'; error: string };
 }
 export interface ProvidersSource {
   page(): Promise<ProviderPage>;
@@ -36,8 +37,11 @@ export interface ProvidersSource {
   configureRemote(body: Record<string, unknown>): Promise<RemoteSummary & { node_id: string }>;
   remoteSecret(): Promise<{ token: string }>;
 }
-export interface CompatibilityConfig { credentials?: Credentials; recipient?: string }
-export type CompatibilitySync = (update: () => Promise<CompatibilityConfig>, preview?: () => Promise<CompatibilityConfig>) => Promise<void>;
+export interface CompatibilityConfig { credentials?: Credentials; recipient?: string; provider_id?: string }
+export type CompatibilityUpdate = (environment?: Credentials, recipient?: string) => Promise<CompatibilityConfig>;
+export type CompatibilitySync = (update: CompatibilityUpdate, preview?: () => Promise<CompatibilityConfig>) => Promise<void>;
+export type CompatibilityStartup = (reconcile: CompatibilityUpdate) => Promise<void>;
+const environmentProviderId = (appId: string): string => `environment-feishu-${createHash('sha256').update(appId).digest('hex').slice(0, 16)}`;
 interface SessionRef { node_id?: string; adapter: string; session_id: string; name?: string; metadata?: Record<string, unknown> }
 interface Delivery { delivery_id: string; session: SessionRef; message: ProviderMessageRef; content: unknown; text: string }
 interface Binding {
@@ -85,6 +89,9 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
   private discoveryTimer?: NodeJS.Timeout;
   private discovery?: Promise<void>;
   private compatibilitySync?: CompatibilitySync;
+  private compatibilityStartup?: CompatibilityStartup;
+  private compatibilityId = 'legacy-feishu';
+  private compatibilityProblem?: string;
   private recipientSync?: (openId: string) => Promise<void>;
   constructor(readonly state: State, private readonly sessions: SessionsService,
     credentials: Credentials | undefined, private readonly report: (record: Record<string, unknown>) => void = () => {},
@@ -93,7 +100,8 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
     this.core = core ?? new ProviderCore(join(state.directory, 'provider-core'), event => this.event(event), undefined, undefined,
       () => { this.connection = 'failed'; this.report({ source: 'providers', status: 'core_stopped' }); });
   }
-  status(): string { return this.connection; }
+  status(): string { return this.connection === 'ready' && this.compatibilityProblem ? 'configuration-conflict' : this.connection; }
+  compatibilityProviderId(): string { return this.compatibilityId; }
   channel(): { name: 'feishu'; configured: boolean; recipient?: string; groups: number } {
     const configured = this.cached?.providers.some(provider => provider.enabled) ?? false;
     return { name: 'feishu', configured, recipient: this.credentials ? this.state.settings.lark_recipient_open_id : undefined,
@@ -102,27 +110,36 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
   async start(): Promise<void> {
     try {
       await this.core.start();
-      if (this.credentials) {
+      const saved = this.state.settings;
+      const migrationCredentials = saved.lark_app_id && saved.lark_app_secret
+        ? { appId: saved.lark_app_id, appSecret: saved.lark_app_secret } : this.credentials;
+      if (migrationCredentials) {
         const bindings = [...this.state.bindings.values()].map(binding => {
           const registered = this.state.sessions.get(binding.session_id);
           const observed = [...this.state.sessionObservations.values()].filter(session => session.session_id === binding.session_id);
           const adapters = new Set(observed.map(session => session.adapter));
           const adapter = binding.adapter ?? registered?.adapter ?? (adapters.size === 1 ? observed[0].adapter : undefined);
-          const appId = binding.app_id ?? this.credentials!.appId;
+          const appId = binding.app_id ?? migrationCredentials.appId;
           const cursor = [...this.state.larkPollCursors.values()].find(cursor => cursor.app_id === appId && cursor.chat_id === binding.chat_id
             && cursor.container_type === 'chat' && cursor.container_id === binding.chat_id);
           return { ...binding, ...(adapter ? { adapter } : {}), session_name: binding.session_name ?? registered?.session_name,
             ...(cursor ? { history_cursor: cursor.through } : {}) };
         });
-        const senders = new Set(bindings.filter(binding => !binding.app_id || binding.app_id === this.credentials!.appId).map(binding => binding.sender_open_id));
-        const recipient = this.state.settings.lark_recipient_open_id ?? process.env.LARK_NOTIFY_OPEN_ID
+        const senders = new Set(bindings.filter(binding => !binding.app_id || binding.app_id === migrationCredentials.appId).map(binding => binding.sender_open_id));
+        const recipient = this.state.settings.lark_recipient_open_id ?? (migrationCredentials.appId === this.credentials?.appId ? process.env.LARK_NOTIFY_OPEN_ID : undefined)
           ?? (senders.size === 1 ? [...senders][0] : undefined);
-        await this.rpc('migration.import', { app_id: this.credentials.appId, app_secret: this.credentials.appSecret,
+        await this.rpc('migration.import', { app_id: migrationCredentials.appId, app_secret: migrationCredentials.appSecret,
           recipient_open_id: recipient, legacy_host: hostname(), bindings });
       }
-      if (this.compatibilitySync) {
-        const read = () => this.compatibilityConfig();
-        await this.compatibilitySync(read, read).catch(error => {
+      if (this.compatibilityStartup) {
+        await this.compatibilityStartup((environment, recipient) => this.reconcileStartupCredentials(environment, recipient)).catch(error => {
+          if (coreErrorCode(error) === 'committed_not_mirrored') return;
+          if (!provenCoreRejection(error) && !(error instanceof HttpError && error.status === 409 && !coreErrorCode(error))) throw error;
+          this.compatibilityProblem = 'Environment Feishu credentials could not be applied safely; select or create a provider for that App ID';
+          this.report({ source: 'providers', status: 'environment_configuration_conflict', reason: this.compatibilityProblem });
+        });
+      } else if (this.compatibilitySync) {
+        await this.compatibilitySync(() => this.compatibilityConfig()).catch(error => {
           if (coreErrorCode(error) !== 'committed_not_mirrored') throw error;
         });
       }
@@ -209,7 +226,8 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
   async page(): Promise<ProviderPage> {
     const [page] = await Promise.all([this.rpc<ProviderPage>('status'), this.listBindings()]);
     this.cached = page;
-    return this.networkFailure ? { ...this.cached, network: this.networkFailure } : this.cached;
+    return { ...this.cached, ...(this.networkFailure ? { network: this.networkFailure } : {}),
+      ...(this.compatibilityProblem ? { compatibility: { status: 'conflict' as const, error: this.compatibilityProblem } } : {}) };
   }
   private async commit(method: string, params: Record<string, unknown>): Promise<HttpError | undefined> {
     try { await this.rpc(method, params); }
@@ -221,17 +239,17 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
     if (body.action === 'save') {
       provider = object(body.provider);
       const config = provider;
-      mutate = () => this.commit('provider.save', config); legacyChanged = provider.id === 'legacy-feishu';
+      mutate = () => this.commit('provider.save', config); legacyChanged = provider.id === this.compatibilityId;
     } else if (body.action === 'delete' || body.action === 'default') {
       const id = identifier(body.id, 'id'); const method = `provider.${body.action}`;
-      mutate = () => this.commit(method, { id }); legacyChanged = body.action === 'delete' && id === 'legacy-feishu';
+      mutate = () => this.commit(method, { id }); legacyChanged = body.action === 'delete' && id === this.compatibilityId;
     } else throw new HttpError(400, 'Expected a provider action: save, delete or default');
     if (legacyChanged) {
       let previous: Record<string, unknown> | undefined;
       let candidate: Record<string, unknown> | undefined; let prepared = false;
       const prepare = async () => {
         if (!prepared) {
-          previous = await this.legacyConfig();
+          previous = await this.compatibilityProviderConfig();
           candidate = provider ? { ...provider, enabled: provider.enabled ?? true,
             app_secret: typeof provider.app_secret === 'string' && provider.app_secret.trim() ? provider.app_secret : previous?.app_secret } : undefined;
           prepared = true;
@@ -254,16 +272,53 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
   }
   /** Settings serializes legacy CRUD with account edits, persistence and directory invalidation. */
   setCompatibilitySync(sync: CompatibilitySync): void { this.compatibilitySync = sync; }
-  private async legacyConfig(): Promise<Record<string, unknown> | undefined> {
+  setCompatibilityStartup(startup: CompatibilityStartup): void { this.compatibilityStartup = startup; }
+  private async reconcileStartupCredentials(environment?: Credentials, recipient?: string): Promise<CompatibilityConfig> {
+    const config = await this.exportConfig();
+    const providers = config.providers as Record<string, unknown>[];
+    const matches = (provider: Record<string, unknown>, appId?: string) => provider.type === 'feishu' && provider.app_id === appId;
+    if (!environment) {
+      const matching = providers.filter(provider => matches(provider, this.credentials?.appId));
+      const selected = matching.find(provider => provider.enabled === true) ?? matching.find(provider => provider.id === this.compatibilityId)
+        ?? matching[0] ?? providers.find(provider => provider.id === this.compatibilityId && provider.type === 'feishu');
+      if (selected) this.compatibilityId = String(selected.id);
+      return this.compatibilityFrom(selected);
+    }
+    const matching = providers.filter(provider => matches(provider, environment.appId));
+    let selected = matching.find(provider => provider.enabled === true) ?? matching.find(provider => provider.id === this.compatibilityId) ?? matching[0];
+    if (!selected) {
+      const id = environmentProviderId(environment.appId);
+      if (providers.some(provider => provider.id === id)) throw new HttpError(409, 'The environment provider ID belongs to another provider; create a provider for the environment App ID');
+      selected = { id, type: 'feishu', name: 'Feishu (environment)', enabled: true, app_id: environment.appId };
+    }
+    const desired = { ...selected, app_secret: environment.appSecret,
+      ...(recipient ? { recipient_open_id: recipient } : {}) };
+    if (selected.app_secret !== environment.appSecret || recipient && selected.recipient_open_id !== recipient) {
+      const warning = await this.commit('provider.save', desired);
+      if (warning) this.report({ source: 'providers', status: 'environment_configuration_committed_not_durable' });
+    }
+    this.compatibilityId = String(selected.id);
+    const priorApp = this.state.settings.lark_app_id;
+    const managedDefault = !config.default_provider_id || config.default_provider_id === 'legacy-feishu'
+      || priorApp && config.default_provider_id === environmentProviderId(priorApp);
+    if (managedDefault && config.default_provider_id !== this.compatibilityId) {
+      const warning = await this.commit('provider.default', { id: this.compatibilityId });
+      if (warning) this.report({ source: 'providers', status: 'environment_default_committed_not_durable' });
+    }
+    this.compatibilityProblem = undefined;
+    return this.compatibilityConfig();
+  }
+  private async compatibilityProviderConfig(): Promise<Record<string, unknown> | undefined> {
     // Public summaries omit secrets, and masked saves retain them inside the core.
     const config = await this.exportConfig();
-    return (config.providers as Record<string, unknown>[]).find(provider => provider.id === 'legacy-feishu' && provider.type === 'feishu');
+    return (config.providers as Record<string, unknown>[]).find(provider => provider.id === this.compatibilityId && provider.type === 'feishu');
   }
   private compatibilityFrom(legacy?: Record<string, unknown>): CompatibilityConfig {
     return { credentials: legacy && legacy.type === 'feishu' ? { appId: String(legacy.app_id), appSecret: String(legacy.app_secret) } : undefined,
-      recipient: typeof legacy?.recipient_open_id === 'string' ? legacy.recipient_open_id : undefined };
+      recipient: typeof legacy?.recipient_open_id === 'string' ? legacy.recipient_open_id : undefined,
+      provider_id: typeof legacy?.id === 'string' ? legacy.id : undefined };
   }
-  private async compatibilityConfig(): Promise<CompatibilityConfig> { return this.compatibilityFrom(await this.legacyConfig()); }
+  private async compatibilityConfig(): Promise<CompatibilityConfig> { return this.compatibilityFrom(await this.compatibilityProviderConfig()); }
   async remote(): Promise<RemoteSummary & { node_id: string }> {
     const page = await this.page(); return { ...page.remote, node_id: page.node_id, ...(page.network ? { network: page.network } : {}) };
   }
@@ -278,15 +333,16 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
   /** Compatibility for old single-bot registration and import callers. New configuration uses provider instances. */
   async configure(credentials?: Credentials): Promise<void> {
     let warning: HttpError | undefined;
-    if (credentials) warning = await this.commit('provider.save', { id: 'legacy-feishu', type: 'feishu', name: 'Feishu', enabled: true,
+    if (credentials) warning = await this.commit('provider.save', { id: this.compatibilityId, type: 'feishu', name: 'Feishu', enabled: true,
       app_id: credentials.appId, app_secret: credentials.appSecret, recipient_open_id: this.state.settings.lark_recipient_open_id });
-    else if ((await this.page()).providers.some(provider => provider.id === 'legacy-feishu')) warning = await this.commit('provider.delete', { id: 'legacy-feishu' });
+    else if ((await this.page()).providers.some(provider => provider.id === this.compatibilityId)) warning = await this.commit('provider.delete', { id: this.compatibilityId });
     this.refreshCompatibilityCredentials(credentials);
     if (warning) throw warning;
     await this.page().catch(error => this.report({ source: 'providers', status: 'configuration_status_unavailable', error: (error as Error).message }));
   }
   /** Refresh legacy HTTP/directory clients without changing imported provider instances. */
-  refreshCompatibilityCredentials(credentials?: Credentials): void {
+  refreshCompatibilityCredentials(credentials?: Credentials, providerId?: string): void {
+    if (providerId) this.compatibilityId = providerId;
     if (this.credentials?.appId === credentials?.appId && this.credentials?.appSecret === credentials?.appSecret) return;
     this.credentials = credentials; this.api = credentials ? createLarkApi(credentials) : undefined;
   }
@@ -295,8 +351,8 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
     let page: ProviderPage;
     try { page = await this.page(); }
     catch { throw publicFailure(new CoreError('unavailable', 'Cannot inspect the Feishu provider before recipient submission')); }
-    const legacy = page.providers.find(provider => provider.id === 'legacy-feishu' && provider.type === 'feishu');
-    if (!legacy) throw new HttpError(404, 'No migrated Feishu provider; configure the recipient in Providers');
+    const legacy = page.providers.find(provider => provider.id === this.compatibilityId && provider.type === 'feishu');
+    if (!legacy) throw new HttpError(404, 'No active compatibility Feishu provider; configure the recipient in Providers');
     let warning: unknown;
     try { await this.rpc('provider.save', { ...legacy, recipient_open_id: open_id }); }
     catch (error) { if (coreErrorCode(error) !== 'committed_not_durable') throw error; warning = error; }
@@ -412,7 +468,7 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
     try {
       const address = text(data.address, 'address');
       const tunnel = await this.tunnel(address);
-      await this.rpc('dial.complete', { request_id, address: tunnel.address, token: tunnel.token });
+      await this.rpc('dial.complete', { request_id, network: tunnel.network, address: tunnel.address, token: tunnel.token });
     } catch { await this.rpc('dial.complete', { request_id, error: 'Embedded Tailscale connection unavailable' }).catch(() => {}); }
   }
   private async deliver(delivery: Delivery): Promise<void> {

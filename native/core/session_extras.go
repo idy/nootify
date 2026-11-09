@@ -225,7 +225,10 @@ func (p *feishuProvider) Bind(ctx context.Context, s Session, chat, sender strin
 	// Routing authority is retained transactionally in the binding. Existing
 	// descriptions and announcements remain untouched, including if persistence
 	// later fails or the provider/session changes while adoption is in flight.
-	b := Binding{ProviderID: p.config.ID, Session: validated, ChatID: chat, SenderID: sender, PreserveDescription: true}
+	p.mu.Lock()
+	start := max(int64(1), p.sourceFloor-sourceTimeOverlap)
+	p.mu.Unlock()
+	b := Binding{ProviderID: p.config.ID, Session: validated, ChatID: chat, SenderID: sender, PreserveDescription: true, HistoryStart: start}
 	retainLegacyIdentity(&b)
 	return b, nil
 }

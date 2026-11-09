@@ -57,6 +57,15 @@ func NewCore(parent context.Context, s *Store, emit func(string, any) error) (*C
 				record.Event = e
 				d.Events[id] = record
 			}
+			if e.ActivityProof == "" && e.Message.OriginNodeID == d.NodeID && e.ChatID != "" {
+				signActivity(d, &e)
+				record.Event = e
+				d.Events[id] = record
+				remember(d, e.Message, "")
+				r := d.References[e.Message.key()]
+				r.ActivityProof = e.ActivityProof
+				d.References[e.Message.key()] = r
+			}
 			if polledInbox(e.Session.Adapter) && (record.Outcome == "local" || record.Outcome == "broadcast") && d.References[e.Message.key()].InboxState == "" {
 				remember(d, e.Message, "")
 				holdInbox(d, e, "")
@@ -541,7 +550,15 @@ func (c *Core) Ingest(ctx context.Context, e Event, route string) error {
 	var delivery *Delivery
 	var wake []string
 	err = c.store.Update(func(d *State) error {
+		if e.Message.OriginNodeID == d.NodeID {
+			signActivity(d, &e)
+		}
 		remember(d, e.Message, route)
+		if e.ActivityProof != "" {
+			r := d.References[e.Message.key()]
+			r.ActivityProof = e.ActivityProof
+			d.References[e.Message.key()] = r
+		}
 		holdInbox(d, e, route)
 		if record, ok := d.Events[e.ID]; ok && record.Outcome != "loop_suppressed" {
 			if binding, bound := d.Bindings[record.Event.Session.key()]; bound && binding.Deleted {

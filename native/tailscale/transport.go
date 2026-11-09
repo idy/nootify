@@ -43,6 +43,7 @@ const (
 type tunnelResult struct {
 	ID      string `json:"id"`
 	Address string `json:"address"`
+	Network string `json:"network"`
 	Token   string `json:"token"` // capability passed only over private stdio IPC
 }
 
@@ -217,9 +218,7 @@ type tcpTransport struct {
 func newTCPTransport(ctx context.Context, dial func(context.Context, string, string) (net.Conn, error), listenPort func(int) (net.Listener, error)) *tcpTransport {
 	return &tcpTransport{
 		ctx: ctx, dial: dial, listenPort: listenPort,
-		listen: func(ctx context.Context) (net.Listener, error) {
-			return (&net.ListenConfig{}).Listen(ctx, "tcp4", "127.0.0.1:0")
-		},
+		listen:      listenLocalTunnel,
 		retryWait:   waitPublicationRetry,
 		sharedSlots: make(chan struct{}, sharedBurstConnections),
 		tunnels:     make(map[string]*tcpBridge), publications: make(map[int]*tcpBridge),
@@ -344,7 +343,7 @@ func (m *tcpTransport) dispatch(ctx context.Context, req request) response {
 		if err != nil {
 			return failure(req.ID, err.Error())
 		}
-		return response{ID: req.ID, Result: tunnelResult{ID: b.id, Address: listener.Addr().String(), Token: b.token}}
+		return response{ID: req.ID, Result: tunnelResult{ID: b.id, Address: listener.Addr().String(), Network: localTunnelNetwork, Token: b.token}}
 	case "publish":
 		if !publicationPort(req.Port) {
 			return failure(req.ID, "invalid_port")

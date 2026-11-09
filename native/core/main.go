@@ -40,6 +40,7 @@ func (c *Core) Handle(ctx context.Context, method string, raw json.RawMessage, l
 		Error      string         `json:"error"`
 		Address    string         `json:"address"`
 		Token      string         `json:"token"`
+		Network    string         `json:"network"`
 		Event      Event          `json:"event"`
 		Tailnet    bool           `json:"tailnet_enabled"`
 		Automatic  bool           `json:"automatic"`
@@ -148,7 +149,7 @@ func (c *Core) Handle(ctx context.Context, method string, raw json.RawMessage, l
 		canceled, err := c.CanceledInbox(raw)
 		return map[string]any{"reconciled": true, "canceled": canceled}, err
 	case "dial.complete":
-		return map[string]any{"completed": true}, c.completeDial(p.RequestID, p.Address, p.Error, p.Token)
+		return map[string]any{"completed": true}, c.completeDial(p.RequestID, p.Address, p.Error, p.Token, p.Network)
 	case "transport.configure":
 		c.ops.Lock()
 		defer c.ops.Unlock()

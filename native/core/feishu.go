@@ -43,6 +43,7 @@ type feishuProvider struct {
 	historyCancel     context.CancelFunc
 	historyWG         sync.WaitGroup
 	coverage          map[string]*feishuCoverage
+	sourceFloor       int64
 }
 
 func newFeishu(c *Core, p ProviderConfig) *feishuProvider {
@@ -99,30 +100,42 @@ func (p *feishuProvider) Close() error {
 	return nil
 }
 func (p *feishuProvider) api(ctx context.Context, method, path string, body any, out any) error {
+	_, err := p.apiSourceTime(ctx, method, path, body, out)
+	return err
+}
+
+func (p *feishuProvider) apiSourceTime(ctx context.Context, method, path string, body any, out any) (int64, error) {
 	u, err := url.Parse(path)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	resp, err := p.client.Do(ctx, &larkcore.ApiReq{HttpMethod: method, ApiPath: u.Path, QueryParams: larkcore.QueryParams(u.Query()), Body: body, SupportedAccessTokenTypes: []larkcore.AccessTokenType{larkcore.AccessTokenTypeTenant}})
 	if err != nil {
-		return fault("unavailable", "Feishu request failed")
+		return 0, fault("unavailable", "Feishu request failed")
 	}
 	var envelope struct {
 		Code int             `json:"code"`
 		Data json.RawMessage `json:"data"`
 	}
 	if err = json.Unmarshal(resp.RawBody, &envelope); err != nil {
-		return fault("unavailable", "invalid Feishu response")
+		return 0, fault("unavailable", "invalid Feishu response")
 	}
 	if resp.StatusCode >= 300 || envelope.Code != 0 {
-		return &feishuAPIError{Code: envelope.Code, HTTPStatus: resp.StatusCode}
+		return 0, &feishuAPIError{Code: envelope.Code, HTTPStatus: resp.StatusCode}
+	}
+	var source int64
+	if date, err := http.ParseTime(resp.Header.Get("Date")); err == nil {
+		source = date.UnixMilli()
+		p.mu.Lock()
+		p.sourceFloor = source
+		p.mu.Unlock()
 	}
 	if out != nil && len(envelope.Data) > 0 {
-		return json.Unmarshal(envelope.Data, out)
+		return source, json.Unmarshal(envelope.Data, out)
 	}
-	return nil
+	return source, nil
 }
 func sessionDescription(s Session) string {
 	b, _ := json.Marshal(s)
@@ -166,13 +179,17 @@ func (p *feishuProvider) Ensure(ctx context.Context, s Session) (Binding, error)
 	var result struct {
 		ChatID string `json:"chat_id"`
 	}
-	started := time.Now().UnixMilli() - 1 // Include input sent during invitation/create.
-	err := p.api(ctx, "POST", "/open-apis/im/v1/chats?user_id_type=open_id&uuid="+hex.EncodeToString(hash[:16]), map[string]any{"name": name, "description": description, "chat_mode": "group", "chat_type": "private", "user_id_list": []string{p.config.Recipient}}, &result)
+	startedAt := time.Now() // Monotonic round-trip duration, not a wall-clock boundary.
+	source, err := p.apiSourceTime(ctx, "POST", "/open-apis/im/v1/chats?user_id_type=open_id&uuid="+hex.EncodeToString(hash[:16]), map[string]any{"name": name, "description": description, "chat_mode": "group", "chat_type": "private", "user_id_list": []string{p.config.Recipient}}, &result)
 	if err != nil {
 		return Binding{}, err
 	}
 	if result.ChatID == "" {
 		return Binding{}, fault("unavailable", "Feishu did not return a chat ID")
+	}
+	started := int64(1)
+	if source > 0 {
+		started = max(int64(1), source-time.Since(startedAt).Milliseconds()-sourceTimeOverlap)
 	}
 	return Binding{Session: s, ProviderID: p.config.ID, ChatID: result.ChatID, SenderID: p.config.Recipient, HistoryStart: started}, nil
 }
@@ -416,19 +433,41 @@ func (p *feishuProvider) receive(ctx context.Context, in *im.P2MessageReceiveV1)
 	if !found {
 		return nil
 	}
-	if legacyBinding(binding) {
-		if err := p.ValidateBinding(ctx, binding); err != nil {
-			return err
-		}
-	}
 	session := binding.Session
-	created := time.Now().UnixMilli()
+	created := int64(0)
 	if raw := val(m.CreateTime); raw != "" {
 		parsed, err := strconv.ParseInt(raw, 10, 64)
 		if err != nil || parsed <= 0 {
 			return nil
 		}
 		created = parsed
+	}
+	if !historyReplay(ctx) {
+		// A failure still leaves outstanding finite recovery work. Its worker
+		// belongs to the provider lifetime, not this failed callback's context.
+		defer func() {
+			// Include the source clock's precision overlap in the query. This
+			// lookahead is never itself coverage: the API Date/observed source
+			// timestamps cap the boundary actually persisted after the scan.
+			end := created + 2*sourceTimeOverlap
+			if created == 0 {
+				end = 0
+			}
+			if end == 0 {
+				p.mu.Lock()
+				end = p.sourceFloor
+				p.mu.Unlock()
+			}
+			if end == 0 {
+				end = time.Now().UnixMilli()
+			} // Query hint only; never a checkpoint.
+			p.scheduleCoverage(binding, end)
+		}()
+	}
+	if legacyBinding(binding) {
+		if err := p.ValidateBinding(ctx, binding); err != nil {
+			return err
+		}
 	}
 	ref := MessageRef{OriginNodeID: p.core.node(), ProviderID: p.config.ID, MessageID: val(m.MessageId), ThreadID: val(m.ThreadId)}
 	hash := sha256.Sum256([]byte("feishu:" + p.config.AppID + ":" + val(m.MessageId)))
@@ -441,11 +480,6 @@ func (p *feishuProvider) receive(ctx context.Context, in *im.P2MessageReceiveV1)
 	err = receive(ctx, Event{ID: hex.EncodeToString(hash[:]), Session: session, Message: ref, Content: content, Hops: 16, SenderID: val(sender.SenderId.OpenId), ChatID: val(m.ChatId), SourceCreatedAt: created})
 	if err != nil {
 		return err
-	}
-	// Live delivery proves only this message. Coalesce a finite history scan
-	// for this chat before advancing its coverage boundary.
-	if !historyReplay(ctx) {
-		p.scheduleCoverage(binding, max(created, time.Now().UnixMilli()))
 	}
 	return nil
 }

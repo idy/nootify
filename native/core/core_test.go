@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -642,9 +641,8 @@ func TestStdioRemainsConcurrentDuringTunnelDial(t *testing.T) {
 	c := testCore(t, nil)
 	p := installFake(t, c, "wait")
 	must(t, c.store.Update(func(d *State) error { d.Tailnet = true; delete(d.Providers, "wait"); return nil }))
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	must(t, err)
-	defer listener.Close()
+	listener := testPrivateTunnelListener(t)
+	var err error
 	p.ensure = func(ctx context.Context, s Session) (Binding, error) {
 		conn, err := c.dial(ctx, "100.100.100.100:9418")
 		if err != nil {
@@ -715,7 +713,7 @@ func TestStdioRemainsConcurrentDuringTunnelDial(t *testing.T) {
 		}
 		handshake <- err
 	}()
-	complete, _ := json.Marshal(map[string]any{"id": 2, "method": "dial.complete", "params": map[string]any{"request_id": event.Data.RequestID, "address": listener.Addr().String(), "token": token}})
+	complete, _ := json.Marshal(map[string]any{"id": 2, "method": "dial.complete", "params": map[string]any{"request_id": event.Data.RequestID, "address": listener.Addr().String(), "token": token, "network": localTunnelNetwork}})
 	_, err = fmt.Fprintln(inWriter, string(complete))
 	must(t, err)
 	seen := map[int64]bool{}

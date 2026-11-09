@@ -1,5 +1,5 @@
 #requires -Version 5.1
-# Compile and execute only a dummy payload, using the exact production NSIS hooks.
+# Headless dummy payload/isolated receipt probes using exact production NSIS macros.
 [CmdletBinding()]
 param()
 $ErrorActionPreference = 'Stop'
@@ -20,6 +20,8 @@ $startupVariables = @('NODE_OPTIONS', 'NODE_PATH', 'NODE_EXTRA_CA_CERTS', 'NODE_
 $phase = 'preflight'
 $failure = $null
 $results = New-Object 'Collections.Generic.List[object]'
+$receiptSubkey = 'Software\Nootify\InstallerReceiptProbe.' + [Guid]::NewGuid().ToString('N')
+$receiptKey = 'HKCU:\' + $receiptSubkey
 
 function Quote-Argument([string]$Value) {
     return '"' + ($Value -replace '(\\*)"', '$1$1\"' -replace '(\\+)$', '$1$1') + '"'
@@ -150,10 +152,50 @@ if (Object.values(clean).some(value => !value) || !safeWorkingDirectory) { proce
         $variant = $(if ($diagnostics) { 'diagnostic' } else { 'production' })
         $phase = "compile $variant probe"
         $installer = Join-Path $fixture "$variant-hook-probe.exe"
-        $arguments = '/V4 ' + (Quote-Argument ("/DPROBE_OUTPUT=$installer")) +
+        $arguments = '/V4 ' + (Quote-Argument ("/DPROBE_OUTPUT=$installer")) + ' ' + (Quote-Argument ("/DPROBE_RECEIPT_KEY=$receiptSubkey")) +
             $(if (!$diagnostics) { ' /DPROBE_NO_DIAGNOSTICS' } else { '' }) + ' ' +
             (Quote-Argument (Join-Path $PSScriptRoot 'windows-installer-hook-smoke.nsi'))
         Run-Native $compiler $arguments "compile-$variant" @{ NOOTIFY_INSTALLER_HOOK_DIAGNOSTICS = '0' }
+        if ($diagnostics) {
+            # Exact production receipt macros, in a silent probe with a fresh
+            # isolated HKCU key. No installer payload/service action can run.
+            $usedDrives = @([IO.Directory]::GetLogicalDrives() | ForEach-Object { $_.Substring(0, 1).ToUpperInvariant() })
+            $unusedDrive = @([char[]]'ZYXWVUTSRQPONMLKJIHGFEDCBA' | Where-Object { [string]$_ -notin $usedDrives })[0]
+            $unavailable = [string]$unusedDrive + ':\Nootify pending receipt probe'
+            $validToken = [Guid]::NewGuid().ToString('B')
+            $receiptCases = @(
+                @{ name = 'target-only'; target = $unavailable; mode = 'clear'; exit = 0 },
+                @{ name = 'token-only'; token = $validToken; mode = 'clear'; exit = 0 },
+                @{ name = 'empty-token'; target = $unavailable; token = ''; mode = 'clear'; exit = 0 },
+                @{ name = 'invalid-type'; target = $unavailable; token = 42; type = 'DWord'; mode = 'blocked'; exit = 1 },
+                @{ name = 'invalid-pair'; target = $unavailable; token = 'malformed-token'; mode = 'blocked'; exit = 1 },
+                @{ name = 'valid-other-unavailable'; target = $unavailable; token = $validToken; mode = 'blocked'; exit = 1 },
+                @{ name = 'valid-matching-unavailable'; target = $unavailable; token = $validToken; mode = 'matching'; exit = 0 }
+            )
+            foreach ($case in $receiptCases) {
+                $phase = 'receipt-' + $case.name
+                if (Test-Path -LiteralPath $receiptKey) { throw 'Refusing a pre-existing receipt probe key' }
+                try {
+                    $null = New-Item -Path $receiptKey
+                    if ($case.ContainsKey('target')) { $null = New-ItemProperty -LiteralPath $receiptKey -Name Target -Value $case.target -PropertyType String }
+                    if ($case.ContainsKey('token')) {
+                        $type = $(if ($case.ContainsKey('type')) { $case.type } else { 'String' })
+                        $null = New-ItemProperty -LiteralPath $receiptKey -Name Token -Value $case.token -PropertyType $type
+                    }
+                    $before = Get-ItemProperty -LiteralPath $receiptKey | ConvertTo-Json -Compress
+                    Run-Native $installer ('/S /RECEIPT=' + $case.mode) $phase @{} $case.exit
+                    if ($case.mode -eq 'clear') {
+                        if (Test-Path -LiteralPath $receiptKey) { throw 'Incomplete pending receipt survived the destination check' }
+                    } elseif (!(Test-Path -LiteralPath $receiptKey) -or (Get-ItemProperty -LiteralPath $receiptKey | ConvertTo-Json -Compress) -cne $before) {
+                        throw 'Complete or unreadable pending authority was changed'
+                    }
+                    if (Test-Path -LiteralPath (Join-Path $fixture 'payload')) { throw 'Receipt probe unexpectedly ran payload hooks' }
+                    $results.Add(@{ case = $phase; result = 'passed' })
+                } finally {
+                    if (Test-Path -LiteralPath $receiptKey) { Remove-Item -LiteralPath $receiptKey -Recurse -Force }
+                }
+            }
+        }
         foreach ($poisoned in @($false, $true)) {
             foreach ($mode in @(0, 1)) {
                 $label = $variant + '-' + $(if ($poisoned) { 'poisoned' } else { 'clean' }) + "-mode-$mode"
@@ -215,4 +257,4 @@ if (Object.values(clean).some(value => !value) || !safeWorkingDirectory) { proce
         ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $outputDir 'diagnostics.json') -Encoding UTF8
 }
 if ($failure) { throw "Windows installer hook probe failed: $failure. See .cache/windows-installer-hook-smoke native traces." }
-Write-Host 'Native Windows installer/uninstaller hook probe passed all eight production/diagnostic environment/update cases.'
+Write-Host 'Headless Windows hook and pending-receipt probes passed all environment/update/publication cases.'

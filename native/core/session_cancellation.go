@@ -156,9 +156,22 @@ func (c *Core) EventActive(ctx context.Context, e Event) (bool, error) {
 	if e.Message.OriginNodeID == d.NodeID {
 		r, ok := d.Events[e.ID]
 		if !ok {
-			return false, nil
+			proof := e.ActivityProof
+			if proof == "" {
+				proof = d.References[e.Message.key()].ActivityProof
+			}
+			if proof == "" {
+				return false, fault("unavailable", "source activity proof is not retained; absence does not prove cancellation")
+			}
+			if !validActivity(d, e, proof) {
+				return false, fault("permission_denied", "source activity proof does not match this event")
+			}
+			if !activeResource(d, e) {
+				return false, fault("unavailable", "source resource activity cannot be confirmed")
+			}
+			return true, nil
 		}
-		if r.Event.Session.key() != e.Session.key() || r.Event.Message.key() != e.Message.key() || r.Event.ChatID != e.ChatID || r.Event.Message.ThreadID != e.Message.ThreadID {
+		if string(activityIdentity(r.Event)) != string(activityIdentity(e)) {
 			return false, fault("conflict", "source event identity differs")
 		}
 		return r.Outcome != "deleted", nil

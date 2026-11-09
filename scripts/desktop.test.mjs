@@ -166,6 +166,23 @@ test('fresh transaction recovery requires a pending receipt before any prepare o
   assert.match(installer, /--fresh-token "\$FreshToken"/);
 });
 
+test('incomplete receipt cleanup precedes destination lock and shares headless native probe logic', async () => {
+  const installer = await readFile(join(root, 'windows/installer.nsi'), 'utf8');
+  const receipt = await readFile(join(root, 'windows/pending-receipt.nsh'), 'utf8');
+  const probe = await readFile(join(root, 'scripts/windows-installer-hook-smoke.nsi'), 'utf8');
+  const smoke = await readFile(join(root, 'scripts/windows-installer-hook-smoke.ps1'), 'utf8');
+  const start = installer.indexOf('Function NootifyCheckRegisteredDestination');
+  const check = installer.slice(start, installer.indexOf('FunctionEnd', start));
+  assert.ok(check.indexOf('NootifyReadPendingReceipt') < check.indexOf('NootifyCheckPendingDestination'));
+  assert.ok(check.indexOf('NootifyCheckPendingDestination') < check.indexOf('$RegisteredLocation != ""'));
+  assert.match(receipt, /\$PendingLocation == ""\s+\$\{OrIf\} \$FreshToken == ""[\s\S]*RegGetValueW[\s\S]*\$0 != 2[\s\S]*\$1 != 2[\s\S]*DeleteRegKey/);
+  assert.doesNotMatch(receipt, /GetFileAttributes|FileExists|RMDir|FileOpen|service-/);
+  for (const macro of ['NootifyReadPendingReceipt', 'NootifyCheckPendingDestination']) assert.ok(probe.includes(`!insertmacro ${macro}`));
+  for (const name of ['target-only', 'token-only', 'empty-token', 'invalid-type', 'invalid-pair', 'valid-other-unavailable', 'valid-matching-unavailable']) assert.ok(smoke.includes(`name = '${name}'`));
+  assert.match(probe, /GetOptions.*\/RECEIPT=/);
+  assert.match(smoke, /Complete or unreadable pending authority was changed/);
+});
+
 test('Windows payload manifest verifies exact extracted bytes and excludes generated uninstaller', async t => {
   const work = await temporary(t);
   await put(join(work, 'Nootify.exe'), 'desktop');

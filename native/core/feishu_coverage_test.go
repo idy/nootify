@@ -101,7 +101,7 @@ func TestHealthyLiveCoverageAllowsCompletedSourceHistoryCompaction(t *testing.T)
 	clock.Store(now.UnixNano())
 	c.store.clock = func() time.Time { return time.Unix(0, clock.Load()) }
 	cfg := ProviderConfig{ID: "bot", Type: "feishu", AppID: "healthy-coverage-app", AppSecret: "synthetic", Recipient: "trusted"}
-	created := now.UnixMilli()
+	created := now.Add(-3 * time.Second).UnixMilli()
 	var requests atomic.Int32
 	p := privateFeishu(t, c, cfg, func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)

@@ -109,11 +109,38 @@ func authenticateTunnelClient(t *testing.T, conn net.Conn, token string) {
 	}
 }
 
-func dialTunnel(t *testing.T, result tunnelResult) *net.TCPConn {
+type halfCloseConn interface {
+	net.Conn
+	CloseWrite() error
+}
+
+func dialTunnel(t *testing.T, result tunnelResult) halfCloseConn {
 	t.Helper()
-	conn := dialLoopback(t, result.Address)
-	authenticateTunnelClient(t, conn, result.Token)
-	return conn
+	if result.Network != localTunnelNetwork {
+		t.Fatal("tunnel did not use the private OS transport")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	conn, err := dialLocalTunnelFixture(ctx, result.Address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	conn.SetDeadline(time.Now().Add(3 * time.Second))
+	half, ok := conn.(halfCloseConn)
+	if !ok {
+		t.Fatal("private tunnel connection lost half-close support")
+	}
+	authenticateTunnelClient(t, half, result.Token)
+	return half
+}
+
+func dialRawTransport(t *testing.T, address string, reply response) halfCloseConn {
+	t.Helper()
+	if result, ok := reply.Result.(tunnelResult); ok {
+		return dialTunnel(t, result)
+	}
+	return dialLoopback(t, address)
 }
 
 func assertSocketClosed(t *testing.T, conn net.Conn) {
@@ -128,10 +155,18 @@ func assertSocketClosed(t *testing.T, conn net.Conn) {
 
 func assertNotListening(t *testing.T, address string) {
 	t.Helper()
-	conn, err := net.DialTimeout("tcp", address, time.Second)
+	var conn net.Conn
+	var err error
+	if _, _, splitErr := net.SplitHostPort(address); splitErr == nil {
+		conn, err = net.DialTimeout("tcp", address, time.Second)
+	} else {
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		conn, err = dialLocalTunnelFixture(ctx, address)
+	}
 	if err == nil {
 		conn.Close()
-		t.Fatalf("listener still reachable at %s", address)
+		t.Fatal("listener still reachable after shutdown")
 	}
 }
 
@@ -176,7 +211,7 @@ func TestRawTransportsPreserveBytesAndHalfClose(t *testing.T) {
 			closeRequest := request{ID: 18, Method: "unpublish", Port: 7443}
 			if method == "tunnel" {
 				result := reply.Result.(tunnelResult)
-				if result.ID == "" || !strings.HasPrefix(result.Address, "127.0.0.1:") {
+				if result.ID == "" || result.Address == "" || result.Network != localTunnelNetwork {
 					t.Fatal(result)
 				}
 				address = result.Address
@@ -186,10 +221,7 @@ func TestRawTransportsPreserveBytesAndHalfClose(t *testing.T) {
 			}
 			// Completion of a short-lived RPC must not cancel its TCP listener.
 			cancel()
-			client := dialLoopback(t, address)
-			if method == "tunnel" {
-				authenticateTunnelClient(t, client, reply.Result.(tunnelResult).Token)
-			}
+			client := dialRawTransport(t, address, reply)
 			server := acceptBackend(t, backend)
 			if method == "tunnel" {
 				if call := <-calls; call != "tcp node.tail.ts.net:7443" {
@@ -288,10 +320,7 @@ func TestCloseRawTransportsClosesActiveSockets(t *testing.T) {
 				address = result.Address
 				closeReq = request{ID: 2, Method: "close_tunnel", TunnelID: result.ID}
 			}
-			client := dialLoopback(t, address)
-			if method == "tunnel" {
-				authenticateTunnelClient(t, client, reply.Result.(tunnelResult).Token)
-			}
+			client := dialRawTransport(t, address, reply)
 			server := acceptBackend(t, backend)
 			if reply := m.dispatch(context.Background(), closeReq); reply.Error != "" {
 				t.Fatal(reply)
@@ -912,8 +941,8 @@ func TestServiceEOFAndShutdownCloseRawTransports(t *testing.T) {
 				t.Fatal(reply)
 			}
 			address := reply.Result.(map[string]any)["address"].(string)
-			tunnelClient := dialLoopback(t, address)
-			authenticateTunnelClient(t, tunnelClient, reply.Result.(map[string]any)["token"].(string))
+			result := reply.Result.(map[string]any)
+			tunnelClient := dialTunnel(t, tunnelResult{Address: address, Network: result["network"].(string), Token: result["token"].(string)})
 			tunnelServer := acceptBackend(t, tunnelBackend)
 			h.send(t, fmt.Sprintf("{\"id\":2,\"method\":\"publish\",\"port\":7443,\"target\":%q}\n", publishBackend.Addr().String()))
 			if reply := h.read(t); reply.ID != 2 || reply.Error != "" || reply.Result.(map[string]any)["port"] != float64(7443) {

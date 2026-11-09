@@ -16,8 +16,7 @@ var fixtureTunnelToken = strings.Repeat("ab", 32)
 // upstream is a caller-owned loopback listener; it never starts tsnet.
 func testAuthenticatedTunnelBridge(t *testing.T, target string) string {
 	t.Helper()
-	listener, err := net.Listen("tcp4", "127.0.0.1:0")
-	must(t, err)
+	listener := testPrivateTunnelListener(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	var mu sync.Mutex
 	connections := map[net.Conn]bool{}
@@ -73,7 +72,7 @@ func testAuthenticatedTunnelBridge(t *testing.T, target string) string {
 						peer.Close()
 						backend.Close()
 					} else {
-						dst.(*net.TCPConn).CloseWrite()
+						dst.(interface{ CloseWrite() error }).CloseWrite()
 					}
 				}
 				go func() { copyOne(backend, peer); close(done) }()
@@ -100,7 +99,7 @@ func TestCompleteDialRequiresPrivateTunnelToken(t *testing.T) {
 		c := testCore(t, nil)
 		ch := make(chan dialResult, 1)
 		c.dials["pending"] = ch
-		err := c.completeDial("pending", "127.0.0.1:12345", "", token)
+		err := c.completeDial("pending", "127.0.0.1:12345", "", token, "tcp")
 		if err == nil || len(ch) != 0 {
 			t.Fatal("invalid capability completed a tunnel allocation")
 		}
@@ -111,11 +110,17 @@ func TestCompleteDialRequiresPrivateTunnelToken(t *testing.T) {
 	c := testCore(t, nil)
 	ch := make(chan dialResult, 1)
 	c.dials["pending"] = ch
-	must(t, c.completeDial("pending", "127.0.0.1:12345", "", fixtureTunnelToken))
+	listener := testPrivateTunnelListener(t)
+	for _, network := range []string{"", "tcp", "tcp4"} {
+		if err := c.completeDial("pending", "127.0.0.1:12345", "", fixtureTunnelToken, network); err == nil || len(ch) != 0 {
+			t.Fatal("local TCP completion bypassed the OS owner boundary")
+		}
+	}
+	must(t, c.completeDial("pending", listener.Addr().String(), "", fixtureTunnelToken, localTunnelNetwork))
 	if result := <-ch; result.Token != fixtureTunnelToken || result.Error != "" {
 		t.Fatal("private completion lost its authentication capability")
 	}
-	must(t, c.completeDial("pending", "", "private backend text", ""))
+	must(t, c.completeDial("pending", "", "private backend text", "", ""))
 	if result := <-ch; result.Error == "" {
 		t.Fatal("failed completion required an authentication capability")
 	}

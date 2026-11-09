@@ -22,9 +22,13 @@ import { NootifyClient } from '../src/client.js';
 import { SettingsService, type SettingsOptions } from '../src/settings.js';
 import { GitHubAuth } from '../src/github-auth.js';
 import { LarkDirectoryCache } from '../src/lark-directory-cache.js';
-import type { TsnetClient } from '../src/tsnet-client.js';
+import type { EmbeddedTailscaleTunnel, TsnetClient } from '../src/tsnet-client.js';
 
 const page: ProviderPage = { node_id: 'local-node', providers: [], remote: { enabled: false, listen: '127.0.0.1:9418', status: 'disabled', tls: false, token_set: false, peers: [] } };
+function tunnelLease(id: string): EmbeddedTailscaleTunnel {
+  return { id, network: process.platform === 'win32' ? 'npipe' : 'unix', token: 'a'.repeat(64),
+    address: process.platform === 'win32' ? String.raw`\\.\pipe\nootify-tunnel-` + Buffer.from(id).toString('hex').padEnd(32, '0').slice(0, 32) : `/synthetic/${id}.sock` };
+}
 interface FakeBinding {
   provider_id: string; session: { node_id: string; adapter: string; session_id: string; name?: string };
   created: boolean; chat_id?: string; thread_id?: string; sender_open_id?: string; deleted?: boolean; aliases?: FakeBinding[];
@@ -48,15 +52,20 @@ class FakeCore implements CoreTransport {
         ...(typeof params.app_id === 'string' ? { app_id: params.app_id, secret_set: Boolean(config.app_secret) } : {}),
         ...(typeof params.recipient_open_id === 'string' ? { recipient_open_id: params.recipient_open_id } : {}) };
       this.snapshot.providers = [...this.snapshot.providers.filter(item => item.id !== provider.id), provider];
+      this.snapshot.default_provider_id ??= provider.id;
     } else if (method === 'provider.delete') {
       this.configs.delete(String(params.id)); this.snapshot.providers = this.snapshot.providers.filter(item => item.id !== params.id);
-    } else if (method === 'remote.configure') this.snapshot.remote = { ...this.snapshot.remote, ...params };
+    } else if (method === 'provider.default') this.snapshot.default_provider_id = String(params.id);
+    else if (method === 'remote.configure') this.snapshot.remote = { ...this.snapshot.remote, ...params };
     else if (method === 'config.import') {
       this.snapshot.providers = params.providers as ProviderPage['providers'];
       this.configs = new Map((params.providers as Record<string, unknown>[]).map(provider => [String(provider.id), provider]));
-    } else if (method === 'config.export') return { version: 1, providers: [...this.configs.values()] } as T;
-    const binding = method === 'session.ensure' ? { provider_id: String(params.provider_id ?? 'remote-one'), session: params.session as FakeBinding['session'], created: true } : undefined;
-    if (binding) this.bindings.push(binding);
+    } else if (method === 'config.export') return { version: 1, providers: [...this.configs.values()], default_provider_id: this.snapshot.default_provider_id } as T;
+    const session = params.session as FakeBinding['session'] | undefined;
+    const existing = method === 'session.ensure' ? this.bindings.find(binding => !binding.deleted && binding.session.node_id === session?.node_id
+      && binding.session.adapter === session?.adapter && binding.session.session_id === session?.session_id) : undefined;
+    const binding = method === 'session.ensure' ? existing ?? { provider_id: String(params.provider_id ?? this.snapshot.default_provider_id ?? 'remote-one'), session: session!, created: true } : undefined;
+    if (binding && !existing) this.bindings.push(binding);
     const result = method === 'status' ? this.snapshot : method === 'session.list' ? this.bindings : binding
       ?? (method === 'remote.secret' ? { token: 'private-peer-token' } : { message_id: 'reply-id' });
     return result as T;
@@ -596,7 +605,7 @@ for (const transition of ['disable', 'cancel', 'logout'] as const) {
       async logout() {},
       async publish(port: number) { assert.ok(online, 'publish requires a live helper'); publications.push(generation); return { port }; },
       async unpublish() { assert.ok(online, 'must not clean up an expired publication through a stopped helper'); },
-      async tunnel() { assert.ok(online); tunnels.push(generation); return { id: `tunnel-${generation}`, address: `127.0.0.1:${12000 + generation}`, token: 'a'.repeat(64) }; },
+      async tunnel() { assert.ok(online); tunnels.push(generation); return tunnelLease(`tunnel-${generation}`); },
       async closeTunnel() { assert.ok(online, 'must not close a stale tunnel through a stopped helper'); },
     } as unknown as TsnetClient;
     const { providers, core, state } = await fixture(t, { sessionName: id => id }, tsnet);
@@ -615,14 +624,14 @@ for (const transition of ['disable', 'cancel', 'logout'] as const) {
       assert.ok(result, 'dial must settle'); return result.params.address;
     };
     await tailscale.setEnabled(true); await providers.syncNetwork();
-    assert.equal(await dial('first-run'), '127.0.0.1:12001');
+    assert.equal(await dial('first-run'), tunnelLease('tunnel-1').address);
     if (transition === 'disable') await tailscale.setEnabled(false);
     else if (transition === 'cancel') await tailscale.cancelLogin();
     else await tailscale.logout();
     assert.equal(online, false);
     await providers.syncNetwork();
     await tailscale.setEnabled(true); await providers.syncNetwork();
-    assert.equal(await dial('second-run'), '127.0.0.1:12002', 'must dial through the replacement helper');
+    assert.equal(await dial('second-run'), tunnelLease('tunnel-2').address, 'must dial through the replacement helper');
     assert.deepEqual(publications, [1, 2], 'must republish the same port in the replacement helper');
     assert.deepEqual(tunnels, [1, 2], 'must not reuse the old helper tunnel');
   });
@@ -829,6 +838,98 @@ for (const operation of ['rotate', 'delete'] as const) {
   });
 }
 
+for (const mode of ['rotate-secret', 'rotate-disabled', 'changed-app', 'changed-app-no-recipient', 'remote-default', 'named-default', 'reuse-enabled'] as const) {
+  test(`startup reconciles environment ${mode} without changing existing binding identities`, async t => {
+    const f = await fixture(t);
+    const sameApp = mode === 'rotate-secret' || mode === 'rotate-disabled';
+    const old = { id: 'legacy-feishu', type: 'feishu', name: 'Retained old provider', enabled: mode !== 'rotate-disabled',
+      app_id: 'cli_0123456789abcdef', app_secret: 'old-secret', recipient_open_id: 'ou_old' };
+    await f.providers.action({ action: 'save', provider: old });
+    const environment = { appId: sameApp ? old.app_id : 'cli_fedcba9876543210', appSecret: 'rotated-environment-secret' };
+    if (mode === 'reuse-enabled') await f.providers.action({ action: 'save', provider: { id: 'existing-app-provider', type: 'feishu',
+      name: 'Keep existing name', enabled: true, app_id: environment.appId, app_secret: 'prior-secret', recipient_open_id: 'ou_matching' } });
+    if (mode === 'remote-default' || mode === 'named-default') {
+      const selected = mode === 'remote-default'
+        ? { id: 'explicit-default', type: 'remote', name: 'Explicit remote', enabled: true, address: '100.64.0.9:9418', token: 'synthetic-token' }
+        : { id: 'explicit-default', type: 'feishu', name: 'Explicit named', enabled: false, app_id: 'cli_1111111111111111', app_secret: 'other-secret' };
+      await f.providers.action({ action: 'save', provider: selected });
+      await f.providers.action({ action: 'default', id: selected.id });
+    }
+    Object.assign(f.state.settings, { lark_app_id: old.app_id, lark_app_secret: old.app_secret, lark_recipient_open_id: 'ou_old' });
+    f.state.bindings.set('oc_original', { chat_id: 'oc_original', session_id: 'old-session', adapter: 'codex', sender_open_id: 'ou_old' });
+    await f.state.save();
+    const binding = { provider_id: old.id, session: { node_id: page.node_id, adapter: 'codex', session_id: 'old-session', name: 'Retained session' },
+      created: false, chat_id: 'oc_original', sender_open_id: 'ou_old', resource_origin_node_id: page.node_id, resource_provider_id: old.id };
+    f.core.bindings.push(binding);
+    const oldCredentials = { appId: old.app_id, appSecret: old.app_secret };
+    await new LarkDirectoryCache(f.directory).write(oldCredentials, { app_id: old.app_id,
+      users: [{ open_id: 'ou_cached', name: 'Old cached person' }], truncated: false, permission_limited: false });
+    const restored = await State.open(f.directory);
+    const providers = new ProvidersService(restored, new SessionsService(restored), environment, undefined, 9417, undefined, f.core);
+    const settings = settingsFor(t, { ...f, state: restored, providers }, { env: { LARK_APP_ID: environment.appId, LARK_APP_SECRET: environment.appSecret,
+      ...(mode === 'changed-app-no-recipient' ? {} : { LARK_NOTIFY_OPEN_ID: 'ou_environment' }) }, source: 'environment' });
+    t.after(() => providers.stop());
+    const calls = f.core.calls.length; await providers.start();
+    assert.equal(providers.status(), 'ready'); assert.deepEqual(providers.credentials, environment);
+    const active = providers.compatibilityProviderId();
+    assert.equal(f.core.configs.get(active)?.app_id, environment.appId); assert.equal(f.core.configs.get(active)?.app_secret, environment.appSecret);
+    assert.equal((await settings.page()).lark.source, 'environment'); assert.equal(settings.larkSecret().app_secret, environment.appSecret);
+    assert.strictEqual(f.core.bindings[0], binding); assert.equal(binding.provider_id, old.id); assert.equal(binding.resource_provider_id, old.id);
+    assert.equal(await new LarkDirectoryCache(f.directory).read(oldCredentials), undefined);
+    if (!sameApp) assert.equal((await State.open(f.directory)).bindings.get('oc_original')?.app_id, old.app_id);
+    assert.equal((f.core.calls.slice(calls).find(call => call.method === 'migration.import')!.params).app_id, old.app_id);
+    assert.ok(!f.core.calls.slice(calls).some(call => call.method === 'provider.save' && call.params.id === old.id && call.params.app_id !== old.app_id));
+    if (sameApp) { assert.equal(active, old.id); assert.equal(f.core.configs.get(active)?.name, old.name); assert.equal(f.core.configs.get(active)?.enabled, old.enabled); }
+    else { assert.notEqual(active, old.id); assert.equal(f.core.configs.get(old.id)?.app_secret, old.app_secret); }
+    if (mode === 'reuse-enabled') { assert.equal(active, 'existing-app-provider'); assert.equal(f.core.configs.get(active)?.name, 'Keep existing name'); }
+    const expectedDefault = mode === 'remote-default' || mode === 'named-default' ? 'explicit-default' : active;
+    assert.equal(f.core.snapshot.default_provider_id, expectedDefault);
+    const oldOpened = await providers.handle({ method: 'POST', path: '/v1/threads', body: { adapter: 'codex', session_id: 'old-session', session_name: 'Retained session' } });
+    assert.equal((oldOpened!.body as { provider_id: string }).provider_id, old.id);
+    if (mode === 'changed-app-no-recipient') assert.equal(f.core.configs.get(active)?.recipient_open_id, undefined, 'a different app must not inherit the old app recipient');
+    else {
+      const newOpened = await providers.handle({ method: 'POST', path: '/v1/threads', body: { adapter: 'codex', session_id: `new-${mode}`, session_name: 'New session' } });
+      assert.equal((newOpened!.body as { provider_id: string }).provider_id, expectedDefault);
+    }
+    await settings.setRecipient('ou_updated'); assert.equal(f.core.configs.get(active)?.recipient_open_id, 'ou_updated');
+    if (active !== old.id) {
+      await providers.action({ action: 'save', provider: { ...old, name: 'Inactive legacy edit' } });
+      assert.deepEqual(providers.credentials, environment); assert.equal(providers.compatibilityProviderId(), active);
+    }
+    const exported = JSON.parse(await readFile((await settings.exportConfig()).path, 'utf8'));
+    assert.equal(exported.lark.app_id, environment.appId); assert.equal(exported.lark.app_secret, environment.appSecret);
+    await settings.importConfig(exported); assert.equal(providers.compatibilityProviderId(), active);
+    await providers.stop(); await settings.stop();
+    const restartedState = await State.open(f.directory);
+    const restarted = new ProvidersService(restartedState, new SessionsService(restartedState), environment, undefined, 9417, undefined, f.core);
+    settingsFor(t, { ...f, state: restartedState, providers: restarted }, { env: { LARK_APP_ID: environment.appId, LARK_APP_SECRET: environment.appSecret }, source: 'environment' });
+    t.after(() => restarted.stop()); const mutations = f.core.calls.filter(call => call.method === 'provider.save').length;
+    await restarted.start(); assert.equal(restarted.status(), 'ready'); assert.equal(restarted.compatibilityProviderId(), active);
+    assert.equal(f.core.calls.filter(call => call.method === 'provider.save').length, mutations, 'unchanged environment startup must not rewrite providers');
+    assert.strictEqual(f.core.bindings[0], binding); assert.equal(f.core.snapshot.default_provider_id, expectedDefault);
+  });
+}
+
+test('an unreconcilable environment identity reports an actionable conflict without stopping other providers', async t => {
+  const f = await fixture(t);
+  await f.providers.action({ action: 'save', provider: { id: 'legacy-feishu', type: 'feishu', name: 'Existing app', enabled: true,
+    app_id: 'cli_0123456789abcdef', app_secret: 'old-secret', recipient_open_id: 'ou_old' } });
+  const environment = { appId: 'cli_fedcba9876543210', appSecret: 'environment-secret' }; const reports: Record<string, unknown>[] = [];
+  const providers = new ProvidersService(f.state, f.sessions, environment, record => reports.push(record), 9417, undefined, f.core);
+  settingsFor(t, { ...f, providers }, { env: { LARK_APP_ID: environment.appId, LARK_APP_SECRET: environment.appSecret }, source: 'environment' });
+  t.after(() => providers.stop());
+  const request = f.core.request.bind(f.core);
+  t.mock.method(f.core, 'request', async <T>(method: string, params: Record<string, unknown> = {}): Promise<T> => {
+    if (method === 'provider.save') throw new CoreError('conflict', 'synthetic environment identity collision');
+    return request<T>(method, params);
+  });
+  await providers.start(); assert.equal(providers.status(), 'configuration-conflict');
+  const snapshot = await providers.page(); assert.match(snapshot.compatibility?.error ?? '', /select or create a provider/);
+  assert.equal(snapshot.providers[0].id, 'legacy-feishu'); assert.equal(f.core.configs.get('legacy-feishu')?.app_id, 'cli_0123456789abcdef');
+  assert.deepEqual(await providers.remoteSecret(), { token: 'private-peer-token' });
+  assert.ok(!reports.some(record => record.status === 'core_failed')); assert.ok(!JSON.stringify(reports).includes(environment.appSecret));
+});
+
 test('startup repairs legacy mirrors from committed core state without rewriting providers', async t => {
   const f = await fixture(t); const initial = { id: 'legacy-feishu', type: 'feishu', name: 'Committed provider', enabled: false,
     app_id: 'cli_0123456789abcdef', app_secret: 'committed-secret', recipient_open_id: 'ou_committed' };
@@ -902,7 +1003,7 @@ async function networkFixture(t: Parameters<typeof fixture>[0]) {
     async unpublish() { unpublishes++; },
     async tunnel(address: string) {
       assert.ok(open.size < 32, 'retired providers must not consume the helper tunnel limit');
-      const id = `tunnel-${++sequence}`; open.set(id, address); return { id, address: `127.0.0.1:${12000 + sequence}`, token: 'a'.repeat(64) };
+      const id = `tunnel-${++sequence}`; open.set(id, address); return tunnelLease(id);
     },
     async closeTunnel(id: string) { if (failClose) throw new Error('tunnel cleanup interrupted'); closed.push(id); open.delete(id); },
   };
@@ -936,6 +1037,7 @@ test('disabling downstream access preserves outgoing provider tunnels and subscr
   const second = await f.dial('after-disable', address);
   assert.equal(second.address, first.address, 'the live outgoing tunnel must be reused');
   assert.equal(first.token, 'a'.repeat(64)); assert.equal(second.token, first.token, 'only the private completion carries its lease authentication token');
+  assert.equal(first.network, process.platform === 'win32' ? 'npipe' : 'unix'); assert.equal(second.network, first.network);
   assert.ok(!JSON.stringify(await f.providers.page()).includes(first.token));
   assert.ok(!JSON.stringify((await State.open(f.directory)).settings).includes(first.token));
 });
@@ -962,13 +1064,13 @@ test('remote provider replacement, shared addresses, deletion and import reclaim
 test('pending dials share one allocation and cannot reinstall a removed provider tunnel', async t => {
   const f = await networkFixture(t); const address = '100.64.0.9:9418';
   await f.save(address); await f.providers.syncNetwork();
-  let release!: (value: { id: string; address: string; token: string }) => void; let requests = 0;
+  let release!: (value: EmbeddedTailscaleTunnel) => void; let requests = 0;
   t.mock.method(f.tsnet, 'tunnel', async () => { requests++; return new Promise(resolve => { release = resolve; }); });
   f.beginDial('pending-one', address); f.beginDial('pending-two', address);
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(requests, 1, 'concurrent provider dials must not leak extra allocations');
   await f.providers.action({ action: 'delete', id: 'upstream' });
-  f.open.set('late-allocation', address); release({ id: 'late-allocation', address: '127.0.0.1:12345', token: 'a'.repeat(64) });
+  f.open.set('late-allocation', address); release(tunnelLease('late-allocation'));
   for (const id of ['pending-one', 'pending-two']) assert.ok((await f.result(id)).error, 'removed provider must not receive a stale endpoint');
   assert.equal(f.open.size, 0);
   assert.deepEqual(f.closed, ['late-allocation']);

@@ -21,6 +21,7 @@ VIAddVersionKey /LANG=1033 "LegalCopyright" "Copyright Nootify contributors"
 !include "FileFunc.nsh"
 !include "x64.nsh"
 !include "${HOOKS}"
+!include "${__FILEDIR__}/pending-receipt.nsh"
 
 Var UpdateMode
 Var Relaunch
@@ -191,13 +192,8 @@ FunctionEnd
 Function NootifyCheckRegisteredDestination
   ReadRegStr $RegisteredLocation HKCU "${UNINSTALL_KEY}" "InstallLocation"
   ReadRegStr $PreviousVersion HKCU "${UNINSTALL_KEY}" "DisplayVersion"
-  ReadRegStr $PendingLocation HKCU "${PENDING_KEY}" "Target"
-  ReadRegStr $FreshToken HKCU "${PENDING_KEY}" "Token"
-  ${If} $PendingLocation != ""
-  ${AndIf} $PendingLocation != $INSTDIR
-    SetErrorLevel 1
-    Abort "A Nootify installation is pending in another directory. Retry it there before choosing a new destination."
-  ${EndIf}
+  !insertmacro NootifyReadPendingReceipt "${PENDING_KEY}"
+  !insertmacro NootifyCheckPendingDestination
   ${If} $RegisteredLocation != ""
   ${AndIf} $RegisteredLocation != $INSTDIR
     SetErrorLevel 1

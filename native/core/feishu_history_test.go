@@ -289,9 +289,12 @@ func TestFeishuFailedLongGapProtectsLiveDedupThroughCompaction(t *testing.T) {
 	base := now.Add(-14 * 24 * time.Hour).UnixMilli()
 	liveCreated := now.UnixMilli() - 1
 	cfg := ProviderConfig{ID: "bot", Type: "feishu", AppID: "long-gap-dedup-app", AppSecret: "synthetic", Recipient: "trusted"}
+	var apiDate atomic.Int64
+	apiDate.Store(now.UnixNano())
 	var fail atomic.Bool
 	fail.Store(true)
 	p := privateFeishu(t, c, cfg, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Date", time.Unix(0, apiDate.Load()).UTC().Format(http.TimeFormat))
 		if fail.Load() {
 			http.Error(w, "synthetic long history outage", 503)
 			return
@@ -326,6 +329,9 @@ func TestFeishuFailedLongGapProtectsLiveDedupThroughCompaction(t *testing.T) {
 	if deliveries.Load() != 2 {
 		t.Fatal("long-gap retry lost old available input or replayed the terminal live duplicate")
 	}
+	// Later source evidence covers the inclusive clock-precision overlap.
+	apiDate.Store(now.Add(3 * time.Second).UnixNano())
+	must(t, p.reconcileHistory(context.Background(), now.Add(3*time.Second).UnixMilli()))
 	must(t, p.Close())
 	clock.Store(now.Add(2*terminalRetention + 48*time.Hour).UnixNano())
 	must(t, c.store.Update(func(*State) error { return nil }))
@@ -347,7 +353,7 @@ func TestFeishuHistoryPreservesRemoteOwnershipAcrossLongOutage(t *testing.T) {
 	cursor := end - (10 * 24 * time.Hour).Milliseconds()
 	p := privateFeishu(t, c, cfg, func(w http.ResponseWriter, r *http.Request) {
 		start, _ := strconv.ParseInt(r.URL.Query().Get("start_time"), 10, 64)
-		if start != cursor/1000 {
+		if start != (cursor-sourceTimeOverlap)/1000 {
 			t.Error("history manufactured a retention cutoff instead of honoring the persisted cursor")
 		}
 		historyPage(w, []map[string]any{historyItem("older-available-input", "chat", "trusted", end-(9*24*time.Hour).Milliseconds()), historyItem("recent-input", "chat", "trusted", end-1000)}, "")

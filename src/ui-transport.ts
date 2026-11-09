@@ -38,14 +38,17 @@ export type UiFrame = { type: 'headers'; status: number; headers: Record<string,
 export class UiTransport {
   private readonly codec?: UiCodec;
   private broken = false;
+  private revocation?: Promise<void>;
   constructor(private readonly origin: string, capability?: UiCapability, private readonly network: typeof fetch = globalThis.fetch.bind(globalThis)) {
     if (capability) this.codec = new UiCodec(capability);
   }
   get authorized(): boolean { return !!this.codec && !this.broken; }
-  async close(): Promise<void> {
-    if (!this.codec) return;
-    try { await (await this.fetch('/ui/api/auth/revoke', { method: 'POST', signal: AbortSignal.timeout(1500) })).text(); }
-    finally { this.broken = true; }
+  close(): Promise<void> {
+    if (!this.codec) return Promise.resolve();
+    return this.revocation ??= (async () => {
+      try { await (await this.fetch('/ui/api/auth/revoke', { method: 'POST', signal: AbortSignal.timeout(1500) })).text(); }
+      finally { this.broken = true; }
+    })();
   }
   readonly fetch = async (input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> => {
     const url = new URL(String(input), this.origin);
@@ -59,7 +62,10 @@ export class UiTransport {
       if (repositoryAction) headers.set('x-nootify-ui', '1');
       return this.network(url, { ...init, headers, credentials: 'omit', redirect: 'error' });
     }
-    if (this.broken) throw new Error('The authorized UI connection was lost; authorize this window again');
+    // Revocation is an idempotent encrypted control request, safe to attempt
+    // even after a broken response. It never revives ordinary API authority.
+    const revoking = url.pathname === '/ui/api/auth/revoke' && init.method === 'POST';
+    if (this.broken && !revoking) throw new Error('The authorized UI connection was lost; authorize this window again');
     const request = uiNonce();
     const body = init.body;
     if (body !== undefined && body !== null && typeof body !== 'string') throw new Error('Unsupported UI request body');

@@ -12,7 +12,35 @@ export interface OwnerUiGateway { url: string; close(): Promise<void> }
 /** The independent gateway owns its origin and its static code for the complete browser session. */
 export async function startOwnerUiGateway(baseUrl: string, token: string, target?: string): Promise<OwnerUiGateway> {
   const route = ownerUiRoute(target);
-  let upstream: UiTransport | undefined = new UiTransport(new URL(baseUrl).origin, await requestOwnerUiSession(baseUrl, token));
+  let upstream: UiTransport | undefined;
+  let authorizing: Promise<UiTransport> | undefined;
+  let closed = false;
+  const owned = new Set<UiTransport>();
+  const retire = async (transport: UiTransport): Promise<void> => {
+    try { await transport.close(); } catch { /* Idle expiry remains the fallback if the daemon is gone. */ }
+    finally { owned.delete(transport); }
+  };
+  const connection = async (): Promise<UiTransport> => {
+    if (closed) throw new HttpError(503, 'Owner UI gateway is closing');
+    if (upstream) return upstream;
+    if (authorizing) return authorizing;
+    // Install the promise before awaiting proof: all simultaneous requests share
+    // one fresh session, including while an interrupted connection is replaced.
+    const pending = requestOwnerUiSession(baseUrl, token).then(async capability => {
+      const transport = new UiTransport(new URL(baseUrl).origin, capability);
+      owned.add(transport);
+      if (closed) {
+        await retire(transport);
+        throw new HttpError(503, 'Owner UI gateway is closing');
+      }
+      upstream = transport;
+      return transport;
+    });
+    authorizing = pending;
+    try { return await pending; }
+    finally { if (authorizing === pending) authorizing = undefined; }
+  };
+  await connection();
   const sessions = new UiSessions();
   const capability = sessions.create();
   let origin = ''; let stopping: Promise<void> | undefined;
@@ -20,9 +48,8 @@ export async function startOwnerUiGateway(baseUrl: string, token: string, target
     response.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify({ error }));
   };
   const proxy = async (request: IncomingMessage, response: ServerResponse) => {
-    if (stopping) throw new HttpError(503, 'Owner UI gateway is closing');
     // This is a new authenticated session after a daemon restart, never a plaintext fallback.
-    upstream ??= new UiTransport(new URL(baseUrl).origin, await requestOwnerUiSession(baseUrl, token));
+    const active = await connection();
     const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(Buffer.from(chunk));
     const body = Buffer.concat(chunks).toString('utf8');
     const cancelled = new AbortController();
@@ -30,7 +57,7 @@ export async function startOwnerUiGateway(baseUrl: string, token: string, target
     response.once('close', disconnected);
     let forwarded = false;
     try {
-      const result = await upstream.fetch(request.url!, { method: request.method, ...(body ? { body } : {}), signal: AbortSignal.any([cancelled.signal, AbortSignal.timeout(185000)]) });
+      const result = await active.fetch(request.url!, { method: request.method, ...(body ? { body } : {}), signal: AbortSignal.any([cancelled.signal, AbortSignal.timeout(185000)]) });
       response.writeHead(result.status, Object.fromEntries(result.headers));
       if (result.body) {
         const reader = result.body.getReader();
@@ -40,7 +67,8 @@ export async function startOwnerUiGateway(baseUrl: string, token: string, target
       response.end();
     } catch {
       if (cancelled.signal.aborted) return;
-      upstream = undefined;
+      if (upstream === active) upstream = undefined;
+      void retire(active);
       // Do not retry a mutation whose result may be unknown. Polling can establish a
       // new verified session; the user decides whether to retry an interrupted action.
       if (forwarded) response.destroy();
@@ -63,15 +91,25 @@ export async function startOwnerUiGateway(baseUrl: string, token: string, target
       throw new HttpError(403, 'Open a fresh owner UI authorization link');
     } catch (error) { if (!response.destroyed) send(response, error instanceof HttpError ? error.status : 502, error instanceof HttpError ? error.message : 'Owner UI gateway is unavailable'); }
   });
-  await new Promise<void>((done, fail) => { server.once('error', fail); server.listen(0, '127.0.0.1', () => { server.off('error', fail); done(); }); });
+  try {
+    await new Promise<void>((done, fail) => { server.once('error', fail); server.listen(0, '127.0.0.1', () => { server.off('error', fail); done(); }); });
+  } catch (error) {
+    closed = true;
+    await Promise.all([...owned].map(retire));
+    throw error;
+  }
   origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   const close = (): Promise<void> => stopping ??= (async () => {
+    closed = true;
     clearTimeout(idle); clearTimeout(lifetime); sessions.clear();
-    const closing = upstream; upstream = undefined;
+    upstream = undefined;
     server.closeAllConnections();
     await Promise.all([
       new Promise<void>(done => server.close(() => done())),
-      closing?.close().catch(() => {}),
+      ...[...owned].map(retire),
+      // A proof already in flight may still issue a capability. connection()
+      // observes closed and revokes that result before this close completes.
+      authorizing?.catch(() => {}),
     ]);
   })();
   let idle: NodeJS.Timeout;

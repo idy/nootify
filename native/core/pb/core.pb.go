@@ -329,6 +329,7 @@ type Event struct {
 	SenderId         string                 `protobuf:"bytes,7,opt,name=sender_id,json=senderId,proto3" json:"sender_id,omitempty"`
 	ChatId           string                 `protobuf:"bytes,8,opt,name=chat_id,json=chatId,proto3" json:"chat_id,omitempty"`
 	CancellationJson []byte                 `protobuf:"bytes,9,opt,name=cancellation_json,json=cancellationJson,proto3" json:"cancellation_json,omitempty"`
+	ActivityProof    string                 `protobuf:"bytes,10,opt,name=activity_proof,json=activityProof,proto3" json:"activity_proof,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
 }
@@ -426,6 +427,13 @@ func (x *Event) GetCancellationJson() []byte {
 	return nil
 }
 
+func (x *Event) GetActivityProof() string {
+	if x != nil {
+		return x.ActivityProof
+	}
+	return ""
+}
+
 // A confirmation belongs only to this authenticated peer's subscription.
 // It confirms durable ingestion, never agent acceptance or another peer's queue.
 type Confirmation struct {
@@ -500,7 +508,7 @@ const file_core_proto_rawDesc = "" +
 	"\n" +
 	"public_key\x18\x03 \x01(\fR\tpublicKey\x12\x1c\n" +
 	"\tchallenge\x18\x04 \x01(\fR\tchallenge\x12\x1c\n" +
-	"\tsignature\x18\x05 \x01(\fR\tsignature\"\xba\x02\n" +
+	"\tsignature\x18\x05 \x01(\fR\tsignature\"\xe1\x02\n" +
 	"\x05Event\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12!\n" +
 	"\fsession_json\x18\x02 \x01(\fR\vsessionJson\x12!\n" +
@@ -510,7 +518,9 @@ const file_core_proto_rawDesc = "" +
 	"\x0ehops_remaining\x18\x06 \x01(\rR\rhopsRemaining\x12\x1b\n" +
 	"\tsender_id\x18\a \x01(\tR\bsenderId\x12\x17\n" +
 	"\achat_id\x18\b \x01(\tR\x06chatId\x12+\n" +
-	"\x11cancellation_json\x18\t \x01(\fR\x10cancellationJson\")\n" +
+	"\x11cancellation_json\x18\t \x01(\fR\x10cancellationJson\x12%\n" +
+	"\x0eactivity_proof\x18\n" +
+	" \x01(\tR\ractivityProof\")\n" +
 	"\fConfirmation\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\tR\aeventId2\xa6\x01\n" +
 	"\x10NotificationCore\x129\n" +

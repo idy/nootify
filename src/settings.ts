@@ -19,7 +19,7 @@ import type { LarkApi } from './lark-metadata.js';
 import { inspectLarkSetup, LarkRegistration, type LarkRegistrationOptions, type LarkRegistrationPage, type LarkRegistrationResult, type LarkSetup } from './lark-registration.js';
 import { DIRECTORY_FRESH_MS, DIRECTORY_MAX_AGE_MS, LarkDirectoryCache } from './lark-directory-cache.js';
 import { mergeRecipients } from './lark-profile.js';
-import type { CompatibilityConfig, CompatibilitySync, ProvidersService } from './providers.js';
+import type { CompatibilityConfig, CompatibilityStartup, CompatibilitySync, CompatibilityUpdate, ProvidersService } from './providers.js';
 import { CoreError, coreErrorCode, provenCoreRejection } from './provider-core.js';
 
 const FORMAT = 'nootify-config';
@@ -62,8 +62,10 @@ export interface LarkControl {
   status(): string;
   channel(): { recipient?: string; groups: number };
   configure(credentials?: Credentials): Promise<void>;
-  refreshCompatibilityCredentials?(credentials?: Credentials): void;
+  refreshCompatibilityCredentials?(credentials?: Credentials, providerId?: string): void;
+  compatibilityProviderId?(): string;
   setCompatibilitySync?(sync: CompatibilitySync): void;
+  setCompatibilityStartup?(startup: CompatibilityStartup): void;
   setRecipient?(openId: string): Promise<void>;
   setRecipientSync?(sync: (openId: string) => Promise<void>): void;
 }
@@ -169,10 +171,11 @@ export class SettingsService {
     this.registration = new LarkRegistration((result, signal) => this.acceptLarkRegistration(result, signal), this.report, options.registration);
     this.directoryStore = new LarkDirectoryCache(options.state.directory);
     options.lark.setCompatibilitySync?.((update, preview) => this.syncProviderCompatibility(update, preview));
+    options.lark.setCompatibilityStartup?.(reconcile => this.syncProviderCompatibility(reconcile));
     options.lark.setRecipientSync?.(openId => this.setRecipient(openId));
   }
   /** Mirror the core's committed legacy provider without saving it again through the compatibility configure path. */
-  private syncProviderCompatibility(update: () => Promise<CompatibilityConfig>, preview?: () => Promise<CompatibilityConfig>): Promise<void> {
+  private syncProviderCompatibility(update: CompatibilityUpdate, preview?: () => Promise<CompatibilityConfig>): Promise<void> {
     return this.serialized(async () => {
       const { lark, state } = this.options;
       const environment = await resolveCredentials(this.env, {});
@@ -183,12 +186,14 @@ export class SettingsService {
         }
       }
       const current = lark.credentials;
-      const { credentials, recipient } = await update();
+      const saved = { appId: state.settings.lark_app_id, appSecret: state.settings.lark_app_secret };
+      const { credentials, recipient, provider_id } = await update(environment?.credentials,
+        isOpenId(this.env.LARK_NOTIFY_OPEN_ID) ? this.env.LARK_NOTIFY_OPEN_ID : undefined);
       let failed = false;
       try {
         // The core already committed. Keep its mirror authoritative in memory even if this disk write fails.
         await state.save({ apply: () => {
-          this.scopeLarkBindings(credentials?.appId);
+          this.scopeLarkBindings(credentials?.appId, saved.appId ?? current?.appId);
           if (credentials) {
             if (state.settings.lark_app_id !== credentials.appId) state.settings.lark_connection_type = 'bot';
             state.settings.lark_app_id = credentials.appId; state.settings.lark_app_secret = credentials.appSecret;
@@ -202,8 +207,9 @@ export class SettingsService {
       const fromEnvironment = environment?.source === 'environment' && environment.credentials.appId === credentials?.appId
         && environment.credentials.appSecret === credentials?.appSecret;
       this.source = credentials ? fromEnvironment ? 'environment' : 'settings' : undefined;
-      lark.refreshCompatibilityCredentials?.(credentials);
-      if (current?.appId !== credentials?.appId || current?.appSecret !== credentials?.appSecret) {
+      lark.refreshCompatibilityCredentials?.(credentials, provider_id);
+      if (current?.appId !== credentials?.appId || current?.appSecret !== credentials?.appSecret
+        || saved.appId !== credentials?.appId || saved.appSecret !== credentials?.appSecret) {
         this.directoryRefresh++; await this.directoryStore.clear();
       }
       if (failed) throw this.mirrorError();
@@ -331,8 +337,7 @@ export class SettingsService {
     return setup;
   }
   /** Persist legacy group ownership in the same snapshot as an application change. */
-  private scopeLarkBindings(nextAppId?: string): void {
-    const previousApp = this.options.lark.credentials?.appId;
+  private scopeLarkBindings(nextAppId?: string, previousApp = this.options.lark.credentials?.appId): void {
     if (!previousApp || previousApp === nextAppId) return;
     for (const binding of this.options.state.bindings.values()) if (!binding.app_id) binding.app_id = previousApp;
   }
@@ -536,7 +541,14 @@ export class SettingsService {
       const { state, pulls, agents, lark } = this.options;
       const summary = summarize(file);
       if (file.providers && !this.options.providers) throw new HttpError(400, 'Provider configuration is not supported by this service');
-      const legacy = (file.providers?.providers as Record<string, unknown>[] | undefined)?.find(provider => provider.id === 'legacy-feishu' && provider.type === 'feishu');
+      const environment = await resolveCredentials(this.env, {});
+      const importedProviders = file.providers?.providers as Record<string, unknown>[] | undefined;
+      const activeId = lark.compatibilityProviderId?.() ?? 'legacy-feishu';
+      const preferredApp = environment?.credentials.appId ?? file.lark?.app_id;
+      const matching = importedProviders?.filter(provider => provider.type === 'feishu' && provider.app_id === preferredApp) ?? [];
+      const legacy = matching.find(provider => provider.enabled === true) ?? matching.find(provider => provider.id === activeId) ?? matching[0]
+        ?? importedProviders?.find(provider => provider.id === activeId && provider.type === 'feishu')
+        ?? importedProviders?.find(provider => provider.id === 'legacy-feishu' && provider.type === 'feishu');
       const imported = legacy && typeof legacy.app_id === 'string' && typeof legacy.app_secret === 'string'
         ? { appId: legacy.app_id, appSecret: legacy.app_secret } : undefined;
       const proposed = { ...state.settings };
@@ -551,7 +563,7 @@ export class SettingsService {
       }
       const previous = lark.credentials;
       const refreshImported = async (allowConfigure = true) => {
-        if (lark.refreshCompatibilityCredentials) lark.refreshCompatibilityCredentials(imported);
+        if (lark.refreshCompatibilityCredentials) lark.refreshCompatibilityCredentials(imported, typeof legacy?.id === 'string' ? legacy.id : undefined);
         else if (allowConfigure && (previous?.appId !== imported?.appId || previous?.appSecret !== imported?.appSecret)) await lark.configure(imported);
         this.source = imported ? effective?.source ?? 'settings' : undefined;
         if (previous?.appId !== imported?.appId || previous?.appSecret !== imported?.appSecret) { this.directoryRefresh++; await this.directoryStore.clear(); }

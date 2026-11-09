@@ -252,6 +252,67 @@ test('Tailnet repository actions reach their authorized listener while anonymous
   await assert.rejects(local.fetch('/ui/api/repos', { method: 'POST', body: '{}' }), /authorization/);
 });
 
+test('concurrent gateway reconnects share one bootstrap and revoke every issued session', { timeout: 15000 }, async t => {
+  const f = await fixture(t);
+  const handler = f.server.listeners('request')[0] as (request: import('node:http').IncomingMessage, response: import('node:http').ServerResponse) => void;
+  f.server.removeAllListeners('request');
+  let challenges = 0; let grants = 0; let drop = false; let release!: () => void; let observed!: () => void;
+  const gate = new Promise<void>(done => { release = done; });
+  const reconnectSeen = new Promise<void>(done => { observed = done; });
+  t.after(() => release());
+  f.server.on('request', (request, response) => {
+    if (request.url?.startsWith('/ui/api/auth/challenge')) {
+      challenges++;
+      if (challenges > 1) { observed(); void gate.then(() => handler(request, response)); return; }
+    }
+    if (request.url === '/ui/api/auth/grant') grants++;
+    if (drop && request.url === '/ui/api/secure') { drop = false; request.resume(); response.end('{}'); return; }
+    handler(request, response);
+  });
+  const g = await gateway(t, f); const client = transportFor(g.url);
+  drop = true;
+  const failed = await client.fetch('/ui/api/providers'); assert.equal(failed.status, 502); await failed.text();
+  const concurrent = Promise.all(Array.from({ length: 40 }, async () => (await (await client.fetch('/ui/api/providers')).json()).editable));
+  await reconnectSeen;
+  await new Promise<void>(done => setImmediate(done));
+  assert.equal(challenges, 2, 'all reconnect requests must await one proof');
+  release();
+  assert.ok((await concurrent).every(Boolean)); assert.equal(grants, 2);
+  await g.close();
+  const all = [];
+  try {
+    for (let index = 0; index < 32; index++) all.push(new UiTransport(new URL(f.base).origin, await requestOwnerUiSession(f.base, f.token)));
+  } finally { await Promise.all(all.map(value => value.close())); }
+});
+
+test('gateway close waits for an in-flight proof and revokes its late capability', { timeout: 15000 }, async t => {
+  const f = await fixture(t);
+  const handler = f.server.listeners('request')[0] as (request: import('node:http').IncomingMessage, response: import('node:http').ServerResponse) => void;
+  f.server.removeAllListeners('request');
+  let challenges = 0; let drop = false; let release!: () => void; let observed!: () => void;
+  const gate = new Promise<void>(done => { release = done; });
+  const reconnectSeen = new Promise<void>(done => { observed = done; });
+  t.after(() => release());
+  f.server.on('request', (request, response) => {
+    if (request.url?.startsWith('/ui/api/auth/challenge') && ++challenges > 1) { observed(); void gate.then(() => handler(request, response)); return; }
+    if (drop && request.url === '/ui/api/secure') { drop = false; request.resume(); response.end('{}'); return; }
+    handler(request, response);
+  });
+  const g = await gateway(t, f); const client = transportFor(g.url);
+  drop = true;
+  const failed = await client.fetch('/ui/api/providers'); assert.equal(failed.status, 502); await failed.text();
+  const reconnect = client.fetch('/ui/api/providers').catch(() => undefined);
+  await reconnectSeen;
+  let finished = false;
+  const closing = g.close().then(() => { finished = true; });
+  await new Promise<void>(done => setImmediate(done)); assert.equal(finished, false);
+  release(); await closing; await reconnect;
+  const all = [];
+  try {
+    for (let index = 0; index < 32; index++) all.push(new UiTransport(new URL(f.base).origin, await requestOwnerUiSession(f.base, f.token)));
+  } finally { await Promise.all(all.map(value => value.close())); }
+});
+
 test('bootstrap proves ownership on the same TCP connection and never sends a root bearer to an imposter', async t => {
   let posts = 0; const captured: string[] = [];
   const imposter = createServer(async (request, response) => { if (request.method === 'POST') posts++; captured.push(JSON.stringify(request.headers)); response.setHeader('content-type', 'application/json'); response.end(JSON.stringify({ challenge: 'A'.repeat(32), issued_at: Date.now(), proof: 'B'.repeat(43) })); });

@@ -5,6 +5,7 @@ go 1.27.3
 require (
 	github.com/gofrs/flock v0.13.0
 	github.com/larksuite/oapi-sdk-go/v3 v3.12.2
+	github.com/tailscale/go-winio v0.0.0-20231025203758-c4f33415bf55
 	golang.org/x/sys v0.48.0
 	google.golang.org/grpc v1.85.0
 	google.golang.org/protobuf v1.36.12

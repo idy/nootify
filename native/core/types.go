@@ -216,6 +216,7 @@ type Event struct {
 	// Relays do not need it: only the source's per-chat cursor covers history.
 	SourceCreatedAt int64    `json:"source_created_at,omitempty"`
 	Cancellation    *Binding `json:"cancellation,omitempty"`
+	ActivityProof   string   `json:"activity_proof,omitempty"`
 }
 type EventRecord struct {
 	Sequence uint64 `json:"broadcast_sequence,omitempty"`
@@ -231,6 +232,7 @@ type Delivery struct {
 	InboxQueuedAt int64  `json:"inbox_queued_at,omitempty"`
 }
 type ReferenceRecord struct {
+	ActivityProof       string     `json:"activity_proof,omitempty"`
 	Message             MessageRef `json:"message"`
 	Routes              []string   `json:"routes,omitempty"`
 	AcknowledgedAt      string     `json:"acknowledged_at,omitempty"`

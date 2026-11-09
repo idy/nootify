@@ -3,7 +3,7 @@ import { access, chmod, constants, lstat, mkdir } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export interface EmbeddedTailscaleTunnel { id: string; address: string; token: string }
+export interface EmbeddedTailscaleTunnel { id: string; network: 'unix' | 'npipe'; address: string; token: string }
 export interface EmbeddedTailscalePublication { port: number }
 
 export interface EmbeddedTailscaleClient {
@@ -139,7 +139,12 @@ export class TsnetClient implements EmbeddedTailscaleClient {
     const result = await this.request('tunnel', { address }) as Partial<EmbeddedTailscaleTunnel> | null;
     if (!result || typeof result.id !== 'string' || !result.id || typeof result.address !== 'string' || !result.address
       || typeof result.token !== 'string' || !/^[0-9a-f]{64}$/.test(result.token)) throw new Error('embedded_protocol_error');
-    return { id: result.id, address: result.address, token: result.token };
+    const pipePrefix = String.raw`\\.\pipe\nootify-tunnel-`;
+    const validEndpoint = process.platform === 'win32'
+      ? result.network === 'npipe' && result.address.startsWith(pipePrefix) && /^[0-9a-f]{32}$/.test(result.address.slice(pipePrefix.length))
+      : result.network === 'unix' && result.address.startsWith('/') && !result.address.includes('\0');
+    if (!validEndpoint) throw new Error('embedded_protocol_error');
+    return { id: result.id, network: result.network!, address: result.address, token: result.token };
   }
   async closeTunnel(tunnelId: string): Promise<void> { await this.request('close_tunnel', { tunnel_id: tunnelId }); }
   publish(port: number, target: string): Promise<EmbeddedTailscalePublication> {

@@ -106,7 +106,7 @@ func TestRemotePlaintextUsesMatchingPrivateEmbeddedBridge(t *testing.T) {
 			t.Error("bridge target was not preserved")
 			return errors.New("wrong synthetic bridge target")
 		}
-		return downstream.completeDial(request["request_id"].(string), bridge, "", fixtureTunnelToken)
+		return downstream.completeDial(request["request_id"].(string), bridge, "", fixtureTunnelToken, localTunnelNetwork)
 	})
 	must(t, downstream.store.Update(func(d *State) error { d.Tailnet = true; return nil }))
 	p := newRemoteProvider(downstream, ProviderConfig{ID: "bridge", Name: "Bridge", Address: "peer.example.ts.net:9418", Token: token})

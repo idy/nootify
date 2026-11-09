@@ -37,6 +37,7 @@ message Event {
   string sender_id = 7;
   string chat_id = 8;
   bytes cancellation_json = 9;
+  string activity_proof = 10;
 }
 // A confirmation belongs only to this authenticated peer's subscription.
 // It confirms durable ingestion, never agent acceptance or another peer's queue.

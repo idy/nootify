@@ -10,6 +10,10 @@ import (
 	im "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
 
+// Date headers have one-second precision. Rescan that source-time bucket and
+// retain its source IDs until a later proven boundary covers the overlap.
+const sourceTimeOverlap int64 = 1000
+
 func feishuCursorKey(app, chat string) string {
 	raw, _ := json.Marshal([]string{app, chat})
 	return string(raw)
@@ -27,7 +31,7 @@ func feishuHistoryUnresolved(d *State, record EventRecord) bool {
 		return false
 	}
 	cursor, exists := d.FeishuCursors[feishuCursorKey(cfg.AppID, e.ChatID)]
-	return exists && e.SourceCreatedAt > cursor
+	return exists && e.SourceCreatedAt >= cursor-sourceTimeOverlap
 }
 
 func (p *feishuProvider) historyBindings() []Binding {
@@ -123,11 +127,22 @@ func (p *feishuProvider) reconcileResources(ctx context.Context, end int64, reso
 	for _, resource := range resources {
 		key := feishuCursorKey(p.config.AppID, resource.ChatID)
 		cursor := p.core.store.Snapshot().FeishuCursors[key]
-		if cursor >= end {
-			continue
-		} // Another proven finite scan already covered it.
-		if cursor != 0 && cursor < end {
-			if err := p.reconcileChat(ctx, resource.ChatID, cursor, end); err != nil {
+		var through int64
+		if cursor == 0 {
+			// An old binding without a source cursor starts from source evidence,
+			// never from a possibly fast local wall clock.
+			source, err := p.apiSourceTime(ctx, "GET", "/open-apis/im/v1/chats/"+url.PathEscape(resource.ChatID), nil, nil)
+			if err != nil {
+				return err
+			}
+			if source == 0 {
+				return fault("unavailable", "Feishu source clock is unavailable")
+			}
+			through = max(int64(1), source-sourceTimeOverlap)
+		} else {
+			var err error
+			through, err = p.reconcileChat(ctx, resource.ChatID, max(int64(1), cursor-sourceTimeOverlap), max(end, cursor))
+			if err != nil {
 				return err
 			}
 		}
@@ -135,8 +150,8 @@ func (p *feishuProvider) reconcileResources(ctx context.Context, end int64, reso
 			return err
 		}
 		if err := p.core.store.Update(func(d *State) error {
-			if d.FeishuCursors[key] < end {
-				d.FeishuCursors[key] = end
+			if d.FeishuCursors[key] < through {
+				d.FeishuCursors[key] = through
 			}
 			return nil
 		}); err != nil {
@@ -163,7 +178,8 @@ type feishuHistoryMessage struct {
 	} `json:"sender"`
 }
 
-func (p *feishuProvider) reconcileChat(ctx context.Context, chat string, start, end int64) error {
+func (p *feishuProvider) reconcileChat(ctx context.Context, chat string, start, end int64) (int64, error) {
+	proven := int64(0)
 	tokens := map[string]bool{}
 	pageToken := ""
 	for pageNumber := 0; pageNumber < 1000; pageNumber++ {
@@ -181,18 +197,23 @@ func (p *feishuProvider) reconcileChat(ctx context.Context, chat string, start, 
 			HasMore   *bool                  `json:"has_more"`
 			PageToken string                 `json:"page_token"`
 		}
-		if err := p.api(ctx, "GET", "/open-apis/im/v1/messages?"+query.Encode(), nil, &page); err != nil {
-			return err
+		source, err := p.apiSourceTime(ctx, "GET", "/open-apis/im/v1/messages?"+query.Encode(), nil, &page)
+		if err != nil {
+			return 0, err
+		}
+		if proven == 0 && source > 0 {
+			proven = source
 		}
 		if page.HasMore == nil || (*page.HasMore && page.Items == nil) {
-			return fault("unavailable", "invalid Feishu history page")
+			return 0, fault("unavailable", "invalid Feishu history page")
 		}
 		for _, item := range page.Items {
 			created, err := strconv.ParseInt(item.CreateTime, 10, 64)
 			if err != nil || created < 0 || item.MessageID == "" || item.ChatID != chat {
-				return fault("unavailable", "invalid Feishu history message")
+				return 0, fault("unavailable", "invalid Feishu history message")
 			}
-			if created <= start || created > end || item.Deleted || item.Sender.Type != "user" || item.Sender.IDType != "open_id" {
+			proven = max(proven, created)
+			if created < start || created > end || item.Deleted || item.Sender.Type != "user" || item.Sender.IDType != "open_id" {
 				continue
 			}
 			kind, content, sender, id, thread := item.Kind, item.Body.Content, item.Sender.ID, item.MessageID, item.ThreadID
@@ -201,17 +222,20 @@ func (p *feishuProvider) reconcileChat(ctx context.Context, chat string, start, 
 				Message: &im.EventMessage{MessageId: &id, ChatId: &chat, ThreadId: &thread, MessageType: &kind, Content: &content, CreateTime: &item.CreateTime},
 			}}
 			if err := p.receive(context.WithValue(ctx, historyReplayKey{}, true), payload); err != nil {
-				return err
+				return 0, err
 			}
 		}
 		if !*page.HasMore {
-			return nil
+			if proven == 0 {
+				return 0, fault("unavailable", "Feishu source clock is unavailable")
+			}
+			return min(end, proven), nil
 		}
 		if page.PageToken == "" || tokens[page.PageToken] {
-			return fault("unavailable", "invalid Feishu history pagination")
+			return 0, fault("unavailable", "invalid Feishu history pagination")
 		}
 		tokens[page.PageToken] = true
 		pageToken = page.PageToken
 	}
-	return fault("resource_exhausted", "Feishu history interval exceeds page limit")
+	return 0, fault("resource_exhausted", "Feishu history interval exceeds page limit")
 }

@@ -88,15 +88,13 @@ func (s *shell) exerciseSmoke(report map[string]any) error {
 		// assertion, eight-second wait and two-second eval limits are unchanged.
 		ctx, cancel := context.WithTimeout(s.ctx, 1500*time.Millisecond)
 		defer cancel()
-		assets := make(chan map[string]any, 1)
-		go func() { assets <- smokeAssetStatuses(ctx, s.offline.URL) }()
-		document, evalErr := s.window.Page().EvalContext(ctx, smokeDocumentSnapshot)
-		if evalErr == nil {
-			report["startup_document"] = document
-		} else {
-			report["startup_document"] = map[string]any{"error": smokeEvalCategory(evalErr)}
+		for key, value := range collectSmokeStartup(ctx, smokeStartupHooks{
+			dispatch: mygo.RunOnMain, inspect: s.smokeNativeSnapshot,
+			document: func(ctx context.Context) (any, error) { return s.window.Page().EvalContext(ctx, smokeDocumentSnapshot) },
+			assets:   func(ctx context.Context) map[string]any { return smokeAssetStatuses(ctx, s.offline.URL) },
+		}) {
+			report[key] = value
 		}
-		report["startup_assets"] = <-assets
 		return err
 	}
 	report["bundled_fallback"] = true

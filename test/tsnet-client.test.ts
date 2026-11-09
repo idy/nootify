@@ -91,16 +91,17 @@ test('a missing embedded helper never starts an installed Tailscale client', asy
   await assert.rejects(client.start('tcp://127.0.0.1:12345',()=>{}),/embedded_client_missing/);
 });
 
-test('TCP transport wrappers use flat RPC fields and preserve tunnel IDs separately from reply IDs', async t => {
+test('private transport wrappers preserve endpoint network and token separately from reply IDs', async t => {
+  const endpoint={network:process.platform==='win32'?'npipe':'unix',address:process.platform==='win32'?String.raw`\\.\pipe\nootify-tunnel-`+'a'.repeat(32):'/synthetic/nootify-tunnel.sock',token:'a'.repeat(64)};
   const {client}=await fixture(t,`import {createInterface} from 'node:readline';
-const input=createInterface({input:process.stdin});const requests=[];
+const input=createInterface({input:process.stdin});const requests=[];const endpoint=${JSON.stringify(endpoint)};
 input.on('line',line=>{const req=JSON.parse(line);requests.push(req);
-const result=req.method==='tunnel'?{id:'tunnel-1',address:'127.0.0.1:43210',token:'a'.repeat(64)}:req.method==='publish'?{port:req.port}:req.method==='status'?requests:{ok:true};
+const result=req.method==='tunnel'?{id:'tunnel-1',...endpoint}:req.method==='publish'?{port:req.port}:req.method==='status'?requests:{ok:true};
 setTimeout(()=>process.stdout.write(JSON.stringify({id:req.id,result})+'\\n'),req.method==='tunnel'?10:0);});
 input.on('close',()=>process.exit());`);
   await client.start('tcp://127.0.0.1:12345',()=>{});
   const [tunnel,publication]=await Promise.all([client.tunnel('[fd7a:115c:a1e0::2]:7443'),client.publish(7443,'127.0.0.1:54321')]);
-  assert.deepEqual(tunnel,{id:'tunnel-1',address:'127.0.0.1:43210',token:'a'.repeat(64)});
+  assert.deepEqual(tunnel,{id:'tunnel-1',...endpoint});
   assert.deepEqual(publication,{port:7443});
   assert.equal(await client.closeTunnel(tunnel.id),undefined);
   assert.equal(await client.unpublish(publication.port),undefined);
@@ -114,13 +115,31 @@ input.on('close',()=>process.exit());`);
 });
 
 test('tunnel leases reject missing malformed and uppercase authentication tokens without exposing helper data', async t => {
+  const endpoint={network:process.platform==='win32'?'npipe':'unix',address:process.platform==='win32'?String.raw`\\.\pipe\nootify-tunnel-`+'a'.repeat(32):'/synthetic/nootify-tunnel.sock'};
   const {client}=await fixture(t,`import {createInterface} from 'node:readline';const input=createInterface({input:process.stdin});
-const tokens=[undefined,'private-secret-value','A'.repeat(64),'b'.repeat(64)];
-input.on('line',line=>{const req=JSON.parse(line);const result={id:'lease',address:'127.0.0.1:43210',token:tokens.shift()};process.stdout.write(JSON.stringify({id:req.id,result})+'\\n');});input.on('close',()=>process.exit());`);
+const tokens=[undefined,'private-secret-value','A'.repeat(64),'b'.repeat(64)];const endpoint=${JSON.stringify(endpoint)};
+input.on('line',line=>{const req=JSON.parse(line);const result={id:'lease',...endpoint,token:tokens.shift()};process.stdout.write(JSON.stringify({id:req.id,result})+'\\n');});input.on('close',()=>process.exit());`);
   await client.start('tcp://127.0.0.1:12345',()=>{});
   for(let i=0;i<3;i++)await assert.rejects(client.tunnel('100.64.0.2:7443'),{message:'embedded_protocol_error'});
   assert.equal((await client.tunnel('100.64.0.2:7443')).token,'b'.repeat(64));
 });
+
+for(const platform of ['darwin','win32'] as const){
+  test(`${platform}: tunnel endpoints require the matching private IPC network without TCP fallback`,async t=>{
+    const pipe=String.raw`\\.\pipe\nootify-tunnel-`+'b'.repeat(32);
+    const valid=platform==='win32'?{network:'npipe',address:pipe}:{network:'unix',address:'/synthetic/owner/tunnel.sock'};
+    const invalid=platform==='win32'
+      ?[{network:'tcp',address:'127.0.0.1:43210'},{network:'unix',address:'/tmp/tunnel.sock'},{network:'npipe',address:pipe+'0'},{network:'npipe',address:pipe.toUpperCase()}]
+      :[{network:'tcp',address:'127.0.0.1:43210'},{network:'npipe',address:pipe},{network:'unix',address:'relative.sock'},{network:'unix',address:'/tmp/invalid\0.sock'}];
+    const {client}=await fixture(t,`import {createInterface} from 'node:readline';const input=createInterface({input:process.stdin});const endpoints=${JSON.stringify([...invalid,valid])};
+input.on('line',line=>{const req=JSON.parse(line);process.stdout.write(JSON.stringify({id:req.id,result:{id:'lease',token:'a'.repeat(64),...endpoints.shift()}})+'\\n');});input.on('close',()=>process.exit());`);
+    await client.start('tcp://127.0.0.1:12345',()=>{});
+    t.mock.property(process,'platform',platform);
+    try{for(const _endpoint of invalid)await assert.rejects(client.tunnel('100.64.0.2:7443'),{message:'embedded_protocol_error'});
+      assert.deepEqual(await client.tunnel('100.64.0.2:7443'),{id:'lease',token:'a'.repeat(64),...valid});
+    }finally{t.mock.restoreAll();}
+  });
+}
 
 test('TCP transport errors preserve fixed codes and redact arbitrary helper text', async t => {
   const {client}=await fixture(t,`import {createInterface} from 'node:readline';const input=createInterface({input:process.stdin});
