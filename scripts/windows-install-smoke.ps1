@@ -266,6 +266,11 @@ try {
         $pendingKey = 'HKCU:\Software\Nootify\PendingInstaller'
         if (Test-Path -LiteralPath $pendingKey) { throw 'Refusing an existing pending installation receipt' }
         $token = [Guid]::NewGuid().ToString('B')
+        # Registry New-Item does not create missing parents on a pristine runner.
+        # Create only the absent parent; preserve any existing values and keep
+        # the leaf creation non-forcing so a pre-existing receipt still fails.
+        $pendingParent = Split-Path -Parent $pendingKey
+        if (!(Test-Path -LiteralPath $pendingParent)) { $null = New-Item -Path $pendingParent }
         $null = New-Item -Path $pendingKey
         $null = New-ItemProperty -LiteralPath $pendingKey -Name Target -Value $installDir -PropertyType String
         $null = New-ItemProperty -LiteralPath $pendingKey -Name Token -Value $token -PropertyType String
