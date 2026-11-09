@@ -28,6 +28,7 @@ type shell struct {
 	ctx            context.Context
 	cancel         context.CancelFunc
 	smoke          bool
+	smokeLoads     smokeLoadDiagnostics
 	offline        *offlineServer
 	policy         urlPolicy
 	window         *mygo.Window
@@ -356,6 +357,7 @@ func (s *shell) createWindow() {
 		return nil
 	})
 	page.OnDidFinishLoad(func() {
+		s.noteSmokeLoad("finished", 0)
 		if documentAt(page.URL(), s.offline.URL) {
 			s.guiDocumentLoaded = true
 			s.confirmGUIReady()
@@ -366,21 +368,33 @@ func (s *shell) createWindow() {
 		}
 	})
 	page.OnDidNavigate(func(raw string) {
+		s.noteSmokeLoad("navigated", 0)
 		if !s.trustedDocument(raw) {
+			s.noteSmokeLoad("blocked", 0)
 			log.Print("Blocked unexpected document")
 			s.online = false
 			s.loading = false
 			_ = page.LoadURL(s.offline.URL)
 		}
 	})
-	page.OnDidFailLoad(func(*mygo.LoadError) {
+	page.OnDidFailLoad(func(failure *mygo.LoadError) {
+		code := 0
+		if failure != nil {
+			code = failure.Code
+		}
+		s.noteSmokeLoad("failed", code)
 		s.online = false
 		s.loading = false
 		if s.ctx.Err() == nil && !documentAt(page.URL(), s.offline.URL) {
 			_ = page.LoadURL(s.offline.URL)
 		}
 	})
-	page.OnRenderProcessGone(func(string) { s.online = false; s.loading = false; _ = page.LoadURL(s.offline.URL) })
+	page.OnRenderProcessGone(func(string) {
+		s.noteSmokeLoad("renderer_gone", 0)
+		s.online = false
+		s.loading = false
+		_ = page.LoadURL(s.offline.URL)
+	})
 	_ = page.LoadURL(s.offline.URL)
 }
 func (s *shell) restore() {

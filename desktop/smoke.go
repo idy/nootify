@@ -64,9 +64,39 @@ func (s *shell) smokeEval(expression string) bool {
 	return err == nil && v == true
 }
 func (s *shell) exerciseSmoke(report map[string]any) error {
+	started := time.Now()
+	observations := map[string]int{}
 	if err := smokeWait("bundled offline document and icon", func() bool {
-		return s.smokeEval("!!document.querySelector('h1') && document.querySelector('.mark')?.naturalWidth > 0 && window.__NOOTIFY_LANGUAGE__?.locale === document.documentElement.lang")
+		ctx, cancel := context.WithTimeout(s.ctx, 2*time.Second)
+		defer cancel()
+		value, err := s.window.Page().EvalContext(ctx, "!!document.querySelector('h1') && document.querySelector('.mark')?.naturalWidth > 0 && window.__NOOTIFY_LANGUAGE__?.locale === document.documentElement.lang")
+		category := smokeEvalCategory(err)
+		if err == nil {
+			if value == true {
+				category = "true"
+			} else {
+				category = "false"
+			}
+		}
+		observations[category]++
+		return err == nil && value == true
 	}); err != nil {
+		report["startup_eval"] = observations
+		report["startup_elapsed_ms"] = time.Since(started).Milliseconds()
+		report["startup_load"] = s.smokeLoadSnapshot()
+		// Failure-only diagnostics share a separate bounded budget. The original
+		// assertion, eight-second wait and two-second eval limits are unchanged.
+		ctx, cancel := context.WithTimeout(s.ctx, 1500*time.Millisecond)
+		defer cancel()
+		assets := make(chan map[string]any, 1)
+		go func() { assets <- smokeAssetStatuses(ctx, s.offline.URL) }()
+		document, evalErr := s.window.Page().EvalContext(ctx, smokeDocumentSnapshot)
+		if evalErr == nil {
+			report["startup_document"] = document
+		} else {
+			report["startup_document"] = map[string]any{"error": smokeEvalCategory(evalErr)}
+		}
+		report["startup_assets"] = <-assets
 		return err
 	}
 	report["bundled_fallback"] = true
