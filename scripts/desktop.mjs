@@ -1,8 +1,9 @@
 // Compile the pinned MyGo module directly. All version metadata comes from the
 // root package.json; --package-version exists only for upgrade test fixtures.
 import { execFile, spawn } from 'node:child_process';
-import { chmod, copyFile, cp, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
-import { join, relative, resolve, sep } from 'node:path';
+import { chmod, copyFile, cp, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { dirname, join, relative, resolve, sep } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { createHash } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs, promisify } from 'node:util';
@@ -128,6 +129,33 @@ async function compileDesktop(target, paths, version, appID) {
   else await verifyExecutable(paths.executable, `nootify-desktop ${version}`, target);
 }
 
+export async function createMacDmg(source, output, { execute = run, wait = delay } = {}) {
+  // Build beside the destination so publication is one same-volume rename.
+  // A failed attempt must never replace an existing, complete installer.
+  const temporary = await mkdtemp(join(dirname(output), '.dmg-image-'));
+  try {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const image = join(temporary, `attempt-${attempt}.dmg`);
+      try {
+        await execute('/usr/bin/hdiutil', ['create', '-volname', 'Nootify', '-srcfolder', source, '-nospotlight', '-format', 'UDZO', image],
+          { cwd: root, timeout: 120_000, maxBuffer: 16 << 20 });
+      } catch (error) {
+        // hdiutil can return EBUSY (16), or a generic exit with the native
+        // diagnostic. Do not retry timeouts, signals, spawn or other failures.
+        const busy = Number.isInteger(error?.code) && error.code > 0 && !error.signal && !error.killed
+          && (error.code === 16 || /(?:^|\r?\n)hdiutil: create failed - Resource busy(?:\r?\n|$)/.test(String(error.stderr)));
+        if (!busy || attempt === 3) throw error;
+        console.warn(`desktop: hdiutil create is busy; retrying (${attempt + 1}/3)`);
+        await wait(attempt * 1000);
+        continue;
+      }
+      await execute('/usr/bin/codesign', ['--force', '--sign', '-', '--timestamp=none', image], { cwd: root, timeout: 30_000 });
+      await rename(image, output);
+      return;
+    }
+  } finally { await rm(temporary, { recursive: true, force: true }); }
+}
+
 async function packageMac(paths, version, appID, bundles) {
   await writeFile(join(paths.app, 'Contents', 'Info.plist'), macInfoPlist(version, appID));
   await writeFile(join(paths.app, 'Contents', 'PkgInfo'), 'APPL????');
@@ -150,8 +178,7 @@ async function packageMac(paths, version, appID, bundles) {
       await cp(paths.app, join(staging, 'Nootify.app'), { recursive: true });
       await symlink('/Applications', join(staging, 'Applications'));
       const dmg = join(paths.dmg, `Nootify_${version}_aarch64.dmg`);
-      await run('/usr/bin/hdiutil', ['create', '-volname', 'Nootify', '-srcfolder', staging, '-ov', '-format', 'UDZO', dmg], { cwd: root, maxBuffer: 16 << 20 });
-      await run('/usr/bin/codesign', ['--force', '--sign', '-', '--timestamp=none', dmg], { cwd: root });
+      await createMacDmg(staging, dmg);
     } finally { await rm(staging, { recursive: true, force: true }); }
   }
   return archive;

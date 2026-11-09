@@ -15,6 +15,8 @@ Nootify's desktop shell uses Go with `github.com/egoist/mygo` pinned to `v0.8.3`
 
 The host does not require the MyGo bundler: a Node build script may compile the pinned MyGo Go module and create the platform bundle directly. JSON/native build metadata must keep version authority in the root `package.json`. No Cargo or Rust is required to build, test, stage, package, or generate notices.
 
+macOS DMGs use UDZO without a Spotlight index. Only `hdiutil create` resource-busy failures retry, at most three attempts with one- and two-second backoff and a two-minute command deadline per attempt. Each attempt writes a separate temporary image beside the destination. Signing must succeed before a same-volume rename publishes the final filename; a failed create/sign leaves an existing completed image unchanged. Permission, disk-space, spawn, signal and timeout failures are not retried.
+
 ## Installed layout and compatibility
 
 Keep app identity `dev.idy.nootify`, app name Nootify, service port 9417, the existing private state directories, task/LaunchAgent identity, and existing routing/auth tokens.
@@ -66,3 +68,9 @@ Updater implementation may add pure-Go dependencies. The desktop-module owner ma
 ## Verification
 
 Preserve all existing service and agent tests. Add Go tests for URL policy, language persistence, service ownership/environment, single-instance/close semantics where testable, update signatures and safe replacement, and release compatibility. Build and test macOS/Windows in CI, including the existing Windows install/upgrade/uninstall checks. Verify the actual MyGo desktop app locally with a separate development identity/isolated service so the installed production app and its credentials stay untouched. Browser preview verification covers the unchanged web UI and any native bridge changes; native window/tray/updater smoke checks cover behavior that a browser cannot exercise.
+
+Portable DMG regressions inject native failures and check bounded retry, temporary-file cleanup, signing order and preservation of an existing output. The opt-in macOS check creates and signs a synthetic image, verifies its checksum/signature and reads image metadata without attaching it or launching a desktop/service:
+
+```bash
+NOOTIFY_TEST_NATIVE_DMG=1 node --test scripts/dmg.test.mjs
+```
