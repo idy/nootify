@@ -131,7 +131,21 @@ function Test-Step([string]$Name, [scriptblock]$Check) {
 function Run-Native([string]$File, [string]$Arguments, [string]$Label, [int]$ExpectedExitCode = 0) {
     $stdout = Join-Path $OutputDirectory "$Label.stdout.log"
     $stderr = Join-Path $OutputDirectory "$Label.stderr.log"
-    $process = Start-Process -FilePath $File -ArgumentList $Arguments -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+    # NSIS detail output is not its stdout/stderr. Give each owned installer
+    # invocation a fresh opt-in trace directory; never pass this to the daemon.
+    $installerProcess = (Same-Path $File $Installer) -or (Same-Path $File $BaselineInstaller) -or (Same-Path $File $uninstaller)
+    $traceVariable = 'NOOTIFY_INSTALLER_DIAGNOSTICS'
+    $previousTrace = [Environment]::GetEnvironmentVariable($traceVariable, 'Process')
+    try {
+        if ($installerProcess) {
+            $trace = Join-Path $OutputDirectory ('installer-' + $Label + '-' + [Guid]::NewGuid().ToString('N'))
+            $null = [IO.Directory]::CreateDirectory($trace)
+            [Environment]::SetEnvironmentVariable($traceVariable, $trace, 'Process')
+        }
+        $process = Start-Process -FilePath $File -ArgumentList $Arguments -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+    } finally {
+        [Environment]::SetEnvironmentVariable($traceVariable, $previousTrace, 'Process')
+    }
     $null = $process.Handle
     if (!$process.WaitForExit(180000)) {
         $process.Kill()
@@ -252,6 +266,32 @@ try {
         # NSIS /D must be the last argument, without quotes around its path.
         $null = Run-Native $BaselineInstaller "/S /D=$installDir" 'install-baseline'
         Assert-Installation $BaselineVersion
+    }
+    Test-Step 'Installer diagnostics retain phase and helper evidence without private data' {
+        $traces = @(Get-ChildItem -LiteralPath $OutputDirectory -Directory -Filter 'installer-install-baseline-*')
+        if ($traces.Count -ne 1) { throw 'Baseline installer diagnostic directory is missing or ambiguous' }
+        $phases = [IO.File]::ReadAllText((Join-Path $traces[0].FullName 'nsis-phases.log'))
+        if ($phases -notmatch 'helper-apply-success' -or $phases -notmatch 'installation-success') {
+            throw 'NSIS did not preserve its successful phase markers'
+        }
+        $reports = @(Get-ChildItem -LiteralPath $traces[0].FullName -File -Filter 'helper-*.jsonl')
+        if ($reports.Count -lt 3) { throw 'Installer helper diagnostic reports are missing' }
+        $actions = @{}
+        foreach ($report in $reports) {
+            foreach ($line in [IO.File]::ReadAllLines($report.FullName)) {
+                $event = $line | ConvertFrom-Json
+                if ($event.version -ne 1 -or $event.outcome -notin @('begin', 'success', 'failure')) {
+                    throw 'Invalid installer helper diagnostic event'
+                }
+                if ($event.outcome -eq 'success') { $actions[[string]$event.action] = $true }
+                if ($line.Contains($installDir) -or $line.Contains($stateDir) -or $line.Contains($env:USERPROFILE)) {
+                    throw 'Installer diagnostics exposed a private path'
+                }
+            }
+        }
+        foreach ($action in @('prepare', 'apply', 'finish')) {
+            if (!$actions.ContainsKey($action)) { throw "Installer helper did not report $action completion" }
+        }
     }
     Test-Step 'Installed desktop starts its real service and one user task' {
         $script:desktop = Start-TestApp

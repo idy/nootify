@@ -37,6 +37,36 @@ Page instfiles
 UninstPage uninstConfirm
 UninstPage instfiles
 
+; Optional fixed phase markers for a caller-owned diagnostic directory. These
+; never contain paths, environment values, child output or service configuration.
+; Preserve the NSIS Errors flag: tracing must not hide extraction/registry errors.
+!macro NootifyDiagnostic MESSAGE
+  Push $0
+  Push $1
+  Push $2
+  StrCpy $2 0
+  ${If} ${Errors}
+    StrCpy $2 1
+  ${EndIf}
+  ReadEnvStr $0 "NOOTIFY_INSTALLER_DIAGNOSTICS"
+  ${If} $0 != ""
+    ClearErrors
+    FileOpen $1 "$0\nsis-phases.log" a
+    ${IfNot} ${Errors}
+      FileWrite $1 "${MESSAGE}$\r$\n"
+      FileClose $1
+    ${EndIf}
+  ${EndIf}
+  ${If} $2 = 1
+    SetErrors
+  ${Else}
+    ClearErrors
+  ${EndIf}
+  Pop $2
+  Pop $1
+  Pop $0
+!macroend
+
 !macro InitOptions
   SetShellVarContext current
   SetRegView 64
@@ -45,6 +75,7 @@ UninstPage instfiles
   StrCpy $PassiveMode 0
   StrCpy $TransactionStarted 0
   StrCpy $RegistrationChanged 0
+  !insertmacro NootifyDiagnostic "init-options"
   ; Hold one kernel mutex for the entire installer/uninstaller lifetime, including
   ; extraction between helper invocations. A crashed process releases it.
   System::Call 'kernel32::CreateMutexW(p 0, i 0, w "Global\Nootify.Installer") p.r0 ?e'
@@ -94,6 +125,7 @@ FunctionEnd
 
 Function un.onInit
   !insertmacro InitOptions
+  !insertmacro NootifyDiagnostic "uninstaller-initialized"
 FunctionEnd
 
 Function NootifyDirectoryPre
@@ -158,12 +190,19 @@ Function NootifyCheckRegisteredDestination
 FunctionEnd
 
 !macro NootifyTransaction ACTION
+  !insertmacro NootifyDiagnostic "helper-${ACTION}-begin"
   nsExec::ExecToLog /TIMEOUT=900000 '"$PLUGINSDIR\nootify-installer-stage.exe" --action ${ACTION} --target "$INSTDIR" --manifest "$PLUGINSDIR\installer-payload.json"'
   Pop $0
+  Push $3
+  StrCpy $3 $0
   ${If} $0 != 0
+    !insertmacro NootifyDiagnostic "helper-${ACTION}-failure code=$3"
+    Pop $3
     SetErrorLevel 1
     Abort "Nootify could not ${ACTION} its installer transaction. The previous payload is retained; retry this installer to recover."
   ${EndIf}
+  !insertmacro NootifyDiagnostic "helper-${ACTION}-success"
+  Pop $3
 !macroend
 
 ; Recursive payload replacement is permitted only in a registered installation.
@@ -267,18 +306,23 @@ Function un.NootifyPreflightDesktop
 FunctionEnd
 
 Section "Nootify" Install
+  !insertmacro NootifyDiagnostic "preflight-destination"
   Call NootifyCheckRegisteredDestination
+  !insertmacro NootifyDiagnostic "preflight-payload"
   Call NootifyPreflightPayload
   ; The desktop lock is checked before recovery too: no service changes while
   ; the user still has a mapped desktop image.
+  !insertmacro NootifyDiagnostic "preflight-desktop"
   Call NootifyPreflightDesktop
   ; Recover an interrupted exchange before checking completeness. The helper
   ; refuses redirected or unrecognized journals and never touches private state.
   !insertmacro NootifyTransaction prepare
   StrCpy $TransactionStarted 1
+  !insertmacro NootifyDiagnostic "preflight-installed-files"
   Call NootifyPreflightInstalledFiles
   ; Extraction touches only an empty staging tree. Abort on any error before
   ; querying/stopping the existing service or exchanging package-owned roots.
+  !insertmacro NootifyDiagnostic "extract-begin"
   SetOutPath "$INSTDIR\.nootify-installer\new"
   SetOverwrite on
   ClearErrors
@@ -290,14 +334,17 @@ Section "Nootify" Install
   WriteUninstaller "$INSTDIR\.nootify-installer\new\uninstall.exe"
   ${If} ${Errors}
     SetErrorLevel 1
+    !insertmacro NootifyDiagnostic "extract-failure"
     Abort "Nootify could not extract the replacement. The installed files and service have not been changed."
   ${EndIf}
+  !insertmacro NootifyDiagnostic "extract-success"
   ; Validates every extracted file against a trusted manifest, journals prior
   ; RUNNING state, then stops/exchanges/restarts via the owned bundled CLI.
   ; /R controls only desktop launch. Deliberately stopped services stay stopped.
   SetOutPath "$PLUGINSDIR"
   !insertmacro NootifyTransaction apply
   StrCpy $RegistrationChanged 1
+  !insertmacro NootifyDiagnostic "registration-begin"
   ClearErrors
   CreateShortcut "$SMPROGRAMS\Nootify.lnk" "$INSTDIR\Nootify.exe"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayName" "Nootify"
@@ -312,13 +359,16 @@ Section "Nootify" Install
   WriteRegDWORD HKCU "${UNINSTALL_KEY}" "NoRepair" 1
   ${If} ${Errors}
     SetErrorLevel 1
+    !insertmacro NootifyDiagnostic "registration-failure"
     Abort "Nootify could not update its installation registration. Restoring the previous installation."
   ${EndIf}
+  !insertmacro NootifyDiagnostic "registration-success"
   !insertmacro NootifyTransaction finish
   StrCpy $TransactionStarted 0
 SectionEnd
 
 Function .onInstFailed
+  !insertmacro NootifyDiagnostic "installation-failure"
   ${If} $TransactionStarted = 1
     SetOutPath "$PLUGINSDIR"
     nsExec::ExecToLog /TIMEOUT=900000 '"$PLUGINSDIR\nootify-installer-stage.exe" --action recover --target "$INSTDIR"'
@@ -337,6 +387,7 @@ Function .onInstFailed
 FunctionEnd
 
 Function .onInstSuccess
+  !insertmacro NootifyDiagnostic "installation-success"
   ; /R works with /S, /P and /UPDATE too, after the independent service's prior
   ; state has already been restored and all files/registration committed.
   ${If} $Relaunch = 1
@@ -347,6 +398,7 @@ FunctionEnd
 Section "Uninstall"
   ; The desktop is independent of the owned service job. Refuse a locked image
   ; before stopping that service or removing payload, task or registration.
+  !insertmacro NootifyDiagnostic "uninstall-preflight-desktop"
   Call un.NootifyPreflightDesktop
   !insertmacro NootifyTransaction recover
   !insertmacro NSIS_HOOK_PREUNINSTALL

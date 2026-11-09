@@ -16,11 +16,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf16"
 )
 
-type installedService struct{ target string }
+type installedService struct {
+	target      string
+	diagnostics *diagnostics
+}
 
 func installerEnvironment() []string {
 	var clean []string
@@ -41,24 +45,44 @@ func installerEnvironment() []string {
 	return clean
 }
 
-func runHidden(file string, arguments ...string) ([]byte, error) {
+func runHidden(d *diagnostics, phase, file string, arguments ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 170*time.Second)
 	defer cancel()
+	return runHiddenContext(ctx, d, phase, file, arguments...)
+}
+
+func runHiddenContext(ctx context.Context, d *diagnostics, phase, file string, arguments ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, file, arguments...)
 	cmd.Env = installerEnvironment()
 	hideWindow(cmd)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
-	// Do not include exec errors or stderr: package paths, environment values,
-	// and user service configuration do not belong in installer diagnostics.
+	// Child output is never diagnostic data. Keep only process exit/deadline and
+	// numeric OS failure facts; preserve the existing public failure message.
+	d.record(phase, "command", "begin", "", nil, nil)
 	if err := cmd.Run(); err != nil {
-		return nil, errors.New("owned service command failed or timed out")
+		failure := commandOutput(stdout.Bytes())
+		failure.timedOut = errors.Is(ctx.Err(), context.DeadlineExceeded)
+		if cmd.ProcessState != nil {
+			code := cmd.ProcessState.ExitCode()
+			failure.exitCode = &code
+		}
+		var errno syscall.Errno
+		if errors.As(err, &errno) {
+			failure.osErrno = uint64(errno)
+		}
+		d.record(phase, "command", "failure", "", failure, failure)
+		return nil, failure
 	}
+	code := 0
+	facts := commandOutput(stdout.Bytes())
+	facts.exitCode = &code
+	d.record(phase, "command", "success", "", nil, facts)
 	return bytes.TrimPrefix(bytes.TrimSpace(stdout.Bytes()), []byte{0xef, 0xbb, 0xbf}), nil
 }
 
 func (s installedService) command(action string) ([]byte, error) {
-	return runHidden(filepath.Join(s.target, "node.exe"), filepath.Join(s.target, "service", "dist", "src", "cli.js"), "service-"+action)
+	return runHidden(s.diagnostics, action, filepath.Join(s.target, "node.exe"), filepath.Join(s.target, "service", "dist", "src", "cli.js"), "service-"+action)
 }
 
 func (s installedService) running() (bool, error) {
@@ -74,6 +98,7 @@ func (s installedService) running() (bool, error) {
 		Running   *bool `json:"running"`
 	}
 	if err := json.Unmarshal(data, &status); err != nil || status.Installed == nil {
+		s.diagnostics.invalidResponse("status", data)
 		return false, errors.New("invalid installed service status")
 	}
 	if !*status.Installed {
@@ -82,6 +107,12 @@ func (s installedService) running() (bool, error) {
 	if status.Running != nil {
 		return *status.Running, nil
 	}
+	return s.legacySnapshot()
+}
+
+func (s installedService) legacySnapshot() (running bool, result error) {
+	s.diagnostics.begin("legacy-snapshot", "")
+	defer func() { s.diagnostics.end("legacy-snapshot", "", result) }()
 	// Published older CLIs return only installed. Task registration is not
 	// evidence of a running service. Read Scheduler's hidden-inclusive snapshot
 	// after the bundled CLI's ownership check; do not modify a task through COM.
@@ -95,7 +126,7 @@ func (s installedService) running() (bool, error) {
 	if !filepath.IsAbs(powerShell) {
 		return false, errors.New("missing absolute system PowerShell path")
 	}
-	data, err = runHidden(powerShell, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", base64.StdEncoding.EncodeToString(buffer))
+	data, err := runHidden(s.diagnostics, "legacy-snapshot", powerShell, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", base64.StdEncoding.EncodeToString(buffer))
 	if err != nil {
 		return false, errors.New("cannot query the installed service running state")
 	}
@@ -103,6 +134,7 @@ func (s installedService) running() (bool, error) {
 		Running *bool `json:"running"`
 	}
 	if err := json.Unmarshal(data, &snapshot); err != nil || snapshot.Running == nil {
+		s.diagnostics.invalidResponse("legacy-snapshot", data)
 		return false, errors.New("invalid service running-state snapshot")
 	}
 	return *snapshot.Running, nil
@@ -122,17 +154,30 @@ func main() {
 	target := flag.String("target", "", "absolute registered installation directory")
 	manifest := flag.String("manifest", "", "trusted staged payload manifest")
 	flag.Parse()
+	d := newDiagnostics(os.Getenv(diagnosticsVariable), *action)
+	d.begin("helper", "")
+	d.begin("arguments", "")
 	if flag.NArg() != 0 || !filepath.IsAbs(*target) {
-		fmt.Fprintln(os.Stderr, "An absolute installer target is required")
+		err := errors.New("An absolute installer target is required")
+		d.end("arguments", "", err)
+		d.end("helper", "", err)
+		d.close()
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	d.end("arguments", "", nil)
+	d.begin("lock", "")
 	unlock, lockErr := lockTransaction()
+	d.end("lock", "", lockErr)
 	if lockErr != nil {
+		d.end("helper", "", lockErr)
+		d.close()
 		fmt.Fprintln(os.Stderr, lockErr)
 		os.Exit(1)
 	}
 	defer unlock()
-	t := transaction{target: filepath.Clean(*target), service: installedService{target: filepath.Clean(*target)}}
+	defer d.close()
+	t := transaction{target: filepath.Clean(*target), diagnostics: d, service: installedService{target: filepath.Clean(*target), diagnostics: d}}
 	var err error
 	switch *action {
 	case "prepare":
@@ -146,7 +191,9 @@ func main() {
 	default:
 		err = errors.New("unknown installer transaction action")
 	}
+	d.end("helper", "", err)
 	if err != nil {
+		d.close()
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

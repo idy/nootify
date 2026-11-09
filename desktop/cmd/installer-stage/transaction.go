@@ -34,8 +34,9 @@ type serviceControl interface {
 }
 
 type transaction struct {
-	target  string
-	service serviceControl
+	target      string
+	service     serviceControl
+	diagnostics *diagnostics
 	// Tests inject errors at actual filesystem and journal boundaries; production
 	// has no environment variable or command-line fault injection switch.
 	checkpoint func(string) error
@@ -94,7 +95,9 @@ func (t transaction) check(name string) error {
 	return nil
 }
 
-func (t transaction) write(j journal) error {
+func (t transaction) write(j journal) (result error) {
+	t.diagnostics.begin("write-journal", "")
+	defer func() { t.diagnostics.end("write-journal", "", result) }()
 	data, err := json.Marshal(j)
 	if err != nil {
 		return err
@@ -118,8 +121,9 @@ func (t transaction) write(j journal) error {
 	return renameJournal(t.dir("journal.next"), t.dir("journal.json"))
 }
 
-func (t transaction) read() (journal, error) {
-	var j journal
+func (t transaction) read() (j journal, result error) {
+	t.diagnostics.begin("read-journal", "")
+	defer func() { t.diagnostics.end("read-journal", "", result) }()
 	if err := plainAncestors(t.target); err != nil {
 		return j, err
 	}
@@ -152,7 +156,9 @@ func (t transaction) read() (journal, error) {
 	return j, nil
 }
 
-func (t transaction) cleanup() error {
+func (t transaction) cleanup() (result error) {
+	t.diagnostics.begin("cleanup", "")
+	defer func() { t.diagnostics.end("cleanup", "", result) }()
 	if err := regularTree(t.dir()); err != nil {
 		return err
 	}
@@ -181,7 +187,9 @@ func (t transaction) cleanup() error {
 	return os.Remove(t.dir())
 }
 
-func (t transaction) prepare() error {
+func (t transaction) prepare() (result error) {
+	t.diagnostics.begin("prepare", "")
+	defer func() { t.diagnostics.end("prepare", "", result) }()
 	if err := plainAncestors(t.target); err != nil {
 		return err
 	}
@@ -207,7 +215,9 @@ func (t transaction) prepare() error {
 	return nil
 }
 
-func (t transaction) validate(manifestPath string) error {
+func (t transaction) validate(manifestPath string) (result error) {
+	t.diagnostics.begin("validate", "")
+	defer func() { t.diagnostics.end("validate", "", result) }()
 	if err := regularTree(t.dir("new")); err != nil {
 		return err
 	}
@@ -280,6 +290,8 @@ func (t transaction) validate(manifestPath string) error {
 }
 
 func (t transaction) apply(manifestPath string) (result error) {
+	t.diagnostics.begin("apply", "")
+	defer func() { t.diagnostics.end("apply", "", result) }()
 	j, err := t.read()
 	if err != nil {
 		return err
@@ -293,14 +305,16 @@ func (t transaction) apply(manifestPath string) (result error) {
 	for _, root := range payloadRoots {
 		path := filepath.Join(t.target, root)
 		if exists(path) {
-			if err := regularTree(path); err != nil {
+			if err := t.observe("old-tree", root, func() error { return regularTree(path) }); err != nil {
 				return err
 			}
 			j.Previous = append(j.Previous, root)
 		}
 	}
 	if t.service != nil {
+		t.diagnostics.begin("status", "")
 		j.Running, err = t.service.running()
+		t.diagnostics.end("status", "", err)
 		if err != nil {
 			return err
 		}
@@ -311,6 +325,8 @@ func (t transaction) apply(manifestPath string) (result error) {
 	}
 	defer func() {
 		if result != nil {
+			// Persist the original failure before rollback removes its evidence.
+			t.diagnostics.end("apply", "", result)
 			if err := t.recover(); err != nil {
 				result = fmt.Errorf("%w; rollback needs retry: %v (previous payload retained in %s)", result, err, t.dir("old"))
 			}
@@ -323,7 +339,7 @@ func (t transaction) apply(manifestPath string) (result error) {
 	// absence alone cannot prove there are no surviving descendant processes.
 	// Only the previously running state authorizes a subsequent Start.
 	if t.service != nil {
-		if err := t.service.stop(); err != nil {
+		if err := t.observe("stop", "", t.service.stop); err != nil {
 			return err
 		}
 	}
@@ -332,14 +348,14 @@ func (t transaction) apply(manifestPath string) (result error) {
 	}
 	for _, root := range payloadRoots {
 		if contains(j.Previous, root) {
-			if err := renamePayload(filepath.Join(t.target, root), t.dir("old", root)); err != nil {
+			if err := t.observe("backup", root, func() error { return renamePayload(filepath.Join(t.target, root), t.dir("old", root)) }); err != nil {
 				return err
 			}
 			if err := t.check("backup:" + root); err != nil {
 				return err
 			}
 		}
-		if err := renamePayload(t.dir("new", root), filepath.Join(t.target, root)); err != nil {
+		if err := t.observe("install", root, func() error { return renamePayload(t.dir("new", root), filepath.Join(t.target, root)) }); err != nil {
 			return err
 		}
 		if err := t.check("install:" + root); err != nil {
@@ -351,7 +367,7 @@ func (t transaction) apply(manifestPath string) (result error) {
 		if err := t.write(j); err != nil {
 			return err
 		}
-		if err := t.service.start(); err != nil {
+		if err := t.observe("start", "", t.service.start); err != nil {
 			return err
 		}
 	}
@@ -362,7 +378,9 @@ func (t transaction) apply(manifestPath string) (result error) {
 	return t.check("ready")
 }
 
-func (t transaction) recover() error {
+func (t transaction) recover() (result error) {
+	t.diagnostics.begin("recover", "")
+	defer func() { t.diagnostics.end("recover", "", result) }()
 	if !exists(t.dir()) {
 		return nil
 	}
@@ -391,7 +409,7 @@ func (t transaction) recover() error {
 	// The new service may already have started before interruption. Stop its
 	// validated owned task before moving anything back; errors retain all copies.
 	if j.Running && (j.Phase == "starting" || j.Phase == "ready") {
-		if err := t.service.stop(); err != nil {
+		if err := t.observe("stop", "", t.service.stop); err != nil {
 			return err
 		}
 	}
@@ -410,10 +428,10 @@ func (t transaction) recover() error {
 			// a crash between moving the old and new roots cannot lose that old root.
 			if exists(old) || !contains(j.Previous, root) && !exists(t.dir("new", root)) {
 				if exists(installed) {
-					if err := regularTree(installed); err != nil {
+					if err := t.observe("old-tree", root, func() error { return regularTree(installed) }); err != nil {
 						return err
 					}
-					if err := renamePayload(installed, t.dir("discard", root)); err != nil {
+					if err := t.observe("discard", root, func() error { return renamePayload(installed, t.dir("discard", root)) }); err != nil {
 						return err
 					}
 					if err := t.check("discard:" + root); err != nil {
@@ -421,7 +439,7 @@ func (t transaction) recover() error {
 					}
 				}
 				if exists(old) {
-					if err := renamePayload(old, installed); err != nil {
+					if err := t.observe("restore", root, func() error { return renamePayload(old, installed) }); err != nil {
 						return err
 					}
 					if err := t.check("restore:" + root); err != nil {
@@ -441,14 +459,16 @@ func (t transaction) recover() error {
 		if t.service == nil {
 			return errors.New("missing service control for rollback")
 		}
-		if err := t.service.start(); err != nil {
+		if err := t.observe("start", "", t.service.start); err != nil {
 			return err
 		}
 	}
 	return t.cleanup()
 }
 
-func (t transaction) finish() error {
+func (t transaction) finish() (result error) {
+	t.diagnostics.begin("finish", "")
+	defer func() { t.diagnostics.end("finish", "", result) }()
 	j, err := t.read()
 	if err != nil {
 		return err
