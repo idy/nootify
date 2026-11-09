@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -929,6 +930,145 @@ test('an unreconcilable environment identity reports an actionable conflict with
   assert.deepEqual(await providers.remoteSecret(), { token: 'private-peer-token' });
   assert.ok(!reports.some(record => record.status === 'core_failed')); assert.ok(!JSON.stringify(reports).includes(environment.appSecret));
 });
+
+async function conflictedEnvironment(t: Parameters<typeof fixture>[0], explicitDefault = false) {
+  const f = await fixture(t);
+  const old = { id: 'legacy-feishu', type: 'feishu', name: 'Existing app', enabled: true,
+    app_id: 'cli_0123456789abcdef', app_secret: 'old-secret', recipient_open_id: 'ou_old' };
+  const environment = { appId: 'cli_fedcba9876543210', appSecret: 'environment-secret' };
+  const collision = { id: `environment-feishu-${createHash('sha256').update(environment.appId).digest('hex').slice(0, 16)}`,
+    type: 'remote', name: 'Existing ID owner', enabled: true, address: '100.64.0.9:9418', token: 'synthetic-token' };
+  await f.providers.action({ action: 'save', provider: old });
+  await f.providers.action({ action: 'save', provider: collision });
+  if (explicitDefault) await f.providers.action({ action: 'default', id: collision.id });
+  Object.assign(f.state.settings, { lark_app_id: old.app_id, lark_app_secret: old.app_secret, lark_recipient_open_id: old.recipient_open_id }); await f.state.save();
+  const binding = { provider_id: old.id, session: { node_id: page.node_id, adapter: 'codex', session_id: 'old-session', name: 'Retained session' },
+    created: false, chat_id: 'oc_old', sender_open_id: 'ou_old' };
+  f.core.bindings.push(binding);
+  const providers = new ProvidersService(f.state, new SessionsService(f.state), environment, undefined, 9417, undefined, f.core);
+  const settings = settingsFor(t, { ...f, providers }, { source: 'environment', env: { LARK_APP_ID: environment.appId, LARK_APP_SECRET: environment.appSecret } });
+  t.after(() => providers.stop()); await providers.start(); assert.equal(providers.status(), 'configuration-conflict');
+  return { ...f, providers, settings, old, environment, collision, binding };
+}
+
+for (const explicitDefault of [false, true]) {
+  test(`creating a matching provider recovers the environment online and preserves ${explicitDefault ? 'an explicit default' : 'existing bindings'}`, async t => {
+    const f = await conflictedEnvironment(t, explicitDefault);
+    const provider = { id: 'recovered-environment', type: 'feishu', name: 'User-created matching app', enabled: true,
+      app_id: f.environment.appId, app_secret: f.environment.appSecret, recipient_open_id: 'ou_recovered' };
+    let writes = 0; const save = f.state.save.bind(f.state);
+    t.mock.method(f.state, 'save', async (...args: Parameters<State['save']>) => { writes++; return save(...args); });
+    const result = await f.providers.action({ action: 'save', provider });
+    assert.equal(f.providers.status(), 'ready'); assert.equal(result.compatibility, undefined);
+    assert.equal(f.providers.compatibilityProviderId(), provider.id); assert.deepEqual(f.providers.credentials, f.environment);
+    assert.equal((await f.settings.page()).lark.source, 'environment'); assert.equal(f.settings.larkSecret().app_secret, provider.app_secret);
+    assert.equal((await State.open(f.directory)).settings.lark_recipient_open_id, provider.recipient_open_id);
+    assert.equal(f.core.snapshot.default_provider_id, explicitDefault ? f.collision.id : provider.id);
+    assert.strictEqual(f.core.bindings[0], f.binding); assert.deepEqual(f.core.configs.get(f.old.id), { ...f.old, token: undefined });
+    const mutations = f.core.calls.filter(call => ['provider.save', 'provider.default'].includes(call.method));
+    assert.equal(mutations.filter(call => call.method === 'provider.save' && call.params.id === provider.id).length, 1, 'reconciliation must not save the already matching provider twice');
+    assert.equal(writes, 1, 'one recovery mirrors its committed state once');
+    await f.providers.action({ action: 'save', provider });
+    assert.equal(f.core.calls.filter(call => ['provider.save', 'provider.default'].includes(call.method)).length, mutations.length);
+    assert.equal(writes, 1, 'an identical retry must not rewrite the mirror');
+    await assert.rejects(f.providers.action({ action: 'save', provider: { ...provider, app_secret: 'rejected-secret' } }), /conflict.*environment/i);
+    assert.equal(f.core.configs.get(provider.id)?.app_secret, provider.app_secret);
+    await f.providers.stop(); await f.settings.stop();
+    const restored = await State.open(f.directory);
+    const restarted = new ProvidersService(restored, new SessionsService(restored), f.environment, undefined, 9417, undefined, f.core);
+    settingsFor(t, { ...f, state: restored, providers: restarted }, { source: 'environment', env: { LARK_APP_ID: f.environment.appId, LARK_APP_SECRET: f.environment.appSecret } });
+    t.after(() => restarted.stop());
+    const before = f.core.calls.filter(call => ['provider.save', 'provider.default'].includes(call.method)).length;
+    await restarted.start(); assert.equal(restarted.status(), 'ready'); assert.equal(restarted.compatibilityProviderId(), provider.id);
+    assert.equal(f.core.calls.filter(call => ['provider.save', 'provider.default'].includes(call.method)).length, before);
+    assert.strictEqual(f.core.bindings[0], f.binding);
+  });
+}
+
+test('removing the conflicting provider recovers its environment identity online without moving old bindings', async t => {
+  const f = await conflictedEnvironment(t);
+  const result = await f.providers.action({ action: 'delete', id: f.collision.id });
+  assert.equal(f.providers.status(), 'ready'); assert.equal(result.compatibility, undefined);
+  assert.equal(f.providers.compatibilityProviderId(), f.collision.id);
+  assert.equal(f.core.configs.get(f.collision.id)?.type, 'feishu'); assert.equal(f.core.configs.get(f.collision.id)?.app_id, f.environment.appId);
+  assert.equal(f.core.snapshot.default_provider_id, f.collision.id); assert.strictEqual(f.core.bindings[0], f.binding);
+});
+
+test('concurrent recovery and conflicting edits serialize through the new active provider preflight', async t => {
+  let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; }); t.after(() => release());
+  const f = await conflictedEnvironment(t);
+  const provider = { id: 'concurrent-recovery', type: 'feishu', name: 'Matching app', enabled: true,
+    app_id: f.environment.appId, app_secret: f.environment.appSecret, recipient_open_id: 'ou_recovered' };
+  let entered!: () => void; const committed = new Promise<void>(resolve => { entered = resolve; });
+  const request = f.core.request.bind(f.core);
+  t.mock.method(f.core, 'request', async <T>(method: string, params: Record<string, unknown> = {}): Promise<T> => {
+    const result = await request<T>(method, params);
+    if (method === 'provider.save' && params.id === provider.id) { entered(); await gate; }
+    return result;
+  });
+  const recovering = f.providers.action({ action: 'save', provider }); await committed;
+  const rejected = assert.rejects(f.providers.action({ action: 'save', provider: { ...provider, app_secret: 'rejected-secret' } }), /conflict.*environment/i);
+  let exported = false; const exporting = f.settings.exportConfig().then(value => { exported = true; return value; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.core.calls.filter(call => call.method === 'provider.save' && call.params.id === provider.id).length, 1);
+  assert.equal(exported, false, 'Settings exports must wait until the core change and compatibility mirror agree');
+  release(); await recovering; await rejected;
+  const document = JSON.parse(await readFile((await exporting).path, 'utf8'));
+  assert.equal(document.lark.app_id, f.environment.appId); assert.equal(document.lark.app_secret, f.environment.appSecret);
+  assert.equal(f.providers.status(), 'ready'); assert.equal(f.core.configs.get(provider.id)?.app_secret, f.environment.appSecret);
+  assert.equal((await State.open(f.directory)).settings.lark_app_secret, f.environment.appSecret);
+});
+
+test('online recovery mirror failure preserves the committed environment and retries only local persistence', async t => {
+  const f = await conflictedEnvironment(t);
+  const provider = { id: 'mirror-recovery', type: 'feishu', name: 'Matching app', enabled: true,
+    app_id: f.environment.appId, app_secret: f.environment.appSecret, recipient_open_id: 'ou_recovered' };
+  const write = StateDatabase.prototype.write; let fail = true; let writes = 0;
+  t.mock.method(StateDatabase.prototype, 'write', async function(this: StateDatabase, rows: StateRows) {
+    if (this.path === join(f.directory, 'state.sqlite')) { writes++; if (fail) throw new Error('synthetic recovery mirror failure'); }
+    return write.call(this, rows);
+  });
+  await assert.rejects(f.providers.action({ action: 'save', provider }), /committed.*mirror.*pending/);
+  assert.equal(f.providers.status(), 'ready'); assert.equal((await f.providers.page()).compatibility, undefined);
+  assert.equal(f.providers.compatibilityProviderId(), provider.id); assert.deepEqual(f.providers.credentials, f.environment);
+  assert.equal(f.state.settings.lark_app_secret, f.environment.appSecret); assert.equal((await f.settings.page()).lark.mirror_status, 'pending');
+  const mutations = f.core.calls.filter(call => ['provider.save', 'provider.default'].includes(call.method)).length;
+  fail = false; await f.providers.action({ action: 'save', provider });
+  assert.equal(f.core.calls.filter(call => ['provider.save', 'provider.default'].includes(call.method)).length, mutations);
+  assert.equal(writes, 2, 'one failed mirror write and one successful repair must not be followed by a duplicate mirror');
+  assert.equal((await State.open(f.directory)).settings.lark_app_secret, f.environment.appSecret);
+  assert.equal((await f.settings.page()).lark.mirror_status, undefined);
+});
+
+for (const committedDefault of [false, true]) {
+  test(`unconfirmed online default recovery ${committedDefault ? 'uses readback confirmation' : 'waits for an explicit change'} without resubmission`, async t => {
+    const f = await conflictedEnvironment(t);
+    const provider = { id: 'uncertain-recovery', type: 'feishu', name: 'Matching app', enabled: true,
+      app_id: f.environment.appId, app_secret: f.environment.appSecret, recipient_open_id: 'ou_recovered' };
+    const request = f.core.request.bind(f.core); let submissions = 0;
+    t.mock.method(f.core, 'request', async <T>(method: string, params: Record<string, unknown> = {}): Promise<T> => {
+      if (method !== 'provider.default' || params.id !== provider.id) return request<T>(method, params);
+      submissions++;
+      if (submissions === 1) {
+        if (committedDefault) await request<T>(method, params);
+        throw new CoreError('unconfirmed', 'synthetic unconfirmed default outcome');
+      }
+      return request<T>(method, params);
+    });
+    await assert.rejects(f.providers.action({ action: 'save', provider }), /synthetic unconfirmed default/);
+    assert.equal(f.providers.status(), 'configuration-conflict'); assert.match((await f.providers.page()).compatibility?.error ?? '', /unconfirmed/);
+    if (committedDefault) await f.providers.action({ action: 'save', provider });
+    else {
+      await assert.rejects(f.providers.action({ action: 'save', provider }), /no default change was resubmitted/);
+      assert.equal(submissions, 1);
+      await f.providers.action({ action: 'default', id: provider.id });
+    }
+    assert.equal(f.providers.status(), 'ready'); assert.equal(f.core.snapshot.default_provider_id, provider.id);
+    assert.equal(submissions, committedDefault ? 1 : 2, 'only an explicit default action may submit a second default change');
+    assert.equal(f.core.calls.filter(call => call.method === 'provider.save' && call.params.id === provider.id).length, 1);
+    assert.equal((await State.open(f.directory)).settings.lark_app_secret, f.environment.appSecret);
+  });
+}
 
 test('startup repairs legacy mirrors from committed core state without rewriting providers', async t => {
   const f = await fixture(t); const initial = { id: 'legacy-feishu', type: 'feishu', name: 'Committed provider', enabled: false,

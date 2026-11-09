@@ -127,36 +127,122 @@ func (p *feishuProvider) reconcileResources(ctx context.Context, end int64, reso
 	for _, resource := range resources {
 		key := feishuCursorKey(p.config.AppID, resource.ChatID)
 		cursor := p.core.store.Snapshot().FeishuCursors[key]
-		var through int64
+		p.mu.Lock()
 		if cursor == 0 {
-			// An old binding without a source cursor starts from source evidence,
-			// never from a possibly fast local wall clock.
+			if p.initializingChats == nil {
+				p.initializingChats = map[string]bool{}
+			}
+			p.initializingChats[resource.ChatID] = true
+		}
+		initializing := p.initializingChats[resource.ChatID]
+		p.mu.Unlock()
+		var seed int64
+		if cursor == 0 {
+			// Establish only a baseline here. A live callback can fail while this
+			// request is in flight, so a successful clock probe is not coverage.
 			source, err := p.apiSourceTime(ctx, "GET", "/open-apis/im/v1/chats/"+url.PathEscape(resource.ChatID), nil, nil)
 			if err != nil {
 				return err
 			}
-			if source == 0 {
+			if source <= sourceTimeOverlap {
 				return fault("unavailable", "Feishu source clock is unavailable")
 			}
-			through = max(int64(1), source-sourceTimeOverlap)
-		} else {
-			var err error
-			through, err = p.reconcileChat(ctx, resource.ChatID, max(int64(1), cursor-sourceTimeOverlap), max(end, cursor))
-			if err != nil {
+			seed = source - sourceTimeOverlap
+		}
+		p.mu.Lock()
+		recovery := p.recoveryFrom[resource.ChatID]
+		p.mu.Unlock()
+		if cursor == 0 {
+			if recovery.from > 0 {
+				seed = min(seed, max(int64(1), recovery.from-sourceTimeOverlap))
+			}
+			// Published retryable/uncertain admissions survive a restart even if
+			// the initial source cursor was never established.
+			d := p.core.store.Snapshot()
+			for _, delivery := range d.Deliveries {
+				if delivery.Status != "retryable" && delivery.Status != "pending" && delivery.Status != "unconfirmed" {
+					continue
+				}
+				event := d.Events[delivery.EventID]
+				e := event.Event
+				cfg := d.Providers[e.Message.ProviderID]
+				if event.Outcome != "deleted" && e.Session.key() == resource.Session.key() && e.ChatID == resource.ChatID && e.Message.OriginNodeID == d.NodeID && cfg.Type == "feishu" && cfg.AppID == p.config.AppID && e.SourceCreatedAt > 0 {
+					seed = min(seed, max(int64(1), e.SourceCreatedAt-sourceTimeOverlap))
+				}
+			}
+			if err := p.commitInitialHistorySeed(ctx, key, resource.ChatID, seed); err != nil {
 				return err
 			}
+			cursor = p.core.store.Snapshot().FeishuCursors[key]
+		}
+		start := max(int64(1), cursor-sourceTimeOverlap)
+		if initializing && recovery.from > 0 {
+			start = min(start, max(int64(1), recovery.from-sourceTimeOverlap))
+		}
+		through, err := p.reconcileChat(ctx, resource.ChatID, start, max(end, cursor, recovery.from))
+		if err != nil {
+			return err
 		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := p.core.store.Update(func(d *State) error {
-			if d.FeishuCursors[key] < through {
-				d.FeishuCursors[key] = through
-			}
-			return nil
-		}); err != nil {
+		if err := p.commitHistoryCoverage(ctx, key, resource.ChatID, through, initializing, recovery); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// These short disk publications share the observation mutex so a callback
+// cannot become known between reading its lower bound and publishing a cursor.
+// Store mutations/retention are state-only; no provider lock is acquired there,
+// and no Feishu request is made while this mutex is held.
+func (p *feishuProvider) commitInitialHistorySeed(ctx context.Context, key, chat string, seed int64) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if latest := p.recoveryFrom[chat]; latest.from > 0 {
+		seed = min(seed, max(int64(1), latest.from-sourceTimeOverlap))
+	}
+	return p.core.store.Update(func(d *State) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if d.FeishuCursors[key] == 0 {
+			d.FeishuCursors[key] = seed
+		}
+		return nil
+	})
+}
+
+func (p *feishuProvider) commitHistoryCoverage(ctx context.Context, key, chat string, through int64, initializing bool, scanned sourceRecovery) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	latest := p.recoveryFrom[chat]
+	uncovered := initializing && latest.from > 0 && (latest.version != scanned.version || through < latest.from)
+	if uncovered {
+		through = min(through, max(int64(1), latest.from-sourceTimeOverlap))
+	}
+	err := p.core.store.Update(func(d *State) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if uncovered {
+			// Only the unproven initialization window may rewind its seed. An
+			// established cursor stays monotonic to protect compacted history.
+			d.FeishuCursors[key] = through
+		} else if d.FeishuCursors[key] < through {
+			d.FeishuCursors[key] = through
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if scanned.from > 0 && through >= scanned.from && latest.version == scanned.version {
+		delete(p.recoveryFrom, chat)
+	}
+	if initializing && p.recoveryFrom[chat].from == 0 {
+		delete(p.initializingChats, chat)
 	}
 	return nil
 }

@@ -189,10 +189,14 @@ export class SettingsService {
       const saved = { appId: state.settings.lark_app_id, appSecret: state.settings.lark_app_secret };
       const { credentials, recipient, provider_id } = await update(environment?.credentials,
         isOpenId(this.env.LARK_NOTIFY_OPEN_ID) ? this.env.LARK_NOTIFY_OPEN_ID : undefined);
+      const previousApp = saved.appId ?? current?.appId;
+      const scopeChanged = previousApp && previousApp !== credentials?.appId && [...state.bindings.values()].some(binding => !binding.app_id);
+      const mirrorChanged = scopeChanged || saved.appId !== credentials?.appId || saved.appSecret !== credentials?.appSecret
+        || state.settings.lark_recipient_open_id !== (recipient || undefined) || !credentials && state.settings.lark_connection_type !== undefined;
       let failed = false;
       try {
         // The core already committed. Keep its mirror authoritative in memory even if this disk write fails.
-        await state.save({ apply: () => {
+        if (mirrorChanged) await state.save({ apply: () => {
           this.scopeLarkBindings(credentials?.appId, saved.appId ?? current?.appId);
           if (credentials) {
             if (state.settings.lark_app_id !== credentials.appId) state.settings.lark_connection_type = 'bot';

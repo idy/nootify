@@ -31,6 +31,44 @@ func signActivity(d *State, e *Event) {
 	e.ActivityProof = base64.RawURLEncoding.EncodeToString(ed25519.Sign(ed25519.PrivateKey(private), activityIdentity(*e)))
 }
 
+// Snapshot authoritative source proofs exactly once, before the first retention
+// sweep after upgrade. A relay may already have confirmed an older unsigned
+// frame; signing the source event alone cannot update that durable remote copy.
+// Retain only compact signatures, not payloads or callback routes, independently
+// of normal ledger GC. Empty-but-non-nil is the persisted migration marker, so
+// new signed traffic does not grow this compatibility ledger on every restart.
+func backfillLegacyActivityProofs(d *State) error {
+	if d.LegacyActivityProofs != nil {
+		return nil
+	}
+	if err := ensureNodeIdentity(d); err != nil {
+		return err
+	}
+	proofs := map[string]string{}
+	for key, reference := range d.References {
+		if reference.Message.OriginNodeID == d.NodeID && reference.ActivityProof != "" {
+			// An intermediate release may already have compacted the payload
+			// after signing it, while the confirmed relay frame stayed unsigned.
+			proofs[key] = reference.ActivityProof
+		}
+	}
+	for id, record := range d.Events {
+		e := record.Event
+		if e.Message.OriginNodeID != d.NodeID || e.ChatID == "" || e.Cancellation != nil {
+			continue
+		}
+		signActivity(d, &e)
+		if e.ActivityProof == "" {
+			continue
+		}
+		record.Event = e
+		d.Events[id] = record
+		proofs[e.Message.key()] = e.ActivityProof
+	}
+	d.LegacyActivityProofs = proofs
+	return nil
+}
+
 func validActivity(d State, e Event, proof string) bool {
 	private, err := base64.StdEncoding.DecodeString(d.NodePrivateKey)
 	if err != nil || len(private) != ed25519.PrivateKeySize {

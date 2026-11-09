@@ -92,6 +92,8 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
   private compatibilityStartup?: CompatibilityStartup;
   private compatibilityId = 'legacy-feishu';
   private compatibilityProblem?: string;
+  private compatibilityUnconfirmed = false;
+  private providerChanges: Promise<unknown> = Promise.resolve();
   private recipientSync?: (openId: string) => Promise<void>;
   constructor(readonly state: State, private readonly sessions: SessionsService,
     credentials: Credentials | undefined, private readonly report: (record: Record<string, unknown>) => void = () => {},
@@ -132,12 +134,7 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
           recipient_open_id: recipient, legacy_host: hostname(), bindings });
       }
       if (this.compatibilityStartup) {
-        await this.compatibilityStartup((environment, recipient) => this.reconcileStartupCredentials(environment, recipient)).catch(error => {
-          if (coreErrorCode(error) === 'committed_not_mirrored') return;
-          if (!provenCoreRejection(error) && !(error instanceof HttpError && error.status === 409 && !coreErrorCode(error))) throw error;
-          this.compatibilityProblem = 'Environment Feishu credentials could not be applied safely; select or create a provider for that App ID';
-          this.report({ source: 'providers', status: 'environment_configuration_conflict', reason: this.compatibilityProblem });
-        });
+        await this.reconcileCompatibility();
       } else if (this.compatibilitySync) {
         await this.compatibilitySync(() => this.compatibilityConfig()).catch(error => {
           if (coreErrorCode(error) !== 'committed_not_mirrored') throw error;
@@ -157,6 +154,7 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
   private async shutdown(): Promise<void> {
     this.draining = true; this.connection = 'stopped';
     clearInterval(this.discoveryTimer); clearInterval(this.inboxTimer); clearTimeout(this.networkRetry); this.discoveryController?.abort();
+    await this.providerChanges.catch(() => {});
     await this.networkQueue.catch(() => {});
     if (this.discovery) await this.discovery;
     while (this.deliveries.size) await Promise.allSettled([...this.deliveries.values()]);
@@ -233,7 +231,12 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
     try { await this.rpc(method, params); }
     catch (error) { if (coreErrorCode(error) !== 'committed_not_durable') throw error; return error as HttpError; }
   }
-  async action(body: Record<string, unknown>): Promise<ProviderPage> {
+  action(body: Record<string, unknown>): Promise<ProviderPage> {
+    if (this.draining) return Promise.reject(new HttpError(503, 'Notification providers are stopping'));
+    const pending = this.providerChanges.catch(() => {}).then(() => this.applyAction(body));
+    this.providerChanges = pending; return pending;
+  }
+  private async applyAction(body: Record<string, unknown>): Promise<ProviderPage> {
     let legacyChanged = false; let mutate: () => Promise<HttpError | undefined>; let warning: HttpError | undefined;
     let provider: Record<string, unknown> | undefined;
     if (body.action === 'save') {
@@ -265,6 +268,10 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
       };
       if (this.compatibilitySync) await this.compatibilitySync(update, prepare);
       else this.refreshCompatibilityCredentials((await update()).credentials);
+      if (this.compatibilityProblem && this.compatibilityStartup) await this.reconcileCompatibility();
+    } else if (this.compatibilityProblem && this.compatibilityStartup) {
+      // Commit and reconcile in the Settings queue; concurrent provider actions cannot bypass the new active provider's preflight.
+      await this.reconcileCompatibility(async () => { warning = await mutate(); });
     } else warning = await mutate();
     await this.syncNetwork();
     if (warning) throw warning;
@@ -273,7 +280,33 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
   /** Settings serializes legacy CRUD with account edits, persistence and directory invalidation. */
   setCompatibilitySync(sync: CompatibilitySync): void { this.compatibilitySync = sync; }
   setCompatibilityStartup(startup: CompatibilityStartup): void { this.compatibilityStartup = startup; }
-  private async reconcileStartupCredentials(environment?: Credentials, recipient?: string): Promise<CompatibilityConfig> {
+  private async reconcileCompatibility(operation?: () => Promise<void>): Promise<void> {
+    let committed = !operation;
+    try {
+      await this.compatibilityStartup!(async (environment, recipient) => {
+        if (operation) { await operation(); committed = true; }
+        return this.reconcileEnvironmentCredentials(environment, recipient);
+      });
+      this.compatibilityProblem = undefined; this.compatibilityUnconfirmed = false;
+    } catch (error) {
+      if (!committed) throw error;
+      const code = coreErrorCode(error);
+      if (code === 'committed_not_mirrored') {
+        // The SDK and in-memory mirror already reflect the core; disk repair has its own pending outcome.
+        this.compatibilityProblem = undefined; this.compatibilityUnconfirmed = false;
+        if (operation) throw error;
+        return;
+      }
+      if (!provenCoreRejection(error) && !(error instanceof HttpError && error.status === 409 && !code)) {
+        this.compatibilityUnconfirmed = true;
+        this.compatibilityProblem = 'Environment reconciliation is unconfirmed; inspect the provider and default before retrying';
+        throw error;
+      }
+      this.compatibilityProblem = 'Environment Feishu credentials could not be applied safely; select or create a provider for that App ID';
+      this.report({ source: 'providers', status: 'environment_configuration_conflict', reason: this.compatibilityProblem });
+    }
+  }
+  private async reconcileEnvironmentCredentials(environment?: Credentials, recipient?: string): Promise<CompatibilityConfig> {
     const config = await this.exportConfig();
     const providers = config.providers as Record<string, unknown>[];
     const matches = (provider: Record<string, unknown>, appId?: string) => provider.type === 'feishu' && provider.app_id === appId;
@@ -294,18 +327,20 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
     const desired = { ...selected, app_secret: environment.appSecret,
       ...(recipient ? { recipient_open_id: recipient } : {}) };
     if (selected.app_secret !== environment.appSecret || recipient && selected.recipient_open_id !== recipient) {
+      if (this.compatibilityUnconfirmed) throw publicFailure(new CoreError('unconfirmed', 'The environment provider outcome is still unconfirmed; no provider change was resubmitted'));
       const warning = await this.commit('provider.save', desired);
       if (warning) this.report({ source: 'providers', status: 'environment_configuration_committed_not_durable' });
     }
     this.compatibilityId = String(selected.id);
     const priorApp = this.state.settings.lark_app_id;
-    const managedDefault = !config.default_provider_id || config.default_provider_id === 'legacy-feishu'
-      || priorApp && config.default_provider_id === environmentProviderId(priorApp);
+    const defaultProvider = providers.find(provider => provider.id === config.default_provider_id);
+    const managedDefault = !config.default_provider_id || config.default_provider_id === 'legacy-feishu' && defaultProvider?.type === 'feishu'
+      || priorApp && config.default_provider_id === environmentProviderId(priorApp) && defaultProvider && matches(defaultProvider, priorApp);
     if (managedDefault && config.default_provider_id !== this.compatibilityId) {
+      if (this.compatibilityUnconfirmed) throw publicFailure(new CoreError('unconfirmed', 'The environment default outcome is still unconfirmed; no default change was resubmitted'));
       const warning = await this.commit('provider.default', { id: this.compatibilityId });
       if (warning) this.report({ source: 'providers', status: 'environment_default_committed_not_durable' });
     }
-    this.compatibilityProblem = undefined;
     return this.compatibilityConfig();
   }
   private async compatibilityProviderConfig(): Promise<Record<string, unknown> | undefined> {

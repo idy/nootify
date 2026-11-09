@@ -218,16 +218,18 @@ func (p *feishuProvider) Bind(ctx context.Context, s Session, chat, sender strin
 	if sender == "" {
 		return Binding{}, fault("invalid_argument", "a trusted sender is required")
 	}
-	validated, err := p.validateGroup(ctx, s, chat)
+	evidence := &sourceTimeEvidence{}
+	validated, err := p.validateGroup(context.WithValue(ctx, sourceTimeEvidenceKey{}, evidence), s, chat)
 	if err != nil {
 		return Binding{}, err
 	}
 	// Routing authority is retained transactionally in the binding. Existing
 	// descriptions and announcements remain untouched, including if persistence
 	// later fails or the provider/session changes while adoption is in flight.
-	p.mu.Lock()
-	start := max(int64(1), p.sourceFloor-sourceTimeOverlap)
-	p.mu.Unlock()
+	if evidence.source <= sourceTimeOverlap {
+		return Binding{}, fault("unavailable", "fresh Feishu source clock is required to adopt an existing group")
+	}
+	start := evidence.source - sourceTimeOverlap
 	b := Binding{ProviderID: p.config.ID, Session: validated, ChatID: chat, SenderID: sender, PreserveDescription: true, HistoryStart: start}
 	retainLegacyIdentity(&b)
 	return b, nil

@@ -33,7 +33,10 @@ type State struct {
 	Peers              map[string]Peer            `json:"peers"`
 	Operations         map[string]Operation       `json:"operations"`
 	FeishuCursors      map[string]int64           `json:"feishu_history_cursors,omitempty"`
-	Retention          LedgerRetention            `json:"retention,omitempty"`
+	// A non-nil, possibly empty map marks the one-time pre-compaction upgrade.
+	// These compact receipts authorize legacy relay frames without their own proof.
+	LegacyActivityProofs map[string]string `json:"legacy_activity_proofs"`
+	Retention            LedgerRetention   `json:"retention,omitempty"`
 }
 type Store struct {
 	mu                sync.Mutex
@@ -218,6 +221,10 @@ func (s *Store) Update(fn func(*State) error) error {
 
 func (s *Store) updateLocked(fn func(*State) error) error {
 	n := cloneState(s.state)
+	// Migrate source evidence before either retention sweep can remove it.
+	if err := backfillLegacyActivityProofs(&n); err != nil {
+		return err
+	}
 	at := s.clock().UnixNano()
 	n.Retention.at = at
 	refreshRetention(&n, s.state, at)
@@ -228,7 +235,7 @@ func (s *Store) updateLocked(fn func(*State) error) error {
 	refreshRetention(&n, s.state, at)
 	compactLedgers(&n, at)
 	n.Retention.at = 0
-	if len(n.Events) > maxRecords || len(n.Bindings) > maxRecords || len(n.References) > maxRecords || len(n.Operations) > maxRecords || len(n.Deliveries) > maxRecords || len(n.Peers) > maxPeers || len(n.ProviderTombstones) > maxRecords || len(n.Providers) > maxRecords || len(n.RetiredBindings) > maxRecords || len(n.FeishuCursors) > maxRecords {
+	if len(n.Events) > maxRecords || len(n.Bindings) > maxRecords || len(n.References) > maxRecords || len(n.Operations) > maxRecords || len(n.Deliveries) > maxRecords || len(n.Peers) > maxPeers || len(n.ProviderTombstones) > maxRecords || len(n.Providers) > maxRecords || len(n.RetiredBindings) > maxRecords || len(n.FeishuCursors) > maxRecords || len(n.LegacyActivityProofs) > 2*maxRecords {
 		return fault("resource_exhausted", "durable ledger limit reached; pending work and retention horizons are preserved")
 	}
 	b, err := json.Marshal(n)

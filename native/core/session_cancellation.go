@@ -161,6 +161,9 @@ func (c *Core) EventActive(ctx context.Context, e Event) (bool, error) {
 				proof = d.References[e.Message.key()].ActivityProof
 			}
 			if proof == "" {
+				proof = d.LegacyActivityProofs[e.Message.key()]
+			}
+			if proof == "" {
 				return false, fault("unavailable", "source activity proof is not retained; absence does not prove cancellation")
 			}
 			if !validActivity(d, e, proof) {

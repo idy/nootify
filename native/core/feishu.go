@@ -28,6 +28,13 @@ func (quietLogger) Info(context.Context, ...interface{})  {}
 func (quietLogger) Warn(context.Context, ...interface{})  {}
 func (quietLogger) Error(context.Context, ...interface{}) {}
 
+type sourceTimeEvidenceKey struct{}
+type sourceTimeEvidence struct{ source int64 }
+type sourceRecovery struct {
+	from    int64
+	version uint64
+}
+
 type feishuProvider struct {
 	mu                sync.Mutex
 	receiver          EventHandler
@@ -44,6 +51,9 @@ type feishuProvider struct {
 	historyWG         sync.WaitGroup
 	coverage          map[string]*feishuCoverage
 	sourceFloor       int64
+	recoveryFrom      map[string]sourceRecovery
+	recoverySequence  uint64
+	initializingChats map[string]bool
 }
 
 func newFeishu(c *Core, p ProviderConfig) *feishuProvider {
@@ -128,6 +138,9 @@ func (p *feishuProvider) apiSourceTime(ctx context.Context, method, path string,
 	var source int64
 	if date, err := http.ParseTime(resp.Header.Get("Date")); err == nil {
 		source = date.UnixMilli()
+		if evidence, _ := ctx.Value(sourceTimeEvidenceKey{}).(*sourceTimeEvidence); evidence != nil {
+			evidence.source = source
+		}
 		p.mu.Lock()
 		p.sourceFloor = source
 		p.mu.Unlock()
@@ -443,6 +456,38 @@ func (p *feishuProvider) receive(ctx context.Context, in *im.P2MessageReceiveV1)
 		created = parsed
 	}
 	if !historyReplay(ctx) {
+		var recoveryErr error
+		if created > 0 {
+			p.mu.Lock()
+			if p.recoveryFrom == nil {
+				p.recoveryFrom = map[string]sourceRecovery{}
+			}
+			recovery := p.recoveryFrom[binding.ChatID]
+			if recovery.from == 0 || created < recovery.from {
+				recovery.from = created
+			}
+			p.recoverySequence++
+			recovery.version = p.recoverySequence
+			p.recoveryFrom[binding.ChatID] = recovery
+			if p.initializingChats[binding.ChatID] {
+				key := feishuCursorKey(p.config.AppID, binding.ChatID)
+				lower := max(int64(1), recovery.from-sourceTimeOverlap)
+				if p.core.store.Snapshot().FeishuCursors[key] > lower {
+					// This seed is not proven coverage yet. Publish the observed
+					// lower bound before admission can fail without a Store record.
+					recoveryErr = p.core.store.Update(func(d *State) error {
+						if err := ctx.Err(); err != nil {
+							return err
+						}
+						if d.FeishuCursors[key] > lower {
+							d.FeishuCursors[key] = lower
+						}
+						return nil
+					})
+				}
+			}
+			p.mu.Unlock()
+		}
 		// A failure still leaves outstanding finite recovery work. Its worker
 		// belongs to the provider lifetime, not this failed callback's context.
 		defer func() {
@@ -463,6 +508,9 @@ func (p *feishuProvider) receive(ctx context.Context, in *im.P2MessageReceiveV1)
 			} // Query hint only; never a checkpoint.
 			p.scheduleCoverage(binding, end)
 		}()
+		if recoveryErr != nil {
+			return recoveryErr
+		}
 	}
 	if legacyBinding(binding) {
 		if err := p.ValidateBinding(ctx, binding); err != nil {
