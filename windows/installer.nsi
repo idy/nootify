@@ -53,6 +53,8 @@ UninstPage instfiles
     ClearErrors
     FileOpen $1 "$0\nsis-phases.log" a
     ${IfNot} ${Errors}
+      ; FileOpen a preserves contents but starts at offset zero in NSIS.
+      FileSeek $1 0 END
       FileWrite $1 "${MESSAGE}$\r$\n"
       FileClose $1
     ${EndIf}
@@ -401,7 +403,10 @@ Section "Uninstall"
   !insertmacro NootifyDiagnostic "uninstall-preflight-desktop"
   Call un.NootifyPreflightDesktop
   !insertmacro NootifyTransaction recover
+  !insertmacro NootifyDiagnostic "uninstall-service-begin"
   !insertmacro NSIS_HOOK_PREUNINSTALL
+  !insertmacro NootifyDiagnostic "uninstall-service-success"
+  !insertmacro NootifyDiagnostic "uninstall-payload-remove"
   Delete "$INSTDIR\Nootify.exe"
   Delete "$INSTDIR\node.exe"
   Delete "$INSTDIR\nootify-core.exe"
