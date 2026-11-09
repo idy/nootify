@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -249,6 +250,14 @@ func TestHiddenCommandDiagnosticsKeepActualExitAndTimeoutWithoutOutput(t *testin
 		t.Fatal("expired child context did not fail")
 	}
 	missing := filepath.Join(directory, "synthetic-private-missing-executable")
+	// Windows LookPath can return exec.ErrNotFound without a numeric errno;
+	// Unix typically retains ENOENT. Record only facts the platform supplies.
+	lookupErr := exec.Command(missing).Run()
+	if lookupErr == nil {
+		t.Fatal("missing command unexpectedly exists")
+	}
+	var expectedErrno syscall.Errno
+	_ = errors.As(lookupErr, &expectedErrno)
 	if _, err := runHidden(d, "start", missing); err == nil {
 		t.Fatal("missing command did not fail")
 	}
@@ -270,7 +279,7 @@ func TestHiddenCommandDiagnosticsKeepActualExitAndTimeoutWithoutOutput(t *testin
 		case "legacy-snapshot":
 			timeout = row.Category == "timeout" && row.TimedOut
 		case "start":
-			spawn = row.Category == "child-start" && row.OSErrno != 0 && row.ExitCode == nil
+			spawn = row.Outcome == "failure" && row.Category == "child-start" && row.OSErrno == uint64(expectedErrno) && row.ExitCode == nil && !row.TimedOut
 		}
 	}
 	if !exit || !success || !timeout || !spawn {
