@@ -411,11 +411,26 @@ func (c *Core) returnProvider(m MessageRef) (Provider, error) {
 	if !ok {
 		return nil, fault("not_found", "message return route is not retained")
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var fallback Provider
 	for _, id := range r.Routes {
-		p, err := c.provider(id)
-		if err == nil {
+		p := c.providers[id]
+		if p == nil {
+			continue
+		}
+		// A remote object survives disconnection; connected means its
+		// subscription completed a handshake. Select once before submission:
+		// a failed RPC may already have delivered the reply.
+		if c.statuses[id] == "connected" {
 			return p, nil
 		}
+		if fallback == nil {
+			fallback = p
+		}
+	}
+	if fallback != nil {
+		return fallback, nil
 	}
 	return nil, fault("unavailable", "message return route is unavailable")
 }

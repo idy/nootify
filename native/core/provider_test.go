@@ -1,8 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -48,6 +52,123 @@ func TestProviderCredentialReplacementAndDuplicateBotValidation(t *testing.T) {
 	_, err = c.SaveProvider(raw)
 	must(t, err)
 }
+
+type importTestBot struct {
+	Bot
+	closes int
+}
+
+func (p *importTestBot) Close() error { p.closes++; return p.Bot.Close() }
+
+func TestImportRejectsProviderTypeChangesWithoutSideEffects(t *testing.T) {
+	for _, oldType := range []string{"feishu", "remote"} {
+		for _, bound := range []bool{false, true} {
+			for _, enabled := range []bool{false, true} {
+				name := oldType
+				if bound {
+					name += "/bound"
+				} else {
+					name += "/unbound"
+				}
+				if enabled {
+					name += "/enabled"
+				} else {
+					name += "/disabled"
+				}
+				t.Run(name, func(t *testing.T) {
+					c := testCore(t, nil)
+					bot := &importTestBot{Bot: installFake(t, c, "retained")}
+					installRoutingBot(c, "retained", bot)
+					c.setStatus("retained", "connected")
+					if bound {
+						_, err := c.Ensure(context.Background(), "retained", Session{Adapter: "codex", SessionID: "bound"})
+						must(t, err)
+					}
+					removed := ProviderConfig{ID: "removed", Name: "Removed", Type: "feishu", AppID: "other-app", AppSecret: "synthetic", Enabled: false}
+					must(t, c.store.Update(func(d *State) error {
+						p := d.Providers["retained"]
+						p.Type, p.Enabled = oldType, enabled
+						p.Address, p.Token = "127.0.0.1:1", "synthetic"
+						d.Providers[p.ID] = p
+						d.Providers[removed.ID] = removed
+						s := Session{NodeID: d.NodeID, Adapter: "codex", SessionID: "would-be-retired"}
+						d.Bindings[s.key()] = Binding{ProviderID: removed.ID, Session: s, ChatID: "keep-group"}
+						return nil
+					}))
+					testServer(t, c)
+					before := c.store.Snapshot()
+					statePath := filepath.Join(c.store.dir, "state.json")
+					fileBefore, err := os.ReadFile(statePath)
+					must(t, err)
+					p := before.Providers["retained"]
+					p.Type = "remote"
+					if oldType == "remote" {
+						p.Type = "feishu"
+					}
+					// The same backup also removes a bound provider, changes the
+					// default, and disables the listener. None may apply on conflict.
+					raw, err := json.Marshal(Backup{Version: 1, Providers: []ProviderConfig{p}, Remote: RemoteConfig{Listen: "127.0.0.1:0"}})
+					must(t, err)
+					c.mu.Lock()
+					server := c.server
+					c.mu.Unlock()
+					// Keep even a regressed enabled import from contacting Feishu.
+					c.cancel()
+					if err := c.ImportConfig(raw); publicError(err).Code != "conflict" {
+						t.Fatalf("provider type change returned %v; want conflict", err)
+					}
+					if !reflect.DeepEqual(before, c.store.Snapshot()) {
+						t.Fatal("rejected import changed durable state")
+					}
+					fileAfter, err := os.ReadFile(statePath)
+					must(t, err)
+					if !bytes.Equal(fileBefore, fileAfter) {
+						t.Fatal("rejected import rewrote the state file")
+					}
+					c.mu.Lock()
+					unchanged := c.providers["retained"] == bot && c.statuses["retained"] == "connected" && c.server == server
+					c.mu.Unlock()
+					if !unchanged || bot.closes != 0 {
+						t.Fatal("rejected import restarted a provider or listener")
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestImportAllowsSameProviderTypeAndNewIDs(t *testing.T) {
+	for _, providerType := range []string{"feishu", "remote"} {
+		t.Run(providerType, func(t *testing.T) {
+			c := testCore(t, nil)
+			installFake(t, c, "retained")
+			_, err := c.Ensure(context.Background(), "retained", Session{Adapter: "codex", SessionID: "bound"})
+			must(t, err)
+			must(t, c.store.Update(func(d *State) error {
+				p := d.Providers["retained"]
+				p.Type, p.Address, p.Token = providerType, "127.0.0.1:1", "synthetic"
+				d.Providers[p.ID] = p
+				return nil
+			}))
+			before := c.store.Snapshot()
+			p := before.Providers["retained"]
+			p.Name = "Updated configuration"
+			p.AppSecret, p.Token = "updated-synthetic-secret", "updated-synthetic-token"
+			added := ProviderConfig{ID: "new", Name: "New", Type: "remote", Address: "127.0.0.1:2", Token: "synthetic"}
+			if providerType == "remote" {
+				added.Type, added.AppID, added.AppSecret = "feishu", "new-app", "synthetic"
+			}
+			raw, err := json.Marshal(Backup{Version: 1, Providers: []ProviderConfig{p, added}, Default: added.ID, Remote: before.Remote})
+			must(t, err)
+			must(t, c.ImportConfig(raw))
+			after := c.store.Snapshot()
+			if after.Providers[p.ID] != p || after.Providers[added.ID] != added || after.DefaultProvider != added.ID || !reflect.DeepEqual(after.Bindings, before.Bindings) {
+				t.Fatal("same-type update or new provider import lost configuration or bindings")
+			}
+		})
+	}
+}
+
 func TestPeerConnectedStatusTracksSubscriptionLifetime(t *testing.T) {
 	c := testCore(t, nil)
 	sub, err := c.Subscribe(context.Background(), "peer", "downstream")

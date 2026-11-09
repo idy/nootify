@@ -108,6 +108,37 @@ test('provider configuration backups keep every secret on disk and restore witho
   assert.deepEqual(restored, backup);
 });
 
+for (const existing of [false, true]) {
+  test(`provider backup refreshes compatibility credentials and directory state on ${existing ? 'existing' : 'fresh'} installations`, async t => {
+    let imported: Record<string, unknown> | undefined;
+    const h = await harness(t, { providers: { async exportConfig() { return imported ?? {}; }, async importConfig(config) { imported = config; }, async syncNetwork() {} } });
+    const oldCredentials = { appId, appSecret: 'old-account-secret' };
+    if (existing) {
+      h.lark.credentials = oldCredentials;
+      await new LarkDirectoryCache(h.dir).write(oldCredentials, { app_id: appId, users: [{ open_id: 'ou_old', name: 'Synthetic old contact' }], truncated: false, permission_limited: false });
+    }
+    const refreshed: (Credentials | undefined)[] = [];
+    Object.assign(h.lark, { refreshCompatibilityCredentials(credentials?: Credentials) {
+      refreshed.push(credentials); h.lark.credentials = credentials;
+      h.lark.api = credentials ? { appId: credentials.appId } as LarkApi : undefined;
+    } });
+    t.mock.method(h.lark, 'configure', async () => { throw new Error('compatibility refresh must not overwrite imported providers'); });
+    const credentials = { appId: 'cli_fedcba9876543210', appSecret: 'new-account-secret' };
+    const backup = { version: 1, providers: [{ id: 'legacy-feishu', name: 'Imported provider', type: 'feishu', enabled: false,
+      app_id: credentials.appId, app_secret: credentials.appSecret, recipient_open_id: 'ou_imported' }] };
+    await h.settings.importConfig({ format: 'nootify-config', version: 1,
+      lark: { app_id: credentials.appId, app_secret: credentials.appSecret }, providers: backup });
+    assert.deepEqual(h.lark.credentials, credentials);
+    assert.equal(h.lark.api?.appId, credentials.appId);
+    assert.deepEqual(refreshed, [credentials]);
+    assert.equal(await new LarkDirectoryCache(h.dir).read(oldCredentials), undefined);
+    assert.deepEqual(h.settings.larkSecret(), { app_id: credentials.appId, app_secret: credentials.appSecret });
+    const exported = JSON.parse(await readFile((await h.settings.exportConfig()).path, 'utf8'));
+    assert.equal(exported.lark.app_id, credentials.appId); assert.equal(exported.lark.app_secret, credentials.appSecret);
+    assert.deepEqual(exported.providers, backup, 'compatibility refresh preserves exact imported provider settings');
+  });
+}
+
 test('a rejected core configuration cannot partially import legacy settings', async t => {
   const h = await harness(t, { providers: { async exportConfig() { return {}; }, async importConfig() { throw new Error('invalid provider credentials'); }, async syncNetwork() {} } });
   await assert.rejects(h.settings.importConfig({ format: 'nootify-config', version: 1,

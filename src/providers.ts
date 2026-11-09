@@ -8,7 +8,7 @@ import { createLarkApi, type Credentials, type LarkApi } from './lark-metadata.j
 import { LarkReplies } from './lark-replies.js';
 import { HttpError, RetryableDeliveryError, SessionUnavailable, identifier, isAdapter, object, text, type RouteRequest, type RouteResponse, type ServiceModule } from './types.js';
 import { registerPolledSession } from './polled-sessions.js';
-import type { TsnetClient } from './tsnet-client.js';
+import type { EmbeddedTailscaleTunnel, TsnetClient } from './tsnet-client.js';
 import { shellCommand, shellForClient, shellQuote } from './shell.js';
 import { fileURLToPath } from 'node:url';
 import type { ThreadDiscovery } from './lark-thread-sync.js';
@@ -74,7 +74,10 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
   private connection = 'starting';
   private cached?: ProviderPage;
   private readonly deliveries = new Map<string, Promise<void>>();
-  private readonly tunnels = new Map<string, { id: string; address: string }>();
+  private readonly tunnels = new Map<string, EmbeddedTailscaleTunnel>();
+  private readonly pendingTunnels = new Map<string, Promise<EmbeddedTailscaleTunnel>>();
+  private remoteAddresses?: ReadonlySet<string>;
+  private networkGeneration = 0;
   private published?: number;
   private networkQueue: Promise<void> = Promise.resolve();
   private discoveryController?: AbortController;
@@ -163,6 +166,7 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
     else if (body.action === 'delete') await this.rpc('provider.delete', { id: identifier(body.id, 'id') });
     else if (body.action === 'default') await this.rpc('provider.default', { id: identifier(body.id, 'id') });
     else throw new HttpError(400, 'Expected a provider action: save, delete or default');
+    await this.syncNetwork();
     return this.page();
   }
   async remote(): Promise<RemoteSummary & { node_id: string }> { const page = await this.page(); return { ...page.remote, node_id: page.node_id }; }
@@ -177,7 +181,11 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
     if (credentials) await this.rpc('provider.save', { id: 'legacy-feishu', type: 'feishu', name: 'Feishu', enabled: true,
       app_id: credentials.appId, app_secret: credentials.appSecret, recipient_open_id: this.state.settings.lark_recipient_open_id });
     else if ((await this.page()).providers.some(provider => provider.id === 'legacy-feishu')) await this.rpc('provider.delete', { id: 'legacy-feishu' });
-    this.credentials = credentials; this.api = credentials ? createLarkApi(credentials) : undefined; await this.page();
+    this.refreshCompatibilityCredentials(credentials); await this.page();
+  }
+  /** Refresh legacy HTTP/directory clients without changing imported provider instances. */
+  refreshCompatibilityCredentials(credentials?: Credentials): void {
+    this.credentials = credentials; this.api = credentials ? createLarkApi(credentials) : undefined;
   }
   async setRecipient(open_id: string): Promise<void> {
     const legacy = (await this.page()).providers.find(provider => provider.id === 'legacy-feishu' && provider.type === 'feishu');
@@ -186,7 +194,8 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
     await this.page();
   }
   networkDisconnected(): void {
-    this.published = undefined; this.tunnels.clear();
+    this.networkGeneration++;
+    this.published = undefined; this.tunnels.clear(); this.pendingTunnels.clear();
     if (this.connection === 'ready') void this.rpc('transport.configure', { tailnet_enabled: false }).catch(() => {});
   }
   /** Called on embedded-network transitions, not by a message polling loop. */
@@ -194,9 +203,13 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
     const task = this.networkQueue.catch(() => {}).then(async () => {
       if (this.connection !== 'ready') return;
       const enabled = this.state.settings.tailscale_enabled === true;
+      const page = await this.page();
+      this.remoteAddresses = new Set(page.providers.filter(provider => provider.type === 'remote' && provider.enabled && provider.address).map(provider => provider.address!));
       await this.rpc('transport.configure', { tailnet_enabled: enabled });
-      const remote = (await this.page()).remote;
-      if (!enabled || !remote.enabled || !this.tsnet) { await this.closeNetwork(); return; }
+      if (!enabled || !this.tsnet) { await this.closeNetwork(); return; }
+      await this.retireTunnels(this.remoteAddresses);
+      const remote = page.remote;
+      if (!remote.enabled) { await this.unpublishCurrent(); return; }
       // The core validates host:port. Splitting the final colon also handles
       // bracketed IPv6 zone addresses, which are not valid WHATWG URL hosts.
       const separator = remote.listen.lastIndexOf(':');
@@ -221,10 +234,39 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
     await this.tsnet.unpublish(port);
     this.published = undefined;
   }
+  private async retireTunnels(addresses: ReadonlySet<string>): Promise<void> {
+    for (const [address, tunnel] of this.tunnels) {
+      if (!addresses.has(address)) await this.closeTunnel(address, tunnel);
+    }
+  }
+  private async closeTunnel(address: string, tunnel: EmbeddedTailscaleTunnel): Promise<void> {
+    await this.tsnet?.closeTunnel(tunnel.id);
+    if (this.tunnels.get(address) === tunnel) this.tunnels.delete(address);
+  }
   private async closeNetwork(): Promise<void> {
     await this.unpublishCurrent();
-    for (const tunnel of this.tunnels.values()) await this.tsnet?.closeTunnel(tunnel.id).catch(() => {});
-    this.tunnels.clear();
+    await this.retireTunnels(new Set());
+  }
+  private async tunnel(address: string): Promise<EmbeddedTailscaleTunnel> {
+    const network = this.tsnet;
+    if (!network || !this.state.settings.tailscale_enabled || (this.remoteAddresses && !this.remoteAddresses.has(address))) throw new Error('Embedded provider transport is unavailable');
+    const existing = this.tunnels.get(address);
+    if (existing) return existing;
+    const inFlight = this.pendingTunnels.get(address);
+    if (inFlight) return inFlight;
+    const generation = this.networkGeneration;
+    const pending: Promise<EmbeddedTailscaleTunnel> = network.tunnel(address).then(async tunnel => {
+      if (generation !== this.networkGeneration) throw new Error('Embedded helper was replaced');
+      this.tunnels.set(address, tunnel);
+      if (this.connection !== 'ready' || !this.state.settings.tailscale_enabled || (this.remoteAddresses && !this.remoteAddresses.has(address))) {
+        // Track a failed close so configuration reconciliation can retry it.
+        await this.closeTunnel(address, tunnel);
+        throw new Error('Remote provider was removed before its tunnel opened');
+      }
+      return tunnel;
+    }).finally(() => { if (this.pendingTunnels.get(address) === pending) this.pendingTunnels.delete(address); });
+    this.pendingTunnels.set(address, pending);
+    return pending;
   }
   private event(event: CoreEvent): void {
     if (event.event === 'log') { this.report({ source: 'providers', ...event.data }); return; }
@@ -240,9 +282,7 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
     const request_id = data.request_id;
     try {
       const address = text(data.address, 'address');
-      if (!this.tsnet || !this.state.settings.tailscale_enabled) throw new Error('Embedded Tailscale is disabled');
-      let tunnel = this.tunnels.get(address);
-      if (!tunnel) { tunnel = await this.tsnet.tunnel(address); this.tunnels.set(address, tunnel); }
+      const tunnel = await this.tunnel(address);
       await this.rpc('dial.complete', { request_id, address: tunnel.address });
     } catch { await this.rpc('dial.complete', { request_id, error: 'Embedded Tailscale connection unavailable' }).catch(() => {}); }
   }

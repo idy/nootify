@@ -236,6 +236,60 @@ func TestMacReplacementAndRollback(t *testing.T) {
 	}
 }
 
+func TestMacCancellationAfterServiceStop(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("macOS bundle permission and symlink semantics")
+	}
+	for _, afterExchange := range []bool{false, true} {
+		name := "before exchange"
+		if afterExchange {
+			name = "after exchange"
+		}
+		t.Run(name, func(t *testing.T) {
+			exe := installedFakeApp(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			stops, swaps, starts := 0, 0, 0
+			m := New(Options{Executable: exe, BeforeInstall: func(context.Context) error {
+				stops++
+				if !afterExchange {
+					cancel() // A successful stop races user quit before replacement.
+				}
+				return nil
+			}, AfterInstall: func() error { starts++; return nil }})
+			// Exchange only private fake bundle directories, even on macOS.
+			m.swap = func(a, b string) error {
+				swaps++
+				if err := testSwap(a, b); err != nil {
+					return err
+				}
+				if swaps == 1 {
+					cancel() // The updater must roll back before host recovery.
+				}
+				return nil
+			}
+			if err := m.installMac(ctx, appArchive(t, bundleEntries())); !errors.Is(err, context.Canceled) {
+				t.Fatal(err)
+			}
+			wantSwaps := 0
+			if afterExchange {
+				wantSwaps = 2
+			}
+			if stops != 1 || swaps != wantSwaps || starts != 0 {
+				t.Fatalf("stops %d, swaps %d, starts %d", stops, swaps, starts)
+			}
+			data, err := os.ReadFile(exe)
+			if err != nil || string(data) != "original" {
+				t.Fatalf("cancellation did not retain original bundle: %q, %v", data, err)
+			}
+			leftovers, _ := filepath.Glob(filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(exe))), "..", ".nootify-update-*"))
+			if len(leftovers) != 0 {
+				t.Fatal("cancelled update left staging directories", leftovers)
+			}
+		})
+	}
+}
+
 func TestInvalidArchiveDoesNotStopService(t *testing.T) {
 	exe := installedFakeApp(t)
 	before := false

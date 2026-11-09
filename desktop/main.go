@@ -25,32 +25,33 @@ var version = "0.0.0-dev"
 var appID = "dev.idy.nootify"
 
 type shell struct {
-	ctx              context.Context
-	cancel           context.CancelFunc
-	smoke            bool
-	offline          *offlineServer
-	policy           urlPolicy
-	window           *mygo.Window
-	tray             *mygo.Tray
-	menu             *mygo.Menu
-	nativeMenu       *mygo.Menu
-	language         *language.Store
-	service          *service.Manager
-	updates          *updater.Manager
-	update           updater.View
-	requests         chan string
-	updateRequests   chan string
-	pageRequests     atomic.Uint64
-	quitting         bool
-	online           bool
-	health           *service.Health
-	healthError      error
-	installed        bool
-	actionPending    bool
-	action           language.Text
-	actionError      error
-	moduleLabels     []string
-	stoppedForUpdate atomic.Bool
+	ctx            context.Context
+	cancel         context.CancelFunc
+	smoke          bool
+	offline        *offlineServer
+	policy         urlPolicy
+	window         *mygo.Window
+	tray           *mygo.Tray
+	menu           *mygo.Menu
+	nativeMenu     *mygo.Menu
+	language       *language.Store
+	service        *service.Manager
+	updates        *updater.Manager
+	update         updater.View
+	requests       chan string
+	updateRequests chan string
+	pageRequests   atomic.Uint64
+	quitting       bool
+	online         bool
+	health         *service.Health
+	healthError    error
+	installed      bool
+	actionPending  bool
+	action         language.Text
+	actionError    error
+	moduleLabels   []string
+	serviceHandoff *serviceHandoff
+	updateShutdown updateShutdown
 }
 
 func main() {
@@ -119,7 +120,13 @@ func main() {
 			}
 		}
 	}
-	mygo.App.OnBeforeQuit(func(*mygo.QuitEvent) { s.quitting = true })
+	mygo.App.OnBeforeQuit(func(e *mygo.QuitEvent) {
+		if s.updateShutdown.deferQuit(s.cancel, mygo.App.Quit) {
+			e.PreventDefault()
+			return
+		}
+		s.quitting = true
+	})
 	mygo.App.OnQuit(func() {
 		cancel()
 		if s.tray != nil {
@@ -159,13 +166,31 @@ func main() {
 			bundle = nil
 		}
 		s.service = service.New(home, bundle)
+		s.serviceHandoff = &serviceHandoff{service: s.service}
 		if bundleErr != nil {
 			s.actionError = bundleErr
 			s.action = language.InstallService
 		}
 		s.configureUpdater()
 		go s.serviceWorker(bundleErr)
-		go s.updateWorker()
+		updateDone := make(chan struct{})
+		s.updateShutdown.done = updateDone
+		go func() {
+			installed := s.updateWorker()
+			close(updateDone)
+			if installed {
+				mygo.RunOnMain(func() {
+					if s.ctx.Err() != nil {
+						return
+					}
+					if runtime.GOOS == "darwin" {
+						mygo.App.Relaunch()
+					} else {
+						mygo.App.Quit()
+					}
+				})
+			}
+		}()
 		if appID == "dev.idy.nootify" && bundle != nil {
 			go s.updates.Run(ctx)
 		}
@@ -436,12 +461,7 @@ func (s *shell) runServiceAction(action string) {
 		progress, label, complete = language.InstallingService, language.InstallService, language.Installed
 	}
 	mygo.RunOnMain(func() { s.actionPending = true; s.action = progress; s.actionError = nil; s.renderHealth() })
-	var err error
-	if action == "install_service" {
-		err = s.service.Install(s.ctx)
-	} else {
-		err = s.service.Request(s.ctx, action)
-	}
+	err := s.serviceHandoff.action(s.ctx, action)
 	mygo.RunOnMain(func() {
 		s.actionPending = false
 		s.action = complete
@@ -467,26 +487,9 @@ func (s *shell) configureUpdater() {
 			if runtime.GOOS == "windows" {
 				return nil
 			}
-			stopped, err := s.service.StopForUpdate(ctx)
-			s.stoppedForUpdate.Store(stopped)
-			return err
+			return s.serviceHandoff.before(ctx)
 		},
-		AfterInstall: func() error {
-			if runtime.GOOS == "darwin" && s.stoppedForUpdate.Load() {
-				ctx, cancel := context.WithTimeout(context.Background(), 155*time.Second)
-				defer cancel()
-				if err := s.service.Request(ctx, "start"); err != nil {
-					return err
-				}
-			}
-			mygo.RunOnMain(func() {
-				if runtime.GOOS == "darwin" {
-					mygo.App.Relaunch()
-				}
-				mygo.App.Quit()
-			})
-			return nil
-		}})
+		AfterInstall: s.serviceHandoff.after})
 	s.update = s.updates.View()
 	s.updates.SetListener(func(v updater.View) {
 		mygo.RunOnMain(func() {
@@ -499,26 +502,8 @@ func (s *shell) configureUpdater() {
 		})
 	})
 }
-func (s *shell) updateWorker() {
-	for {
-		select {
-		case <-s.ctx.Done():
-			return
-		case action := <-s.updateRequests:
-			var err error
-			if action == "check_update" {
-				err = s.updates.Check(s.ctx)
-			} else {
-				err = s.updates.Install(s.ctx)
-			}
-			if err != nil && !errors.Is(err, context.Canceled) {
-				log.Printf("Update: %v", err)
-				if runtime.GOOS == "darwin" && s.stoppedForUpdate.Swap(false) {
-					if restartErr := s.service.Request(s.ctx, "start"); restartErr != nil {
-						log.Printf("Cannot recover background service after update: %v", restartErr)
-					}
-				}
-			}
-		}
-	}
+func (s *shell) updateWorker() bool {
+	return runUpdateRequests(s.ctx, s.updateRequests, s.updates.Check,
+		func(ctx context.Context) error { return s.serviceHandoff.install(ctx, s.updates.Install) },
+		func(err error) { log.Printf("Update: %v", err) })
 }

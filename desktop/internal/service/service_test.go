@@ -147,6 +147,50 @@ func TestCLIReceivesOnlyOwnedPathsAndCheckedActions(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+func TestStopForUpdateRetainsCLIRegistrationChecks(t *testing.T) {
+	for _, scenario := range []string{"absent", "owned", "foreign", "stop failed"} {
+		t.Run(scenario, func(t *testing.T) {
+			home := t.TempDir()
+			m := New(home, &Bundled{filepath.Join(home, "node"), filepath.Join(home, "cli.js")})
+			m.platform = "darwin"
+			if scenario != "absent" {
+				if err := os.MkdirAll(filepath.Dir(m.plist()), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(m.plist(), []byte("private fake registration; never parsed by launchctl"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var calls []Command
+			refused := errors.New("stop failed")
+			m.run = func(_ context.Context, c Command) Output {
+				calls = append(calls, c)
+				if scenario == "foreign" {
+					return Output{Err: refused, Stderr: `{"error":"Refusing to control another installation"}`}
+				}
+				if scenario == "stop failed" {
+					return Output{Err: refused}
+				}
+				return Output{}
+			}
+			stopped, err := m.StopForUpdate(context.Background())
+			if stopped != (scenario == "owned") || (err != nil) != (scenario == "foreign" || scenario == "stop failed") {
+				t.Fatal(stopped, err)
+			}
+			if scenario == "absent" {
+				if len(calls) != 0 {
+					t.Fatal("missing registration reached a service command", calls)
+				}
+			} else if len(calls) != 1 || calls[0].Path != m.Bundle.Node || !slices.Equal(calls[0].Args, []string{m.Bundle.CLI, "service-stop"}) || calls[0].Dir != home {
+				t.Fatal("stop bypassed the exact installation CLI", calls)
+			}
+			if scenario == "foreign" && err.Error() != "Refusing to control another installation" {
+				t.Fatal("ownership refusal was hidden", err)
+			}
+		})
+	}
+}
+
 func TestCommandDrainsOutputAndBoundsDuration(t *testing.T) {
 	exe, err := os.Executable()
 	if err != nil {

@@ -306,6 +306,11 @@ func (c *Core) ImportConfig(raw json.RawMessage) error {
 	c.ops.Lock()
 	defer c.ops.Unlock()
 	if err := c.store.Update(func(d *State) error {
+		for id, p := range ps {
+			if old, exists := d.Providers[id]; exists && old.Type != p.Type {
+				return fault("conflict", "provider type cannot be changed")
+			}
+		}
 		for id := range d.Providers {
 			if _, ok := ps[id]; !ok {
 				for _, binding := range d.Bindings {

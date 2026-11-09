@@ -59,6 +59,7 @@ export interface LarkControl {
   status(): string;
   channel(): { recipient?: string; groups: number };
   configure(credentials?: Credentials): Promise<void>;
+  refreshCompatibilityCredentials?(credentials?: Credentials): void;
   setRecipient?(openId: string): Promise<void>;
 }
 export interface PullPreferences {
@@ -289,13 +290,14 @@ export class SettingsService {
   }
 
   /** Re-derives the active bot from its sources and moves the connection only if that changed it. */
-  private async reload(forceReconnect = false): Promise<void> {
+  private async reload(forceReconnect = false, preserveProviders = false): Promise<void> {
     const { lark, state, mcpConfig } = this.options;
     const resolved = await resolveCredentials(this.env, state.settings, mcpConfig);
     this.source = resolved?.source;
     const current = lark.credentials;
     if (!forceReconnect && current?.appId === resolved?.credentials.appId && current?.appSecret === resolved?.credentials.appSecret) return;
-    await lark.configure(resolved?.credentials);
+    if (preserveProviders && lark.refreshCompatibilityCredentials) lark.refreshCompatibilityCredentials(resolved?.credentials);
+    else await lark.configure(resolved?.credentials);
     if (current?.appId !== resolved?.credentials.appId || current?.appSecret !== resolved?.credentials.appSecret) { this.directoryRefresh++; await this.directoryStore.clear(); }
     this.report({ source: 'lark', status: 'lark_configured', reason: resolved ? resolved.credentials.appId : undefined });
   }
@@ -469,7 +471,7 @@ export class SettingsService {
       for (const agent of file.agents ?? []) {
         try { await agents.set(agent, true); } catch (error) { summary.warnings.push(`${agent}: ${(error as Error).message}`); }
       }
-      if (!file.providers) await this.reload();
+      await this.reload(false, Boolean(file.providers));
       if (file.lark?.app_id && this.source === 'environment') summary.warnings.push('LARK_APP_ID and LARK_APP_SECRET are set for this process and stay in use');
       this.report({ source: 'host', status: 'config_imported' });
       return summary;
