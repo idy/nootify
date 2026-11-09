@@ -14,7 +14,7 @@ OutFile "${PROBE_OUTPUT}"
   !define NOOTIFY_INSTALLER_HOOK_LOG "$EXEDIR\nootify-installer-hook.log"
 !endif
 !include "windows-installer-hooks.nsh"
-!include "${__FILEDIR__}/../windows/pending-receipt.nsh"
+!include "${__FILEDIR__}\..\windows\pending-receipt.nsh"
 !ifndef PROBE_RECEIPT_KEY
   !define PROBE_RECEIPT_KEY "Software\Nootify\InstallerReceiptProbe"
 !endif

@@ -21,7 +21,7 @@ VIAddVersionKey /LANG=1033 "LegalCopyright" "Copyright Nootify contributors"
 !include "FileFunc.nsh"
 !include "x64.nsh"
 !include "${HOOKS}"
-!include "${__FILEDIR__}/pending-receipt.nsh"
+!include "${__FILEDIR__}\pending-receipt.nsh"
 
 Var UpdateMode
 Var Relaunch
