@@ -312,6 +312,24 @@ test('owned post-bootout failure carries a drain identity and recovery waits bef
   assert.equal(bootstraps, 1);
 });
 
+test('drain recovery verifies the process even after plist removal and grants no missing-registration start authority', async t => {
+  const f = await fixture(t); await rm(f.plist);
+  const started = 'Sat Nov  7 12:00:00 2026'; let alive = true; let inspected = 0;
+  const execute: ServiceExecutor = async (file, args) => {
+    assert.equal(file, '/bin/ps', 'missing registration must never authorize a scheduler action');
+    assert.deepEqual(args, ['-p', '12345', '-o', 'lstart=']); inspected++;
+    return { stdout: alive ? started : 'Sat Nov  7 12:00:01 2026' };
+  };
+  const runtime = { ...f.runtime, execute, shutdownTimeout: 1 };
+  const options = { ...f.options, drain: { pid: 12345, started } };
+  await assert.rejects(manageService('stop', options, runtime), /not finished shutting down/);
+  assert.ok(inspected > 0);
+  alive = false;
+  assert.deepEqual(await manageService('stop', options, runtime), { installed: false, was_running: true, status: 'stopped' });
+  for (const action of ['start', 'restart'] as const) await assert.rejects(manageService(action, options, runtime), /not installed/);
+  assert.ok(inspected >= 4, 'each drain-bearing retry must verify the exact process identity');
+});
+
 test('a bootout refusal cannot claim an owned unloaded service', async t => {
   const f = await fixture(t);
   const execute: ServiceExecutor = async (file, args, options) => {
@@ -389,7 +407,7 @@ test('service outcomes distinguish installed stopped and previously running owne
     assert.deepEqual(await manageService('status', f.options, f.runtime), { installed: true, running: loaded });
     assert.equal((await manageService('stop', f.options, f.runtime)).was_running, loaded);
   }
-  for (const field of ['running', 'was_running']) {
+  for (const field of ['running', 'enabled', 'was_running']) {
     for (const value of [false, true]) {
       const result = await manageService('stop', { port: 9417 }, { platform: 'win32', execute: async () => ({ stdout: JSON.stringify({ installed: true, [field]: value }) }) });
       assert.equal((result as unknown as Record<string, unknown>)[field], value);

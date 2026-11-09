@@ -89,38 +89,55 @@ func (s installedService) command(action string) ([]byte, error) {
 	return runHidden(s.diagnostics, action, filepath.Join(s.target, "node.exe"), filepath.Join(s.target, "service", "dist", "src", "cli.js"), "service-"+action)
 }
 
-func (s installedService) running() (bool, error) {
+func (s installedService) snapshot() (serviceState, error) {
 	if !exists(filepath.Join(s.target, "node.exe")) && !exists(filepath.Join(s.target, "service")) {
-		return false, nil
+		return serviceState{}, nil
 	}
 	data, err := s.command("status") // Validates exact bundled task ownership first.
 	if err != nil {
-		return false, err
+		return serviceState{}, err
 	}
 	var status struct {
 		Installed *bool `json:"installed"`
 		Running   *bool `json:"running"`
+		Enabled   *bool `json:"enabled"`
 	}
 	if err := json.Unmarshal(data, &status); err != nil || status.Installed == nil {
 		s.diagnostics.invalidResponse("status", data)
-		return false, errors.New("invalid installed service status")
+		return serviceState{}, errors.New("invalid installed service status")
 	}
 	if !*status.Installed {
-		return false, nil
+		return serviceState{}, nil
 	}
-	if status.Running != nil {
-		return *status.Running, nil
+	if status.Running != nil && status.Enabled != nil {
+		return serviceState{Running: *status.Running, Enabled: *status.Enabled}, nil
 	}
 	return s.legacySnapshot()
 }
 
-func (s installedService) legacySnapshot() (running bool, result error) {
+func (s installedService) legacySnapshot() (state serviceState, result error) {
 	s.diagnostics.begin("legacy-snapshot", "")
 	defer func() { s.diagnostics.end("legacy-snapshot", "", result) }()
 	// Published older CLIs return only installed. Task registration is not
 	// evidence of a running service. Read Scheduler's hidden-inclusive snapshot
 	// after the bundled CLI's ownership check; do not modify a task through COM.
-	script := `$ErrorActionPreference='Stop'; $env:PSModulePath=[IO.Path]::Combine($PSHOME,'Modules'); $s=New-Object -ComObject 'Schedule.Service'; $s.Connect(); $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value; $name='Nootify.Service.'+$sid; $task=$s.GetFolder('\').GetTask($name); $all=$s.GetRunningTasks(1); if($null -eq $all.Count){throw 'Missing instance count'}; $count=0; for($i=1;$i -le $all.Count;$i++){ $path=[string]$all.Item($i).Path; if(!$path){throw 'Missing task path'}; if([string]::Equals($path,'\'+$name,[StringComparison]::OrdinalIgnoreCase)){$count++} }; @{running=[bool]($count -gt 0 -or $task.State -eq 4 -or $task.State -eq 2)} | ConvertTo-Json -Compress`
+	script := `$ErrorActionPreference='Stop'; $env:PSModulePath=[IO.Path]::Combine($PSHOME,'Modules'); $s=New-Object -ComObject 'Schedule.Service'; $s.Connect(); $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value; $name='Nootify.Service.'+$sid; $task=$s.GetFolder('\').GetTask($name); $all=$s.GetRunningTasks(1); if($null -eq $all.Count){throw 'Missing instance count'}; $count=0; for($i=1;$i -le $all.Count;$i++){ $path=[string]$all.Item($i).Path; if(!$path){throw 'Missing task path'}; if([string]::Equals($path,'\'+$name,[StringComparison]::OrdinalIgnoreCase)){$count++} }; @{running=[bool]($count -gt 0 -or $task.State -eq 4 -or $task.State -eq 2); enabled=[bool]$task.Enabled} | ConvertTo-Json -Compress`
+	data, err := s.powerShell("legacy-snapshot", script)
+	if err != nil {
+		return state, errors.New("cannot query the installed service state")
+	}
+	var snapshot struct {
+		Running *bool `json:"running"`
+		Enabled *bool `json:"enabled"`
+	}
+	if err := json.Unmarshal(data, &snapshot); err != nil || snapshot.Running == nil || snapshot.Enabled == nil {
+		s.diagnostics.invalidResponse("legacy-snapshot", data)
+		return state, errors.New("invalid service state snapshot")
+	}
+	return serviceState{Running: *snapshot.Running, Enabled: *snapshot.Enabled}, nil
+}
+
+func (s installedService) powerShell(phase, script string) ([]byte, error) {
 	encoded := utf16.Encode([]rune(script))
 	buffer := make([]byte, 2*len(encoded))
 	for i, unit := range encoded {
@@ -128,20 +145,65 @@ func (s installedService) legacySnapshot() (running bool, result error) {
 	}
 	powerShell := filepath.Join(os.Getenv("SystemRoot"), "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
 	if !filepath.IsAbs(powerShell) {
-		return false, errors.New("missing absolute system PowerShell path")
+		return nil, errors.New("missing absolute system PowerShell path")
 	}
-	data, err := runHidden(s.diagnostics, "legacy-snapshot", powerShell, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", base64.StdEncoding.EncodeToString(buffer))
+	return runHidden(s.diagnostics, phase, powerShell, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", base64.StdEncoding.EncodeToString(buffer))
+}
+
+func (s installedService) enable(enabled bool) error {
+	if !exists(filepath.Join(s.target, "node.exe")) && !exists(filepath.Join(s.target, "service")) {
+		return nil
+	}
+	// The old bundled CLI performs its complete ownership check first. Recheck
+	// the exact install paths on the same COM object whose Enabled flag changes.
+	data, err := s.command("status")
 	if err != nil {
-		return false, errors.New("cannot query the installed service running state")
+		return err
 	}
-	var snapshot struct {
-		Running *bool `json:"running"`
+	var status struct {
+		Installed *bool `json:"installed"`
 	}
-	if err := json.Unmarshal(data, &snapshot); err != nil || snapshot.Running == nil {
-		s.diagnostics.invalidResponse("legacy-snapshot", data)
-		return false, errors.New("invalid service running-state snapshot")
+	if err := json.Unmarshal(data, &status); err != nil || status.Installed == nil {
+		return errors.New("invalid service status before enabling")
 	}
-	return *snapshot.Running, nil
+	if !*status.Installed {
+		if enabled {
+			return errors.New("owned service task is missing")
+		}
+		return nil
+	}
+	literal := "'" + strings.ReplaceAll(s.target, "'", "''") + "'"
+	value := "$false"
+	if enabled {
+		value = "$true"
+	}
+	script := `$ErrorActionPreference='Stop'; $env:PSModulePath=[IO.Path]::Combine($PSHOME,'Modules'); $target=` + literal + `
+$scriptPath=Join-Path $target 'service\windows\service.ps1'
+$tokens=$null; $parseErrors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($scriptPath,[ref]$tokens,[ref]$parseErrors)
+if($parseErrors.Count -ne 0){throw 'Invalid bundled service script'}
+$required=@('Full-Path','Same-Path','Quote-Argument','Run-Arguments','Assert-Owned')
+$loaded=0
+foreach($statement in $ast.EndBlock.Statements){
+  if($statement -is [Management.Automation.Language.FunctionDefinitionAst] -and $statement.Name -in $required){
+    . ([scriptblock]::Create($statement.Extent.Text)); $loaded++
+  }
+}
+if($loaded -ne $required.Count){throw 'Missing bundled ownership checks'}
+$scriptPath=Full-Path $scriptPath
+$NodePath=Full-Path (Join-Path $target 'node.exe')
+$ServerPath=Full-Path (Join-Path $target 'service\dist\src\server.js')
+$StateDir=Full-Path (Join-Path $env:LOCALAPPDATA 'Nootify\state')
+$Port=9417
+$ownerSid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$descriptionPrefix='Nootify per-user service v1: '
+$powerShell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+$s=New-Object -ComObject 'Schedule.Service'; $s.Connect()
+$task=$s.GetFolder('\').GetTask('Nootify.Service.'+$ownerSid)
+$null=Assert-Owned $task
+$task.Enabled=` + value
+	_, err = s.powerShell("enable", script)
+	return err
 }
 
 func (s installedService) stop() error {
@@ -154,9 +216,10 @@ func (s installedService) stop() error {
 func (s installedService) start() error { _, err := s.command("start"); return err }
 
 func main() {
-	action := flag.String("action", "", "prepare, apply, recover or finish")
+	action := flag.String("action", "", "prepare, apply, recover, finish or remove")
 	target := flag.String("target", "", "absolute registered installation directory")
 	manifest := flag.String("manifest", "", "trusted staged payload manifest")
+	freshToken := flag.String("fresh-token", "", "pending fresh-install ownership receipt")
 	flag.Parse()
 	d := newDiagnostics(os.Getenv(diagnosticsVariable), *action)
 	d.begin("helper", "")
@@ -181,7 +244,7 @@ func main() {
 	}
 	defer unlock()
 	defer d.close()
-	t := transaction{target: filepath.Clean(*target), diagnostics: d, service: installedService{target: filepath.Clean(*target), diagnostics: d}}
+	t := transaction{target: filepath.Clean(*target), diagnostics: d, freshToken: *freshToken, service: installedService{target: filepath.Clean(*target), diagnostics: d}}
 	var err error
 	switch *action {
 	case "prepare":
@@ -192,6 +255,8 @@ func main() {
 		err = t.recover()
 	case "finish":
 		err = t.finish()
+	case "remove":
+		err = t.remove()
 	default:
 		err = errors.New("unknown installer transaction action")
 	}

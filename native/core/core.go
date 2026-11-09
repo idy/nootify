@@ -512,6 +512,9 @@ func (c *Core) Ack(ctx context.Context, m MessageRef) (map[string]any, error) {
 	return map[string]any{"status": "session_acknowledged", "message_id": m.MessageID, "acknowledged_at": at}, nil
 }
 func (c *Core) Ingest(ctx context.Context, e Event, route string) error {
+	if e.Cancellation != nil {
+		return c.ingestCancellation(ctx, e)
+	}
 	if e.ID == "" || !e.Message.valid() {
 		return fault("invalid_argument", "invalid event identity")
 	}
@@ -545,12 +548,8 @@ func (c *Core) Ingest(ctx context.Context, e Event, route string) error {
 				return nil
 			}
 			if record.Outcome == "local" {
-				for id, v := range d.Deliveries {
+				for _, v := range d.Deliveries {
 					if v.EventID == e.ID && v.Status == "retryable" {
-						v.Status = "pending"
-						v.Error = ""
-						v.Transport = ""
-						d.Deliveries[id] = v
 						delivery = &v
 						e = record.Event
 						break
@@ -567,7 +566,7 @@ func (c *Core) Ingest(ctx context.Context, e Event, route string) error {
 			record.Outcome = "deleted"
 		} else if e.Session.NodeID == node {
 			record.Outcome = "local"
-			v := Delivery{ID: uid(), EventID: e.ID, Status: "pending"}
+			v := Delivery{ID: uid(), EventID: e.ID, Status: "retryable", Transport: "not_submitted"}
 			d.Deliveries[v.ID] = v
 			delivery = &v
 		} else {
@@ -590,11 +589,8 @@ func (c *Core) Ingest(ctx context.Context, e Event, route string) error {
 	for _, id := range wake {
 		c.wake(id)
 	}
-	if delivery != nil {
-		data := map[string]any{"delivery_id": delivery.ID, "session": e.Session, "message": e.Message, "content": e.Content, "text": e.Content.Plain(), "sender_id": e.SenderID, "chat_id": e.ChatID}
-		if c.emit == nil || c.emit("delivery", data) != nil {
-			_ = c.Complete(delivery.ID, "unconfirmed", "", "")
-		}
+	if delivery != nil && err == nil {
+		return c.dispatchDelivery(ctx, delivery.ID)
 	}
 	return err
 }
@@ -627,6 +623,9 @@ func (c *Core) Complete(id, status, transport, msg string) error {
 		}
 		v.Error = msg
 		d.Deliveries[id] = v
+		if record := d.Events[v.EventID]; record.Outcome == "deleted" {
+			cancelEvent(d, v.EventID)
+		}
 		if status == "rejected" {
 			if record, ok := d.Events[v.EventID]; ok && record.Event.Session.NodeID == d.NodeID && polledInbox(record.Event.Session.Adapter) {
 				markInboxConsumed(d, record.Event.Message)
@@ -637,13 +636,14 @@ func (c *Core) Complete(id, status, transport, msg string) error {
 }
 
 type Subscription struct {
-	core    *Core
-	node    string
-	ctx     context.Context
-	cancel  context.CancelFunc
-	signal  chan struct{}
-	mu      sync.Mutex
-	offered map[string]bool
+	core          *Core
+	node          string
+	ctx           context.Context
+	cancel        context.CancelFunc
+	signal        chan struct{}
+	mu            sync.Mutex
+	offered       map[string]bool
+	cancellations map[string]bool
 }
 
 func (c *Core) Subscribe(ctx context.Context, node, name string) (*Subscription, error) {
@@ -696,6 +696,10 @@ func (s *Subscription) Next() (Event, error) {
 		if err != nil {
 			s.mu.Unlock()
 			return Event{}, err
+		}
+		if e, ok := s.nextCancellation(d); ok {
+			s.mu.Unlock()
+			return e, nil
 		}
 		p := d.Peers[s.node]
 		pendingSet := make(map[string]bool, len(p.Pending))

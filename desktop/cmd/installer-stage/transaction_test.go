@@ -13,19 +13,27 @@ import (
 )
 
 type fakeService struct {
-	active    bool
-	calls     []string
-	failStart int
-	failStop  bool
+	active      bool
+	enabled     bool
+	enableCalls []bool
+	calls       []string
+	failStart   int
+	failStop    bool
 }
 
-func (s *fakeService) running() (bool, error) {
+func (s *fakeService) snapshot() (serviceState, error) {
 	s.calls = append(s.calls, "status")
-	return s.active, nil
+	return serviceState{Running: s.active, Enabled: s.enabled}, nil
+}
+func (s *fakeService) enable(value bool) error {
+	s.enabled = value
+	s.enableCalls = append(s.enableCalls, value)
+	return nil
 }
 func (s *fakeService) stop() error {
 	s.calls = append(s.calls, "stop")
 	s.active = false
+	s.enabled = false
 	if s.failStop {
 		return errors.New("stop failed")
 	}
@@ -38,6 +46,7 @@ func (s *fakeService) start() error {
 		return errors.New("start failed")
 	}
 	s.active = true
+	s.enabled = true
 	return nil
 }
 
@@ -93,7 +102,7 @@ func fixture(t *testing.T, running bool) (transaction, *fakeService, string, map
 	put(t, filepath.Join(target, "state", "private-marker"), "private state retained")
 	put(t, filepath.Join(target, "unrelated.txt"), "unrelated file retained")
 	before := tree(t, target)
-	service := &fakeService{active: running}
+	service := &fakeService{active: running, enabled: running}
 	tx := transaction{target: target, service: service}
 	if err := tx.prepare(); err != nil {
 		t.Fatal(err)

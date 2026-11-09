@@ -31,6 +31,9 @@ func TestMappedTailnetDialUsesEmbeddedTunnel(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	must(t, err)
 	defer listener.Close()
+	// Exercise the actual private tunnel capability exchange before the raw
+	// connection reaches this caller-owned loopback backend.
+	bridge := testAuthenticatedTunnelBridge(t, listener.Addr().String())
 	var core *Core
 	var requested string
 	core = testCore(t, func(event string, data any) error {
@@ -39,7 +42,7 @@ func TestMappedTailnetDialUsesEmbeddedTunnel(t *testing.T) {
 		}
 		fields := data.(map[string]any)
 		requested = fields["address"].(string)
-		return core.completeDial(fields["request_id"].(string), listener.Addr().String(), "")
+		return core.completeDial(fields["request_id"].(string), bridge, "", fixtureTunnelToken)
 	})
 	must(t, core.store.Update(func(state *State) error { state.Tailnet = true; return nil }))
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -48,7 +51,7 @@ func TestMappedTailnetDialUsesEmbeddedTunnel(t *testing.T) {
 	conn, err := core.dial(ctx, address)
 	must(t, err)
 	defer conn.Close()
-	if requested != address || conn.RemoteAddr().String() != listener.Addr().String() {
+	if requested != address || conn.RemoteAddr().String() != bridge {
 		t.Fatalf("mapped Tailnet destination bypassed the embedded tunnel: request=%q remote=%s", requested, conn.RemoteAddr())
 	}
 }

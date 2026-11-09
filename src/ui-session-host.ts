@@ -5,6 +5,9 @@ import { HttpError } from './types.js';
 import { UiCodec, encode, type UiCapability, type UiEnvelope, type UiFrame, type UiRequest } from './ui-transport.js';
 
 export const uiSessionAge = 8 * 60 * 60_000;
+// Gateways normally revoke on close; abandoned/crashed windows also release
+// daemon capacity after their normal two-minute idle lifetime has elapsed.
+export const uiSessionIdle = 3 * 60_000;
 export const privateNonce = () => randomBytes(24).toString('base64url');
 export function uiSessionUrl(origin: string, capability: UiCapability, route: string): string {
   return `${origin}/#${new URLSearchParams({ 'nootify-ui': `${capability.id}.${capability.key}`, route })}`;
@@ -21,30 +24,41 @@ export async function limitedJson(request: IncomingMessage, maximum = 4 * 1024 *
 }
 
 export class UiSessions {
-  private readonly sessions = new Map<string, { codec: UiCodec; used: Set<string> }>();
+  private readonly sessions = new Map<string, { codec: UiCodec; used: Set<string>; seen: number }>();
   create(deriveKey?: (id: string, expires: number) => string): UiCapability {
-    for (const [id, session] of this.sessions) if (session.codec.capability.expires <= Date.now()) this.sessions.delete(id);
+    for (const [id, session] of this.sessions) if (session.codec.capability.expires <= Date.now() || Date.now() - session.seen >= uiSessionIdle) this.sessions.delete(id);
     if (this.sessions.size >= 32) throw new HttpError(429, 'Too many authorized UI windows');
     const id = privateNonce(), expires = Date.now() + uiSessionAge;
     const capability = { id, key: deriveKey ? deriveKey(id, expires) : randomBytes(32).toString('base64url'), expires };
-    this.sessions.set(capability.id, { codec: new UiCodec(capability), used: new Set() });
+    this.sessions.set(capability.id, { codec: new UiCodec(capability), used: new Set(), seen: Date.now() });
     return capability;
   }
-  async open(request: IncomingMessage, response: ServerResponse): Promise<IncomingMessage> {
+  clear(): void { this.sessions.clear(); }
+  async open(request: IncomingMessage, response: ServerResponse): Promise<IncomingMessage | undefined> {
     const value = await limitedJson(request) as UiEnvelope;
     if (!value || typeof value.id !== 'string' || typeof value.request !== 'string' || !/^[A-Za-z0-9_-]{32}$/.test(value.request)) throw new HttpError(403, 'Owner UI authorization required');
     const session = this.sessions.get(value.id);
-    if (!session || session.codec.capability.expires <= Date.now() || session.used.has(value.request) || session.used.size >= 32768) throw new HttpError(403, 'Owner UI authorization expired');
+    if (!session || session.codec.capability.expires <= Date.now() || Date.now() - session.seen >= uiSessionIdle || session.used.has(value.request) || session.used.size >= 32768) throw new HttpError(403, 'Owner UI authorization expired');
     let input: UiRequest;
     try { input = await session.codec.open(value, value.request, 'request') as UiRequest; }
     catch { throw new HttpError(403, 'Invalid owner UI authorization'); }
     // Record before dispatch, including malformed operations; an authenticated request is never replayable.
     if (session.used.has(value.request)) throw new HttpError(403, 'Owner UI request replayed');
     session.used.add(value.request);
+    session.seen = Date.now();
+    // Once the request is authenticated, validation failures must also be
+    // authenticated responses. Only bad envelopes/proofs remain plaintext.
+    encryptResponse(response, session.codec, value.request);
     if (!input || !['GET', 'POST'].includes(input.method) || typeof input.path !== 'string'
       || !/^\/ui\/api\/[a-z/-]+$/.test(input.path) || input.path === '/ui/api/secure'
       || input.body !== undefined && (typeof input.body !== 'string' || Buffer.byteLength(input.body) > 1024 * 1024)) throw new HttpError(400, 'Invalid owner UI operation');
-    encryptResponse(response, session.codec, value.request);
+    if (input.path === '/ui/api/auth/revoke') {
+      if (input.method !== 'POST') throw new HttpError(405, 'Session revocation requires POST');
+      this.sessions.delete(value.id);
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ revoked: true }));
+      return;
+    }
     const inner = Readable.from(input.body === undefined ? [] : [Buffer.from(input.body)]) as IncomingMessage;
     Object.assign(inner, { method: input.method, url: input.path, headers: { ...request.headers, 'x-nootify-ui': '1' }, socket: request.socket });
     request.once('aborted', () => inner.destroy());

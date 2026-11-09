@@ -47,24 +47,6 @@ func (p *feishuProvider) historyBindings() []Binding {
 	return resources
 }
 
-// Accepted live events checkpoint with overlap for concurrently queued input.
-// No timer performs history polling or advances an unresolved offline interval.
-func (p *feishuProvider) checkpointHistoryLocked(at int64) error {
-	if !p.connected || p.recovering {
-		return nil
-	}
-	resources := p.historyBindings()
-	return p.core.store.Update(func(d *State) error {
-		for _, resource := range resources {
-			key := feishuCursorKey(p.config.AppID, resource.ChatID)
-			if d.FeishuCursors[key] < at {
-				d.FeishuCursors[key] = at
-			}
-		}
-		return nil
-	})
-}
-
 func (p *feishuProvider) connectionLost() {
 	p.mu.Lock()
 	// A reconnect callback may lag the actual socket loss. Keep the last
@@ -73,6 +55,10 @@ func (p *feishuProvider) connectionLost() {
 	p.historyGeneration++
 	if p.historyCancel != nil {
 		p.historyCancel()
+	}
+	for chat, coverage := range p.coverage {
+		coverage.cancel()
+		delete(p.coverage, chat)
 	}
 	p.mu.Unlock()
 	p.core.setStatus(p.config.ID, "reconnecting")
@@ -91,6 +77,7 @@ func (p *feishuProvider) connectionReady() {
 	p.historyCancel = cancel
 	p.historyWG.Add(1)
 	end := time.Now().UnixMilli()
+	resources := p.historyBindings()
 	p.mu.Unlock()
 	p.core.setStatus(p.config.ID, "connected")
 	go func() {
@@ -99,7 +86,7 @@ func (p *feishuProvider) connectionReady() {
 		backoff := 250 * time.Millisecond
 		for {
 			attempt, stop := context.WithTimeout(ctx, 45*time.Second)
-			err := p.reconcileHistory(attempt, end)
+			err := p.reconcileResources(attempt, end, resources)
 			stop()
 			p.mu.Lock()
 			current := generation == p.historyGeneration && p.connected && ctx.Err() == nil
@@ -129,12 +116,16 @@ func (p *feishuProvider) connectionReady() {
 // after every history page is ingested durably; uncertain deliveries stay
 // deduplicated in Core.Ingest, while proven retryable outcomes may retry safely.
 func (p *feishuProvider) reconcileHistory(ctx context.Context, end int64) error {
-	for _, resource := range p.historyBindings() {
+	return p.reconcileResources(ctx, end, p.historyBindings())
+}
+
+func (p *feishuProvider) reconcileResources(ctx context.Context, end int64, resources []Binding) error {
+	for _, resource := range resources {
 		key := feishuCursorKey(p.config.AppID, resource.ChatID)
 		cursor := p.core.store.Snapshot().FeishuCursors[key]
-		if cursor > end+1000 {
-			return fault("conflict", "Feishu history cursor is ahead of the current clock")
-		}
+		if cursor >= end {
+			continue
+		} // Another proven finite scan already covered it.
 		if cursor != 0 && cursor < end {
 			if err := p.reconcileChat(ctx, resource.ChatID, cursor, end); err != nil {
 				return err
@@ -209,7 +200,7 @@ func (p *feishuProvider) reconcileChat(ctx context.Context, chat string, start, 
 				Sender:  &im.EventSender{SenderType: &item.Sender.Type, SenderId: &im.UserId{OpenId: &sender}},
 				Message: &im.EventMessage{MessageId: &id, ChatId: &chat, ThreadId: &thread, MessageType: &kind, Content: &content, CreateTime: &item.CreateTime},
 			}}
-			if err := p.receive(ctx, payload); err != nil {
+			if err := p.receive(context.WithValue(ctx, historyReplayKey{}, true), payload); err != nil {
 				return err
 			}
 		}

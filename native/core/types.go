@@ -128,6 +128,7 @@ type Binding struct {
 	Legacy              bool      `json:"legacy,omitempty"`
 	LegacyHost          string    `json:"legacy_host,omitempty"`
 	PreserveDescription bool      `json:"preserve_description,omitempty"`
+	HistoryStart        int64     `json:"history_start,omitempty"`
 }
 type SendResult struct {
 	Message   MessageRef `json:"message"`
@@ -213,7 +214,8 @@ type Event struct {
 	ChatID   string     `json:"chat_id,omitempty"`
 	// SourceCreatedAt is retained by the ingress node for history deduplication.
 	// Relays do not need it: only the source's per-chat cursor covers history.
-	SourceCreatedAt int64 `json:"source_created_at,omitempty"`
+	SourceCreatedAt int64    `json:"source_created_at,omitempty"`
+	Cancellation    *Binding `json:"cancellation,omitempty"`
 }
 type EventRecord struct {
 	Sequence uint64 `json:"broadcast_sequence,omitempty"`
@@ -236,6 +238,9 @@ type ReferenceRecord struct {
 	InboxNodeID         string     `json:"inbox_node_id,omitempty"`
 	InboxUpdatedAt      int64      `json:"inbox_updated_at,omitempty"`
 	InboxReleasedRoutes []string   `json:"inbox_released_routes,omitempty"`
+	InboxReleaseCursor  string     `json:"inbox_release_cursor,omitempty"`
+	InboxCanceled       bool       `json:"inbox_canceled,omitempty"`
+	InboxCancelPending  bool       `json:"inbox_cancel_pending,omitempty"`
 }
 type Operation struct {
 	State       string          `json:"state"`

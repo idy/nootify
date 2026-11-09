@@ -262,10 +262,26 @@ try {
         if (Test-Path -LiteralPath (Join-Path $env:USERPROFILE '.claude.json')) { throw 'Refusing to import a pre-existing user MCP configuration' }
         $script:ownsTestState = $true
     }
+    Test-Step 'Fresh installer recovers an interrupted unregistered exchange with its pending receipt' {
+        $pendingKey = 'HKCU:\Software\Nootify\PendingInstaller'
+        if (Test-Path -LiteralPath $pendingKey) { throw 'Refusing an existing pending installation receipt' }
+        $token = [Guid]::NewGuid().ToString('B')
+        $null = New-Item -Path $pendingKey
+        $null = New-ItemProperty -LiteralPath $pendingKey -Name Target -Value $installDir -PropertyType String
+        $null = New-ItemProperty -LiteralPath $pendingKey -Name Token -Value $token -PropertyType String
+        $transaction = Join-Path $installDir '.nootify-installer'
+        foreach ($name in @('new', 'old', 'discard')) { $null = New-Item -ItemType Directory -Path (Join-Path $transaction $name) }
+        [IO.File]::WriteAllText($app, 'interrupted fresh payload owned by this smoke fixture')
+        @{ version = 1; target = $installDir; phase = 'exchanging'; previous = @(); running = $false; fresh_token = $token } |
+            ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $transaction 'journal.json') -Encoding ASCII
+        # The following baseline install must recover this state without a stable
+        # InstallLocation yet, then remove the pending receipt only after commit.
+    }
     Test-Step 'Silent install of the baseline package into a path with spaces' {
         # NSIS /D must be the last argument, without quotes around its path.
         $null = Run-Native $BaselineInstaller "/S /D=$installDir" 'install-baseline'
         Assert-Installation $BaselineVersion
+        if (Test-Path -LiteralPath 'HKCU:\Software\Nootify\PendingInstaller') { throw 'Committed installation retained its pending receipt' }
     }
     Test-Step 'Installer diagnostics retain phase and helper evidence without private data' {
         $traces = @(Get-ChildItem -LiteralPath $OutputDirectory -Directory -Filter 'installer-install-baseline-*')
@@ -427,6 +443,23 @@ await main(process.argv.slice(2), async (action, options) => {
         Assert-RunningTask
         $script:daemon = Get-ServiceProcess
     }
+    Test-Step 'Normal upgrade retains an enabled idle task without starting it' {
+        $null = Invoke-Service 'stop'
+        Wait-Until 'idle task has no running instance' { (Get-TestInstanceCount) -eq 0 -and (Test-PortFree) }
+        (Get-TestTask).Enabled = $true
+        $null = Run-Native $Installer "/S /D=$installDir" 'upgrade-enabled-idle'
+        Assert-Installation $Version
+        if (!(Get-TestTask).Enabled -or (Get-TestInstanceCount) -ne 0 -or !(Test-PortFree) -or @(Get-TestApps).Count -ne 0) {
+            throw 'Upgrade disabled or started an enabled idle task'
+        }
+        if ((Get-TestTask).Definition.Data -cne $marker) { throw 'Idle-task upgrade recreated task identity' }
+        $status = Invoke-Service 'status'
+        if (!$status.enabled -or $status.running) { throw 'Status did not distinguish enabled and running task state' }
+        $null = Invoke-Service 'start'
+        Wait-Until 'explicit start after idle task upgrade' { Test-Health }
+        Assert-RunningTask
+        $script:daemon = Get-ServiceProcess
+    }
     Test-Step 'Updater-mode upgrade ignores inherited Node options and relaunches the desktop' {
         With-NodeStartupOptions { $null = Run-Native $Installer "/S /UPDATE /R /D=$installDir" 'upgrade-current' }
         Wait-Until 'upgraded app and daemon' { (Test-Health) -and @(Get-TestApps).Count -eq 1 }
@@ -506,6 +539,25 @@ await main(process.argv.slice(2), async (action, options) => {
             (Get-FileHash -LiteralPath (Join-Path $stateDir 'auth-token') -Algorithm SHA256).Hash -cne $tokenHash) {
             throw 'Refused uninstall changed private state'
         }
+    }
+    Test-Step 'Locked independent runtime preserves uninstaller registration and management payload for retry' {
+        Stop-TestApps
+        $before = @{}
+        foreach ($file in @(Get-ChildItem -LiteralPath $installDir -Recurse -File)) {
+            $before[$file.FullName] = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
+        }
+        $registrationBefore = Get-ItemProperty -LiteralPath $registryKey | ConvertTo-Json -Compress
+        $lock = [IO.File]::Open($node, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        try { $null = Run-Native $uninstaller "/S _?=$installDir" 'locked-runtime-uninstall' 1 }
+        finally { $lock.Dispose() }
+        foreach ($path in $before.Keys) {
+            if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -cne $before[$path]) { throw 'Failed uninstall did not restore the retryable payload layout' }
+        }
+        if ((Get-ItemProperty -LiteralPath $registryKey | ConvertTo-Json -Compress) -cne $registrationBefore -or
+            !(Test-Path -LiteralPath $uninstaller) -or (Test-Path -LiteralPath (Join-Path $installDir '.nootify-installer'))) {
+            throw 'Failed uninstall lost registration, uninstaller or completed quarantine rollback'
+        }
+        if ((Get-TestTask) -or !(Test-PortFree)) { throw 'Owned service uninstall did not complete before the independent lock refusal' }
     }
     Test-Step 'Silent uninstall after desktop exit ignores inherited Node options and keeps private data' {
         With-NodeStartupOptions { Uninstall-TestApp 'uninstall-current' }

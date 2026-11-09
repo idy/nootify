@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/idy/nootify/desktop/internal/updater"
 )
 
 // All lifecycle operations are injected: these tests never initialize MyGo, run
@@ -401,6 +403,105 @@ func TestServiceHandoffOnlyRecoversSuccessfullyStoppedService(t *testing.T) {
 			}
 			h.controls.Unlock()
 		})
+	}
+}
+
+func TestSuccessfulMacUpdateTransfersStoppedPolicyThroughGUICommit(t *testing.T) {
+	for _, running := range []bool{false, true} {
+		t.Run(map[bool]string{false: "stopped", true: "running"}[running], func(t *testing.T) {
+			starts := 0
+			h := &serviceHandoff{service: fakeControlledService{
+				stop:    func(context.Context) (bool, error) { return running, nil },
+				request: func(context.Context, string) error { starts++; return nil },
+			}}
+			if err := h.install(context.Background(), func(ctx context.Context) error {
+				if err := h.before(ctx); err != nil {
+					return err
+				}
+				h.guiPending = true // updater retains original through post-loop supervisor
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if starts != 0 || h.wasRunning != running || h.controls.TryLock() {
+				t.Fatal("GUI transaction lost the stopped state or lock")
+			}
+			// The private receipt carries this value to the replacement, whose
+			// startup worker consumes the same policy only after GUI commit.
+			suppress := !h.wasRunning
+			if action := initialServiceAction(suppress, false, true); suppress && action != "" {
+				t.Fatal("relaunch startup undid deliberate stop", action)
+			}
+			if err := h.after(); err != nil {
+				t.Fatal(err)
+			} // only after actual GUI readiness
+			want := 0
+			if running {
+				want = 1
+			}
+			if starts != want {
+				t.Fatal(starts, want)
+			}
+			h.releaseGUI()
+			if h.locked || h.guiPending {
+				t.Fatal("GUI transaction retained controls")
+			}
+			// The suppression applies to this automatic relaunch, not an explicit
+			// later user start. Controls are available after the handoff commits.
+			if err := h.action(context.Background(), "start"); err != nil || starts != want+1 {
+				t.Fatal("explicit start was suppressed", err)
+			}
+		})
+	}
+}
+
+func TestGUICommitFailureQuiescesAfterSuccessfulServiceStart(t *testing.T) {
+	stops, starts := 0, 0
+	h := &serviceHandoff{service: fakeControlledService{
+		stop:    func(context.Context) (bool, error) { stops++; return true, nil },
+		request: func(context.Context, string) error { starts++; return nil },
+	}}
+	if err := h.install(context.Background(), func(ctx context.Context) error {
+		if err := h.before(ctx); err != nil {
+			return err
+		}
+		h.guiPending = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	defer h.releaseGUI()
+	if err := h.after(); err != nil || h.stopped || !h.replacementRunning {
+		t.Fatal("ready service start state incorrect", err)
+	}
+	// A separate GUI commit now fails; after() success must not erase the fact
+	// that replacement resources need ownership-checked quiescence.
+	if err := h.beforeRollback(); err != nil || stops != 2 || !h.stopped || h.replacementRunning {
+		t.Fatal("commit failure skipped service quiescence", err, stops)
+	}
+	if err := h.after(); err != nil || starts != 2 {
+		t.Fatal("restored original did not recover", err, starts)
+	}
+}
+
+func TestGUIReadinessRequiresBothNativeInitializationAndDocumentLoad(t *testing.T) {
+	// A real GUIClient isn't needed to exercise the latch's two independent
+	// native signals; use an allocated client without running any native code.
+	s := shell{guiReady: make(chan struct{}), guiHandoff: new(updater.GUIClient)}
+	s.guiInitialized = true
+	s.confirmGUIReady()
+	select {
+	case <-s.guiReady:
+		t.Fatal("tray creation alone confirmed GUI handoff")
+	default:
+	}
+	s.guiDocumentLoaded = true
+	s.confirmGUIReady()
+	s.confirmGUIReady()
+	select {
+	case <-s.guiReady:
+	default:
+		t.Fatal("initialized and loaded GUI did not confirm")
 	}
 }
 

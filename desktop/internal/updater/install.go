@@ -101,6 +101,24 @@ func (m *Manager) installMac(ctx context.Context, archive string) error {
 			return rollback(fmt.Errorf("relaunch updated app: %w", err))
 		}
 	}
+	if m.options.ConfirmGUI {
+		installed, statErr := os.Lstat(root)
+		if statErr != nil {
+			return rollback(fmt.Errorf("inspect replacement before GUI handoff: %w", statErr))
+		}
+		stageInfo, statErr := os.Lstat(staging)
+		if statErr != nil {
+			return rollback(statErr)
+		}
+		targetVersion := ""
+		m.mu.Lock()
+		if m.pending != nil {
+			targetVersion = m.pending.Version
+		}
+		m.mu.Unlock()
+		m.guiPending = &macPending{root: root, replacement: replacement, staging: staging, original: original, installed: installed, stageInfo: stageInfo, version: targetVersion}
+		cleanup = false
+	}
 	return nil
 }
 

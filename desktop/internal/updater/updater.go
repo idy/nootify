@@ -55,6 +55,9 @@ type Options struct {
 	// BeforeRollback must quiesce a replacement that may have partially started.
 	// Failure preserves both bundles in place instead of deleting live resources.
 	BeforeRollback func() error
+	// ConfirmGUI retains the macOS original until a replacement GUI completes the
+	// private relaunch handshake. AfterInstall alone cannot certify a GUI launch.
+	ConfirmGUI bool
 }
 
 type release struct{ Version, URL, Signature string }
@@ -73,6 +76,7 @@ type Manager struct {
 	swap            func(string, string) error
 	scheduleChanged chan bool
 	runMu           sync.Mutex
+	guiPending      *macPending
 }
 
 func New(options Options) *Manager {

@@ -95,6 +95,27 @@ func dialLoopback(t *testing.T, address string) *net.TCPConn {
 	return conn.(*net.TCPConn)
 }
 
+func authenticateTunnelClient(t *testing.T, conn net.Conn, token string) {
+	t.Helper()
+	if len(token) != 2*tunnelTokenBytes {
+		t.Fatal("tunnel capability missing")
+	}
+	if _, err := io.WriteString(conn, tunnelHandshakePrefix+token+"\n"); err != nil {
+		t.Fatal(err)
+	}
+	var ack [1]byte
+	if _, err := io.ReadFull(conn, ack[:]); err != nil || ack[0] != 1 {
+		t.Fatalf("private tunnel authentication failed: %v", err)
+	}
+}
+
+func dialTunnel(t *testing.T, result tunnelResult) *net.TCPConn {
+	t.Helper()
+	conn := dialLoopback(t, result.Address)
+	authenticateTunnelClient(t, conn, result.Token)
+	return conn
+}
+
 func assertSocketClosed(t *testing.T, conn net.Conn) {
 	t.Helper()
 	conn.SetReadDeadline(time.Now().Add(time.Second))
@@ -166,6 +187,9 @@ func TestRawTransportsPreserveBytesAndHalfClose(t *testing.T) {
 			// Completion of a short-lived RPC must not cancel its TCP listener.
 			cancel()
 			client := dialLoopback(t, address)
+			if method == "tunnel" {
+				authenticateTunnelClient(t, client, reply.Result.(tunnelResult).Token)
+			}
 			server := acceptBackend(t, backend)
 			if method == "tunnel" {
 				if call := <-calls; call != "tcp node.tail.ts.net:7443" {
@@ -206,6 +230,45 @@ func TestRawTransportsPreserveBytesAndHalfClose(t *testing.T) {
 	}
 }
 
+func TestPublicationForwardsToIPv6Loopback(t *testing.T) {
+	backend, err := net.ListenTCP("tcp6", &net.TCPAddr{IP: net.IPv6loopback})
+	if err != nil {
+		t.Skipf("IPv6 loopback unavailable: %v", err)
+	}
+	t.Cleanup(func() { backend.Close() })
+	backend.SetDeadline(time.Now().Add(3 * time.Second))
+	listener := newTestListener()
+	m := testTCPTransport(t, nil, func(int) (net.Listener, error) { return listener, nil })
+	if reply := m.dispatch(context.Background(), request{ID: 1, Method: "publish", Port: 7443, Target: backend.Addr().String()}); reply.Error != "" {
+		t.Fatal(reply)
+	}
+	client, peer := tcpPair(t)
+	sendPeer(t, listener, peer)
+	server := acceptBackend(t, backend)
+	request := []byte("\x00IPv6-request\xff")
+	if _, err := client.Write(request); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := io.ReadAll(server); err != nil || !bytes.Equal(got, request) {
+		t.Fatalf("IPv6 request = %q, %v", got, err)
+	}
+	response := []byte("\x00IPv6-response\xff")
+	if _, err := server.Write(response); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := io.ReadAll(client); err != nil || !bytes.Equal(got, response) {
+		t.Fatalf("IPv6 response after half-close = %q, %v", got, err)
+	}
+	m.close()
+	await(t, listener.closed)
+}
+
 func TestCloseRawTransportsClosesActiveSockets(t *testing.T) {
 	for _, method := range []string{"tunnel", "publish"} {
 		t.Run(method, func(t *testing.T) {
@@ -226,6 +289,9 @@ func TestCloseRawTransportsClosesActiveSockets(t *testing.T) {
 				closeReq = request{ID: 2, Method: "close_tunnel", TunnelID: result.ID}
 			}
 			client := dialLoopback(t, address)
+			if method == "tunnel" {
+				authenticateTunnelClient(t, client, reply.Result.(tunnelResult).Token)
+			}
 			server := acceptBackend(t, backend)
 			if reply := m.dispatch(context.Background(), closeReq); reply.Error != "" {
 				t.Fatal(reply)
@@ -258,7 +324,7 @@ func TestTunnelCloseCancelsPendingDialAndDialErrorsCloseClient(t *testing.T) {
 				t.Fatal(reply)
 			}
 			result := reply.Result.(tunnelResult)
-			client := dialLoopback(t, result.Address)
+			client := dialTunnel(t, result)
 			await(t, entered)
 			if fails {
 				assertSocketClosed(t, client)
@@ -480,7 +546,7 @@ func TestIdlePublicationCannotStarveOtherBridges(t *testing.T) {
 		t.Fatal(reply)
 	}
 	for range reservedBridgeConnections {
-		idleClients = append(idleClients, dialLoopback(t, reply.Result.(tunnelResult).Address))
+		idleClients = append(idleClients, dialTunnel(t, reply.Result.(tunnelResult)))
 		idleServers = append(idleServers, acceptBackend(t, backend))
 	}
 	// Previously idle streams remain usable after other bridges reach capacity.
@@ -847,6 +913,7 @@ func TestServiceEOFAndShutdownCloseRawTransports(t *testing.T) {
 			}
 			address := reply.Result.(map[string]any)["address"].(string)
 			tunnelClient := dialLoopback(t, address)
+			authenticateTunnelClient(t, tunnelClient, reply.Result.(map[string]any)["token"].(string))
 			tunnelServer := acceptBackend(t, tunnelBackend)
 			h.send(t, fmt.Sprintf("{\"id\":2,\"method\":\"publish\",\"port\":7443,\"target\":%q}\n", publishBackend.Addr().String()))
 			if reply := h.read(t); reply.ID != 2 || reply.Error != "" || reply.Result.(map[string]any)["port"] != float64(7443) {

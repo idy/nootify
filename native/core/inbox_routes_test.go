@@ -17,10 +17,14 @@ type inboxTestRoute struct {
 	releases atomic.Int64
 	statuses atomic.Int64
 	status   func(context.Context, MessageRef) (bool, error)
+	release  func(context.Context, MessageRef) error
 }
 
 func (p *inboxTestRoute) ReleaseInbox(ctx context.Context, m MessageRef) error {
 	p.releases.Add(1)
+	if p.release != nil {
+		return p.release(ctx, m)
+	}
 	if p.offline.Load() {
 		return errors.New("synthetic offline inbox return route")
 	}
@@ -193,6 +197,117 @@ func TestInboxRoutesOfflineForkReleaseSurvivesRestart(t *testing.T) {
 	}
 	if offline.store.Snapshot().References[event.Message.key()].InboxState != "consumed" {
 		t.Fatal("recovered release did not reach the previously offline upstream")
+	}
+}
+
+func TestInboxRoutesSlowFirstRouteDoesNotStarveHealthyRelease(t *testing.T) {
+	origin, leaf := testCore(t, nil), testCore(t, nil)
+	slow := installInboxTestRoute(leaf, "a-slow", origin)
+	healthy := installInboxTestRoute(leaf, "b-healthy", origin)
+	slow.release = func(ctx context.Context, _ MessageRef) error { <-ctx.Done(); return ctx.Err() }
+	m := MessageRef{OriginNodeID: origin.node(), ProviderID: "synthetic", MessageID: "slow-first"}
+	must(t, leaf.store.Update(func(d *State) error {
+		d.References[m.key()] = ReferenceRecord{Message: m, Routes: []string{"a-slow", "b-healthy"}, InboxState: "releasing", InboxNodeID: d.NodeID, InboxUpdatedAt: inboxTimestamp(d)}
+		return nil
+	}))
+	started := time.Now()
+	leaf.retryInboxReleases()
+	r := leaf.store.Snapshot().References[m.key()]
+	if healthy.releases.Load() != 1 || !contains(r.InboxReleasedRoutes, "b-healthy") || contains(r.InboxReleasedRoutes, "a-slow") || r.InboxState != "releasing" {
+		t.Fatal("slow first route starved a healthy release or discarded its pending branch")
+	}
+	if time.Since(started) > 3*time.Second {
+		t.Fatal("one hanging route consumed the entire five-second sweep budget")
+	}
+}
+
+func TestInboxRoutesAttemptRotationAndProgressSurviveRestart(t *testing.T) {
+	origin, leaf := testCore(t, nil), testCore(t, nil)
+	slow := installInboxTestRoute(leaf, "a-slow", origin)
+	slow.release = func(ctx context.Context, _ MessageRef) error { <-ctx.Done(); return ctx.Err() }
+	m := MessageRef{OriginNodeID: origin.node(), ProviderID: "synthetic", MessageID: "restart-fairness"}
+	must(t, leaf.store.Update(func(d *State) error {
+		d.References[m.key()] = ReferenceRecord{Message: m, Routes: []string{"a-slow", "b-healthy", "c-healthy"}, InboxState: "releasing", InboxNodeID: d.NodeID, InboxUpdatedAt: inboxTimestamp(d)}
+		return nil
+	}))
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	if err := leaf.ReleaseInbox(ctx, m); err == nil {
+		t.Fatal("fixture hanging release unexpectedly succeeded")
+	}
+	cancel()
+	if leaf.store.Snapshot().References[m.key()].InboxReleaseCursor != "a-slow" {
+		t.Fatal("attempt rotation was not persisted before hanging network I/O")
+	}
+	leaf = reopenCore(t, leaf, nil)
+	slow = installInboxTestRoute(leaf, "a-slow", origin)
+	slow.release = func(ctx context.Context, _ MessageRef) error { <-ctx.Done(); return ctx.Err() }
+	first := installInboxTestRoute(leaf, "b-healthy", origin)
+	second := installInboxTestRoute(leaf, "c-healthy", origin)
+	ctx, cancel = context.WithTimeout(context.Background(), 200*time.Millisecond)
+	_ = leaf.ReleaseInbox(ctx, m)
+	cancel()
+	r := leaf.store.Snapshot().References[m.key()]
+	if first.releases.Load() != 1 || second.releases.Load() != 1 || !contains(r.InboxReleasedRoutes, "b-healthy") || !contains(r.InboxReleasedRoutes, "c-healthy") {
+		t.Fatal("restart repeated the hanging route before progressing healthy branches")
+	}
+	slow.release = nil
+	must(t, leaf.ReleaseInbox(context.Background(), m))
+	if leaf.store.Snapshot().References[m.key()].InboxState != "consumed" || first.releases.Load() != 1 || second.releases.Load() != 1 {
+		t.Fatal("completed routes were retried or the recovered slow branch was lost")
+	}
+}
+
+func TestInboxRoutesManyHangingRoutesShareFiveSecondBudget(t *testing.T) {
+	origin, leaf := testCore(t, nil), testCore(t, nil)
+	m := MessageRef{OriginNodeID: origin.node(), ProviderID: "synthetic", MessageID: "overall-route-budget"}
+	var routes []string
+	for i := 0; i < inboxSweepBatch; i++ {
+		id := fmt.Sprintf("slow-%02d", i)
+		routes = append(routes, id)
+		provider := installInboxTestRoute(leaf, id, origin)
+		provider.release = func(ctx context.Context, _ MessageRef) error { <-ctx.Done(); return ctx.Err() }
+	}
+	must(t, leaf.store.Update(func(d *State) error {
+		d.References[m.key()] = ReferenceRecord{Message: m, Routes: routes, InboxState: "releasing", InboxNodeID: d.NodeID, InboxUpdatedAt: inboxTimestamp(d)}
+		return nil
+	}))
+	started := time.Now()
+	if err := leaf.ReleaseInbox(context.Background(), m); err == nil {
+		t.Fatal("hanging routes incorrectly reported complete release")
+	}
+	if elapsed := time.Since(started); elapsed > inboxSweepBudget+time.Second {
+		t.Fatalf("independent route timeouts exceeded the shared five-second budget: %s", elapsed)
+	}
+	if r := leaf.store.Snapshot().References[m.key()]; r.InboxState != "releasing" || len(r.InboxReleasedRoutes) != 0 || r.InboxReleaseCursor == "" {
+		t.Fatal("bounded sweep lost its pending branches or durable rotation")
+	}
+}
+
+func TestInboxRoutesEachCallBoundsRouteAttempts(t *testing.T) {
+	origin, leaf := testCore(t, nil), testCore(t, nil)
+	m := MessageRef{OriginNodeID: origin.node(), ProviderID: "synthetic", MessageID: "bounded-routes"}
+	var routes []string
+	var providers []*inboxTestRoute
+	for i := 0; i < inboxSweepBatch+3; i++ {
+		id := fmt.Sprintf("route-%02d", i)
+		routes = append(routes, id)
+		providers = append(providers, installInboxTestRoute(leaf, id, origin))
+	}
+	must(t, leaf.store.Update(func(d *State) error {
+		d.References[m.key()] = ReferenceRecord{Message: m, Routes: routes, InboxState: "releasing", InboxNodeID: d.NodeID, InboxUpdatedAt: inboxTimestamp(d)}
+		return nil
+	}))
+	if err := leaf.ReleaseInbox(context.Background(), m); err == nil {
+		t.Fatal("bounded first call incorrectly claimed all routes released")
+	}
+	if len(leaf.store.Snapshot().References[m.key()].InboxReleasedRoutes) != inboxSweepBatch {
+		t.Fatal("release call exceeded its route-attempt bound")
+	}
+	must(t, leaf.ReleaseInbox(context.Background(), m))
+	for _, provider := range providers {
+		if provider.releases.Load() != 1 {
+			t.Fatal("route was skipped or its successful release was repeated")
+		}
 	}
 }
 
@@ -439,6 +554,128 @@ func TestInboxRoutesSnapshotDoesNotReleaseNewerQueueOrReopenLaterConsumption(t *
 	must(t, c.ReconcileInbox(context.Background(), raw))
 	if c.store.Snapshot().References[old.Message.key()].InboxState != "consumed" {
 		t.Fatal("stale snapshot resurrected an already consumed inbox")
+	}
+}
+
+func TestInboxRoutesCanceledQueueProofSurvivesOfflineUntilNodeAcknowledges(t *testing.T) {
+	c := queuedInboxCore(t)
+	at := time.Now().UTC()
+	setInboxTestClock(c, &at)
+	event := eventFor(c.node(), "canceled-offline-inbox")
+	event.Session.Adapter = "trae"
+	event.Message.OriginNodeID, event.Message.ThreadID = c.node(), "retained-thread"
+	must(t, c.Ingest(context.Background(), event, ""))
+	must(t, c.store.Update(func(d *State) error { cancelEvent(d, event.ID); return nil }))
+	must(t, c.ReleaseInbox(context.Background(), event.Message))
+	if r := c.store.Snapshot().References[event.Message.key()]; !r.InboxCanceled || !r.InboxCancelPending || r.InboxState != "consumed" {
+		t.Fatal("actual canceled local queue did not retain an unacknowledged cancellation proof")
+	}
+	at = at.Add(90 * 24 * time.Hour)
+	must(t, c.store.Update(func(*State) error { return nil }))
+	if _, exists := c.store.Snapshot().Events[event.ID]; exists {
+		t.Fatal("cancellation proof unnecessarily retained the completed payload")
+	}
+	c = reopenCore(t, c, nil)
+	setInboxTestClock(c, &at)
+	raw, err := json.Marshal(map[string]any{"pending": []any{map[string]any{"message": event.Message}}, "before": at.UnixMilli()})
+	must(t, err)
+	must(t, c.ReconcileInbox(context.Background(), raw))
+	canceled, err := c.CanceledInbox(raw)
+	must(t, err)
+	if len(canceled) != 1 || canceled[0] != event.Message || !c.store.Snapshot().References[event.Message.key()].InboxCancelPending {
+		t.Fatal("long-offline Node could not obtain exact cancellation proof without reopening the hold")
+	}
+	must(t, c.ConsumeInbox(context.Background(), event.Message)) // After Node's durable deletion.
+	if c.store.Snapshot().References[event.Message.key()].InboxCancelPending {
+		t.Fatal("Node acknowledgment did not release its cancellation-proof pin")
+	}
+	at = at.Add(referenceRetention)
+	must(t, c.store.Update(func(*State) error { return nil }))
+	if _, exists := c.store.Snapshot().References[event.Message.key()]; exists {
+		t.Fatal("acknowledged cancellation proof remained pinned forever")
+	}
+}
+
+func TestInboxRoutesEmptySnapshotRecoversCanceledQueueAcknowledgment(t *testing.T) {
+	c := queuedInboxCore(t)
+	at := time.Now().UTC()
+	setInboxTestClock(c, &at)
+	event := eventFor(c.node(), "lost-canceled-ack")
+	event.Session.Adapter, event.Message.OriginNodeID = "workbuddy", c.node()
+	must(t, c.Ingest(context.Background(), event, ""))
+	at = at.Add(time.Hour)
+	must(t, c.store.Update(func(d *State) error { cancelEvent(d, event.ID); return nil }))
+	must(t, c.ReleaseInbox(context.Background(), event.Message))
+	stamp := c.store.Snapshot().References[event.Message.key()].InboxUpdatedAt
+	stale, err := json.Marshal(map[string]any{"pending": []any{}, "before": stamp - 1})
+	must(t, err)
+	must(t, c.ReconcileInbox(context.Background(), stale))
+	if !c.store.Snapshot().References[event.Message.key()].InboxCancelPending {
+		t.Fatal("older empty snapshot acknowledged a future cancellation")
+	}
+	// Node's durable deletion succeeded, but its consume RPC was lost. Core
+	// restarts and later receives a newer authoritative empty inbox snapshot.
+	c = reopenCore(t, c, nil)
+	at = at.Add(time.Hour)
+	setInboxTestClock(c, &at)
+	empty, err := json.Marshal(map[string]any{"pending": []any{}, "before": at.UnixMilli()})
+	must(t, err)
+	must(t, c.ReconcileInbox(context.Background(), empty))
+	if c.store.Snapshot().References[event.Message.key()].InboxCancelPending {
+		t.Fatal("newer empty snapshot did not repair the lost Node cancellation acknowledgment")
+	}
+	at = at.Add(referenceRetention)
+	must(t, c.store.Update(func(*State) error { return nil }))
+	if _, exists := c.store.Snapshot().References[event.Message.key()]; exists {
+		t.Fatal("recovered empty-snapshot acknowledgment never reclaimed its proof")
+	}
+}
+
+func TestInboxRoutesCanceledProofListDoesNotInferUnknownOrUnqueuedCancellation(t *testing.T) {
+	c := testCore(t, nil)
+	at := time.Now().UTC()
+	setInboxTestClock(c, &at)
+	known := MessageRef{OriginNodeID: c.node(), ProviderID: "synthetic", MessageID: "known-canceled"}
+	active := known
+	active.MessageID = "active"
+	unknown := known
+	unknown.MessageID = "unknown"
+	unlisted := known
+	unlisted.MessageID = "unlisted-canceled"
+	must(t, c.store.Update(func(d *State) error {
+		for _, m := range []MessageRef{known, unlisted} {
+			d.References[m.key()] = ReferenceRecord{Message: m, InboxNodeID: d.NodeID, InboxState: "consumed", InboxCanceled: true, InboxCancelPending: true}
+		}
+		d.References[active.key()] = ReferenceRecord{Message: active, InboxNodeID: d.NodeID, InboxState: "pending"}
+		return nil
+	}))
+	raw, err := json.Marshal(map[string]any{"pending": []any{map[string]any{"message": known}, map[string]any{"message": known}, map[string]any{"message": active}, map[string]any{"message": unknown}}, "before": at.UnixMilli()})
+	must(t, err)
+	canceled, err := c.CanceledInbox(raw)
+	must(t, err)
+	if len(canceled) != 1 || canceled[0] != known {
+		t.Fatal("cancellation response included unknown, active, unlisted, or duplicate references")
+	}
+	// A never-queued canceled event has no Node removal acknowledgment to wait
+	// for. Its proof must retain the ordinary finite completion horizon.
+	event := eventFor(c.node(), "never-queued")
+	event.Session.Adapter, event.Message.OriginNodeID = "trae", c.node()
+	must(t, c.store.Update(func(d *State) error {
+		d.Events[event.ID] = EventRecord{Event: event, Outcome: "local"}
+		d.Deliveries["not-queued"] = Delivery{ID: "not-queued", EventID: event.ID, Status: "retryable"}
+		remember(d, event.Message, "")
+		holdInbox(d, event, "")
+		cancelEvent(d, event.ID)
+		return nil
+	}))
+	must(t, c.ReleaseInbox(context.Background(), event.Message))
+	if c.store.Snapshot().References[event.Message.key()].InboxCancelPending {
+		t.Fatal("never-queued cancellation acquired an unfulfillable Node acknowledgment pin")
+	}
+	at = at.Add(90 * 24 * time.Hour)
+	must(t, c.store.Update(func(*State) error { return nil }))
+	if _, exists := c.store.Snapshot().References[event.Message.key()]; exists {
+		t.Fatal("never-queued canceled reference was permanently retained")
 	}
 }
 

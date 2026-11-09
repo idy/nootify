@@ -104,7 +104,11 @@ test('production NSIS stages before transactional replacement and guards uninsta
   assert.match(installer, /Function \.onInstFailed[\s\S]*--action recover/);
   assert.ok(uninstall.indexOf('Call un.NootifyPreflightDesktop') >= 0);
   assert.ok(uninstall.indexOf('Call un.NootifyPreflightDesktop') < uninstall.indexOf('!insertmacro NSIS_HOOK_PREUNINSTALL'));
-  assert.ok(uninstall.indexOf('!insertmacro NSIS_HOOK_PREUNINSTALL') < uninstall.indexOf('  Delete '));
+  assert.ok(uninstall.indexOf('!insertmacro NSIS_HOOK_PREUNINSTALL') < uninstall.indexOf('NootifyTransaction remove'));
+  assert.ok(uninstall.indexOf('NootifyTransaction remove') < uninstall.indexOf('  Delete '));
+  assert.ok(uninstall.indexOf('  Delete ') < uninstall.indexOf('DeleteRegKey HKCU'));
+  assert.match(uninstall, /Delete "\$INSTDIR\\uninstall\.exe"\s+\$\{If\} \$\{Errors\}[\s\S]*Abort/);
+  assert.doesNotMatch(uninstall, /RMDir \/r|Delete "\$INSTDIR\\node\.exe"/);
   assert.match(installer, /RequestExecutionLevel user/);
   assert.match(installer, /Uninstall\\Nootify/);
   assert.match(installer, /GetOptions.*"\/UPDATE"/);
@@ -144,9 +148,22 @@ test('fresh Windows targets refuse unowned payload before stopping or recursivel
   assert.match(guard, /IntOp \$1 \$0 & 0x400[\s\S]*reparse point/);
   assert.match(guard, /ReadRegStr \$0 HKCU "\$\{UNINSTALL_KEY\}" "InstallLocation"[\s\S]*\$0 != \$INSTDIR[\s\S]*Abort/);
   assert.match(guard, /IfNot.*FileExists.*Nootify\.exe[\s\S]*OrIfNot.*node\.exe[\s\S]*OrIfNot.*cli\.js[\s\S]*Abort/);
-  const destination = installer.slice(installer.indexOf('Function NootifyCheckRegisteredDestination'), installer.indexOf('!macro NootifyTransaction'));
+  const destinationStart = installer.indexOf('Function NootifyCheckRegisteredDestination');
+  const destination = installer.slice(destinationStart, installer.indexOf('FunctionEnd', destinationStart));
   assert.match(destination, /ReadRegStr \$RegisteredLocation[\s\S]*\$RegisteredLocation != ""[\s\S]*\$RegisteredLocation != \$INSTDIR[\s\S]*Abort/);
   assert.doesNotMatch(guard, /RMDir|Delete|service-stop|service-uninstall/);
+});
+
+test('fresh transaction recovery requires a pending receipt before any prepare or registration', async () => {
+  const installer = await readFile(join(root, 'windows/installer.nsi'), 'utf8');
+  const start = installer.indexOf('Function NootifyPrepareFreshReceipt');
+  const receipt = installer.slice(start, installer.indexOf('FunctionEnd', start));
+  const install = installer.slice(installer.indexOf('Section "Nootify"'), installer.indexOf('Function .onInstFailed'));
+  assert.match(receipt, /GetFileAttributesW[\s\S]*unowned installer transaction[\s\S]*CoCreateGuid[\s\S]*WriteRegStr HKCU "\$\{PENDING_KEY\}" "Target"[\s\S]*"Token"/);
+  assert.ok(install.indexOf('Call NootifyPreflightPayload') < install.indexOf('Call NootifyPrepareFreshReceipt'));
+  assert.ok(install.indexOf('Call NootifyPrepareFreshReceipt') < install.indexOf('NootifyTransaction prepare'));
+  assert.ok(install.indexOf('NootifyTransaction finish') < install.indexOf('DeleteRegKey HKCU "${PENDING_KEY}"'));
+  assert.match(installer, /--fresh-token "\$FreshToken"/);
 });
 
 test('Windows payload manifest verifies exact extracted bytes and excludes generated uninstaller', async t => {

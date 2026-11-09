@@ -42,12 +42,22 @@ export class UiTransport {
     if (capability) this.codec = new UiCodec(capability);
   }
   get authorized(): boolean { return !!this.codec && !this.broken; }
+  async close(): Promise<void> {
+    if (!this.codec) return;
+    try { await (await this.fetch('/ui/api/auth/revoke', { method: 'POST', signal: AbortSignal.timeout(1500) })).text(); }
+    finally { this.broken = true; }
+  }
   readonly fetch = async (input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> => {
     const url = new URL(String(input), this.origin);
     if (url.origin !== this.origin || !url.pathname.startsWith('/ui/api/') || url.search || url.hash) throw new Error('Invalid UI request target');
     if (!this.codec) {
-      if ((init.method ?? 'GET') !== 'GET') throw new Error('Owner authorization is required');
-      return this.network(url, { ...init, credentials: 'omit', redirect: 'error' });
+      const method = init.method ?? 'GET';
+      const local = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+      const repositoryAction = method === 'POST' && !local && ['/ui/api/repos', '/ui/api/pulls/refresh'].includes(url.pathname);
+      if (method !== 'GET' && !repositoryAction) throw new Error('Owner authorization is required');
+      const headers = new Headers(init.headers);
+      if (repositoryAction) headers.set('x-nootify-ui', '1');
+      return this.network(url, { ...init, headers, credentials: 'omit', redirect: 'error' });
     }
     if (this.broken) throw new Error('The authorized UI connection was lost; authorize this window again');
     const request = uiNonce();

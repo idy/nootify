@@ -3,7 +3,7 @@ import { access, chmod, constants, lstat, mkdir } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export interface EmbeddedTailscaleTunnel { id: string; address: string }
+export interface EmbeddedTailscaleTunnel { id: string; address: string; token: string }
 export interface EmbeddedTailscalePublication { port: number }
 
 export interface EmbeddedTailscaleClient {
@@ -135,8 +135,11 @@ export class TsnetClient implements EmbeddedTailscaleClient {
   whois(ip: string): Promise<unknown> { return this.request('whois', { ip }); }
   async login(): Promise<void> { await this.request('login'); }
   async logout(): Promise<void> { await this.request('logout'); }
-  tunnel(address: string): Promise<EmbeddedTailscaleTunnel> {
-    return this.request('tunnel', { address }) as Promise<EmbeddedTailscaleTunnel>;
+  async tunnel(address: string): Promise<EmbeddedTailscaleTunnel> {
+    const result = await this.request('tunnel', { address }) as Partial<EmbeddedTailscaleTunnel> | null;
+    if (!result || typeof result.id !== 'string' || !result.id || typeof result.address !== 'string' || !result.address
+      || typeof result.token !== 'string' || !/^[0-9a-f]{64}$/.test(result.token)) throw new Error('embedded_protocol_error');
+    return { id: result.id, address: result.address, token: result.token };
   }
   async closeTunnel(tunnelId: string): Promise<void> { await this.request('close_tunnel', { tunnel_id: tunnelId }); }
   publish(port: number, target: string): Promise<EmbeddedTailscalePublication> {

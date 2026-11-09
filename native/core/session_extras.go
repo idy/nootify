@@ -23,8 +23,11 @@ func recordTombstone(d *State, b Binding) {
 	}
 	for id, record := range d.Events {
 		if record.Event.Session.key() == b.Session.key() {
-			record.Outcome = "deleted"
-			d.Events[id] = record
+			if record.Event.ChatID != "" {
+				resource := Binding{Session: record.Event.Session, ProviderID: b.ProviderID, ChatID: record.Event.ChatID, ResourceNodeID: record.Event.Message.OriginNodeID, ResourceProviderID: record.Event.Message.ProviderID, Deleted: true}
+				d.RetiredBindings[resourceKey(resource)] = resource
+			}
+			cancelEvent(d, id)
 		}
 	}
 	log := broadcastLog(d)
@@ -235,6 +238,9 @@ func (c *Core) RetryDeliveryContext(ctx context.Context, id string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := c.store.FlushUndispatched(); err != nil {
+		return err
+	}
 	d := c.store.Snapshot()
 	v, ok := d.Deliveries[id]
 	if !ok {
@@ -251,47 +257,5 @@ func (c *Core) RetryDeliveryContext(ctx context.Context, id string) error {
 		return err
 	}
 	defer unlock()
-	var event Event
-	err = c.store.Update(func(d *State) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		v, ok := d.Deliveries[id]
-		if !ok {
-			return fault("not_found", "delivery does not exist")
-		}
-		if v.Status != "retryable" {
-			return fault("conflict", "only a proven retryable delivery may be retried")
-		}
-		record, ok := d.Events[v.EventID]
-		if !ok {
-			return fault("not_found", "source event is missing")
-		}
-		b, bound := d.Bindings[record.Event.Session.key()]
-		if record.Outcome == "deleted" || (bound && b.Deleted) {
-			return fault("deleted", "notification session was deleted")
-		}
-		v.Status = "pending"
-		v.Error = ""
-		v.Transport = ""
-		d.Deliveries[id] = v
-		event = record.Event
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-	if err := ctx.Err(); err != nil {
-		// No adapter submission occurred; leave this delivery safely retryable.
-		_ = c.Complete(id, "retryable", "canceled", "")
-		return err
-	}
-	if c.emit == nil {
-		return c.Complete(id, "unconfirmed", "", "")
-	}
-	if err = c.emit("delivery", map[string]any{"delivery_id": id, "session": event.Session, "message": event.Message, "content": event.Content, "text": event.Content.Plain(), "sender_id": event.SenderID, "chat_id": event.ChatID}); err != nil {
-		_ = c.Complete(id, "unconfirmed", "", "")
-		return err
-	}
-	return nil
+	return c.dispatchDelivery(ctx, id)
 }

@@ -136,19 +136,26 @@ func (c *Core) publishBinding(lease providerLease, b Binding) (Binding, error) {
 			if cfg.Type == "feishu" && resource.ChatID != "" {
 				key := feishuCursorKey(cfg.AppID, resource.ChatID)
 				if d.FeishuCursors[key] == 0 {
-					d.FeishuCursors[key] = time.Now().UnixMilli()
+					if resource.HistoryStart != 0 {
+						d.FeishuCursors[key] = resource.HistoryStart
+					} else {
+						d.FeishuCursors[key] = time.Now().UnixMilli()
+					}
 				}
 			}
 		}
 		return nil
 	})
-	if err != nil {
+	if !stateCommitted(err) {
 		return b, err
 	}
 	if conflict {
 		return b, fault("conflict", "provider or session changed while creating the notification resource")
 	}
-	return b, nil
+	if publisher, ok := lease.Bot.(interface{ PublishedBinding(Binding) }); ok {
+		publisher.PublishedBinding(b)
+	}
+	return b, err
 }
 
 // The caller holds only this session's gate. Cleanup of a configured provider

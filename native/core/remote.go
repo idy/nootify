@@ -7,7 +7,9 @@ import (
 	"crypto/subtle"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net"
 	"net/netip"
 	"strings"
@@ -295,7 +297,11 @@ func eventFrame(e Event) *pb.SubscriptionFrame {
 	s, _ := json.Marshal(e.Session)
 	m, _ := json.Marshal(e.Message)
 	c, _ := json.Marshal(e.Content)
-	return &pb.SubscriptionFrame{Body: &pb.SubscriptionFrame_Event{Event: &pb.Event{EventId: e.ID, SessionJson: s, MessageJson: m, ContentJson: c, VisitedNodes: e.Visited, HopsRemaining: e.Hops, SenderId: e.SenderID, ChatId: e.ChatID}}}
+	var cancellation []byte
+	if e.Cancellation != nil {
+		cancellation, _ = json.Marshal(e.Cancellation)
+	}
+	return &pb.SubscriptionFrame{Body: &pb.SubscriptionFrame_Event{Event: &pb.Event{EventId: e.ID, SessionJson: s, MessageJson: m, ContentJson: c, VisitedNodes: e.Visited, HopsRemaining: e.Hops, SenderId: e.SenderID, ChatId: e.ChatID, CancellationJson: cancellation}}}
 }
 func parseEvent(e *pb.Event) (Event, error) {
 	v := Event{ID: e.EventId, Visited: e.VisitedNodes, Hops: e.HopsRemaining, SenderID: e.SenderId, ChatID: e.ChatId}
@@ -304,6 +310,11 @@ func parseEvent(e *pb.Event) (Event, error) {
 	}
 	if err := json.Unmarshal(e.MessageJson, &v.Message); err != nil {
 		return v, err
+	}
+	if len(e.CancellationJson) != 0 {
+		if err := json.Unmarshal(e.CancellationJson, &v.Cancellation); err != nil {
+			return v, err
+		}
 	}
 	err := json.Unmarshal(e.ContentJson, &v.Content)
 	return v, err
@@ -808,6 +819,53 @@ func (p *remoteProvider) InboxConsumed(ctx context.Context, m MessageRef) (bool,
 type dialResult struct {
 	Address string
 	Error   string
+	Token   string
+}
+
+const embeddedTunnelHandshakePrefix = "NOOTIFY-TUNNEL/1 "
+const embeddedTunnelHandshakeTimeout = 3 * time.Second
+
+func validTunnelToken(token string) bool {
+	if len(token) != 64 || strings.ToLower(token) != token {
+		return false
+	}
+	_, err := hex.DecodeString(token)
+	return err == nil
+}
+
+func authenticateEmbeddedTunnel(ctx context.Context, conn net.Conn, token string) error {
+	failure := fault("unavailable", "embedded tunnel authentication failed")
+	if !validTunnelToken(token) {
+		return failure
+	}
+	deadline := time.Now().Add(embeddedTunnelHandshakeTimeout)
+	if until, ok := ctx.Deadline(); ok && until.Before(deadline) {
+		deadline = until
+	}
+	if err := conn.SetDeadline(deadline); err != nil {
+		return failure
+	}
+	// Cancellation must interrupt a blocked read or write even without a caller
+	// deadline. Wait for a racing close before returning the socket to gRPC.
+	stopped := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() { conn.Close(); close(stopped) })
+	defer func() {
+		if !stop() {
+			<-stopped
+		}
+	}()
+	frame := embeddedTunnelHandshakePrefix + token + "\n"
+	if n, err := io.WriteString(conn, frame); err != nil || n != len(frame) {
+		return failure
+	}
+	var ack [1]byte
+	if _, err := io.ReadFull(conn, ack[:]); err != nil || ack[0] != 1 || ctx.Err() != nil {
+		return failure
+	}
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		return failure
+	}
+	return nil
 }
 
 func isTailnet(address string) bool {
@@ -829,6 +887,7 @@ func isTailnet(address string) bool {
 func (c *Core) dial(ctx context.Context, address string) (net.Conn, error) {
 	target := address
 	embedded := false
+	var token string
 	if c.store.Snapshot().Tailnet && isTailnet(address) {
 		id := uid()
 		ch := make(chan dialResult, 1)
@@ -856,6 +915,7 @@ func (c *Core) dial(ctx context.Context, address string) (net.Conn, error) {
 				return nil, fault("unavailable", "embedded tunnel failed")
 			}
 			target = result.Address
+			token = result.Token
 			embedded = true
 		}
 	}
@@ -864,12 +924,24 @@ func (c *Core) dial(ctx context.Context, address string) (net.Conn, error) {
 		return nil, err
 	}
 	if embedded {
+		authCtx, cancel := context.WithCancel(ctx)
+		stop := context.AfterFunc(c.ctx, cancel)
+		err := authenticateEmbeddedTunnel(authCtx, conn, token)
+		stop()
+		cancel()
+		if err != nil {
+			conn.Close()
+			return nil, err
+		}
 		return &embeddedRemoteConn{Conn: conn}, nil
 	}
 	return conn, nil
 }
-func (c *Core) completeDial(id, address, msg string) error {
+func (c *Core) completeDial(id, address, msg, token string) error {
 	if msg == "" {
+		if !validTunnelToken(token) {
+			return fault("invalid_argument", "tunnel authentication token is required")
+		}
 		host, _, err := net.SplitHostPort(address)
 		ip := net.ParseIP(host)
 		if err != nil || ip == nil || !ip.IsLoopback() {
@@ -886,7 +958,7 @@ func (c *Core) completeDial(id, address, msg string) error {
 		return fault("not_found", "dial request does not exist")
 	}
 	select {
-	case ch <- dialResult{address, msg}:
+	case ch <- dialResult{Address: address, Error: msg, Token: token}:
 		return nil
 	default:
 		return fault("conflict", "dial request already completed")

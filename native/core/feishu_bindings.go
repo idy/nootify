@@ -118,8 +118,7 @@ func retireProviderResources(d *State, id string) {
 	}
 	for key, event := range d.Events {
 		if retiredResource(d, event.Event) {
-			event.Outcome = "deleted"
-			d.Events[key] = event
+			cancelEvent(d, key)
 		}
 	}
 	log := broadcastLog(d)

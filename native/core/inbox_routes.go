@@ -120,6 +120,8 @@ func (c *Core) ReleaseInbox(ctx context.Context, m MessageRef) error {
 	if !m.valid() {
 		return fault("invalid_argument", "full message reference is required")
 	}
+	ctx, cancel := context.WithTimeout(ctx, inboxSweepBudget)
+	defer cancel()
 	unlock, err := c.inboxReleases.acquire(ctx, m.key())
 	if err != nil {
 		return err
@@ -151,9 +153,38 @@ func (c *Core) ReleaseInbox(ctx context.Context, m MessageRef) error {
 	r := c.store.Snapshot().References[m.key()]
 	var first error
 	if m.OriginNodeID != c.node() {
+		routes := make([]string, 0, len(r.Routes))
 		for _, route := range r.Routes {
-			if contains(r.InboxReleasedRoutes, route) {
-				continue
+			if !contains(r.InboxReleasedRoutes, route) {
+				routes = append(routes, route)
+			}
+		}
+		sort.Strings(routes)
+		start := sort.Search(len(routes), func(i int) bool { return routes[i] > r.InboxReleaseCursor })
+		routes = append(append([]string{}, routes[start:]...), routes[:start]...)
+		for attempt, route := range routes {
+			if attempt >= inboxSweepBatch || ctx.Err() != nil {
+				break
+			}
+			// Persist rotation before I/O: even a crash during a hanging first
+			// branch lets the next process start with a different branch.
+			releaseErr := c.store.Update(func(d *State) error {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				current := d.References[m.key()]
+				if current.InboxState != "releasing" || current.InboxUpdatedAt != generation {
+					return fault("conflict", "inbox obligation changed during release")
+				}
+				current.InboxReleaseCursor = route
+				d.References[m.key()] = current
+				return nil
+			})
+			if releaseErr != nil {
+				if first == nil {
+					first = releaseErr
+				}
+				break
 			}
 			provider, releaseErr := c.provider(route)
 			if releaseErr == nil {
@@ -161,7 +192,7 @@ func (c *Core) ReleaseInbox(ctx context.Context, m MessageRef) error {
 				if !ok {
 					releaseErr = fault("unavailable", "message return provider cannot release an inbox hold")
 				} else {
-					request, cancel := context.WithTimeout(ctx, 10*time.Second)
+					request, cancel := context.WithTimeout(ctx, inboxRouteAttemptBudget)
 					releaseErr = releaser.ReleaseInbox(request, r.Message)
 					cancel()
 				}
@@ -255,12 +286,56 @@ func (c *Core) ConsumeInbox(ctx context.Context, m MessageRef) error {
 			return fault("permission_denied", "inbox belongs to another node")
 		}
 		markInboxConsumed(d, m)
+		acknowledgeCanceledInbox(d, m.key())
 		return nil
 	})
 	if err != nil {
 		return err
 	}
 	return c.ReleaseInbox(ctx, m)
+}
+
+func acknowledgeCanceledInbox(d *State, key string) {
+	r, exists := d.References[key]
+	if exists && r.InboxCanceled && r.InboxCancelPending && r.InboxNodeID == d.NodeID {
+		r.InboxCancelPending = false
+		d.References[key] = r
+		retainReference(d, key)
+	}
+}
+
+// CanceledInbox returns cancellation proof only for exact pending references
+// supplied by Node. Missing references never imply cancellation. The owner
+// retains this proof until Node durably removes the inbox entry and consumes
+// it, or a later durable empty snapshot proves removal after a crashed reply.
+func (c *Core) CanceledInbox(raw json.RawMessage) ([]MessageRef, error) {
+	var snapshot struct {
+		Pending []struct {
+			Message MessageRef `json:"message"`
+		} `json:"pending"`
+		Before int64 `json:"before"`
+	}
+	if json.Unmarshal(raw, &snapshot) != nil || snapshot.Before <= 0 || len(snapshot.Pending) > 1000 {
+		return nil, fault("invalid_argument", "invalid pending inbox snapshot")
+	}
+	d, err := c.store.DurableSnapshot()
+	if err != nil {
+		return nil, err
+	}
+	canceled := make([]MessageRef, 0)
+	seen := map[string]bool{}
+	for _, item := range snapshot.Pending {
+		if !item.Message.valid() {
+			return nil, fault("invalid_argument", "full pending inbox reference is required")
+		}
+		key := item.Message.key()
+		r, exists := d.References[key]
+		if exists && r.InboxCanceled && r.InboxNodeID == d.NodeID && !seen[key] {
+			canceled = append(canceled, r.Message)
+			seen[key] = true
+		}
+	}
+	return canceled, nil
 }
 
 // ReconcileInbox repairs a crash between Node's durable inbox deletion and its
@@ -296,6 +371,11 @@ func (c *Core) ReconcileInbox(ctx context.Context, raw json.RawMessage) error {
 			if r.InboxNodeID != "" && r.InboxNodeID != d.NodeID {
 				return fault("permission_denied", "pending inbox belongs to another node")
 			}
+			if r.InboxCanceled {
+				// Node may still have the canceled queued entry in its durable
+				// snapshot. It cannot resurrect the released core obligation.
+				continue
+			}
 			if r.InboxState != "pending" && r.InboxUpdatedAt < snapshot.Before {
 				r.InboxState, r.InboxNodeID = "pending", d.NodeID
 				r.InboxReleasedRoutes = nil
@@ -303,6 +383,17 @@ func (c *Core) ReconcileInbox(ctx context.Context, raw json.RawMessage) error {
 				d.References[key] = r
 			}
 			remember(d, message, "")
+		}
+		for key, reference := range d.References {
+			if !reference.InboxCancelPending || !reference.InboxCanceled || reference.InboxNodeID != d.NodeID || reference.InboxUpdatedAt >= snapshot.Before {
+				continue
+			}
+			if _, exists := pending[key]; !exists {
+				// Durable Node deletion may have succeeded before the consume
+				// RPC was lost. A newer empty snapshot is its acknowledgment.
+				acknowledgeCanceledInbox(d, key)
+				release = append(release, reference.Message)
+			}
 		}
 		seen := map[string]bool{}
 		for id, delivery := range d.Deliveries {
@@ -348,6 +439,7 @@ type inboxRetryState struct {
 
 const inboxSweepBatch = 8
 const inboxSweepBudget = 5 * time.Second
+const inboxRouteAttemptBudget = time.Second
 
 func (c *Core) retryInboxReleases() { c.retryInboxBatch(&inboxRetryState{}) }
 

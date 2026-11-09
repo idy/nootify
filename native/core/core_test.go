@@ -695,7 +695,27 @@ func TestStdioRemainsConcurrentDuringTunnelDial(t *testing.T) {
 	if event.Event != "dial" {
 		t.Fatalf("expected dial, got %s", scanner.Text())
 	}
-	complete, _ := json.Marshal(map[string]any{"id": 2, "method": "dial.complete", "params": map[string]any{"request_id": event.Data.RequestID, "address": listener.Addr().String()}})
+	token := strings.Repeat("ab", 32)
+	handshake := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			handshake <- err
+			return
+		}
+		defer conn.Close()
+		conn.SetDeadline(time.Now().Add(3 * time.Second))
+		frame := make([]byte, len(embeddedTunnelHandshakePrefix)+len(token)+1)
+		_, err = io.ReadFull(conn, frame)
+		if err == nil && string(frame) != embeddedTunnelHandshakePrefix+token+"\n" {
+			err = fmt.Errorf("unexpected private tunnel handshake")
+		}
+		if err == nil {
+			_, err = conn.Write([]byte{1})
+		}
+		handshake <- err
+	}()
+	complete, _ := json.Marshal(map[string]any{"id": 2, "method": "dial.complete", "params": map[string]any{"request_id": event.Data.RequestID, "address": listener.Addr().String(), "token": token}})
 	_, err = fmt.Fprintln(inWriter, string(complete))
 	must(t, err)
 	seen := map[int64]bool{}
@@ -710,6 +730,7 @@ func TestStdioRemainsConcurrentDuringTunnelDial(t *testing.T) {
 		}
 		seen[response.ID] = true
 	}
+	must(t, <-handshake)
 	inWriter.Close()
 	select {
 	case err := <-done:

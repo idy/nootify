@@ -39,6 +39,8 @@ func (c *Core) Handle(ctx context.Context, method string, raw json.RawMessage, l
 		Transport  string         `json:"transport_status"`
 		Error      string         `json:"error"`
 		Address    string         `json:"address"`
+		Token      string         `json:"token"`
+		Event      Event          `json:"event"`
 		Tailnet    bool           `json:"tailnet_enabled"`
 		Automatic  bool           `json:"automatic"`
 		ChatID     string         `json:"chat_id"`
@@ -49,7 +51,7 @@ func (c *Core) Handle(ctx context.Context, method string, raw json.RawMessage, l
 	}
 	if !local {
 		switch method {
-		case "session.ensure", "session.bind", "session.metadata.get", "session.metadata.set", "session.delete", "message.send", "message.reply", "message.ack", "message.inbox.release", "message.inbox.status":
+		case "session.ensure", "session.bind", "session.metadata.get", "session.metadata.set", "session.delete", "message.send", "message.reply", "message.ack", "message.inbox.release", "message.inbox.status", "event.active":
 		default:
 			return nil, fault("permission_denied", "method is private to the local bridge")
 		}
@@ -62,6 +64,9 @@ func (c *Core) Handle(ctx context.Context, method string, raw json.RawMessage, l
 	switch method {
 	case "status":
 		return c.Status(), nil
+	case "event.active":
+		active, err := c.EventActive(ctx, p.Event)
+		return map[string]any{"active": active}, err
 	case "provider.save":
 		return c.SaveProvider(raw)
 	case "provider.delete":
@@ -137,9 +142,13 @@ func (c *Core) Handle(ctx context.Context, method string, raw json.RawMessage, l
 		}
 		return map[string]any{"consumed": true}, c.ConsumeInbox(ctx, *p.Message)
 	case "delivery.inbox.reconcile":
-		return map[string]any{"reconciled": true}, c.ReconcileInbox(ctx, raw)
+		if err := c.ReconcileInbox(ctx, raw); err != nil {
+			return nil, err
+		}
+		canceled, err := c.CanceledInbox(raw)
+		return map[string]any{"reconciled": true, "canceled": canceled}, err
 	case "dial.complete":
-		return map[string]any{"completed": true}, c.completeDial(p.RequestID, p.Address, p.Error)
+		return map[string]any{"completed": true}, c.completeDial(p.RequestID, p.Address, p.Error, p.Token)
 	case "transport.configure":
 		c.ops.Lock()
 		defer c.ops.Unlock()

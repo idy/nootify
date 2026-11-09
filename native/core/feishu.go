@@ -42,6 +42,7 @@ type feishuProvider struct {
 	historyGeneration uint64
 	historyCancel     context.CancelFunc
 	historyWG         sync.WaitGroup
+	coverage          map[string]*feishuCoverage
 }
 
 func newFeishu(c *Core, p ProviderConfig) *feishuProvider {
@@ -165,6 +166,7 @@ func (p *feishuProvider) Ensure(ctx context.Context, s Session) (Binding, error)
 	var result struct {
 		ChatID string `json:"chat_id"`
 	}
+	started := time.Now().UnixMilli() - 1 // Include input sent during invitation/create.
 	err := p.api(ctx, "POST", "/open-apis/im/v1/chats?user_id_type=open_id&uuid="+hex.EncodeToString(hash[:16]), map[string]any{"name": name, "description": description, "chat_mode": "group", "chat_type": "private", "user_id_list": []string{p.config.Recipient}}, &result)
 	if err != nil {
 		return Binding{}, err
@@ -172,7 +174,7 @@ func (p *feishuProvider) Ensure(ctx context.Context, s Session) (Binding, error)
 	if result.ChatID == "" {
 		return Binding{}, fault("unavailable", "Feishu did not return a chat ID")
 	}
-	return Binding{Session: s, ProviderID: p.config.ID, ChatID: result.ChatID, SenderID: p.config.Recipient}, nil
+	return Binding{Session: s, ProviderID: p.config.ID, ChatID: result.ChatID, SenderID: p.config.Recipient, HistoryStart: started}, nil
 }
 func (p *feishuProvider) Metadata(ctx context.Context, b Binding, m map[string]any, set bool) (map[string]any, error) {
 	if !set {
@@ -440,8 +442,10 @@ func (p *feishuProvider) receive(ctx context.Context, in *im.P2MessageReceiveV1)
 	if err != nil {
 		return err
 	}
-	p.mu.Lock()
-	checkpointErr := p.checkpointHistoryLocked(time.Now().Add(-5 * time.Second).UnixMilli())
-	p.mu.Unlock()
-	return checkpointErr
+	// Live delivery proves only this message. Coalesce a finite history scan
+	// for this chat before advancing its coverage boundary.
+	if !historyReplay(ctx) {
+		p.scheduleCoverage(binding, max(created, time.Now().UnixMilli()))
+	}
+	return nil
 }

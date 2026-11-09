@@ -319,17 +319,18 @@ func (x *Hello) GetSignature() []byte {
 }
 
 type Event struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	EventId       string                 `protobuf:"bytes,1,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
-	SessionJson   []byte                 `protobuf:"bytes,2,opt,name=session_json,json=sessionJson,proto3" json:"session_json,omitempty"`
-	MessageJson   []byte                 `protobuf:"bytes,3,opt,name=message_json,json=messageJson,proto3" json:"message_json,omitempty"`
-	ContentJson   []byte                 `protobuf:"bytes,4,opt,name=content_json,json=contentJson,proto3" json:"content_json,omitempty"`
-	VisitedNodes  []string               `protobuf:"bytes,5,rep,name=visited_nodes,json=visitedNodes,proto3" json:"visited_nodes,omitempty"`
-	HopsRemaining uint32                 `protobuf:"varint,6,opt,name=hops_remaining,json=hopsRemaining,proto3" json:"hops_remaining,omitempty"`
-	SenderId      string                 `protobuf:"bytes,7,opt,name=sender_id,json=senderId,proto3" json:"sender_id,omitempty"`
-	ChatId        string                 `protobuf:"bytes,8,opt,name=chat_id,json=chatId,proto3" json:"chat_id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	EventId          string                 `protobuf:"bytes,1,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
+	SessionJson      []byte                 `protobuf:"bytes,2,opt,name=session_json,json=sessionJson,proto3" json:"session_json,omitempty"`
+	MessageJson      []byte                 `protobuf:"bytes,3,opt,name=message_json,json=messageJson,proto3" json:"message_json,omitempty"`
+	ContentJson      []byte                 `protobuf:"bytes,4,opt,name=content_json,json=contentJson,proto3" json:"content_json,omitempty"`
+	VisitedNodes     []string               `protobuf:"bytes,5,rep,name=visited_nodes,json=visitedNodes,proto3" json:"visited_nodes,omitempty"`
+	HopsRemaining    uint32                 `protobuf:"varint,6,opt,name=hops_remaining,json=hopsRemaining,proto3" json:"hops_remaining,omitempty"`
+	SenderId         string                 `protobuf:"bytes,7,opt,name=sender_id,json=senderId,proto3" json:"sender_id,omitempty"`
+	ChatId           string                 `protobuf:"bytes,8,opt,name=chat_id,json=chatId,proto3" json:"chat_id,omitempty"`
+	CancellationJson []byte                 `protobuf:"bytes,9,opt,name=cancellation_json,json=cancellationJson,proto3" json:"cancellation_json,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *Event) Reset() {
@@ -418,6 +419,13 @@ func (x *Event) GetChatId() string {
 	return ""
 }
 
+func (x *Event) GetCancellationJson() []byte {
+	if x != nil {
+		return x.CancellationJson
+	}
+	return nil
+}
+
 // A confirmation belongs only to this authenticated peer's subscription.
 // It confirms durable ingestion, never agent acceptance or another peer's queue.
 type Confirmation struct {
@@ -492,7 +500,7 @@ const file_core_proto_rawDesc = "" +
 	"\n" +
 	"public_key\x18\x03 \x01(\fR\tpublicKey\x12\x1c\n" +
 	"\tchallenge\x18\x04 \x01(\fR\tchallenge\x12\x1c\n" +
-	"\tsignature\x18\x05 \x01(\fR\tsignature\"\x8d\x02\n" +
+	"\tsignature\x18\x05 \x01(\fR\tsignature\"\xba\x02\n" +
 	"\x05Event\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12!\n" +
 	"\fsession_json\x18\x02 \x01(\fR\vsessionJson\x12!\n" +
@@ -501,7 +509,8 @@ const file_core_proto_rawDesc = "" +
 	"\rvisited_nodes\x18\x05 \x03(\tR\fvisitedNodes\x12%\n" +
 	"\x0ehops_remaining\x18\x06 \x01(\rR\rhopsRemaining\x12\x1b\n" +
 	"\tsender_id\x18\a \x01(\tR\bsenderId\x12\x17\n" +
-	"\achat_id\x18\b \x01(\tR\x06chatId\")\n" +
+	"\achat_id\x18\b \x01(\tR\x06chatId\x12+\n" +
+	"\x11cancellation_json\x18\t \x01(\fR\x10cancellationJson\")\n" +
 	"\fConfirmation\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\tR\aeventId2\xa6\x01\n" +
 	"\x10NotificationCore\x129\n" +

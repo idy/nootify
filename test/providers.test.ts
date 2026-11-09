@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { once } from 'node:events';
 import test from 'node:test';
 import { State } from '../src/state.js';
+import { StateDatabase, type StateRows } from '../src/state-database.js';
 import { CoreError, ProviderCore, type CoreEvent, type CoreTransport } from '../src/provider-core.js';
 import { ProvidersService, decodeMessageRef, encodeMessageRef, type ProviderPage } from '../src/providers.js';
 import { SessionsService } from '../src/sessions.js';
@@ -276,6 +277,49 @@ test('durable inbox acknowledgement releases only the last pending reference and
   assert.deepEqual(recovery.pending, []); assert.equal(typeof recovery.before, 'number');
 });
 
+for (const failedDeletion of [false, true]) {
+  test(`reconciliation durably removes only core-proven canceled snapshot input${failedDeletion ? ' after a failed deletion retry' : ''}`, async t => {
+    const f = await fixture(t);
+    await registerPolledSession(f.state, 'trae', 'retained-conversation', 'Original conversation');
+    const session = f.state.sessions.get('retained-conversation');
+    const canceled = { origin_node_id: 'source', provider_id: 'bot', message_id: 'same-id', thread_id: 'original-thread' };
+    const uncertain = { ...canceled, provider_id: 'uncertain-provider' };
+    const foreign = { ...canceled, origin_node_id: 'other-node' };
+    for (const message of [canceled, uncertain, foreign]) await f.sessions.send('retained-conversation', message.provider_id, 'trae', {
+      text: message.provider_id, source: { channel: 'provider', delivery: { adapter: 'trae', session_id: 'retained-conversation', message } },
+    });
+    await f.sessions.send('retained-conversation', 'Unrelated local input', 'trae');
+    const original = [...f.state.inboxMessages.values()];
+    const canceledId = original.find(item => item.source?.channel === 'provider' && item.source.delivery.message === canceled)!.id;
+    const write = StateDatabase.prototype.write; let failNext = false; let failures = failedDeletion ? 1 : 0;
+    t.mock.method(StateDatabase.prototype, 'write', async function(this: StateDatabase, rows: StateRows) {
+      if (failNext && this.path === join(f.directory, 'state.sqlite')) { failNext = false; throw new Error('synthetic canceled-inbox deletion failure'); }
+      return write.call(this, rows);
+    });
+    const request = f.core.request.bind(f.core);
+    t.mock.method(f.core, 'request', async <T>(method: string, params: Record<string, unknown> = {}): Promise<T> => {
+      const result = await request<T>(method, params);
+      if (method !== 'delivery.inbox.reconcile') return result;
+      assert.ok((params.pending as { inbox_id: string }[]).some(item => item.inbox_id === canceledId));
+      if (failures > 0) { failures--; failNext = true; }
+      return { reconciled: true, canceled: [{ ...canceled, thread_id: 'canonical-thread' }] } as T;
+    });
+    if (failedDeletion) {
+      await assert.rejects(f.providers.reconcileInbox(), /synthetic canceled-inbox deletion failure/);
+      assert.equal((await State.open(f.directory)).inboxMessages.size, original.length);
+      assert.equal(f.core.calls.filter(call => call.method === 'delivery.inbox.consume').length, 0, 'a failed deletion cannot release its durable cancellation proof');
+    }
+    await f.providers.reconcileInbox();
+    const restored = await State.open(f.directory);
+    assert.equal(restored.inboxMessages.has(canceledId), false);
+    for (const item of original.filter(item => item.id !== canceledId)) assert.ok(restored.inboxMessages.has(item.id), 'uncertain, foreign and non-provider input must remain');
+    assert.strictEqual(f.state.sessions.get('retained-conversation'), session); assert.equal(restored.sessions.size, 1);
+    const released = f.core.calls.filter(call => call.method === 'delivery.inbox.consume');
+    assert.equal(released.length, 1); assert.deepEqual(released[0].params, { message: canceled });
+    assert.ok(!f.core.calls.some(call => call.method === 'session.delete' || call.method === 'provider.delete'));
+  });
+}
+
 test('proven rejected polled delivery releases its hold after recording the terminal result', async t => {
   const f = await fixture(t, { async send() { throw new SessionUnavailable('session_not_local'); } });
   const message = { origin_node_id: 'source', provider_id: 'bot', message_id: 'rejected-polled' };
@@ -498,6 +542,20 @@ test('thread operations infer native adapters from durable local bindings and re
   await assert.rejects(providers.handle({ method: 'GET', path: '/v1/threads/missing/metadata', body: undefined }), /No notification session/);
 });
 
+test('IPv6 loopback publication targets the configured address and republishes when the family changes on one port', async t => {
+  const publications: { port: number; target: string }[] = []; const withdrawn: number[] = [];
+  const f = await fixture(t, undefined, { async publish(port: number, target: string) { publications.push({ port, target }); return { port }; },
+    async unpublish(port: number) { withdrawn.push(port); }, async closeTunnel() {} } as unknown as TsnetClient);
+  f.state.settings.tailscale_enabled = true; f.core.snapshot.remote.enabled = true;
+  for (const listen of ['127.0.0.1:9418', '[::1]:9418', '[0:0:0:0:0:0:0:1]:9418', '[::]:9418', '[::ffff:127.0.0.1]:9418']) {
+    f.core.snapshot.remote.listen = listen; await f.providers.syncNetwork(); assert.equal((await f.providers.page()).network, undefined);
+  }
+  assert.deepEqual(publications, [{ port: 9418, target: '127.0.0.1:9418' }, { port: 9418, target: '[::1]:9418' }, { port: 9418, target: '[::ffff:7f00:1]:9418' }]);
+  assert.deepEqual(withdrawn, [9418, 9418]);
+  f.core.snapshot.remote.listen = '192.168.1.2:9418'; await f.providers.syncNetwork();
+  assert.match((await f.providers.page()).network?.error ?? '', /not reachable.*loopback/);
+});
+
 test('changing to a non-loopback listener withdraws the old Tailnet publication and retries failed cleanup', async t => {
   const network: { method: string; port: number; target?: string }[] = [];
   let failCleanup = false;
@@ -538,7 +596,7 @@ for (const transition of ['disable', 'cancel', 'logout'] as const) {
       async logout() {},
       async publish(port: number) { assert.ok(online, 'publish requires a live helper'); publications.push(generation); return { port }; },
       async unpublish() { assert.ok(online, 'must not clean up an expired publication through a stopped helper'); },
-      async tunnel() { assert.ok(online); tunnels.push(generation); return { id: `tunnel-${generation}`, address: `127.0.0.1:${12000 + generation}` }; },
+      async tunnel() { assert.ok(online); tunnels.push(generation); return { id: `tunnel-${generation}`, address: `127.0.0.1:${12000 + generation}`, token: 'a'.repeat(64) }; },
       async closeTunnel() { assert.ok(online, 'must not close a stale tunnel through a stopped helper'); },
     } as unknown as TsnetClient;
     const { providers, core, state } = await fixture(t, { sessionName: id => id }, tsnet);
@@ -714,6 +772,78 @@ for (const operation of ['save', 'registration', 'clear', 'import'] as const) {
   });
 }
 
+test('direct legacy edits preserve environment credentials before core commit while allowing names and recipients', async t => {
+  const f = await fixture(t);
+  const initial = { id: 'legacy-feishu', type: 'feishu', name: 'Environment provider', enabled: false,
+    app_id: 'cli_0123456789abcdef', app_secret: 'environment-secret', recipient_open_id: 'ou_original' };
+  await f.providers.action({ action: 'save', provider: initial });
+  const settings = settingsFor(t, f, { source: 'environment', env: { LARK_APP_ID: initial.app_id, LARK_APP_SECRET: initial.app_secret } });
+  const api = f.providers.api; const mutations = f.core.calls.filter(call => /provider\.(save|delete)/.test(call.method)).length;
+  for (const action of [{ action: 'save', provider: { ...initial, app_secret: 'rejected-secret' } },
+    { action: 'save', provider: { ...initial, app_id: 'cli_fedcba9876543210', app_secret: 'other-app-secret' } },
+    { action: 'delete', id: initial.id }]) await assert.rejects(f.providers.action(action), /conflict.*environment/i);
+  assert.equal(f.core.calls.filter(call => /provider\.(save|delete)/.test(call.method)).length, mutations);
+  assert.strictEqual(f.providers.api, api); assert.equal(f.providers.credentials?.appSecret, initial.app_secret);
+  const { app_secret: _masked, ...masked } = initial;
+  await f.providers.action({ action: 'save', provider: { ...masked, name: 'Allowed name', recipient_open_id: 'ou_allowed' } });
+  assert.equal((await settings.page()).lark.source, 'environment');
+  assert.equal(f.core.configs.get(initial.id)?.name, 'Allowed name'); assert.equal(f.core.configs.get(initial.id)?.recipient_open_id, 'ou_allowed');
+  assert.equal(f.core.configs.get(initial.id)?.app_secret, initial.app_secret); assert.strictEqual(f.providers.api, api);
+});
+
+for (const operation of ['rotate', 'delete'] as const) {
+  test(`a committed legacy ${operation} survives mirror disk failure and an identical retry writes no core mutation`, async t => {
+    const f = await fixture(t); const reports: Record<string, unknown>[] = [];
+    const settings = settingsFor(t, f, { report: record => reports.push(record) });
+    const initial = { id: 'legacy-feishu', type: 'feishu', name: 'Keep name', enabled: false,
+      app_id: 'cli_0123456789abcdef', app_secret: 'original-secret', recipient_open_id: 'ou_original' };
+    await f.providers.action({ action: 'save', provider: initial });
+    const credentials = f.providers.credentials!;
+    await new LarkDirectoryCache(f.directory).write(credentials, { app_id: initial.app_id,
+      users: [{ open_id: 'ou_cached', name: 'Old cached person' }], truncated: false, permission_limited: false });
+    const write = StateDatabase.prototype.write; let fail = true;
+    t.mock.method(StateDatabase.prototype, 'write', async function(this: StateDatabase, rows: StateRows) {
+      if (fail && this.path === join(f.directory, 'state.sqlite')) throw new Error('synthetic mirror disk failure');
+      return write.call(this, rows);
+    });
+    const candidate = { ...initial, app_secret: 'rotated-secret', recipient_open_id: 'ou_rotated' };
+    const action = operation === 'rotate' ? { action: 'save', provider: candidate } : { action: 'delete', id: initial.id };
+    await assert.rejects(f.providers.action(action), /committed.*mirror.*pending/);
+    const expectedSecret = operation === 'rotate' ? candidate.app_secret : undefined;
+    assert.equal(f.providers.credentials?.appSecret, expectedSecret); assert.equal(f.state.settings.lark_app_secret, expectedSecret);
+    assert.equal(f.core.configs.get(initial.id)?.app_secret, expectedSecret);
+    assert.equal((await State.open(f.directory)).settings.lark_app_secret, initial.app_secret, 'disk remains explicitly pending while writes fail');
+    assert.equal((await settings.page()).lark.mirror_status, 'pending');
+    assert.equal(await new LarkDirectoryCache(f.directory).read(credentials), undefined);
+    await assert.rejects(settings.exportConfig(), /committed.*mirror.*pending/);
+    const mutations = f.core.calls.filter(call => /provider\.(save|delete)/.test(call.method)).length;
+    fail = false;
+    await f.providers.action(action);
+    assert.equal(f.core.calls.filter(call => /provider\.(save|delete)/.test(call.method)).length, mutations, 'recovery persists the committed mirror without reissuing a provider write');
+    assert.equal((await State.open(f.directory)).settings.lark_app_secret, expectedSecret);
+    assert.equal((await settings.page()).lark.mirror_status, undefined);
+    const exported = JSON.parse(await readFile((await settings.exportConfig()).path, 'utf8'));
+    assert.equal(exported.lark.app_secret, expectedSecret);
+    assert.equal(exported.providers.providers[0]?.app_secret, expectedSecret);
+    assert.ok(!JSON.stringify(reports).includes(initial.app_secret)); assert.ok(!JSON.stringify(reports).includes(candidate.app_secret));
+  });
+}
+
+test('startup repairs legacy mirrors from committed core state without rewriting providers', async t => {
+  const f = await fixture(t); const initial = { id: 'legacy-feishu', type: 'feishu', name: 'Committed provider', enabled: false,
+    app_id: 'cli_0123456789abcdef', app_secret: 'committed-secret', recipient_open_id: 'ou_committed' };
+  await f.providers.action({ action: 'save', provider: initial });
+  Object.assign(f.state.settings, { lark_app_id: initial.app_id, lark_app_secret: 'stale-disk-secret', lark_recipient_open_id: 'ou_stale' }); await f.state.save();
+  const restored = await State.open(f.directory);
+  const providers = new ProvidersService(restored, new SessionsService(restored), { appId: initial.app_id, appSecret: 'stale-disk-secret' }, undefined, 9417, undefined, f.core);
+  const recovered = { ...f, state: restored, providers }; const settings = settingsFor(t, recovered); t.after(() => providers.stop());
+  const writes = f.core.calls.filter(call => call.method === 'provider.save').length;
+  await providers.start();
+  assert.equal(providers.credentials?.appSecret, initial.app_secret); assert.equal(settings.larkSecret().app_secret, initial.app_secret);
+  assert.equal((await State.open(f.directory)).settings.lark_app_secret, initial.app_secret);
+  assert.equal(f.core.calls.filter(call => call.method === 'provider.save').length, writes);
+});
+
 test('legacy provider CRUD serializes with Settings credential edits before mutating the core', async t => {
   const { providers, core, state, directory } = await fixture(t);
   let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; });
@@ -747,6 +877,8 @@ test('rejected legacy provider mutations preserve compatibility credentials and 
   t.after(() => settings.stop());
   const credentials = { appId: 'cli_0123456789abcdef', appSecret: 'synthetic-retained-secret' };
   providers.refreshCompatibilityCredentials(credentials);
+  core.configs.set('legacy-feishu', { id: 'legacy-feishu', type: 'feishu', name: 'Existing', enabled: true,
+    app_id: credentials.appId, app_secret: credentials.appSecret, recipient_open_id: 'ou_original' });
   Object.assign(state.settings, { lark_app_id: credentials.appId, lark_app_secret: credentials.appSecret, lark_recipient_open_id: 'ou_original' });
   await state.save();
   const api = providers.api;
@@ -770,7 +902,7 @@ async function networkFixture(t: Parameters<typeof fixture>[0]) {
     async unpublish() { unpublishes++; },
     async tunnel(address: string) {
       assert.ok(open.size < 32, 'retired providers must not consume the helper tunnel limit');
-      const id = `tunnel-${++sequence}`; open.set(id, address); return { id, address: `127.0.0.1:${12000 + sequence}` };
+      const id = `tunnel-${++sequence}`; open.set(id, address); return { id, address: `127.0.0.1:${12000 + sequence}`, token: 'a'.repeat(64) };
     },
     async closeTunnel(id: string) { if (failClose) throw new Error('tunnel cleanup interrupted'); closed.push(id); open.delete(id); },
   };
@@ -803,6 +935,9 @@ test('disabling downstream access preserves outgoing provider tunnels and subscr
   assert.equal(f.closed.length, 0);
   const second = await f.dial('after-disable', address);
   assert.equal(second.address, first.address, 'the live outgoing tunnel must be reused');
+  assert.equal(first.token, 'a'.repeat(64)); assert.equal(second.token, first.token, 'only the private completion carries its lease authentication token');
+  assert.ok(!JSON.stringify(await f.providers.page()).includes(first.token));
+  assert.ok(!JSON.stringify((await State.open(f.directory)).settings).includes(first.token));
 });
 
 test('remote provider replacement, shared addresses, deletion and import reclaim unused tunnels', async t => {
@@ -827,13 +962,13 @@ test('remote provider replacement, shared addresses, deletion and import reclaim
 test('pending dials share one allocation and cannot reinstall a removed provider tunnel', async t => {
   const f = await networkFixture(t); const address = '100.64.0.9:9418';
   await f.save(address); await f.providers.syncNetwork();
-  let release!: (value: { id: string; address: string }) => void; let requests = 0;
+  let release!: (value: { id: string; address: string; token: string }) => void; let requests = 0;
   t.mock.method(f.tsnet, 'tunnel', async () => { requests++; return new Promise(resolve => { release = resolve; }); });
   f.beginDial('pending-one', address); f.beginDial('pending-two', address);
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(requests, 1, 'concurrent provider dials must not leak extra allocations');
   await f.providers.action({ action: 'delete', id: 'upstream' });
-  f.open.set('late-allocation', address); release({ id: 'late-allocation', address: '127.0.0.1:12345' });
+  f.open.set('late-allocation', address); release({ id: 'late-allocation', address: '127.0.0.1:12345', token: 'a'.repeat(64) });
   for (const id of ['pending-one', 'pending-two']) assert.ok((await f.result(id)).error, 'removed provider must not receive a stale endpoint');
   assert.equal(f.open.size, 0);
   assert.deepEqual(f.closed, ['late-allocation']);

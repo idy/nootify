@@ -68,7 +68,7 @@ func TestStoreCommittedOperationOutcomeNeverResubmits(t *testing.T) {
 			cause := errors.New("synthetic operation durability failure")
 			c.store.syncDirectory = func(string) error {
 				barriers++
-				if phase == "pending" || barriers == 2 {
+				if phase == "pending" || barriers == 3 {
 					return cause
 				}
 				return nil
@@ -84,12 +84,15 @@ func TestStoreCommittedOperationOutcomeNeverResubmits(t *testing.T) {
 			if err == nil || !stateCommitted(err) || publicError(err).Code != "committed_not_durable" {
 				t.Fatalf("lost committed operation warning: %v", err)
 			}
+			if phase == "pending" && calls != 0 {
+				t.Fatal("durability warning authorized a provider submission")
+			}
 			c.store.syncDirectory = syncStateDirectory
 			must(t, c.store.Sync())
 			got, retryErr := invoke()
 			if phase == "pending" {
-				if calls != 0 || retryErr == nil || publicError(retryErr).Code != "unconfirmed" {
-					t.Fatal("non-durable pending intent was automatically submitted")
+				if calls != 1 || retryErr != nil || got.MessageID != result.MessageID {
+					t.Fatal("proven undispatched request did not retry safely after durability recovery")
 				}
 			} else if calls != 1 || retryErr != nil || got.MessageID != result.MessageID {
 				t.Fatalf("committed known result was resubmitted or lost: calls=%d result=%+v error=%v", calls, got, retryErr)

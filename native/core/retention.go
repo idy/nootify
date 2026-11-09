@@ -155,7 +155,10 @@ func compactLedgers(d *State, at int64) {
 	}
 	pinnedReferences := map[string]bool{}
 	for key, reference := range d.References {
-		if inboxReferenceHeld(reference) {
+		if inboxReferenceHeld(reference) || reference.InboxCancelPending && reference.InboxNodeID == d.NodeID {
+			// Only the owner with an actual canceled Node inbox entry waits
+			// for durable removal proof. Relays and never-queued work expire
+			// normally once their upstream release obligation completes.
 			pinnedReferences[key] = true
 		}
 	}

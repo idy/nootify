@@ -20,23 +20,28 @@ const transactionName = ".nootify-installer"
 var payloadRoots = []string{"Nootify.exe", "node.exe", "nootify-core.exe", "nootify-tsnet.exe", "service", "uninstall.exe"}
 
 type journal struct {
-	Version  int      `json:"version"`
-	Target   string   `json:"target"`
-	Phase    string   `json:"phase"`
-	Previous []string `json:"previous"`
-	Running  bool     `json:"running"`
+	Version    int      `json:"version"`
+	Target     string   `json:"target"`
+	Phase      string   `json:"phase"`
+	Previous   []string `json:"previous"`
+	Running    bool     `json:"running"`
+	Enabled    *bool    `json:"enabled,omitempty"`
+	FreshToken string   `json:"fresh_token,omitempty"`
 }
 
+type serviceState struct{ Running, Enabled bool }
 type serviceControl interface {
-	running() (bool, error)
+	snapshot() (serviceState, error)
 	stop() error
 	start() error
+	enable(bool) error
 }
 
 type transaction struct {
 	target      string
 	service     serviceControl
 	diagnostics *diagnostics
+	freshToken  string
 	// Tests inject errors at actual filesystem and journal boundaries; production
 	// has no environment variable or command-line fault injection switch.
 	checkpoint func(string) error
@@ -106,9 +111,18 @@ func (t transaction) write(j journal) (result error) {
 	if err != nil {
 		return err
 	}
-	_, err = file.Write(data)
+	err = t.check("journal-next-open")
+	if err == nil {
+		_, err = file.Write(data)
+	}
+	if err == nil {
+		err = t.check("journal-next-write")
+	}
 	if err == nil {
 		err = file.Sync()
+	}
+	if err == nil {
+		err = t.check("journal-next-sync")
 	}
 	closeErr := file.Close()
 	if err != nil {
@@ -140,7 +154,7 @@ func (t transaction) read() (j journal, result error) {
 	if err = json.Unmarshal(data, &j); err != nil {
 		return j, err
 	}
-	if j.Version != 1 || !strings.EqualFold(j.Target, t.target) || !contains([]string{"staging", "exchanging", "starting", "ready", "rolling-back", "restored", "committed"}, j.Phase) {
+	if j.Version != 1 || !strings.EqualFold(j.Target, t.target) || !contains([]string{"staging", "exchanging", "starting", "ready", "rolling-back", "restored", "committed", "quarantining", "removing"}, j.Phase) {
 		return j, errors.New("refusing an unrecognized installer journal")
 	}
 	seen := map[string]bool{}
@@ -152,6 +166,18 @@ func (t transaction) read() (j journal, result error) {
 	}
 	if j.Phase == "staging" && (j.Running || len(j.Previous) != 0) {
 		return j, errors.New("invalid staging journal")
+	}
+	if j.Phase == "quarantining" || j.Phase == "removing" {
+		if j.FreshToken != "" || j.Running || j.Enabled != nil || contains(j.Previous, "uninstall.exe") {
+			return j, errors.New("invalid uninstall removal journal")
+		}
+	}
+	if j.FreshToken != "" {
+		if t.freshToken == "" || j.FreshToken != t.freshToken || len(j.Previous) != 0 || j.Running || j.Enabled != nil && *j.Enabled {
+			return j, errors.New("invalid fresh-install transaction ownership")
+		}
+	} else if t.freshToken != "" {
+		return j, errors.New("fresh-install receipt does not match this journal")
 	}
 	return j, nil
 }
@@ -204,7 +230,7 @@ func (t transaction) prepare() (result error) {
 	if err := os.Mkdir(t.dir(), 0700); err != nil {
 		return err
 	}
-	if err := t.write(journal{Version: 1, Target: t.target, Phase: "staging"}); err != nil {
+	if err := t.write(journal{Version: 1, Target: t.target, Phase: "staging", FreshToken: t.freshToken}); err != nil {
 		return err
 	}
 	for _, name := range []string{"new", "old", "discard"} {
@@ -311,9 +337,14 @@ func (t transaction) apply(manifestPath string) (result error) {
 			j.Previous = append(j.Previous, root)
 		}
 	}
+	if t.freshToken != "" && len(j.Previous) != 0 {
+		return errors.New("fresh installation contains unowned payload roots")
+	}
 	if t.service != nil {
 		t.diagnostics.begin("status", "")
-		j.Running, err = t.service.running()
+		var state serviceState
+		state, err = t.service.snapshot()
+		j.Running, j.Enabled = state.Running, &state.Enabled
 		t.diagnostics.end("status", "", err)
 		if err != nil {
 			return err
@@ -371,6 +402,11 @@ func (t transaction) apply(manifestPath string) (result error) {
 			return err
 		}
 	}
+	if j.Enabled != nil && t.service != nil {
+		if err := t.observe("enable", "", func() error { return t.service.enable(*j.Enabled) }); err != nil {
+			return err
+		}
+	}
 	j.Phase = "ready"
 	if err := t.write(j); err != nil {
 		return err
@@ -399,10 +435,39 @@ func (t transaction) recover() (result error) {
 	if len(entries) == 0 {
 		return os.Remove(t.dir())
 	}
+	// Before the first journal publication no root has moved and staging has
+	// not begun. Only the lone regular next-file is disposable; extra entries
+	// or a missing published journal after later work remain an error.
+	if len(entries) == 1 && entries[0].Name() == "journal.next" {
+		info, err := entries[0].Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() || info.Size() > 4096 {
+			return errors.New("invalid initial installer journal")
+		}
+		if err := os.Remove(t.dir("journal.next")); err != nil {
+			return err
+		}
+		return os.Remove(t.dir())
+	}
 	j, err := t.read()
 	if err != nil {
 		return err
 	}
+	if j.Phase == "quarantining" {
+		return t.restoreQuarantine(j)
+	}
+	if j.Phase == "removing" {
+		// All roots must have moved before irreversible removal was authorized.
+		// Do not skip service ownership checks for a newly resurrected payload.
+		for _, root := range payloadRoots {
+			if root != "uninstall.exe" && exists(filepath.Join(t.target, root)) {
+				return errors.New("installed payload appeared during pending uninstall")
+			}
+		}
+		return nil
+	} // Only a retrying uninstaller may complete irreversible removal.
 	if j.Phase == "committed" || j.Phase == "staging" {
 		return t.cleanup()
 	}
@@ -463,6 +528,11 @@ func (t transaction) recover() (result error) {
 			return err
 		}
 	}
+	if j.Enabled != nil && t.service != nil {
+		if err := t.observe("enable", "", func() error { return t.service.enable(*j.Enabled) }); err != nil {
+			return err
+		}
+	}
 	return t.cleanup()
 }
 
@@ -472,6 +542,9 @@ func (t transaction) finish() (result error) {
 	j, err := t.read()
 	if err != nil {
 		return err
+	}
+	if j.Phase == "committed" {
+		return t.cleanup()
 	}
 	if j.Phase != "ready" {
 		return errors.New("installer payload is not ready to commit")

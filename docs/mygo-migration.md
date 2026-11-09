@@ -4,7 +4,7 @@ Nootify's desktop shell uses Go with `github.com/egoist/mygo` pinned to `v0.8.3`
 
 ## Layout and responsibilities
 
-- `desktop/` becomes the Go desktop module (`github.com/idy/nootify/desktop`), alongside the existing offline HTML/CSS/JS/fonts. Go embeds those assets and serves its offline view from an application-owned loopback listener. MyGo uses the operating-system webview to display the existing service at `http://127.0.0.1:9417/` or that offline view.
+- `desktop/` is the Go desktop module (`github.com/idy/nootify/desktop`), alongside the offline HTML/CSS/JS/fonts. Go embeds those assets and serves its offline view from an application-owned loopback listener. MyGo's operating-system webview loads either that offline view or an independently owned UI gateway serving trusted packaged assets. The daemon at `http://127.0.0.1:9417/` is the gateway's authenticated backend, not a trusted webview document origin. The native policy admits only the live owned gateway origin; encrypted, authenticated API frames protect privileged reads/writes between browser, gateway and daemon.
 - `desktop/main.go` and related Go files own MyGo windows, tray, single-instance activation, native menus, navigation restrictions, trusted document events, language preference, and service lifecycle. No generic privileged frontend bindings are exposed. Existing fixed `nootify://window/...`, `nootify://update/...`, `nootify://language/...` and offline service actions are validated and canceled by native policy. Log exports from a trusted document's own Blob URL retain MyGo's Downloads destination and unique filename handling; other downloads remain blocked.
 - `desktop/internal/service` manages only the existing owned LaunchAgent/Windows task through checked bundled CLI calls and preserves independent daemon lifetime after desktop quit. It must preserve existing ownership, occupied-port, environment isolation, read-only-volume and process-replacement protections.
 - `desktop/internal/updater` owns release checks, signature verification, progress/state events, and installation/relaunch. It stays independent of MyGo APIs so it can be tested and used by a signing CLI without starting native UI.
@@ -45,16 +45,19 @@ type Options struct {
     Executable string
     BeforeInstall func(context.Context) error
     AfterInstall func() error
+    BeforeRollback func() error
+    ConfirmGUI bool // keep macOS original until FinishGUI confirms readiness
 }
 func New(options Options) *Manager
 func (m *Manager) View() View
 func (m *Manager) SetListener(func(View))
 func (m *Manager) Check(context.Context) error
 func (m *Manager) Install(context.Context) error
+func (m *Manager) FinishGUI(context.Context, GUIRelaunchOptions) error
 func (m *Manager) Run(context.Context)
 ```
 
-`SetListener` publishes the existing `nootify-update` DOM event shape. Keep progress throttling, semantic phases, bounded check/download deadlines and clock-safe scheduled checks from the current updater. `BeforeInstall` runs only after signature verification and before replacement/installer launch. On Windows, launch the verified NSIS installer with compatible `/UPDATE /R` behavior and leave final lifecycle hooks responsible for stopping/restarting the owned service. On macOS, safely unpack, validate and replace this app with rollback protection. `AfterInstall` lets the desktop exit/relaunch after a successful handoff.
+`SetListener` publishes the existing `nootify-update` DOM event shape. Keep progress throttling, semantic phases, bounded check/download deadlines and clock-safe scheduled checks from the current updater. `BeforeInstall` runs only after signature verification and before replacement/installer launch. On Windows, launch the verified NSIS installer with compatible `/UPDATE /R` behavior and leave final lifecycle hooks responsible for stopping/restarting the owned service. On macOS, safely unpack, validate and replace this app with rollback protection. `AfterInstall` performs service-only work; it is not GUI readiness proof. On macOS, `ConfirmGUI` retains the original bundle and `FinishGUI` runs after the old event loop exits, supervises the Launch Services launch, and waits for authenticated window/tray readiness and commit before cleanup. A private one-use receipt binds expected app identity, version, executable/hash and pre-update stopped-service state. Proven launch/abort failure permits ownership-checked rollback and reopening the original; missing quiescence or identity proof retains both bundles. The result-free MyGo `App.Relaunch()` is not used as a success signal.
 
 Signing CLI contract: `go -C desktop run ./cmd/sign-update --file <artifact>` writes `<artifact>.sig` in the existing Tauri-compatible minisign representation. Accept `NOOTIFY_SIGNING_PRIVATE_KEY` / `NOOTIFY_SIGNING_PRIVATE_KEY_PASSWORD` and existing `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` as fallback compatibility inputs; public keys are not regenerated. No production key is needed for unit tests, which use generated synthetic fixtures.
 

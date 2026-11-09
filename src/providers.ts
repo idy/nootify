@@ -1,4 +1,5 @@
 import { hostname } from 'node:os';
+import { isIP } from 'node:net';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import type { State } from './state.js';
@@ -7,7 +8,7 @@ import { CoreError, ProviderCore, coreErrorCode, provenCoreRejection, type CoreE
 import { createLarkApi, type Credentials, type LarkApi } from './lark-metadata.js';
 import { LarkReplies } from './lark-replies.js';
 import { HttpError, RetryableDeliveryError, SessionUnavailable, identifier, isAdapter, isPolledAdapter, object, text, type RouteRequest, type RouteResponse, type ServiceModule } from './types.js';
-import { registerPolledSession } from './polled-sessions.js';
+import { discardCanceledInbox, registerPolledSession, type ProviderInboxSnapshot } from './polled-sessions.js';
 import type { EmbeddedTailscaleTunnel, TsnetClient } from './tsnet-client.js';
 import { forwardedProviderMessage } from './forwarded-messages.js';
 import { decodeMessageRef, encodeMessageRef, parseMessageRef, type ProviderMessageRef } from './message-ref.js';
@@ -35,7 +36,8 @@ export interface ProvidersSource {
   configureRemote(body: Record<string, unknown>): Promise<RemoteSummary & { node_id: string }>;
   remoteSecret(): Promise<{ token: string }>;
 }
-interface CompatibilityConfig { credentials?: Credentials; recipient?: string }
+export interface CompatibilityConfig { credentials?: Credentials; recipient?: string }
+export type CompatibilitySync = (update: () => Promise<CompatibilityConfig>, preview?: () => Promise<CompatibilityConfig>) => Promise<void>;
 interface SessionRef { node_id?: string; adapter: string; session_id: string; name?: string; metadata?: Record<string, unknown> }
 interface Delivery { delivery_id: string; session: SessionRef; message: ProviderMessageRef; content: unknown; text: string }
 interface Binding {
@@ -71,7 +73,7 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
   private readonly pendingTunnels = new Map<string, Promise<EmbeddedTailscaleTunnel>>();
   private remoteAddresses?: ReadonlySet<string>;
   private networkGeneration = 0;
-  private published?: number;
+  private published?: { port: number; target: string };
   private networkQueue: Promise<void> = Promise.resolve();
   private networkFailure?: ProviderPage['network'];
   private networkRetry?: NodeJS.Timeout;
@@ -82,7 +84,7 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
   private discoveryController?: AbortController;
   private discoveryTimer?: NodeJS.Timeout;
   private discovery?: Promise<void>;
-  private compatibilitySync?: (update: () => Promise<CompatibilityConfig>) => Promise<void>;
+  private compatibilitySync?: CompatibilitySync;
   private recipientSync?: (openId: string) => Promise<void>;
   constructor(readonly state: State, private readonly sessions: SessionsService,
     credentials: Credentials | undefined, private readonly report: (record: Record<string, unknown>) => void = () => {},
@@ -118,6 +120,12 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
         await this.rpc('migration.import', { app_id: this.credentials.appId, app_secret: this.credentials.appSecret,
           recipient_open_id: recipient, legacy_host: hostname(), bindings });
       }
+      if (this.compatibilitySync) {
+        const read = () => this.compatibilityConfig();
+        await this.compatibilitySync(read, read).catch(error => {
+          if (coreErrorCode(error) !== 'committed_not_mirrored') throw error;
+        });
+      }
       await this.reconcileInbox().catch(error => this.report({ source: 'providers', status: 'inbox_reconciliation_pending', error: (error as Error).message }));
       this.inboxTimer = setInterval(() => { void this.reconcileInbox().catch(error => this.report({ source: 'providers', status: 'inbox_reconciliation_pending', error: (error as Error).message })); }, 30_000).unref();
       this.connection = 'ready'; await this.page();
@@ -148,13 +156,18 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
   reconcileInbox(): Promise<void> {
     if (this.inboxReconciliation) return this.inboxReconciliation;
     const task = (async () => {
-      let before = 0; let pending: { inbox_id: string; message: ProviderMessageRef }[] = [];
+      let before = 0; let pending: ProviderInboxSnapshot[] = [];
       // Capture a committed snapshot in the same queue as inbox enqueue/delete. The cutoff excludes later completions.
       await this.state.save({ apply: () => {
         before = Date.now(); pending = [...this.state.inboxMessages.values()].flatMap(item => item.source?.channel === 'provider'
           ? [{ inbox_id: item.id, message: item.source.delivery.message }] : []);
       }, rollback: () => {} });
-      await this.rpc('delivery.inbox.reconcile', { pending, before });
+      const result = await this.rpc<{ canceled?: ProviderMessageRef[] }>('delivery.inbox.reconcile', { pending, before });
+      const canceled = Array.isArray(result?.canceled) ? result.canceled.map(parseMessageRef) : [];
+      const removed = await discardCanceledInbox(this.state, pending, canceled);
+      for (const message of removed) await this.consumeInbox(message).catch(error => this.report({
+        source: 'providers', status: 'inbox_release_pending', message_id: message.message_id, error: (error as Error).message,
+      }));
     })();
     this.inboxReconciliation = task;
     return task.finally(() => { if (this.inboxReconciliation === task) this.inboxReconciliation = undefined; });
@@ -204,16 +217,35 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
   }
   async action(body: Record<string, unknown>): Promise<ProviderPage> {
     let legacyChanged = false; let mutate: () => Promise<HttpError | undefined>; let warning: HttpError | undefined;
+    let provider: Record<string, unknown> | undefined;
     if (body.action === 'save') {
-      const provider = object(body.provider);
-      mutate = () => this.commit('provider.save', provider); legacyChanged = provider.id === 'legacy-feishu';
+      provider = object(body.provider);
+      const config = provider;
+      mutate = () => this.commit('provider.save', config); legacyChanged = provider.id === 'legacy-feishu';
     } else if (body.action === 'delete' || body.action === 'default') {
       const id = identifier(body.id, 'id'); const method = `provider.${body.action}`;
       mutate = () => this.commit(method, { id }); legacyChanged = body.action === 'delete' && id === 'legacy-feishu';
     } else throw new HttpError(400, 'Expected a provider action: save, delete or default');
     if (legacyChanged) {
-      const update = async () => { warning = await mutate(); return this.compatibilityConfig(); };
-      if (this.compatibilitySync) await this.compatibilitySync(update);
+      let previous: Record<string, unknown> | undefined;
+      let candidate: Record<string, unknown> | undefined; let prepared = false;
+      const prepare = async () => {
+        if (!prepared) {
+          previous = await this.legacyConfig();
+          candidate = provider ? { ...provider, enabled: provider.enabled ?? true,
+            app_secret: typeof provider.app_secret === 'string' && provider.app_secret.trim() ? provider.app_secret : previous?.app_secret } : undefined;
+          prepared = true;
+        }
+        return this.compatibilityFrom(candidate);
+      };
+      const update = async () => {
+        await prepare();
+        const unchanged = candidate ? previous && ['id', 'name', 'type', 'enabled', 'app_id', 'app_secret', 'recipient_open_id']
+          .every(key => (candidate![key] ?? '') === (previous![key] ?? '')) : !previous;
+        if (!unchanged) warning = await mutate();
+        return this.compatibilityConfig();
+      };
+      if (this.compatibilitySync) await this.compatibilitySync(update, prepare);
       else this.refreshCompatibilityCredentials((await update()).credentials);
     } else warning = await mutate();
     await this.syncNetwork();
@@ -221,14 +253,17 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
     return this.page();
   }
   /** Settings serializes legacy CRUD with account edits, persistence and directory invalidation. */
-  setCompatibilitySync(sync: (update: () => Promise<CompatibilityConfig>) => Promise<void>): void { this.compatibilitySync = sync; }
-  private async compatibilityConfig(): Promise<CompatibilityConfig> {
-    // Public provider summaries omit secrets, and masked saves retain them inside the core.
+  setCompatibilitySync(sync: CompatibilitySync): void { this.compatibilitySync = sync; }
+  private async legacyConfig(): Promise<Record<string, unknown> | undefined> {
+    // Public summaries omit secrets, and masked saves retain them inside the core.
     const config = await this.exportConfig();
-    const legacy = (config.providers as Record<string, unknown>[]).find(provider => provider.id === 'legacy-feishu' && provider.type === 'feishu');
-    return { credentials: legacy ? { appId: String(legacy.app_id), appSecret: String(legacy.app_secret) } : undefined,
+    return (config.providers as Record<string, unknown>[]).find(provider => provider.id === 'legacy-feishu' && provider.type === 'feishu');
+  }
+  private compatibilityFrom(legacy?: Record<string, unknown>): CompatibilityConfig {
+    return { credentials: legacy && legacy.type === 'feishu' ? { appId: String(legacy.app_id), appSecret: String(legacy.app_secret) } : undefined,
       recipient: typeof legacy?.recipient_open_id === 'string' ? legacy.recipient_open_id : undefined };
   }
+  private async compatibilityConfig(): Promise<CompatibilityConfig> { return this.compatibilityFrom(await this.legacyConfig()); }
   async remote(): Promise<RemoteSummary & { node_id: string }> {
     const page = await this.page(); return { ...page.remote, node_id: page.node_id, ...(page.network ? { network: page.network } : {}) };
   }
@@ -292,13 +327,22 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
       const port = Number(remote.listen.slice(separator + 1));
       // A wildcard listener is reachable through loopback too. The helper only accepts numeric loopback targets.
       const host = remote.listen.slice(0, separator).replace(/^\[|\]$/g, '');
-      if (!['127.0.0.1', '0.0.0.0', 'localhost'].includes(host)) {
-        await this.unpublishCurrent();
-        this.report({ source: 'providers', status: 'tailnet_publish_skipped', reason: 'listener_not_loopback_reachable' }); return;
+      let loopback: string | undefined;
+      if (host === 'localhost' || host === '0.0.0.0') loopback = '127.0.0.1';
+      else if (isIP(host) === 4 && host.startsWith('127.')) loopback = host;
+      else if (isIP(host) === 6 && !host.includes('%')) {
+        const canonical = new URL(`http://[${host}]/`).hostname.slice(1, -1);
+        if (canonical === '::1' || canonical === '::') loopback = '[::1]';
+        else if (/^::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}$/.test(canonical)) loopback = `[${canonical}]`;
       }
-      if (this.published === port) return;
+      if (!loopback) {
+        await this.unpublishCurrent();
+        throw new Error('Remote listener is not reachable through a supported loopback address');
+      }
+      const target = `${loopback}:${port}`;
+      if (this.published?.port === port && this.published.target === target) return;
       await this.unpublishCurrent();
-      await this.tsnet.publish(port, `127.0.0.1:${port}`); this.published = port;
+      await this.tsnet.publish(port, target); this.published = { port, target };
     });
     const settled = task.then(() => { this.networkFailure = undefined; clearTimeout(this.networkRetry); this.networkRetry = undefined; }, error => {
       const unconfirmed = Boolean(coreErrorCode(error)) && !provenCoreRejection(error);
@@ -313,10 +357,10 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
     return settled;
   }
   private async unpublishCurrent(): Promise<void> {
-    const port = this.published;
-    if (port === undefined || !this.tsnet) return;
+    const publication = this.published;
+    if (!publication || !this.tsnet) return;
     // Keep the handle if cleanup fails, so the next transition can retry it.
-    await this.tsnet.unpublish(port);
+    await this.tsnet.unpublish(publication.port);
     this.published = undefined;
   }
   private async retireTunnels(addresses: ReadonlySet<string>): Promise<void> {
@@ -368,7 +412,7 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
     try {
       const address = text(data.address, 'address');
       const tunnel = await this.tunnel(address);
-      await this.rpc('dial.complete', { request_id, address: tunnel.address });
+      await this.rpc('dial.complete', { request_id, address: tunnel.address, token: tunnel.token });
     } catch { await this.rpc('dial.complete', { request_id, error: 'Embedded Tailscale connection unavailable' }).catch(() => {}); }
   }
   private async deliver(delivery: Delivery): Promise<void> {

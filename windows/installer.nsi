@@ -30,6 +30,9 @@ Var RegistrationChanged
 Var RegisteredLocation
 Var PreviousVersion
 Var InstallerMutex
+Var PendingLocation
+Var FreshToken
+!define PENDING_KEY "Software\Nootify\PendingInstaller"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\Nootify"
 
 Page directory NootifyDirectoryPre
@@ -127,6 +130,10 @@ FunctionEnd
 
 Function un.onInit
   !insertmacro InitOptions
+  ReadRegStr $PendingLocation HKCU "${PENDING_KEY}" "Target"
+  ${If} $PendingLocation == $INSTDIR
+    ReadRegStr $FreshToken HKCU "${PENDING_KEY}" "Token"
+  ${EndIf}
   !insertmacro NootifyDiagnostic "uninstaller-initialized"
 FunctionEnd
 
@@ -184,6 +191,13 @@ FunctionEnd
 Function NootifyCheckRegisteredDestination
   ReadRegStr $RegisteredLocation HKCU "${UNINSTALL_KEY}" "InstallLocation"
   ReadRegStr $PreviousVersion HKCU "${UNINSTALL_KEY}" "DisplayVersion"
+  ReadRegStr $PendingLocation HKCU "${PENDING_KEY}" "Target"
+  ReadRegStr $FreshToken HKCU "${PENDING_KEY}" "Token"
+  ${If} $PendingLocation != ""
+  ${AndIf} $PendingLocation != $INSTDIR
+    SetErrorLevel 1
+    Abort "A Nootify installation is pending in another directory. Retry it there before choosing a new destination."
+  ${EndIf}
   ${If} $RegisteredLocation != ""
   ${AndIf} $RegisteredLocation != $INSTDIR
     SetErrorLevel 1
@@ -191,9 +205,62 @@ Function NootifyCheckRegisteredDestination
   ${EndIf}
 FunctionEnd
 
+Function NootifyPrepareFreshReceipt
+  ${If} $RegisteredLocation != ""
+    ; Registration can precede the fresh transaction's final commit. With both
+    ; its external receipt and this exact registered location, finish a ready
+    ; transaction (or retry committed cleanup) before treating it as an upgrade.
+    ${If} $FreshToken != ""
+    ${AndIf} ${FileExists} "$INSTDIR\.nootify-installer\journal.json"
+      nsExec::ExecToLog /TIMEOUT=900000 '"$PLUGINSDIR\nootify-installer-stage.exe" --action finish --target "$INSTDIR" --fresh-token "$FreshToken"'
+      Pop $0
+      ${If} $0 != 0
+      ${OrIf} ${FileExists} "$INSTDIR\.nootify-installer\journal.json"
+        SetErrorLevel 1
+        Abort "The pending fresh installation could not finish cleanup. Its files and receipt have been retained for retry."
+      ${EndIf}
+    ${EndIf}
+    ${IfNot} ${FileExists} "$INSTDIR\.nootify-installer\journal.json"
+      DeleteRegKey HKCU "${PENDING_KEY}"
+      StrCpy $FreshToken ""
+    ${EndIf}
+    Return
+  ${EndIf}
+  ${If} $FreshToken != ""
+  ${AndIf} $PendingLocation == $INSTDIR
+    Return
+  ${EndIf}
+  ; Never attach an ownership receipt to a pre-existing transaction directory.
+  System::Call 'kernel32::GetFileAttributesW(w "$INSTDIR\.nootify-installer") i.r0 ?e'
+  Pop $1
+  ${If} $0 = -1
+  ${AndIf} $1 != 2
+  ${AndIf} $1 != 3
+    SetErrorLevel 1
+    Abort "Cannot inspect the pending installer destination. No ownership receipt has been created."
+  ${EndIf}
+  ${If} $0 != -1
+    SetErrorLevel 1
+    Abort "The destination contains an unowned installer transaction. Choose an empty directory."
+  ${EndIf}
+  System::Call 'ole32::CoCreateGuid(g .r0) i.r1'
+  ${If} $1 != 0
+    SetErrorLevel 1
+    Abort "Cannot create the pending installer receipt. No payload has changed."
+  ${EndIf}
+  StrCpy $FreshToken $0
+  ClearErrors
+  WriteRegStr HKCU "${PENDING_KEY}" "Target" "$INSTDIR"
+  WriteRegStr HKCU "${PENDING_KEY}" "Token" "$FreshToken"
+  ${If} ${Errors}
+    SetErrorLevel 1
+    Abort "Cannot retain the pending installer receipt. No payload has changed."
+  ${EndIf}
+FunctionEnd
+
 !macro NootifyTransaction ACTION
   !insertmacro NootifyDiagnostic "helper-${ACTION}-begin"
-  nsExec::ExecToLog /TIMEOUT=900000 '"$PLUGINSDIR\nootify-installer-stage.exe" --action ${ACTION} --target "$INSTDIR" --manifest "$PLUGINSDIR\installer-payload.json"'
+  nsExec::ExecToLog /TIMEOUT=900000 '"$PLUGINSDIR\nootify-installer-stage.exe" --action ${ACTION} --target "$INSTDIR" --fresh-token "$FreshToken" --manifest "$PLUGINSDIR\installer-payload.json"'
   Pop $0
   Push $3
   StrCpy $3 $0
@@ -242,14 +309,20 @@ Function NootifyPreflightPayload
   ${OrIf} ${FileExists} "$INSTDIR\uninstall.exe"
     ReadRegStr $0 HKCU "${UNINSTALL_KEY}" "InstallLocation"
     ${If} $0 != $INSTDIR
-      SetErrorLevel 1
-      Abort "The target contains files not owned by this registered Nootify installation. Choose an empty directory."
+      ${If} $PendingLocation != $INSTDIR
+      ${OrIf} $FreshToken == ""
+        SetErrorLevel 1
+        Abort "The target contains files not owned by this registered Nootify installation. Choose an empty directory."
+      ${EndIf}
     ${EndIf}
   ${EndIf}
   ${If} ${FileExists} "$INSTDIR\.nootify-installer\journal.json"
   ${AndIf} $RegisteredLocation != $INSTDIR
-    SetErrorLevel 1
-    Abort "Refusing an installer journal outside this registered Nootify installation."
+    ${If} $PendingLocation != $INSTDIR
+    ${OrIf} $FreshToken == ""
+      SetErrorLevel 1
+      Abort "Refusing an installer journal without its pending receipt or registration."
+    ${EndIf}
   ${EndIf}
 FunctionEnd
 
@@ -316,6 +389,7 @@ Section "Nootify" Install
   ; the user still has a mapped desktop image.
   !insertmacro NootifyDiagnostic "preflight-desktop"
   Call NootifyPreflightDesktop
+  Call NootifyPrepareFreshReceipt
   ; Recover an interrupted exchange before checking completeness. The helper
   ; refuses redirected or unrecognized journals and never touches private state.
   !insertmacro NootifyTransaction prepare
@@ -366,6 +440,9 @@ Section "Nootify" Install
   ${EndIf}
   !insertmacro NootifyDiagnostic "registration-success"
   !insertmacro NootifyTransaction finish
+  ${IfNot} ${FileExists} "$INSTDIR\.nootify-installer\journal.json"
+    DeleteRegKey HKCU "${PENDING_KEY}"
+  ${EndIf}
   StrCpy $TransactionStarted 0
 SectionEnd
 
@@ -373,8 +450,12 @@ Function .onInstFailed
   !insertmacro NootifyDiagnostic "installation-failure"
   ${If} $TransactionStarted = 1
     SetOutPath "$PLUGINSDIR"
-    nsExec::ExecToLog /TIMEOUT=900000 '"$PLUGINSDIR\nootify-installer-stage.exe" --action recover --target "$INSTDIR"'
+    nsExec::ExecToLog /TIMEOUT=900000 '"$PLUGINSDIR\nootify-installer-stage.exe" --action recover --target "$INSTDIR" --fresh-token "$FreshToken"'
     Pop $0
+    ${If} $0 = 0
+    ${AndIf} $RegisteredLocation == ""
+      DeleteRegKey HKCU "${PENDING_KEY}"
+    ${EndIf}
     ${If} $0 = 0
     ${AndIf} $RegistrationChanged = 1
       ${If} $RegisteredLocation != ""
@@ -407,17 +488,24 @@ Section "Uninstall"
   !insertmacro NSIS_HOOK_PREUNINSTALL
   !insertmacro NootifyDiagnostic "uninstall-service-success"
   !insertmacro NootifyDiagnostic "uninstall-payload-remove"
-  Delete "$INSTDIR\Nootify.exe"
-  Delete "$INSTDIR\node.exe"
-  Delete "$INSTDIR\nootify-core.exe"
-  Delete "$INSTDIR\nootify-tsnet.exe"
-  RMDir /r "$INSTDIR\service"
+  ; The helper quarantines package roots before deleting them. Any lock/error
+  ; keeps this uninstaller, its registration and a durable retry journal.
+  StrCpy $FreshToken ""
+  !insertmacro NootifyTransaction remove
+  ClearErrors
   Delete "$INSTDIR\uninstall.exe"
+  ${If} ${Errors}
+    SetErrorLevel 1
+    Abort "Nootify could not remove its uninstaller. Close applications using the installation and retry. Its registration has been retained."
+  ${EndIf}
   ; Another installation may own the stable registration; leave it untouched.
   ReadRegStr $0 HKCU "${UNINSTALL_KEY}" "InstallLocation"
   ${If} $0 == $INSTDIR
     DeleteRegKey HKCU "${UNINSTALL_KEY}"
     Delete "$SMPROGRAMS\Nootify.lnk"
+    ${If} $PendingLocation == $INSTDIR
+      DeleteRegKey HKCU "${PENDING_KEY}"
+    ${EndIf}
   ${EndIf}
   ; Nonrecursive: retain private data and any files not owned by this package.
   RMDir "$INSTDIR"

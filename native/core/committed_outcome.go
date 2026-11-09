@@ -19,6 +19,17 @@ func (e *committedStateError) Error() string {
 }
 func (e *committedStateError) Unwrap() error { return e.cause }
 
+// A queued repair may commit while preventing the next caller's mutation from
+// even starting. Preserve its filesystem cause and safe retry classification,
+// without exposing a committedStateError for that unapplied next mutation.
+func undispatchedFlushError(err error) error {
+	var committed *committedStateError
+	if errors.As(err, &committed) {
+		return errors.Join(rejectOperation(true, "state mutation was not started; retry after storage recovers"), committed.cause)
+	}
+	return err
+}
+
 // stateCommitted distinguishes an unapplied transaction from a published one.
 // Callers still return/log the original error after reconciling live effects.
 // In particular, a committed pending intent with an error does not authorize a

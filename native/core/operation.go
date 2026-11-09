@@ -69,9 +69,11 @@ func (g *sessionGates) acquire(ctx context.Context, key string) (func(), error) 
 	return func() { entry.gate.Unlock(); unref() }, nil
 }
 
-// Admission is serialized only until its durable pending intent is saved.
-// Concurrent duplicates then see pending and cannot submit a second RPC. The
-// provider call and outcome persistence never hold the node-wide gate.
+// Admission first saves retryable proof that no provider has been called, then
+// arms a durable pending intent. A failed pending barrier never authorizes a
+// provider call: it is repaired to retryable before returning whenever storage
+// accepts the repair. Concurrent duplicates cannot pass the node-wide gate
+// until this decision completes. Provider calls and outcome writes hold no gate.
 func (c *Core) admitOperation(ctx context.Context, key, request, finger string, automatic bool) (string, *SendResult, error) {
 	if err := c.ops.LockContext(ctx); err != nil {
 		return request, nil, err
@@ -79,6 +81,9 @@ func (c *Core) admitOperation(ctx context.Context, key, request, finger string, 
 	defer c.ops.Unlock()
 	if key == "" {
 		return request, nil, nil
+	}
+	if err := c.store.FlushUndispatched(); err != nil {
+		return request, nil, err
 	}
 	if previous, exists := c.store.Snapshot().Operations[key]; exists {
 		if previous.Fingerprint != finger {
@@ -112,11 +117,40 @@ func (c *Core) admitOperation(ctx context.Context, key, request, finger string, 
 	if err := ctx.Err(); err != nil {
 		return request, nil, err
 	}
+	proof := rejectOperation(true, "request was not submitted; retry after storage recovers")
 	err := c.store.Update(func(d *State) error {
+		d.Operations[key] = Operation{State: "retryable", Fingerprint: finger, RequestID: request, Failure: publicError(proof)}
+		return nil
+	})
+	if err != nil {
+		return request, nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return request, nil, proof
+	}
+	err = c.store.Update(func(d *State) error {
 		d.Operations[key] = Operation{State: "pending", Fingerprint: finger, RequestID: request}
 		return nil
 	})
-	return request, nil, err
+	if err == nil {
+		return request, nil, nil
+	}
+	// The provider has not been called. A post-rename warning may nevertheless
+	// expose pending, so persist the stronger proof before admitting any retry.
+	// If replacement itself fails, the Store queues this exact repair for the
+	// next admission/write/close; do not lie about its disk state in Snapshot.
+	repairErr := c.store.RepairUndispatched("operation:"+key, func(d *State) error {
+		previous, exists := d.Operations[key]
+		if exists && previous.State == "pending" && previous.Fingerprint == finger && previous.RequestID == request {
+			previous.State, previous.Failure = "retryable", publicError(proof)
+			d.Operations[key] = previous
+		}
+		return nil
+	})
+	if repairErr != nil {
+		return request, nil, errors.Join(err, repairErr)
+	}
+	return request, nil, proof
 }
 
 // A rejection is evidence that the provider did not accept a side effect.

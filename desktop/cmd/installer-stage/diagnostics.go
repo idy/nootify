@@ -57,7 +57,7 @@ func newDiagnostics(directory, action string) *diagnostics {
 	if err != nil || !os.SameFile(before, opened) {
 		return nil
 	}
-	if !contains([]string{"prepare", "apply", "recover", "finish"}, action) {
+	if !contains([]string{"prepare", "apply", "recover", "finish", "remove"}, action) {
 		action = "other"
 	}
 	for range 8 {
@@ -96,7 +96,7 @@ func (d *diagnostics) record(phase, kind, outcome, root string, failure error, c
 	if d == nil {
 		return
 	}
-	if !contains([]string{"helper", "arguments", "lock", "prepare", "apply", "recover", "finish", "read-journal", "write-journal", "validate", "old-tree", "status", "legacy-snapshot", "stop", "backup", "install", "discard", "restore", "start", "cleanup"}, phase) {
+	if !contains([]string{"helper", "arguments", "lock", "prepare", "apply", "recover", "finish", "read-journal", "write-journal", "validate", "old-tree", "status", "legacy-snapshot", "stop", "backup", "install", "discard", "restore", "start", "cleanup", "enable", "remove"}, phase) {
 		phase = "other"
 	}
 	if !contains(payloadRoots, root) {

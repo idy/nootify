@@ -10,6 +10,16 @@ import (
 
 const serviceControlTimeout = 155 * time.Second
 
+func initialServiceAction(suppress, healthy, installed bool) string {
+	if suppress || healthy {
+		return ""
+	}
+	if installed {
+		return "start"
+	}
+	return "install_service"
+}
+
 type controlledService interface {
 	Install(context.Context) error
 	Request(context.Context, string) error
@@ -21,12 +31,15 @@ type controlledService interface {
 // Download and validation stay outside controls; replacement, rollback and recovery
 // retain it until install returns. The CLI still makes all ownership decisions.
 type serviceHandoff struct {
-	service         controlledService
-	controls        sync.Mutex
-	locked          bool
-	stopped         bool
-	startAttempted  bool
-	recoveryBlocked bool
+	service            controlledService
+	controls           sync.Mutex
+	locked             bool
+	stopped            bool
+	startAttempted     bool
+	recoveryBlocked    bool
+	wasRunning         bool
+	replacementRunning bool
+	guiPending         bool
 }
 
 func (h *serviceHandoff) action(ctx context.Context, action string) error {
@@ -53,6 +66,7 @@ func (h *serviceHandoff) before(ctx context.Context) error {
 	defer cancel()
 	var err error
 	h.stopped, err = h.service.StopForUpdate(stopCtx)
+	h.wasRunning = h.stopped
 	// Keep the successful stop recorded for deferred recovery, but do not replace
 	// the bundle when cancellation arrived during the critical stop.
 	return errors.Join(err, ctx.Err())
@@ -72,11 +86,12 @@ func (h *serviceHandoff) after() error {
 	}
 	h.stopped = false
 	h.startAttempted = false
+	h.replacementRunning = true
 	return nil
 }
 
 func (h *serviceHandoff) beforeRollback() error {
-	if !h.startAttempted {
+	if !h.startAttempted && !h.replacementRunning {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), serviceControlTimeout)
@@ -94,17 +109,38 @@ func (h *serviceHandoff) beforeRollback() error {
 		return err
 	}
 	h.startAttempted = false
+	h.replacementRunning = false
+	h.stopped = h.wasRunning
 	return nil
+}
+
+func (h *serviceHandoff) releaseGUI() {
+	if !h.guiPending {
+		return
+	}
+	h.guiPending = false
+	h.locked = false
+	h.stopped = false
+	h.wasRunning = false
+	h.startAttempted = false
+	h.replacementRunning = false
+	h.recoveryBlocked = false
+	h.controls.Unlock()
 }
 
 func (h *serviceHandoff) install(ctx context.Context, install func(context.Context) error) (err error) {
 	defer func() {
+		if err == nil && h.guiPending {
+			return
+		} // ownership transfers to post-loop GUI supervisor
 		if h.locked {
 			defer func() {
 				h.locked = false
 				h.stopped = false
 				h.startAttempted = false
 				h.recoveryBlocked = false
+				h.wasRunning = false
+				h.replacementRunning = false
 				h.controls.Unlock()
 			}()
 		}

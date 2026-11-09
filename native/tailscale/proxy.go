@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"io"
@@ -98,6 +99,8 @@ type forwarder struct {
 	dial      func(context.Context, string, string) (net.Conn, error)
 	raw       bool // raw RPC transports never emit an HTTP PROXY preamble
 	limit     connectionLimit
+	token     string // nonempty only for authenticated local tunnel ingress
+	pending   chan struct{}
 	listening atomic.Bool
 
 	mu          sync.Mutex
@@ -175,7 +178,11 @@ func (f *forwarder) serve(parent context.Context) error {
 			}
 			return err
 		}
-		release := f.limit.acquire()
+		limit := f.limit
+		if f.token != "" {
+			limit = connectionLimit{reserved: f.pending}
+		}
+		release := limit.acquire()
 		if release == nil {
 			conn.Close()
 			continue
@@ -187,11 +194,47 @@ func (f *forwarder) serve(parent context.Context) error {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
-			defer release()
+			defer func() {
+				if release != nil {
+					release()
+				}
+			}()
 			defer f.release(conn)
+			if f.token != "" {
+				if !f.authenticateTunnel(conn) {
+					return
+				}
+				// Authentication has its own bounded budget. Only an authenticated
+				// client may consume raw capacity or cause an embedded-identity dial.
+				release()
+				release = f.limit.acquire()
+				if release == nil {
+					return
+				}
+				if n, err := conn.Write([]byte{1}); err != nil || n != 1 {
+					return
+				}
+				if err := conn.SetDeadline(time.Time{}); err != nil {
+					return
+				}
+			}
 			f.forward(ctx, conn)
 		}()
 	}
+}
+
+func (f *forwarder) authenticateTunnel(peer net.Conn) bool {
+	if err := peer.SetDeadline(time.Now().Add(tunnelHandshakeTimeout)); err != nil {
+		return false
+	}
+	var received [len(tunnelHandshakePrefix) + 2*tunnelTokenBytes + 1]byte
+	if _, err := io.ReadFull(peer, received[:]); err != nil {
+		return false
+	}
+	// Read exactly the capability frame, leaving any pipelined TLS/HTTP2 bytes
+	// untouched. Invalid input and tokens never appear in diagnostics or errors.
+	want := tunnelHandshakePrefix + f.token + "\n"
+	return subtle.ConstantTimeCompare(received[:], []byte(want)) == 1
 }
 
 func (f *forwarder) forward(ctx context.Context, peer net.Conn) {

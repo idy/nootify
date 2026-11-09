@@ -371,7 +371,7 @@ try {
     if ($Action -ne 'Status') { $operationLock = Enter-Lock "Global\Nootify.Service.Management.$ownerSid" 60000 }
     $task = Get-Task
     if ($task) { $record = Assert-Owned $task }
-    if ($Action -eq 'Status') { $stdoutWriter.WriteLine((@{ installed = [bool]$task; running = [bool](Test-OwnedTaskRunning $task) } | ConvertTo-Json -Compress)); exit 0 }
+    if ($Action -eq 'Status') { $stdoutWriter.WriteLine((@{ installed = [bool]$task; running = [bool](Test-OwnedTaskRunning $task); enabled = [bool]($task -and $task.Enabled) } | ConvertTo-Json -Compress)); exit 0 }
     $wasRunning = $false
     if ($Action -eq 'Stop' -or $Action -eq 'Uninstall') { $wasRunning = [bool](Test-OwnedTaskRunning $task) }
     if ($Action -eq 'Install') {

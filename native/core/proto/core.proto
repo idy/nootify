@@ -36,6 +36,7 @@ message Event {
   uint32 hops_remaining = 6;
   string sender_id = 7;
   string chat_id = 8;
+  bytes cancellation_json = 9;
 }
 // A confirmation belongs only to this authenticated peer's subscription.
 // It confirms durable ingestion, never agent acceptance or another peer's queue.

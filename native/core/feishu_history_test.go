@@ -149,9 +149,15 @@ func TestFeishuFailedCatchupRetriesSameGapWithoutReconnect(t *testing.T) {
 			t.Fatalf("retry changed the captured history interval: got=%v want=%v", got, firstRange)
 		}
 	}
-	// Successful synchronization ends the retry worker; newer live input must
-	// not cause requests after a backoff interval has elapsed.
+	// New live input triggers one coalesced finite coverage scan. Both workers
+	// terminate after synchronization; idle connections never poll history.
 	must(t, p.receive(context.Background(), feishuInput("live-after-sync", "chat", "trusted")))
+	await(t, func() bool { p.mu.Lock(); defer p.mu.Unlock(); return len(p.coverage) == 0 })
+	covered := requests.Load()
+	for i := n; i < covered; i++ {
+		<-ranges
+	}
+	n = covered
 	select {
 	case extra := <-ranges:
 		t.Fatalf("healthy synchronized connection kept polling history: %v", extra)

@@ -20,6 +20,7 @@ export async function startOwnerUiGateway(baseUrl: string, token: string, target
     response.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify({ error }));
   };
   const proxy = async (request: IncomingMessage, response: ServerResponse) => {
+    if (stopping) throw new HttpError(503, 'Owner UI gateway is closing');
     // This is a new authenticated session after a daemon restart, never a plaintext fallback.
     upstream ??= new UiTransport(new URL(baseUrl).origin, await requestOwnerUiSession(baseUrl, token));
     const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(Buffer.from(chunk));
@@ -55,6 +56,7 @@ export async function startOwnerUiGateway(baseUrl: string, token: string, target
         if (request.method !== 'POST' || request.headers['x-nootify-ui'] !== '1'
           || request.headers['sec-fetch-site'] && !['same-origin', 'none'].includes(String(request.headers['sec-fetch-site']))) throw new HttpError(403, 'Owner UI authorization required');
         const inner = await sessions.open(request, response);
+        if (!inner) return;
         resetIdle(); await proxy(inner, response); return;
       }
       if (request.method === 'GET' && !url.search && await serveUiAsset(response, url.pathname)) return;
@@ -64,8 +66,13 @@ export async function startOwnerUiGateway(baseUrl: string, token: string, target
   await new Promise<void>((done, fail) => { server.once('error', fail); server.listen(0, '127.0.0.1', () => { server.off('error', fail); done(); }); });
   origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   const close = (): Promise<void> => stopping ??= (async () => {
-    clearTimeout(idle); clearTimeout(lifetime); server.closeAllConnections();
-    await new Promise<void>(done => server.close(() => done()));
+    clearTimeout(idle); clearTimeout(lifetime); sessions.clear();
+    const closing = upstream; upstream = undefined;
+    server.closeAllConnections();
+    await Promise.all([
+      new Promise<void>(done => server.close(() => done())),
+      closing?.close().catch(() => {}),
+    ]);
   })();
   let idle: NodeJS.Timeout;
   const resetIdle = () => { clearTimeout(idle); idle = setTimeout(() => { void close(); }, 2 * 60_000); idle.unref(); };

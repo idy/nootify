@@ -76,7 +76,9 @@ export function createServiceHost(modules: ServiceModule[], token: string, logs?
       let encryptedOwner = false;
       if (url.pathname === '/ui/api/secure') {
         if (options.via === 'tailnet' || request.method !== 'POST') throw new HttpError(403, 'Encrypted owner UI is local-only');
-        request = await owner.sessions.open(request, response);
+        const inner = await owner.sessions.open(request, response);
+        if (!inner) return;
+        request = inner;
         url = new URL(request.url!, 'http://127.0.0.1');
         encryptedOwner = true;
       }

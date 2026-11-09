@@ -62,6 +62,29 @@ export function sessionInbox(state: State, adapter: PolledAdapter, id: string, o
   return { session_id: id, adapter, messages };
 }
 
+export interface ProviderInboxSnapshot { inbox_id: string; message: ProviderMessageRef }
+const referenceKey = (message: ProviderMessageRef): string => JSON.stringify([message.origin_node_id, message.provider_id, message.message_id]);
+
+/** Only a core cancellation proof for an entry in the committed snapshot can remove unread input. */
+export async function discardCanceledInbox(state: State, snapshot: readonly ProviderInboxSnapshot[], canceled: readonly ProviderMessageRef[]): Promise<ProviderMessageRef[]> {
+  const canceledKeys = new Set(canceled.map(referenceKey));
+  const confirmed = new Map(snapshot.filter(item => canceledKeys.has(referenceKey(item.message))).map(item => [referenceKey(item.message), item.message]));
+  if (!confirmed.size) return [];
+  const removed = new Map<string, StoredInboxMessage>();
+  await state.save({
+    apply() {
+      for (const { inbox_id, message } of snapshot) {
+        const entry = state.inboxMessages.get(inbox_id);
+        if (!confirmed.has(referenceKey(message)) || entry?.source?.channel !== 'provider'
+          || referenceKey(entry.source.delivery.message) !== referenceKey(message)) continue;
+        removed.set(inbox_id, entry); state.inboxMessages.delete(inbox_id);
+      }
+    },
+    rollback() { for (const [id, entry] of removed) if (!state.inboxMessages.has(id)) state.inboxMessages.set(id, entry); },
+  });
+  return [...confirmed.values()];
+}
+
 export async function acknowledgeInbox(state: State, adapter: PolledAdapter, id: string, messageId: string,
   consumed?: (message: ProviderMessageRef) => Promise<void>): Promise<{ status: 'inbox_acknowledged'; message_id: string }> {
   let before: Map<string, StoredInboxMessage> | undefined; let source: ProviderMessageRef | undefined;

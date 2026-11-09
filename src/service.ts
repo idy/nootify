@@ -11,7 +11,7 @@ const exec = promisify(execFile);
 export const SERVICE_ACTIONS = ['install', 'start', 'restart', 'stop', 'uninstall', 'status'] as const;
 export type ServiceAction = typeof SERVICE_ACTIONS[number];
 export interface ServiceOptions { stateDir?: string; port: number; mcpConfig?: string; drain?: LaunchdProcess }
-export interface ServiceResult { installed: boolean; running?: boolean; was_running?: boolean; status?: string; task?: string; plist?: string }
+export interface ServiceResult { installed: boolean; running?: boolean; enabled?: boolean; was_running?: boolean; status?: string; task?: string; plist?: string }
 export type ServiceExecutor = (file: string, args: string[], options?: ExecFileOptions) => Promise<{ stdout: string }>;
 interface ServiceRuntime { execute?: ServiceExecutor; home?: string; platform?: NodeJS.Platform; uid?: number; shutdownTimeout?: number }
 const executeService: ServiceExecutor = (file, args, options) => exec(file, args, { ...options, encoding: 'utf8' });
@@ -112,7 +112,7 @@ export async function manageService(action: ServiceAction, options: ServiceOptio
     });
     const result: unknown = JSON.parse(stdout.replace(/^\uFEFF/, '').trim());
     if (!result || typeof result !== 'object' || typeof (result as ServiceResult).installed !== 'boolean'
-      || ['running', 'was_running'].some(key => Object.hasOwn(result, key) && typeof (result as Record<string, unknown>)[key] !== 'boolean')) throw new Error('Invalid Windows service management response');
+      || ['running', 'enabled', 'was_running'].some(key => Object.hasOwn(result, key) && typeof (result as Record<string, unknown>)[key] !== 'boolean')) throw new Error('Invalid Windows service management response');
     return result as ServiceResult;
   }
   if (platform !== 'darwin' || uid === undefined) throw new Error('Background service management requires macOS or Windows');
@@ -124,17 +124,16 @@ export async function manageService(action: ServiceAction, options: ServiceOptio
     const { stdout } = await run('/usr/bin/plutil', ['-convert', 'json', '-o', '-', plist]);
     assertLaunchdOwnership(JSON.parse(stdout), options);
   }
-  if (!installed) {
-    if (action === 'status') return { installed: false, running: false };
-    if (action === 'uninstall' || action === 'stop') return { installed: false, was_running: false, status: action === 'stop' ? 'stopped' : 'uninstalled' };
-    throw new Error('Nootify is not installed; use service-install');
-  }
   if (options.drain) {
-    // The desktop carries the exact pre-bootout identity across CLI invocations.
-    // Recheck registration ownership first, then prove exit before any bootstrap
-    // or a stop result that could authorize replacement/deletion of its resources.
+    // The receipt still needs an exit check if another uninstall removed the plist.
+    // An existing registration must prove ownership first; a missing one grants no start authority.
     const identity = parseServiceDrain(options.drain);
     await waitForLaunchdExit(identity, run, runtime.shutdownTimeout ?? 30_000);
+  }
+  if (!installed) {
+    if (action === 'status') return { installed: false, running: false };
+    if (action === 'uninstall' || action === 'stop') return { installed: false, was_running: Boolean(options.drain), status: action === 'stop' ? 'stopped' : 'uninstalled' };
+    throw new Error('Nootify is not installed; use service-install');
   }
   const target = `gui/${uid}/${launchdLabel}`;
   let loaded = true; let job = '';

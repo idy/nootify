@@ -19,8 +19,8 @@ import type { LarkApi } from './lark-metadata.js';
 import { inspectLarkSetup, LarkRegistration, type LarkRegistrationOptions, type LarkRegistrationPage, type LarkRegistrationResult, type LarkSetup } from './lark-registration.js';
 import { DIRECTORY_FRESH_MS, DIRECTORY_MAX_AGE_MS, LarkDirectoryCache } from './lark-directory-cache.js';
 import { mergeRecipients } from './lark-profile.js';
-import type { ProvidersService } from './providers.js';
-import { coreErrorCode, provenCoreRejection } from './provider-core.js';
+import type { CompatibilityConfig, CompatibilitySync, ProvidersService } from './providers.js';
+import { CoreError, coreErrorCode, provenCoreRejection } from './provider-core.js';
 
 const FORMAT = 'nootify-config';
 const EXPORTS_KEPT = 10;
@@ -37,7 +37,7 @@ export interface SettingsPage {
   version: string;
   exports_dir: string;
   last_export?: string;
-  lark: { status: string; configured: boolean; connection_type: LarkConnectionType; source?: CredentialSource; app_id?: string; saved: boolean; recipient?: string; groups: number };
+  lark: { status: string; configured: boolean; connection_type: LarkConnectionType; source?: CredentialSource; app_id?: string; saved: boolean; recipient?: string; groups: number; mirror_status?: 'pending' };
 }
 export interface LarkRecipientsPage extends Omit<LarkDirectory, 'permission'> { permission?: LarkPermissionHelp; cached?: boolean; fetched_at?: number; refresh_after?: number; expires_at?: number }
 export interface GitHubSettings { account?: GitHubAccount; login: GitHubLogin }
@@ -63,7 +63,7 @@ export interface LarkControl {
   channel(): { recipient?: string; groups: number };
   configure(credentials?: Credentials): Promise<void>;
   refreshCompatibilityCredentials?(credentials?: Credentials): void;
-  setCompatibilitySync?(sync: (update: () => Promise<{ credentials?: Credentials; recipient?: string }>) => Promise<void>): void;
+  setCompatibilitySync?(sync: CompatibilitySync): void;
   setRecipient?(openId: string): Promise<void>;
   setRecipientSync?(sync: (openId: string) => Promise<void>): void;
 }
@@ -161,39 +161,73 @@ export class SettingsService {
   private readonly env: NodeJS.ProcessEnv;
   private readonly report: (record: Record<string, unknown>) => void;
   private readonly registration: LarkRegistration;
+  private mirrorPending = false;
+  private mirrorRetry?: NodeJS.Timeout;
+  private stopping = false;
   constructor(private readonly options: SettingsOptions) {
     this.source = options.source; this.env = options.env ?? process.env; this.report = options.report ?? (() => {});
     this.registration = new LarkRegistration((result, signal) => this.acceptLarkRegistration(result, signal), this.report, options.registration);
     this.directoryStore = new LarkDirectoryCache(options.state.directory);
-    options.lark.setCompatibilitySync?.(update => this.syncProviderCompatibility(update));
+    options.lark.setCompatibilitySync?.((update, preview) => this.syncProviderCompatibility(update, preview));
     options.lark.setRecipientSync?.(openId => this.setRecipient(openId));
   }
   /** Mirror the core's committed legacy provider without saving it again through the compatibility configure path. */
-  private syncProviderCompatibility(update: () => Promise<{ credentials?: Credentials; recipient?: string }>): Promise<void> {
+  private syncProviderCompatibility(update: () => Promise<CompatibilityConfig>, preview?: () => Promise<CompatibilityConfig>): Promise<void> {
     return this.serialized(async () => {
       const { lark, state } = this.options;
+      const environment = await resolveCredentials(this.env, {});
+      if (preview && environment?.source === 'environment') {
+        const candidate = (await preview()).credentials;
+        if (candidate?.appId !== environment.credentials.appId || candidate?.appSecret !== environment.credentials.appSecret) {
+          throw new HttpError(409, 'Provider changes conflict with the active environment Feishu credentials');
+        }
+      }
       const current = lark.credentials;
       const { credentials, recipient } = await update();
-      await this.persistSettings(() => {
-        this.scopeLarkBindings(credentials?.appId);
-        if (credentials) {
-          if (state.settings.lark_app_id !== credentials.appId) state.settings.lark_connection_type = 'bot';
-          state.settings.lark_app_id = credentials.appId; state.settings.lark_app_secret = credentials.appSecret;
-        } else {
-          delete state.settings.lark_app_id; delete state.settings.lark_app_secret; delete state.settings.lark_connection_type;
-        }
-        if (recipient) state.settings.lark_recipient_open_id = recipient; else delete state.settings.lark_recipient_open_id;
-      });
-      this.source = credentials ? 'settings' : undefined;
+      let failed = false;
+      try {
+        // The core already committed. Keep its mirror authoritative in memory even if this disk write fails.
+        await state.save({ apply: () => {
+          this.scopeLarkBindings(credentials?.appId);
+          if (credentials) {
+            if (state.settings.lark_app_id !== credentials.appId) state.settings.lark_connection_type = 'bot';
+            state.settings.lark_app_id = credentials.appId; state.settings.lark_app_secret = credentials.appSecret;
+          } else {
+            delete state.settings.lark_app_id; delete state.settings.lark_app_secret; delete state.settings.lark_connection_type;
+          }
+          if (recipient) state.settings.lark_recipient_open_id = recipient; else delete state.settings.lark_recipient_open_id;
+        }, rollback: () => {} });
+        this.mirrorPending = false; clearTimeout(this.mirrorRetry); this.mirrorRetry = undefined;
+      } catch { failed = true; this.mirrorPending = true; this.scheduleMirrorRetry(); }
+      const fromEnvironment = environment?.source === 'environment' && environment.credentials.appId === credentials?.appId
+        && environment.credentials.appSecret === credentials?.appSecret;
+      this.source = credentials ? fromEnvironment ? 'environment' : 'settings' : undefined;
       lark.refreshCompatibilityCredentials?.(credentials);
       if (current?.appId !== credentials?.appId || current?.appSecret !== credentials?.appSecret) {
         this.directoryRefresh++; await this.directoryStore.clear();
       }
+      if (failed) throw this.mirrorError();
     });
+  }
+  private mirrorError(): HttpError {
+    const error = new HttpError(409, 'Provider change committed; saving its local compatibility mirror is pending');
+    error.cause = new CoreError('committed_not_mirrored', error.message); return error;
+  }
+  private scheduleMirrorRetry(): void {
+    this.report({ source: 'providers', status: 'compatibility_mirror_pending' });
+    if (!this.stopping && !this.mirrorRetry) this.mirrorRetry = setTimeout(() => {
+      this.mirrorRetry = undefined; void this.serialized(async () => {}).catch(() => {});
+    }, 1000).unref();
+  }
+  private async repairMirror(): Promise<void> {
+    if (!this.mirrorPending) return;
+    try { await this.options.state.save(); }
+    catch { this.scheduleMirrorRetry(); throw this.mirrorError(); }
+    this.mirrorPending = false; clearTimeout(this.mirrorRetry); this.mirrorRetry = undefined;
   }
   private get exportsDir(): string { return join(this.options.state.directory, 'exports'); }
   private serialized<T>(operation: () => Promise<T>): Promise<T> {
-    const pending = this.writes.catch(() => {}).then(operation);
+    const pending = this.writes.catch(() => {}).then(async () => { await this.repairMirror(); return operation(); });
     this.writes = pending;
     return pending;
   }
@@ -245,7 +279,7 @@ export class SettingsService {
     const configured = Boolean(lark.credentials?.appId.trim() && lark.credentials?.appSecret.trim());
     return { version, exports_dir: this.exportsDir, ...(this.lastExport ? { last_export: this.lastExport } : {}),
       lark: { status: configured ? lark.status() : 'disabled', configured, connection_type: this.larkConnectionType(), source: this.source, app_id: lark.credentials?.appId, saved: Boolean(state.settings.lark_app_id && state.settings.lark_app_secret),
-        recipient: channel.recipient ?? state.settings.lark_recipient_open_id, groups: channel.groups } };
+        recipient: channel.recipient ?? state.settings.lark_recipient_open_id, groups: channel.groups, ...(this.mirrorPending ? { mirror_status: 'pending' as const } : {}) } };
   }
   /** Asking GitHub costs a network round trip, so polling during a login reads only the flow. */
   async github(): Promise<GitHubSettings> {
@@ -276,7 +310,11 @@ export class SettingsService {
     await this.options.tailscale.logout();
     await this.options.providers?.syncNetwork();
   }
-  async stop(): Promise<void> { await this.registration.stop(); await this.options.github.stop(); await this.writes.catch(() => {}); }
+  async stop(): Promise<void> {
+    this.stopping = true; clearTimeout(this.mirrorRetry);
+    await this.registration.stop(); await this.options.github.stop(); await this.writes.catch(() => {});
+    await this.repairMirror().catch(() => {});
+  }
 
   larkRegistration(): LarkRegistrationPage { return this.registration.page(); }
   startLarkRegistration(): LarkRegistrationPage {

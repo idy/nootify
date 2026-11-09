@@ -44,16 +44,24 @@ type shell struct {
 	evaluations    pageEvaluator
 	quitting       bool
 	pageLoadState
-	ui             *service.OwnedUI
-	health         *service.Health
-	healthError    error
-	installed      bool
-	actionPending  bool
-	action         language.Text
-	actionError    error
-	moduleLabels   []string
-	serviceHandoff *serviceHandoff
-	updateShutdown updateShutdown
+	ui                   *service.OwnedUI
+	health               *service.Health
+	healthError          error
+	installed            bool
+	actionPending        bool
+	action               language.Text
+	actionError          error
+	moduleLabels         []string
+	serviceHandoff       *serviceHandoff
+	updateShutdown       updateShutdown
+	startupGate          <-chan struct{}
+	suppressServiceStart bool
+	guiHandoff           *updater.GUIClient
+	guiReady             chan struct{}
+	guiInitialized       bool
+	guiDocumentLoaded    bool
+	guiSignaled          bool
+	updateRelaunch       bool
 }
 
 func main() {
@@ -85,6 +93,14 @@ func main() {
 		reportStartupError(err.Error())
 		return
 	}
+	// A replacement must rendezvous with its live supervisor before initializing
+	// native resources or acquiring the instance lock. A stale receipt fails closed.
+	guiHandoff, handoffErr := updater.AcceptGUIHandoff(os.Args[1:], version, appID)
+	if handoffErr != nil {
+		log.Printf("Cannot accept update GUI handoff: %v", handoffErr)
+		return
+	}
+	defer guiHandoff.Stopped()
 	mygo.App.SetName(name)
 	mygo.App.SetVersion(version)
 	config, err := os.UserConfigDir()
@@ -104,6 +120,7 @@ func main() {
 	mygo.App.SetPath(mygo.PathCache, filepath.Join(state, "cache"))
 	mygo.App.SetPath(mygo.PathLogs, filepath.Join(state, "logs"))
 	if !mygo.App.RequestSingleInstanceLock() {
+		guiHandoff.Refuse()
 		return
 	}
 	offline, err := startOffline()
@@ -113,7 +130,13 @@ func main() {
 	defer offline.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	s := &shell{ctx: ctx, cancel: cancel, smoke: smoke, offline: offline, policy: urlPolicy{offline: offline.URL, isolated: smoke}, requests: make(chan string, 4), updateRequests: make(chan string, 2), action: language.ServiceKeepsRunning}
+	startupGate := make(chan struct{})
+	s := &shell{ctx: ctx, cancel: cancel, smoke: smoke, offline: offline, policy: urlPolicy{offline: offline.URL, isolated: smoke}, requests: make(chan string, 4), updateRequests: make(chan string, 2), action: language.ServiceKeepsRunning, startupGate: startupGate, guiHandoff: guiHandoff, guiReady: make(chan struct{}), suppressServiceStart: guiHandoff.SuppressServiceStart()}
+	if guiHandoff == nil {
+		close(startupGate)
+	} else {
+		go guiHandoff.AwaitCommit(s.guiReady, func() { close(startupGate) }, func() { mygo.App.Quit() })
+	}
 	if smoke {
 		if raw := os.Getenv("NOOTIFY_SMOKE_UI_URL"); raw != "" {
 			s.policy.preview = previewURL(raw)
@@ -188,20 +211,56 @@ func main() {
 					if s.ctx.Err() != nil {
 						return
 					}
-					if runtime.GOOS == "darwin" {
-						mygo.App.Relaunch()
-					} else {
-						mygo.App.Quit()
-					}
+					s.updateRelaunch = true
+					// The macOS updater retains its original until a supervised GUI
+					// handshake after this event loop exits. MyGo Relaunch has no result.
+					mygo.App.Quit()
 				})
 			}
 		}()
 		if appID == "dev.idy.nootify" && bundle != nil {
-			go s.updates.Run(ctx)
+			go func() {
+				if s.awaitStartup() {
+					s.updates.Run(ctx)
+				}
+			}()
 		}
+		s.guiInitialized = true
+		s.confirmGUIReady()
 	})
 	if err := mygo.App.Run(); err != nil {
-		log.Fatal(err)
+		log.Print(err)
+	}
+	// OnQuit has released the single-instance lock. Keep this process alive as a
+	// headless supervisor until the replacement GUI commits or recovery finishes.
+	if s.updates != nil && s.updates.PendingGUI() {
+		h := s.serviceHandoff
+		defer h.releaseGUI()
+		if !s.updateRelaunch {
+			if err := s.updates.AbortGUI(); err != nil {
+				log.Printf("Cancel update GUI handoff: %v", err)
+			} else if err := h.after(); err != nil {
+				log.Printf("Recover service after cancelled GUI handoff: %v", err)
+			}
+			return
+		}
+		if err := s.updates.FinishGUI(context.Background(), updater.GUIRelaunchOptions{SuppressServiceStart: !h.wasRunning, AfterReady: h.after, RecoverOriginal: h.after}); err != nil {
+			log.Printf("Update GUI handoff: %v", err)
+		}
+	}
+}
+func (s *shell) awaitStartup() bool {
+	select {
+	case <-s.startupGate:
+		return s.ctx.Err() == nil
+	case <-s.ctx.Done():
+		return false
+	}
+}
+func (s *shell) confirmGUIReady() {
+	if s.guiHandoff != nil && s.guiInitialized && s.guiDocumentLoaded && !s.guiSignaled {
+		s.guiSignaled = true
+		close(s.guiReady)
 	}
 }
 func systemLocale() language.Locale {
@@ -297,6 +356,10 @@ func (s *shell) createWindow() {
 		return nil
 	})
 	page.OnDidFinishLoad(func() {
+		if documentAt(page.URL(), s.offline.URL) {
+			s.guiDocumentLoaded = true
+			s.confirmGUIReady()
+		}
 		s.finish(s.ui != nil && s.ui.Alive() && documentAt(page.URL(), s.policy.gateway))
 		if s.trustedDocument(page.URL()) {
 			s.publish()
@@ -435,6 +498,9 @@ func (s *shell) setServiceView(online bool, ownerURL string) {
 	}
 }
 func (s *shell) serviceWorker(bundleErr error) {
+	if !s.awaitStartup() {
+		return
+	}
 	client := service.HealthClient()
 	legacyRestarted := false
 	poll := func() {
@@ -442,7 +508,7 @@ func (s *shell) serviceWorker(bundleErr error) {
 		installed, inspectErr := s.service.Installed(s.ctx)
 		// Old independent daemons can outlive a manual app replacement. Health is
 		// advisory only: the bundled CLI still proves exact ownership before restart.
-		if err == nil && h.UITransport == 0 && installed && inspectErr == nil && s.service.Bundle != nil && !legacyRestarted {
+		if !s.suppressServiceStart && err == nil && h.UITransport == 0 && installed && inspectErr == nil && s.service.Bundle != nil && !legacyRestarted {
 			legacyRestarted = true
 			s.runServiceAction("restart")
 			h, err = service.CheckHealth(s.ctx, client, service.URL)
@@ -496,14 +562,12 @@ func (s *shell) serviceWorker(bundleErr error) {
 			}
 		})
 	}
-	if _, err := service.CheckHealth(s.ctx, client, service.URL); err != nil && bundleErr == nil && s.service.Bundle != nil {
+	if _, err := service.CheckHealth(s.ctx, client, service.URL); !s.suppressServiceStart && err != nil && bundleErr == nil && s.service.Bundle != nil {
 		installed, inspectErr := s.service.Installed(s.ctx)
 		if inspectErr == nil {
-			action := "install_service"
-			if installed {
-				action = "start"
+			if action := initialServiceAction(s.suppressServiceStart, false, installed); action != "" {
+				s.runServiceAction(action)
 			}
-			s.runServiceAction(action)
 		}
 	}
 	poll()
@@ -577,7 +641,13 @@ func (s *shell) configureUpdater() {
 			}
 			return s.serviceHandoff.before(ctx)
 		},
-		AfterInstall: s.serviceHandoff.after, BeforeRollback: s.serviceHandoff.beforeRollback})
+		// macOS service restoration follows confirmed GUI readiness in FinishGUI.
+		AfterInstall: func() error {
+			if runtime.GOOS == "windows" {
+				return s.serviceHandoff.after()
+			}
+			return nil
+		}, BeforeRollback: s.serviceHandoff.beforeRollback, ConfirmGUI: runtime.GOOS == "darwin"})
 	s.update = s.updates.View()
 	s.updates.SetListener(func(v updater.View) {
 		mygo.RunOnMain(func() {
@@ -591,7 +661,25 @@ func (s *shell) configureUpdater() {
 	})
 }
 func (s *shell) updateWorker() bool {
+	if !s.awaitStartup() {
+		return false
+	}
 	return runUpdateRequests(s.ctx, s.updateRequests, s.updates.Check,
-		func(ctx context.Context) error { return s.serviceHandoff.install(ctx, s.updates.Install) },
+		func(ctx context.Context) error {
+			return s.serviceHandoff.install(ctx, func(ctx context.Context) error {
+				err := s.updates.Install(ctx)
+				if err == nil && s.updates.PendingGUI() {
+					if ctx.Err() != nil {
+						rollbackErr := s.updates.AbortGUI()
+						if rollbackErr != nil {
+							s.serviceHandoff.recoveryBlocked = true
+						}
+						return errors.Join(ctx.Err(), rollbackErr)
+					}
+					s.serviceHandoff.guiPending = true
+				}
+				return err
+			})
+		},
 		func(err error) { log.Printf("Update: %v", err) })
 }

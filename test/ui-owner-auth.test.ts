@@ -12,6 +12,8 @@ import { startOwnerUiGateway } from '../src/ui-gateway.js';
 import { UiCodec, UiTransport, type UiEnvelope } from '../src/ui-transport.js';
 import type { ProvidersService } from '../src/providers.js';
 import type { SettingsSource } from '../src/ui.js';
+import { UiSessions, uiSessionIdle } from '../src/ui-session-host.js';
+import type { TailnetAccess } from '../src/tailnet.js';
 
 async function stop(server: Server) { server.closeAllConnections(); await new Promise<void>(done => server.close(() => done())); }
 async function fixture(t: TestContext, slowDirectory = false) {
@@ -174,6 +176,80 @@ test('a Host-preserving active relay learns no traffic key and cannot decrypt or
   const forged = { ...operation, request: 'Z'.repeat(32), data: 'A' + operation.data.slice(1) };
   assert.equal((await fetch(origin + '/ui/api/secure', { method: 'POST', headers: { 'x-nootify-ui': '1', 'content-type': 'application/json' }, body: JSON.stringify(forged) })).status, 403);
   assert.equal(f.writes(), 1);
+});
+
+test('closing gateways revokes daemon capabilities and permits more than 32 sequential authorizations', async t => {
+  const f = await fixture(t);
+  for (let index = 0; index < 40; index++) {
+    const g = await startOwnerUiGateway(f.base, f.token);
+    const client = transportFor(g.url);
+    assert.equal((await (await client.fetch('/ui/api/providers')).json()).editable, true);
+    await g.close();
+  }
+  const capability = await requestOwnerUiSession(f.base, f.token);
+  const client = new UiTransport(new URL(f.base).origin, capability);
+  await client.close();
+  const stale = new UiTransport(new URL(f.base).origin, capability);
+  await assert.rejects(stale.fetch('/ui/api/providers'), /authenticated/);
+});
+
+test('abandoned UI sessions reclaim capacity after inactivity', async t => {
+  const sessions = new UiSessions(); const now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  for (let index = 0; index < 32; index++) sessions.create();
+  assert.throws(() => sessions.create(), /Too many/);
+  t.mock.method(Date, 'now', () => now + uiSessionIdle + 1);
+  assert.doesNotThrow(() => sessions.create());
+});
+
+test('authenticated activity refreshes both UI session idle leases', async t => {
+  const f = await fixture(t); const g = await gateway(t, f); const client = transportFor(g.url);
+  const now = Date.now(); let elapsed = 0;
+  t.mock.method(Date, 'now', () => now + elapsed);
+  for (let index = 0; index < 5; index++) {
+    elapsed += 2 * 60_000;
+    assert.equal((await (await client.fetch('/ui/api/providers')).json()).editable, true);
+  }
+});
+
+test('authenticated invalid methods and wrapped import sizes return encrypted errors without breaking either hop', async t => {
+  const f = await fixture(t); const g = await gateway(t, f);
+  const clients = [transportFor(g.url), new UiTransport(new URL(f.base).origin, await requestOwnerUiSession(f.base, f.token))];
+  for (const client of clients) {
+    const unsupported = await client.fetch('/ui/api/providers', { method: 'PATCH', body: '{}' });
+    assert.equal(unsupported.status, 400); assert.match(await unsupported.text(), /Invalid owner UI operation/);
+    // A file can fit the UI file limit while the document/apply wrapper exceeds
+    // the inner request limit. Neither authenticated validation error may revoke.
+    const document = 'x'.repeat(1024 * 1024 - 1);
+    const tooLarge = await client.fetch('/ui/api/settings/import', { method: 'POST', body: JSON.stringify({ document, apply: true }) });
+    assert.equal(tooLarge.status, 400); assert.match(await tooLarge.text(), /Invalid owner UI operation/);
+    assert.equal(client.authorized, true);
+    assert.equal((await (await client.fetch('/ui/api/providers')).json()).editable, true);
+  }
+  assert.equal(f.writes(), 0);
+});
+
+test('Tailnet repository actions reach their authorized listener while anonymous local settings remain protected', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'nootify-tailnet-ui-'));
+  const logs = await EventLog.open(directory); let refreshed = 0; let followed = 0;
+  const tailnet = { authorize: async () => undefined, url: () => 'http://100.64.0.7/' } as unknown as TailnetAccess;
+  const pulls = { refresh: () => { refreshed++; }, setChoice: async () => { followed++; return {}; } } as unknown as import('../src/ui.js').PullsSource;
+  const server = createServiceHost([], 'synthetic-token', logs, { via: 'tailnet', tailnet, pulls });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(async () => { await stop(server); await logs.flush(); await rm(directory, { recursive: true, force: true }); });
+  const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  let requests = 0;
+  const client = new UiTransport('http://100.64.0.7', undefined, (input, init) => {
+    requests++; const url = new URL(String(input));
+    return fetch(base + url.pathname, { ...init, headers: { ...Object.fromEntries(new Headers(init?.headers)), host: url.host } });
+  });
+  assert.equal((await client.fetch('/ui/api/pulls/refresh', { method: 'POST' })).status, 202);
+  assert.equal((await client.fetch('/ui/api/repos', { method: 'POST', body: JSON.stringify({ repository: 'owner/repo', follow: true }) })).status, 200);
+  assert.deepEqual([refreshed, followed, requests], [1, 1, 2]);
+  await assert.rejects(client.fetch('/ui/api/settings/remote', { method: 'POST', body: '{}' }), /authorization/);
+  assert.equal(requests, 2);
+  const local = new UiTransport(base, undefined, () => { throw new Error('Unprivileged local POST must not reach network'); });
+  await assert.rejects(local.fetch('/ui/api/repos', { method: 'POST', body: '{}' }), /authorization/);
 });
 
 test('bootstrap proves ownership on the same TCP connection and never sends a root bearer to an imposter', async t => {

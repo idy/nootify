@@ -95,12 +95,12 @@ test('TCP transport wrappers use flat RPC fields and preserve tunnel IDs separat
   const {client}=await fixture(t,`import {createInterface} from 'node:readline';
 const input=createInterface({input:process.stdin});const requests=[];
 input.on('line',line=>{const req=JSON.parse(line);requests.push(req);
-const result=req.method==='tunnel'?{id:'tunnel-1',address:'127.0.0.1:43210'}:req.method==='publish'?{port:req.port}:req.method==='status'?requests:{ok:true};
+const result=req.method==='tunnel'?{id:'tunnel-1',address:'127.0.0.1:43210',token:'a'.repeat(64)}:req.method==='publish'?{port:req.port}:req.method==='status'?requests:{ok:true};
 setTimeout(()=>process.stdout.write(JSON.stringify({id:req.id,result})+'\\n'),req.method==='tunnel'?10:0);});
 input.on('close',()=>process.exit());`);
   await client.start('tcp://127.0.0.1:12345',()=>{});
   const [tunnel,publication]=await Promise.all([client.tunnel('[fd7a:115c:a1e0::2]:7443'),client.publish(7443,'127.0.0.1:54321')]);
-  assert.deepEqual(tunnel,{id:'tunnel-1',address:'127.0.0.1:43210'});
+  assert.deepEqual(tunnel,{id:'tunnel-1',address:'127.0.0.1:43210',token:'a'.repeat(64)});
   assert.deepEqual(publication,{port:7443});
   assert.equal(await client.closeTunnel(tunnel.id),undefined);
   assert.equal(await client.unpublish(publication.port),undefined);
@@ -111,6 +111,15 @@ input.on('close',()=>process.exit());`);
     {id:4,method:'unpublish',port:7443},
     {id:5,method:'status'},
   ]);
+});
+
+test('tunnel leases reject missing malformed and uppercase authentication tokens without exposing helper data', async t => {
+  const {client}=await fixture(t,`import {createInterface} from 'node:readline';const input=createInterface({input:process.stdin});
+const tokens=[undefined,'private-secret-value','A'.repeat(64),'b'.repeat(64)];
+input.on('line',line=>{const req=JSON.parse(line);const result={id:'lease',address:'127.0.0.1:43210',token:tokens.shift()};process.stdout.write(JSON.stringify({id:req.id,result})+'\\n');});input.on('close',()=>process.exit());`);
+  await client.start('tcp://127.0.0.1:12345',()=>{});
+  for(let i=0;i<3;i++)await assert.rejects(client.tunnel('100.64.0.2:7443'),{message:'embedded_protocol_error'});
+  assert.equal((await client.tunnel('100.64.0.2:7443')).token,'b'.repeat(64));
 });
 
 test('TCP transport errors preserve fixed codes and redact arbitrary helper text', async t => {

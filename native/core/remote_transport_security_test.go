@@ -93,6 +93,7 @@ func TestRemotePlaintextCredentialsRejectGenericLoopbackForward(t *testing.T) {
 func TestRemotePlaintextUsesMatchingPrivateEmbeddedBridge(t *testing.T) {
 	upstream := testCore(t, nil)
 	address, token := testServer(t, upstream)
+	bridge := testAuthenticatedTunnelBridge(t, address)
 	var downstream *Core
 	var requests atomic.Int32
 	downstream = testCore(t, func(name string, data any) error {
@@ -105,7 +106,7 @@ func TestRemotePlaintextUsesMatchingPrivateEmbeddedBridge(t *testing.T) {
 			t.Error("bridge target was not preserved")
 			return errors.New("wrong synthetic bridge target")
 		}
-		return downstream.completeDial(request["request_id"].(string), address, "")
+		return downstream.completeDial(request["request_id"].(string), bridge, "", fixtureTunnelToken)
 	})
 	must(t, downstream.store.Update(func(d *State) error { d.Tailnet = true; return nil }))
 	p := newRemoteProvider(downstream, ProviderConfig{ID: "bridge", Name: "Bridge", Address: "peer.example.ts.net:9418", Token: token})
@@ -228,8 +229,13 @@ func TestRemoteKnownSuccessSurvivesCommittedReferenceWarning(t *testing.T) {
 	downstream.store.mu.Lock()
 	original := downstream.store.syncDirectory
 	var syncs atomic.Int32
+	var injected atomic.Bool
 	downstream.store.syncDirectory = func(dir string) error {
-		if syncs.Add(1) == 2 {
+		syncs.Add(1)
+		// The store lock is held and its replacement has been published.
+		// Target the first retained remote result, not an ordinal write:
+		// retryable proof and pending admission both precede this boundary.
+		if len(downstream.store.state.References) > 0 && injected.CompareAndSwap(false, true) {
 			return errors.New("synthetic remember directory sync failure")
 		}
 		return original(dir)
@@ -240,8 +246,8 @@ func TestRemoteKnownSuccessSurvivesCommittedReferenceWarning(t *testing.T) {
 	downstream.store.syncDirectory = original
 	downstream.store.mu.Unlock()
 	must(t, err)
-	if syncs.Load() < 3 {
-		t.Fatal("test did not exercise operation admission, remote remember, and root result persistence")
+	if !injected.Load() || syncs.Load() < 4 {
+		t.Fatal("test did not exercise retryable proof, pending admission, remote remember, and root result persistence")
 	}
 	key := "send:" + session.key() + ":known-result"
 	if op := downstream.store.Snapshot().Operations[key]; op.State != "complete" {

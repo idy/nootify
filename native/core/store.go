@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -42,6 +43,7 @@ type Store struct {
 	clock             func() time.Time
 	syncDirectory     func(string) error
 	durabilityPending bool
+	undispatched      map[string]func(*State) error
 }
 
 func OpenStore(dir string) (*Store, error) {
@@ -185,6 +187,9 @@ func (s *Store) Snapshot() State { s.mu.Lock(); defer s.mu.Unlock(); return clon
 func (s *Store) DurableSnapshot() (State, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.flushUndispatchedLocked(); err != nil && !stateCommitted(err) {
+		return State{}, err
+	}
 	if s.durabilityPending {
 		if err := s.syncDirectory(s.dir); err != nil {
 			return State{}, &committedStateError{cause: err}
@@ -203,6 +208,15 @@ func (s *Store) DurableSnapshot() (State, error) {
 func (s *Store) Update(fn func(*State) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.flushUndispatchedLocked(); err != nil {
+		// This transaction's callback has not run. Do not let a committed
+		// repair warning falsely report that its caller's mutation committed.
+		return undispatchedFlushError(err)
+	}
+	return s.updateLocked(fn)
+}
+
+func (s *Store) updateLocked(fn func(*State) error) error {
 	n := cloneState(s.state)
 	at := s.clock().UnixNano()
 	n.Retention.at = at
@@ -258,11 +272,65 @@ func (s *Store) Update(fn func(*State) error) error {
 	return nil
 }
 
-// Sync retries the durability barrier for the current committed state, without
-// rerunning a business mutation, issuing a provider call, or changing a cursor.
+// RepairUndispatched records proof owned by the current process that a side
+// effect was never invoked. A failed repair stays queued until a later write,
+// admission, durability retry, or orderly close can persist it. Callbacks only
+// repair their exact pending record; they must not invoke providers or Store.
+// An unwriteable filesystem plus a forced crash remains conservatively unknown.
+func (s *Store) RepairUndispatched(key string, fn func(*State) error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.undispatched == nil {
+		s.undispatched = map[string]func(*State) error{}
+	}
+	if _, exists := s.undispatched[key]; !exists && len(s.undispatched) >= 2*maxRecords {
+		return fault("resource_exhausted", "too many undispatched state repairs")
+	}
+	s.undispatched[key] = fn
+	return s.flushUndispatchedLocked()
+}
+
+func (s *Store) FlushUndispatched() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.flushUndispatchedLocked()
+}
+
+func (s *Store) flushUndispatchedLocked() error {
+	if len(s.undispatched) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(s.undispatched))
+	for key := range s.undispatched {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	err := s.updateLocked(func(d *State) error {
+		for _, key := range keys {
+			if err := s.undispatched[key](d); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if stateCommitted(err) {
+		// A post-rename warning still published the repair. Sync tracks its
+		// remaining durability barrier; never reapply it over a later send.
+		for _, key := range keys {
+			delete(s.undispatched, key)
+		}
+	}
+	return err
+}
+
+// Sync retries queued no-submission proofs and the current durability barrier,
+// without issuing a provider call or changing a business cursor.
 func (s *Store) Sync() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.flushUndispatchedLocked(); err != nil && !stateCommitted(err) {
+		return err
+	}
 	if err := s.syncDirectory(s.dir); err != nil {
 		s.durabilityPending = true
 		return &committedStateError{cause: err}
@@ -271,4 +339,7 @@ func (s *Store) Sync() error {
 	return nil
 }
 
-func (s *Store) Close() error { return s.lock.Unlock() }
+func (s *Store) Close() error {
+	err := s.FlushUndispatched()
+	return errors.Join(err, s.lock.Unlock())
+}

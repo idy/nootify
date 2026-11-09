@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"net"
 	"net/netip"
@@ -26,6 +28,14 @@ const (
 	maxBridgeConnections      = 16
 	sharedBurstConnections    = maxRawConnections - (maxTunnels+maxPublications)*reservedBridgeConnections
 
+	// Pending local authentication never borrows authenticated bridge capacity.
+	// Per-tunnel admission isolates unrelated tunnels and bounds the helper to
+	// 64 pending handshakes across its 32 possible tunnel allocations.
+	maxPendingTunnelHandshakes = 2
+	tunnelHandshakeTimeout     = 3 * time.Second
+	tunnelHandshakePrefix      = "NOOTIFY-TUNNEL/1 "
+	tunnelTokenBytes           = 32
+
 	publicationRetryMin = 100 * time.Millisecond
 	publicationRetryMax = 5 * time.Second
 )
@@ -33,6 +43,7 @@ const (
 type tunnelResult struct {
 	ID      string `json:"id"`
 	Address string `json:"address"`
+	Token   string `json:"token"` // capability passed only over private stdio IPC
 }
 
 type publishResult struct {
@@ -90,12 +101,14 @@ func validateLoopbackAddress(raw string) (string, error) {
 func publicationPort(port int) bool { return port > 0 && port <= 65535 && port != 80 }
 
 type tcpBridge struct {
-	id     string
-	port   int
-	ctx    context.Context
-	cancel context.CancelFunc
-	done   chan struct{}
-	limit  connectionLimit
+	id      string
+	port    int
+	ctx     context.Context
+	cancel  context.CancelFunc
+	done    chan struct{}
+	limit   connectionLimit
+	token   string
+	pending chan struct{}
 }
 
 // A publication belongs to its bridge until unpublish or service shutdown. A
@@ -244,6 +257,10 @@ func (m *tcpTransport) reserve(ctx context.Context, port int) (*tcpBridge, error
 		},
 	}
 	if port == 0 {
+		var token [tunnelTokenBytes]byte
+		rand.Read(token[:])
+		b.token = hex.EncodeToString(token[:])
+		b.pending = make(chan struct{}, maxPendingTunnelHandshakes)
 		m.sequence++
 		b.id = strconv.FormatUint(m.sequence, 10)
 		m.tunnels[b.id] = b
@@ -299,6 +316,8 @@ func (m *tcpTransport) start(ctx context.Context, b *tcpBridge, target string) (
 	f.limit = b.limit
 	if b.port == 0 {
 		f.dial = m.dial
+		f.token = b.token
+		f.pending = b.pending
 	}
 	go func() {
 		// Publications recover Accept failures without ending serve. Cancellation
@@ -325,7 +344,7 @@ func (m *tcpTransport) dispatch(ctx context.Context, req request) response {
 		if err != nil {
 			return failure(req.ID, err.Error())
 		}
-		return response{ID: req.ID, Result: tunnelResult{ID: b.id, Address: listener.Addr().String()}}
+		return response{ID: req.ID, Result: tunnelResult{ID: b.id, Address: listener.Addr().String(), Token: b.token}}
 	case "publish":
 		if !publicationPort(req.Port) {
 			return failure(req.ID, "invalid_port")
