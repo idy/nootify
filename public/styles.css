@@ -25,6 +25,8 @@
   --check-line: #868690;
   --titlebar-height: 52px;
   --page-gutter: 22px;
+  --content-width: 960px;
+  --content-gutter: max(var(--page-gutter), calc((100% - var(--content-width)) / 2));
   --section-gap: 12px;
   --panel-inset: 16px;
   --font-code: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
@@ -116,7 +118,7 @@ svg { flex: none; }
 .dot.error { background: var(--red); }
 
 .content { container: shell / inline-size; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-.titlebar { position: relative; display: flex; flex: none; align-items: center; gap: 16px; height: var(--titlebar-height); padding: 0 var(--page-gutter); user-select: none; }
+.titlebar { position: relative; display: flex; flex: none; align-items: center; gap: 16px; height: var(--titlebar-height); padding: 0 var(--content-gutter); user-select: none; }
 .crumbs { display: flex; align-items: baseline; gap: 8px; min-width: 0; color: var(--muted); font-size: var(--type-body); line-height: 22px; white-space: nowrap; }
 .crumbs > span { flex: none; }
 .crumbs strong { min-width: 0; overflow: hidden; color: var(--text); font-size: var(--type-heading); font-weight: 600; text-overflow: ellipsis; }
@@ -136,8 +138,8 @@ svg { flex: none; }
 .icon-button svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 .icon-button.busy svg { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
-.view { container: workspace / inline-size; flex: 1; min-height: 0; overflow: auto; padding: 2px var(--page-gutter) 24px; }
-.banner { margin: 0 var(--page-gutter) var(--section-gap); padding: 9px 12px; border: 1px solid var(--banner-line); border-radius: 8px; background: var(--banner-bg); color: var(--banner-text); font-size: var(--type-body); }
+.view { container: workspace / inline-size; flex: 1; min-height: 0; overflow: auto; padding: 2px var(--content-gutter) 24px; }
+.banner { margin: 0 var(--content-gutter) var(--section-gap); padding: 9px 12px; border: 1px solid var(--banner-line); border-radius: 8px; background: var(--banner-bg); color: var(--banner-text); font-size: var(--type-body); }
 .view .banner { margin: 0 0 12px; }
 
 /* List filters sit above their card, separate from titlebar actions. */
@@ -208,7 +210,6 @@ a.row:hover, button.row:hover { background: var(--hover); }
 .check:checked::after { opacity: 1; }
 .check:disabled { opacity: .5; cursor: progress; }
 label.row { cursor: pointer; }
-label.row:hover { background: var(--hover); }
 .inline-link { margin-left: 6px; color: var(--blue); }
 /* Row details line up with the title after the checkbox. */
 .agent-extra { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; padding: 0 16px 11px 48px; }
@@ -295,9 +296,9 @@ label.row:hover { background: var(--hover); }
 .providers-toolbar .setting-sub { margin: 0; }
 #provider-add { gap: 6px; margin-left: -10px; }
 #provider-add svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
-.provider-card-list { display: grid; gap: 12px; max-width: 960px; }
+.provider-card-list { display: grid; gap: 12px; max-width: var(--content-width); }
+.provider-card-list:empty { display: none; }
 .provider-card { min-width: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
-.provider-list-empty { max-width: 960px; padding: 36px 16px; }
 .provider-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 12px 16px; padding: 16px; }
 .provider-row-title { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; min-width: 0; }
 .provider-row-title .setting-title { overflow-wrap: anywhere; }

@@ -88,8 +88,10 @@
     <div id="providers-banner" class="banner" role="alert" hidden></div>
     <div id="providers-readonly" class="banner note" role="status" hidden data-i18n="只能查看连接状态；请在运行 Nootify 的电脑上修改接入和密钥。">只能查看连接状态；请在运行 Nootify 的电脑上修改接入和密钥。</div>
     <div class="providers-toolbar"><button type="button" id="provider-add" class="text-button primary" aria-haspopup="dialog" aria-controls="provider-dialog" disabled><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg><span data-i18n="添加 Provider">添加 Provider</span></button><div id="providers-summary" class="setting-sub" role="status" aria-live="polite"></div><button type="button" id="providers-retry" class="text-button" data-i18n="重试" hidden>重试</button></div>
-    <div id="provider-rows" class="provider-card-list" role="list" aria-label="Providers"></div>
-    <div id="providers-empty" class="empty provider-list-empty" hidden><strong data-i18n="还没有 Provider">还没有 Provider</strong><span data-i18n="添加飞书应用，或连接另一台 Nootify。">添加飞书应用，或连接另一台 Nootify。</span></div>
+    <div class="provider-card-list">
+      <div id="provider-rows" class="provider-card-list" role="list" aria-label="Providers"></div>
+      <div id="providers-empty" class="provider-card empty" hidden><strong data-i18n="还没有 Provider">还没有 Provider</strong><span data-i18n="添加飞书应用，或连接另一台 Nootify。">添加飞书应用，或连接另一台 Nootify。</span></div>
+    </div>
     <dialog id="provider-dialog" class="recipient-dialog provider-dialog" aria-labelledby="provider-editor-title" aria-describedby="provider-editor-status">
       <div class="recipient-dialog-head provider-dialog-head"><button type="button" id="provider-back" class="icon-button" aria-label="返回接入类型" title="返回接入类型" data-i18n-aria-label="返回接入类型" data-i18n-title="返回接入类型" hidden><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m9 3-5 5 5 5M4 8h9"/></svg></button><div><h2 id="provider-editor-title"></h2><p id="provider-editor-status"></p></div><button type="button" id="provider-dialog-close" class="icon-button" aria-label="关闭" data-i18n-aria-label="关闭"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8"/></svg></button></div>
       <div id="provider-chooser">
