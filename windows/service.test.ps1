@@ -140,6 +140,56 @@ $ServerPath = 'C:\Nootify Test\server.js'
 $StateDir = 'C:\Nootify Test\state'
 $McpConfig = "C:\Users\O'Brien\MCP settings.json"
 $Port = 9517
+
+# Reproduce NSIS's native System.dll collision without launching an installer or
+# touching any task, state, job or service. Separate logical/process directories
+# ensure the importer cannot accidentally fix one by silently changing the other.
+$compilerFixture = Join-Path ([IO.Path]::GetTempPath()) ('nootify-compiler-shadow-' + [guid]::NewGuid().ToString('N'))
+$compilerLocation = Get-Location
+$compilerCurrentDirectory = [Environment]::CurrentDirectory
+$compilerScriptPath = $scriptPath
+try {
+    $null = New-Item -ItemType Directory -Path $compilerFixture
+    $logicalDirectory = Join-Path $compilerFixture 'PowerShell location'
+    $processDirectory = Join-Path $compilerFixture 'process working directory'
+    $brokenDirectory = Join-Path $compilerFixture 'invalid CSharp source'
+    foreach ($directory in @($logicalDirectory, $processDirectory, $brokenDirectory)) {
+        $null = New-Item -ItemType Directory -Path $directory
+    }
+    $nativeLibrary = Join-Path $env:SystemRoot 'System32\kernel32.dll'
+    foreach ($directory in @($logicalDirectory, $processDirectory)) {
+        Copy-Item -LiteralPath $nativeLibrary -Destination (Join-Path $directory 'System.dll')
+    }
+    Set-Location -LiteralPath $logicalDirectory
+    [Environment]::CurrentDirectory = $processDirectory
+    $expectedLocation = (Get-Location).ProviderPath
+    $expectedCurrentDirectory = [Environment]::CurrentDirectory
+
+    Must-Fail {
+        Add-Type -LiteralPath (Join-Path (Split-Path -Parent $compilerScriptPath) 'service-runner.cs')
+    } 'The old importer must fail when a native System.dll shadows its framework reference'
+    Assert (!('Nootify.ServiceJob' -as [type])) 'The negative control must not load the production service types'
+    Set-Location -LiteralPath $logicalDirectory
+    [Environment]::CurrentDirectory = $processDirectory
+
+    [IO.File]::WriteAllText((Join-Path $brokenDirectory 'service-runner.cs'), 'public class InvalidCompilerFixture { this is deliberately invalid CSharp; }')
+    $scriptPath = Join-Path $brokenDirectory 'service.ps1'
+    Must-Fail { Import-ServiceRunner } 'The isolated compiler must still report invalid source as a failure'
+    Assert ((Get-Location).ProviderPath -ceq $expectedLocation) 'A failed import must preserve the PowerShell location'
+    Assert ([Environment]::CurrentDirectory -ceq $expectedCurrentDirectory) 'A failed import must preserve the process working directory'
+
+    $scriptPath = $compilerScriptPath
+    Import-ServiceRunner
+    Assert ([bool]('Nootify.ServiceJob' -as [type])) 'Explicit framework references must compile the production service types beside a native System.dll'
+    Assert ((Get-Location).ProviderPath -ceq $expectedLocation) 'A successful import must preserve the PowerShell location'
+    Assert ([Environment]::CurrentDirectory -ceq $expectedCurrentDirectory) 'A successful import must preserve the process working directory'
+} finally {
+    $scriptPath = $compilerScriptPath
+    Set-Location -LiteralPath $compilerLocation.ProviderPath
+    [Environment]::CurrentDirectory = $compilerCurrentDirectory
+    if (Test-Path -LiteralPath $compilerFixture) { Remove-Item -LiteralPath $compilerFixture -Recurse -Force }
+}
+
 $record = [pscustomobject]@{ version = 1; sid = $ownerSid; script = $scriptPath; node = $NodePath; server = $ServerPath; state = $StateDir; port = $Port; mcp = $McpConfig }
 $entry = [pscustomobject]@{ Type = 0; Path = $powerShell; Arguments = (Run-Arguments $record); WorkingDirectory = $StateDir }
 $actions = [pscustomobject]@{ Count = 1; Entry = $entry }

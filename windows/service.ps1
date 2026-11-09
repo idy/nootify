@@ -160,9 +160,22 @@ function New-ServiceTask {
     return $scheduler.GetFolder('\').RegisterTaskDefinition($taskName, $definition, 2, $ownerSid, $null, 3, $null)
 }
 function Import-ServiceRunner {
-    # Use the verified entry script path: extracted function scriptblocks have no PSScriptRoot.
-    # Only System.dll/mscorlib types are used, including on Windows PowerShell 5.1.
-    if (!('Nootify.ServiceJob' -as [type])) { Add-Type -LiteralPath (Join-Path (Split-Path -Parent (Full-Path $scriptPath)) 'service-runner.cs') }
+    if (!('Nootify.ServiceJob' -as [type])) {
+        # NSIS's working directory contains its native System.dll plug-in. Default
+        # Add-Type references probe that directory before the framework directory.
+        # CompilerParameters are passed unchanged, without bare default references;
+        # neither PowerShell's location nor the process working directory is changed.
+        $framework = [Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()
+        $compiler = [CodeDom.Compiler.CompilerParameters]::new()
+        $compiler.GenerateInMemory = $true
+        $compiler.CompilerOptions = '/nostdlib+'
+        foreach ($assembly in @('mscorlib.dll', 'System.dll', 'System.Core.dll')) {
+            $null = $compiler.ReferencedAssemblies.Add((Join-Path $framework $assembly))
+        }
+        $null = $compiler.ReferencedAssemblies.Add([Management.Automation.PSObject].Assembly.Location)
+        # Use the verified entry script path: extracted functions have no PSScriptRoot.
+        Add-Type -LiteralPath (Join-Path (Split-Path -Parent (Full-Path $scriptPath)) 'service-runner.cs') -CompilerParameters $compiler
+    }
 }
 function Get-BootSequence { return [Nootify.ServiceJob]::ReadBootSequence() }
 function Get-TerminalSessionId { return [Nootify.ServiceJob]::ReadTerminalSessionId() }

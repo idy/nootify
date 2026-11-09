@@ -54,13 +54,17 @@ func runHidden(d *diagnostics, phase, file string, arguments ...string) ([]byte,
 func runHiddenContext(ctx context.Context, d *diagnostics, phase, file string, arguments ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, file, arguments...)
 	cmd.Env = installerEnvironment()
-	hideWindow(cmd)
+	configurationError := configureCommand(cmd)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	// Child output is never diagnostic data. Keep only process exit/deadline and
 	// numeric OS failure facts; preserve the existing public failure message.
 	d.record(phase, "command", "begin", "", nil, nil)
-	if err := cmd.Run(); err != nil {
+	err := configurationError
+	if err == nil {
+		err = cmd.Run()
+	}
+	if err != nil {
 		failure := commandOutput(stdout.Bytes())
 		failure.timedOut = errors.Is(ctx.Err(), context.DeadlineExceeded)
 		if cmd.ProcessState != nil {

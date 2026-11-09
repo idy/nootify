@@ -23,8 +23,18 @@ func lockTransaction() (func(), error) {
 	return func() { syscall.CloseHandle(syscall.Handle(handle)) }, nil
 }
 
-func hideWindow(cmd *exec.Cmd) {
+func configureCommand(cmd *exec.Cmd) error {
+	// NSIS runs from its plugin directory, which contains a native System.dll.
+	// Legacy PowerShell Add-Type resolves bare framework references from CWD.
+	// Use the OS system directory, independent of inherited environment values.
+	var directory [32768]uint16
+	length, _, _ := kernel32.NewProc("GetSystemDirectoryW").Call(uintptr(unsafe.Pointer(&directory[0])), uintptr(len(directory)))
+	if length == 0 || length >= uintptr(len(directory)) {
+		return errors.New("cannot resolve the Windows system command directory")
+	}
+	cmd.Dir = syscall.UTF16ToString(directory[:length])
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
+	return nil
 }
 
 func move(source, destination string, flags uintptr) error {

@@ -66,8 +66,23 @@
     ; The CLI allows 150 seconds for serialized service management. Give it
     ; time to report failure itself before aborting replacement/deletion.
     !insertmacro NootifyInstallerTrace "manage ${COMMAND}: invoking CLI"
+    ; Legacy service scripts compile C# using bare framework assembly names.
+    ; Never inherit $PLUGINSDIR: its native System.dll shadows the .NET DLL.
+    Push $R8
+    StrCpy $R8 "$OUTDIR"
+    ClearErrors
+    SetOutPath "$SYSDIR"
+    ${If} ${Errors}
+      SetOutPath "$R8"
+      Pop $R8
+      Pop $0
+      SetErrorLevel 1
+      Abort "Unable to select a safe service command directory. Installed files are unchanged."
+    ${EndIf}
     nsExec::ExecToLog /TIMEOUT=160000 '"$INSTDIR\node.exe" "$INSTDIR\service\dist\src\cli.js" ${COMMAND}'
     Pop $0
+    SetOutPath "$R8"
+    Pop $R8
     !insertmacro NootifyInstallerTrace "manage ${COMMAND}: result=$0"
     ${If} $0 != 0
       DetailPrint "Nootify ${COMMAND} failed ($0). Installed files have not been replaced or removed."

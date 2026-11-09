@@ -140,8 +140,11 @@ const clean = {};
 for (const name of ['NODE_OPTIONS', 'NODE_PATH', 'NODE_EXTRA_CA_CERTS', 'NODE_ICU_DATA']) {
   clean[name] = !process.env[name];
 }
-fs.appendFileSync(path.resolve(__dirname, '../../..', 'calls.jsonl'), JSON.stringify({ command, clean }) + '\n');
-if (Object.values(clean).some(value => !value)) { process.exitCode = 10; }
+const windows = process.env.SystemRoot || process.env.SYSTEMROOT;
+const safeWorkingDirectory = !!windows && ['System32', 'SysWOW64'].some(directory =>
+  path.resolve(windows, directory).toLowerCase() === path.resolve(process.cwd()).toLowerCase());
+fs.appendFileSync(path.resolve(__dirname, '../../..', 'calls.jsonl'), JSON.stringify({ command, clean, safe_working_directory: safeWorkingDirectory }) + '\n');
+if (Object.values(clean).some(value => !value) || !safeWorkingDirectory) { process.exitCode = 10; }
 '@
     foreach ($diagnostics in @($true, $false)) {
         $variant = $(if ($diagnostics) { 'diagnostic' } else { 'production' })
@@ -192,6 +195,7 @@ if (Object.values(clean).some(value => !value)) { process.exitCode = 10; }
                     throw "$label recorded unexpected CLI commands"
                 }
                 foreach ($call in $calls) {
+                    if ($call.safe_working_directory -ne $true) { throw "$label inherited an unsafe installer plugin directory" }
                     foreach ($name in $startupVariables) {
                         if ($call.clean.$name -ne $true) { throw "$label inherited a Node startup variable" }
                     }
