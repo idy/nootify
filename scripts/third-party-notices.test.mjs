@@ -1,11 +1,9 @@
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import test from 'node:test';
-import { cratesFromMetadata, npmPackages, renderNotices, SPDX_LICENSE_LIST, spdxIds } from './third-party-notices.mjs';
-
-const CRATES_IO = 'registry+https://github.com/rust-lang/crates.io-index';
+import { goModules, modulesFromGoList, npmPackages, renderNotices, SPDX_LICENSE_LIST, spdxIds } from './third-party-notices.mjs';
 
 async function fixture(files) {
   const dir = await mkdtemp(join(tmpdir(), 'nootify-notices-'));
@@ -16,8 +14,8 @@ async function fixture(files) {
   return dir;
 }
 
-function crate(dir, name, fields = {}) {
-  return { kind: 'Rust crate', name, version: '1.0.0', license: 'MIT', authors: [], dir: join(dir, name), source: `https://crates.io/crates/${name}/1.0.0`, ...fields };
+function module(dir, name, fields = {}) {
+  return { kind: 'Go module', name, version: '1.0.0', license: 'MIT', authors: [], dir: join(dir, name), source: `https://example.com/${name}/1.0.0`, ...fields };
 }
 
 test('SPDX expressions and legacy slash lists name each license and exception once', () => {
@@ -27,26 +25,47 @@ test('SPDX expressions and legacy slash lists name each license and exception on
   assert.deepEqual(spdxIds('Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT'), ['Apache-2.0', 'LLVM-exception', 'MIT']);
 });
 
-test('crates come from normal and build dependencies of the app, not dev-dependencies or local paths', () => {
-  const pkg = (id, source = CRATES_IO) => ({ id, name: id, version: '1.0.0', license: 'MIT', license_file: null, authors: [], source, manifest_path: `/registry/${id}/Cargo.toml` });
-  const dep = (id, ...kinds) => ({ pkg: id, dep_kinds: kinds.map(kind => ({ kind, target: null })) });
-  const metadata = {
-    packages: [pkg('app', null), pkg('normal'), pkg('build'), pkg('dev'), pkg('dev-only-child'), pkg('local', null), pkg('git', 'git+https://example.com/git?rev=1#abc'), pkg('both')],
-    resolve: {
-      root: 'app',
-      nodes: [
-        { id: 'app', deps: [dep('normal', null), dep('build', 'build'), dep('dev', 'dev'), dep('local', null), dep('both', 'dev', 'build')] },
-        { id: 'normal', deps: [dep('git', null)] },
-        { id: 'build', deps: [] }, { id: 'dev', deps: [dep('dev-only-child', null)] }, { id: 'dev-only-child', deps: [] },
-        { id: 'local', deps: [] }, { id: 'git', deps: [] }, { id: 'both', deps: [] },
-      ],
-    },
-  };
-  const crates = cratesFromMetadata(metadata);
-  assert.deepEqual(crates.map(({ name }) => name).sort(), ['both', 'build', 'git', 'normal']);
-  assert.equal(crates.find(({ name }) => name === 'normal').source, 'https://crates.io/crates/normal/1.0.0');
-  assert.equal(crates.find(({ name }) => name === 'git').source, 'git+https://example.com/git?rev=1#abc');
-  assert.equal(crates.find(({ name }) => name === 'normal').dir, '/registry/normal');
+test('Go module attribution uses linked dependencies, deduplicates and excludes local modules', () => {
+  const modules = modulesFromGoList([
+    'github.com/idy/nootify/desktop\t\t/work/desktop',
+    'github.com/egoist/mygo\tv0.8.3\t/cache/mygo',
+    'github.com/egoist/mygo\tv0.8.3\t/cache/mygo',
+    'golang.org/x/sys\tv0.48.0\t/cache/sys', '',
+  ].join('\n'));
+  assert.deepEqual(modules.map(({ name }) => name), ['github.com/egoist/mygo', 'golang.org/x/sys']);
+  assert.equal(modules[0].kind, 'Go module');
+  assert.equal(modules[0].version, 'v0.8.3');
+  assert.equal(modules[0].dir, '/cache/mygo');
+  assert.equal(modules[0].source, 'https://github.com/egoist/mygo');
+});
+
+test('runtime attribution queries each build module and reproduces every selected toolchain license', async () => {
+  const dir = await fixture({ 'go127/LICENSE': 'Go 1.27 runtime license', 'go128/LICENSE': 'Go 1.28 runtime license' });
+  try {
+    const calls = [];
+    const components = await goModules({ goos: 'windows', goarch: 'amd64' }, async (command, args, options) => {
+      assert.equal(command, 'go');
+      const module = basename(options.cwd);
+      assert.ok(['desktop', 'core', 'tailscale', 'installer-stage'].includes(module), 'root-level toolchain selection must never be used');
+      assert.equal(options.env.GOOS, 'windows'); assert.equal(options.env.GOARCH, 'amd64'); assert.equal(options.env.CGO_ENABLED, '0');
+      calls.push([module, args[0]]);
+      if (args[0] === 'list') return { stdout: 'example.com/shared\tv1.0.0\t/module-cache/shared\n' };
+      assert.deepEqual(args, ['env', '-json', 'GOROOT', 'GOVERSION']);
+      return { stdout: JSON.stringify(module === 'core'
+        ? { GOROOT: join(dir, 'go128'), GOVERSION: 'go1.28.1' }
+        : { GOROOT: join(dir, 'go127'), GOVERSION: 'go1.27.3' }) };
+    });
+    assert.equal(calls.length, 8);
+    for (const module of ['desktop', 'core', 'tailscale', 'installer-stage']) assert.deepEqual(calls.filter(([name]) => name === module).map(([, method]) => method).sort(), ['env', 'list']);
+    const runtimes = components.filter(component => component.kind === 'Go runtime');
+    assert.deepEqual(runtimes.map(component => component.version), ['go1.27.3', 'go1.28.1']);
+    assert.deepEqual(runtimes[0].executables, ['Nootify', 'nootify-tsnet', 'nootify-installer-stage']);
+    assert.deepEqual(runtimes[1].executables, ['nootify-core']);
+    assert.equal(components.filter(component => component.kind === 'Go module').length, 1, 'shared dependencies remain deduplicated');
+    const notices = await renderNotices('x86_64-pc-windows-msvc', runtimes, []);
+    assert.match(notices, /Go standard library go1\.27\.3[\s\S]*Built into: Nootify, nootify-tsnet[\s\S]*Go 1\.27 runtime license/);
+    assert.match(notices, /Go standard library go1\.28\.1[\s\S]*Built into: nootify-core[\s\S]*Go 1\.28 runtime license/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
 test('notices reproduce shipped license files and fall back to SPDX texts of declared licenses', async () => {
@@ -59,22 +78,22 @@ test('notices reproduce shipped license files and fall back to SPDX texts of dec
     'node_modules/see-file/package.json': { name: 'see-file', version: '1.0.0', license: 'SEE LICENSE IN terms/EULA.txt' },
     'node_modules/see-file/terms/EULA.txt': 'EULA text of see-file',
     'node_modules/.bin/ignored': '',
-    'crates/dual/LICENSE-APACHE': 'Apache text of dual',
-    'crates/dual/LICENSE-MIT': 'MIT text of dual',
-    'crates/dual/README.md': 'not a license',
-    'crates/declared/licenses/LICENSE.txt': 'license-file text',
+    'modules/dual/LICENSE-APACHE': 'Apache text of dual',
+    'modules/dual/LICENSE-MIT': 'MIT text of dual',
+    'modules/dual/README.md': 'not a license',
+    'modules/declared/licenses/LICENSE.txt': 'license-file text',
   });
   try {
-    const crates = [crate(join(dir, 'crates'), 'dual', { license: 'MIT OR Apache-2.0' }), crate(join(dir, 'crates'), 'declared', { license: undefined, licenseFile: 'licenses/LICENSE.txt' })];
+    const modules = [module(join(dir, 'modules'), 'dual', { license: 'MIT OR Apache-2.0' }), module(join(dir, 'modules'), 'declared', { license: undefined, licenseFile: 'licenses/LICENSE.txt' })];
     const packages = await npmPackages(join(dir, 'node_modules'));
     assert.deepEqual(packages.map(({ name }) => name).sort(), ['@scope/no-file', 'nested', 'see-file', 'with-file']);
-    const notices = await renderNotices('aarch64-apple-darwin', crates, packages);
-    assert.match(notices, /- 2 Rust crates that Cargo builds for the desktop app \(aarch64-apple-darwin\)/);
+    const notices = await renderNotices('aarch64-apple-darwin', modules, packages);
+    assert.match(notices, /- 2 Go runtime\/modules linked into the desktop app, notification core/);
     assert.match(notices, /- 4 npm packages in service\/node_modules/);
     assert.match(notices, /npm package: see-file 1\.0\.0\nLicense: SEE LICENSE IN terms\/EULA\.txt\n.*\n\n--- terms\/EULA\.txt ---\n\nEULA text of see-file\n/);
-    assert.ok(notices.indexOf('Rust crate: declared 1.0.0') < notices.indexOf('Rust crate: dual 1.0.0'));
-    assert.ok(notices.indexOf('Rust crate: dual 1.0.0') < notices.indexOf('npm package: @scope/no-file 3.0.0'));
-    assert.match(notices, /Rust crate: dual 1\.0\.0\nLicense: MIT OR Apache-2\.0\nSource: https:\/\/crates\.io\/crates\/dual\/1\.0\.0\n\n--- LICENSE-APACHE ---\n\nApache text of dual\n\n--- LICENSE-MIT ---\n\nMIT text of dual\n/);
+    assert.ok(notices.indexOf('Go module: declared 1.0.0') < notices.indexOf('Go module: dual 1.0.0'));
+    assert.ok(notices.indexOf('Go module: dual 1.0.0') < notices.indexOf('npm package: @scope/no-file 3.0.0'));
+    assert.match(notices, /Go module: dual 1\.0\.0\nLicense: MIT OR Apache-2\.0\nSource: https:\/\/example\.com\/dual\/1\.0\.0\n\n--- LICENSE-APACHE ---\n\nApache text of dual\n\n--- LICENSE-MIT ---\n\nMIT text of dual\n/);
     assert.match(notices, /License: not declared\n.*\n\n--- licenses\/LICENSE\.txt ---\n\nlicense-file text\n/);
     assert.match(notices, /npm package: with-file 2\.0\.0\nLicense: MIT\nSource: https:\/\/www\.npmjs\.com\/package\/with-file\/v\/2\.0\.0\n\n--- LICENSE ---\n\nCopyright \(c\) 2026 With File\n/);
     assert.match(notices, /npm package: nested 0\.1\.0\nLicense: ISC\n[^=]*ISC text of nested/);
@@ -85,20 +104,20 @@ test('notices reproduce shipped license files and fall back to SPDX texts of dec
       '', `--- MIT (SPDX License List ${SPDX_LICENSE_LIST}) ---`, '', spdxMit.replace(/\r\n?/g, '\n').trimEnd(),
     ].join('\n')));
     assert.ok(!notices.includes('\r') && !notices.includes(dir) && !notices.includes('not a license') && notices.endsWith('\n'));
-    assert.equal(await renderNotices('aarch64-apple-darwin', [...crates].reverse(), [...packages].reverse()), notices);
+    assert.equal(await renderNotices('aarch64-apple-darwin', [...modules].reverse(), [...packages].reverse()), notices);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
 });
 
 test('components without a license file or a known declared license fail staging', async () => {
-  const dir = await fixture({ 'crates/a/Cargo.toml': '', 'crates/b/Cargo.toml': '', 'crates/c/Cargo.toml': '', 'crates/d/Cargo.toml': '' });
+  const dir = await fixture({ 'modules/a/go.mod': '', 'modules/b/go.mod': '', 'modules/c/go.mod': '', 'modules/d/go.mod': '' });
   try {
     const only = component => renderNotices('aarch64-apple-darwin', [component], []);
-    await assert.rejects(only(crate(join(dir, 'crates'), 'a', { license: 'MIT OR Unlisted-1.0' })), /add text\/Unlisted-1\.0\.txt of SPDX License List .* as scripts\/spdx-licenses\/Unlisted-1\.0\.txt/);
-    await assert.rejects(only(crate(join(dir, 'crates'), 'b', { license: undefined })), /Rust crate b 1\.0\.0 includes no license file and declares no license/);
-    await assert.rejects(only(crate(join(dir, 'crates'), 'c', { license: 'Custom: see https://example.com' })), /not an SPDX expression/);
-    await assert.rejects(only(crate(join(dir, 'crates'), 'd', { licenseFile: '../a/Cargo.toml' })), /license file \.\.\/a\/Cargo\.toml outside its directory/);
+    await assert.rejects(only(module(join(dir, 'modules'), 'a', { license: 'MIT OR Unlisted-1.0' })), /add text\/Unlisted-1\.0\.txt of SPDX License List .* as scripts\/spdx-licenses\/Unlisted-1\.0\.txt/);
+    await assert.rejects(only(module(join(dir, 'modules'), 'b', { license: undefined })), /Go module b 1\.0\.0 includes no license file and declares no license/);
+    await assert.rejects(only(module(join(dir, 'modules'), 'c', { license: 'Custom: see https://example.com' })), /not an SPDX expression/);
+    await assert.rejects(only(module(join(dir, 'modules'), 'd', { licenseFile: '../a/go.mod' })), /license file \.\.\/a\/go\.mod outside its directory/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

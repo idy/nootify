@@ -1,14 +1,20 @@
 # Nootify product context
 
-Nootify is a Windows and macOS companion for local coding-agent conversations. A per-user TypeScript service bridges Feishu messages to existing agent sessions and tracks GitHub pull requests. The desktop window and tray manage this service; the service does not create or unarchive agent sessions.
+Nootify is a Windows and macOS companion for local coding-agent conversations. A Go notification core manages multiple Feishu WebSocket and Remote Nootify gRPC providers, session bindings, and event routing. The per-user TypeScript service hosts the UI, existing local agent transports, and repository tracking. The desktop window and tray use the Go/MyGo host, including native menus, language preferences, signed updates, and service management. Notification-session creation does not create or unarchive native agent conversations.
 
 ## Audience and operating scene
 
-The owner configures Feishu and a trusted recipient on their computer, then follows agent progress and replies through Feishu. Settings are an Operate surface: quick, familiar controls and an accurate explanation of connection, permissions, and routing matter more than visual expression.
+The owner adds named providers on their computer: a Feishu bot and its trusted recipient, or a Remote Nootify connection. Other Nootify nodes can subscribe to this node's authenticated gRPC service. Each node tries the addressed local agent session first and broadcasts unmatched events independently to every downstream subscriber. Settings are an Operate surface: quick, familiar controls and an accurate explanation of connections, permissions, and routing matter more than visual expression.
+
+## Provider and session model
+
+An agent session is the business identity; groups and topics are provider implementation details. Providers implement idempotent session creation, metadata access, deletion, rich-text messaging, replies, and event subscription. A remote provider forwards the same operations without changing the originating session identity. Locally owned failures are distinct from unmatched events. Each downstream has independent acknowledgement and replay state. Provider mutation and remote access credentials are available only in the local UI.
+
+Every page uses a content column capped at 960px and centered within the area to the right of the sidebar, including page titles, actions, logs, routing sessions, and settings. Providers is a card list with an upper-left Add action; an empty list retains a card with centered explanatory text. Agent checkbox rows have no hover background highlight. Adding opens a provider-type list in a dialog, then the chosen type's configuration; editing also uses the dialog. The message-bridge sidebar includes Providers alongside logs, routing sessions, and Agents. Repository navigation is grouped under Repos. Remote access settings configure the listener and show nodes connected to this Nootify. Feishu credentials belong to each provider instance.
 
 ## Existing commitments
 
-Preserve the application’s penguin identity, compact neutral settings, blue action color, and system light/dark appearance. English typography uses Montserrat for navigation menus, their section labels and counts, and the brand; Lato for body text, controls, content headings, row titles, and metadata. Chinese keeps system-font fallbacks. Support Simplified Chinese and English. Configuration edits, secret reveal, and contact directories remain local to the computer; tailnet access does not grant those capabilities.
+Preserve the application’s penguin identity, compact neutral settings, blue action color, and system light/dark appearance. English typography uses Montserrat for navigation menus, their section labels and counts, and the brand; Lato for body text, controls, content headings, row titles, and metadata. Chinese keeps system-font fallbacks. Support Simplified Chinese and English. Web dropdown buttons and menus use application styling in both appearances, with keyboard selection, visible selected state, and no operating-system select popup. Configuration edits, secret reveal, and contact directories remain local to the computer; tailnet access does not grant those capabilities.
 
 ## Feishu recipient selection
 

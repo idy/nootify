@@ -22,6 +22,8 @@ export function tailscaleLoginUrl(value: string): string | undefined {
 interface Options {
   state: State; access: TailnetAccess; client: EmbeddedTailscaleClient; listen: () => Promise<TailnetListener>;
   report?: (record: Record<string, unknown>) => void;
+  /** Helper-owned publication and tunnel handles expire on intentional stops too. */
+  disconnected?: () => void;
 }
 /** Owns Nootify's independent tsnet device and its private backend. System Tailscale is never used. */
 export class TailscaleService {
@@ -164,6 +166,7 @@ export class TailscaleService {
     this.options.access.publish(undefined, false);
     if (run) await run.listener.close();
     await this.options.client.stop();
+    if (run) this.options.disconnected?.();
   }
   async stop(): Promise<void> {
     this.stopped = true; clearInterval(this.timer);

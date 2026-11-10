@@ -16,12 +16,14 @@ export class NootifyClient {
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
     const response = await fetch(new URL(path, this.baseUrl), {
       method, headers: { authorization: `Bearer ${this.options.token}`, 'content-type': 'application/json' },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(20000),
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(75000),
     });
     const data = await response.json() as T & { error?: string };
     if (!response.ok) throw new Error(data.error ?? `HTTP ${response.status}`);
     return data;
   }
+  nodeIdentity(): Promise<{ node_id: string; public_key: string }> { return this.request('GET', '/v1/remote/identity'); }
+  bindPeer(nodeId: string, publicKey: string): Promise<unknown> { return this.request('PUT', `/v1/remote/peers/${encodeURIComponent(nodeId)}`, { public_key: publicKey }); }
   health(): Promise<Health> { return this.request('GET', '/health'); }
   services(): Promise<ModuleStatus[]> { return this.request('GET', '/v1/services'); }
   listSessions(): Promise<PublicSession[]> { return this.request('GET', '/v1/sessions'); }
@@ -43,8 +45,18 @@ export class NootifyClient {
   larkBindings(): Promise<LarkBinding[]> { return this.request('GET', '/v1/lark/bindings'); }
   /** Find or create the session's Feishu group. */
   openThread(request: ThreadRequest): Promise<ThreadInfo> { return this.request('POST', '/v1/threads', request); }
-  sendThread(sessionId: string, text: string, adapter?: Adapter, channel?: NotificationChannel): Promise<ThreadMessage> {
-    return this.request('POST', `/v1/threads/${encodeURIComponent(sessionId)}/messages`, { text, adapter, channel });
+  sendThread(sessionId: string, text: string, adapter?: Adapter, channel?: NotificationChannel, providerId?: string, requestId?: string): Promise<ThreadMessage> {
+    return this.request('POST', `/v1/threads/${encodeURIComponent(sessionId)}/messages`, { text, adapter, channel,
+      ...(providerId ? { provider_id: providerId } : {}), ...(requestId ? { request_id: requestId } : {}) });
+  }
+  deleteThread(sessionId: string, adapter: Adapter, providerId?: string): Promise<unknown> {
+    return this.request('DELETE', `/v1/threads/${encodeURIComponent(sessionId)}`, { adapter, ...(providerId ? { provider_id: providerId } : {}) });
+  }
+  acknowledgeMessage(messageRef: string): Promise<LarkReceipt> {
+    return this.request('POST', `/v1/provider-messages/${encodeURIComponent(messageRef)}/ack`, {});
+  }
+  replyMessage(messageRef: string, text: string): Promise<LarkReply> {
+    return this.request('POST', `/v1/provider-messages/${encodeURIComponent(messageRef)}/reply`, { text });
   }
   receiveThread(sessionId: string, adapter: PolledAdapter): Promise<SessionInbox> {
     return this.request('POST', `/v1/sessions/${encodeURIComponent(sessionId)}/inbox`, { adapter });

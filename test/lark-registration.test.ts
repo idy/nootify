@@ -277,7 +277,7 @@ test('cancel after an unseen completion reports the committed app once without u
   assert.equal(displayed.status, 'waiting', 'the UI has not observed completion yet');
   assert.notEqual(oldPage.lark.app_id, appId);
   const origin = await serve(t, await EventLog.open(h.directory), { settings: h.settings });
-  const response = await fetch(origin + '/ui/api/settings/lark/registration', { method: 'POST', headers: { 'x-nootify-ui': '1' }, body: JSON.stringify({ action: 'cancel' }) });
+  const response = await fetch(origin + '/ui/api/settings/lark/registration', { method: 'POST', headers: { 'x-nootify-ui': '1', authorization: 'Bearer test-token' }, body: JSON.stringify({ action: 'cancel' }) });
   assert.equal(response.status, 200);
   const result = await response.json() as { status: string; app_id: string };
   assert.equal(result.status, 'complete'); assert.equal(result.app_id, appId);
@@ -318,7 +318,7 @@ test('connection types are validated and the settings API saves the explicitly s
   await assert.rejects(h.settings.saveLark(appId, complete.client_secret, 'user'), /connection type/);
   assert.equal(h.state.settings.lark_app_id, undefined);
   const origin = await serve(t, await EventLog.open(h.directory), { settings: h.settings });
-  const response = await fetch(origin + '/ui/api/settings/lark', { method: 'POST', headers: { 'x-nootify-ui': '1' },
+  const response = await fetch(origin + '/ui/api/settings/lark', { method: 'POST', headers: { 'x-nootify-ui': '1', authorization: 'Bearer test-token' },
     body: JSON.stringify({ app_id: appId, app_secret: complete.client_secret, connection_type: 'personal-app' }) });
   assert.equal(response.status, 200);
   assert.equal((await h.settings.page()).lark.connection_type, 'personal-app');
@@ -348,7 +348,7 @@ test('QR URLs, status and permission actions remain loopback-only behind the UI 
   const h = await settingsHarness(t); const logs = await EventLog.open(h.directory);
   const local = await serve(t, logs, { settings: h.settings });
   const remote = await serve(t, logs, { settings: h.settings, via: 'tailnet', tailnet: { authorize: async () => undefined, url: () => undefined } as unknown as TailnetAccess });
-  const send = (origin: string, path: string, action: string, headers = { 'x-nootify-ui': '1' }) => fetch(origin + path, { method: 'POST', headers, body: JSON.stringify({ action }) });
+  const send = (origin: string, path: string, action: string, headers: Record<string, string> = { 'x-nootify-ui': '1', authorization: 'Bearer test-token' }) => fetch(origin + path, { method: 'POST', headers, body: JSON.stringify({ action }) });
   const registration = '/ui/api/settings/lark/registration';
   for (const action of ['start', 'status', 'cancel']) {
     assert.equal((await send(remote, registration, action)).status, 403);

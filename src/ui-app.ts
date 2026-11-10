@@ -11,18 +11,36 @@ import type { LarkRegistrationPage, LarkSetup } from './lark-registration.js';
 import type { LarkConnectionType } from './state.js';
 import { mergeRecipients, recipientDisplayName } from './lark-profile.js';
 import { RecipientListRenderer } from './recipient-list.js';
+import { Dropdown } from './dropdown.js';
+import { browserUiTransport } from './ui-transport.js';
+
+const ownerTransport = browserUiTransport(location, history);
+// Every API path, including streamed directories and reads, uses the same protected transport.
+const fetch = ownerTransport.fetch;
 
 interface PullSummary { internal: number; upstream: number; followed: number; running: boolean; lastSuccessAt?: string; error?: string; signedOut?: boolean }
 interface Snapshot {
   time: string; modules: ModuleStatus[]; sessions: PublicSession[]; logs: LogEntry[];
-  pulls?: PullSummary; access?: { tailnet_url?: string };
+  pulls?: PullSummary; access?: { tailnet_url?: string; owner_authenticated?: boolean; owner_ui_command?: string };
 }
-type View = 'logs' | 'sessions' | 'agents' | 'pulls-internal' | 'pulls-upstream' | 'repos' | 'settings-general' | 'settings-github' | 'settings-lark' | 'settings-tailscale' | 'settings-backup' | 'settings-about';
-interface AgentsPage { agents: AgentPrompt[]; editable: boolean; channel?: { name: 'feishu'; configured: boolean; recipient?: string; groups: number } }
+type View = 'logs' | 'sessions' | 'agents' | 'providers' | 'pulls-internal' | 'pulls-upstream' | 'repos' | 'settings-general' | 'settings-github' | 'settings-lark' | 'settings-remote' | 'settings-tailscale' | 'settings-backup' | 'settings-about';
+interface AgentsPage { agents: AgentPrompt[]; editable: boolean }
+/** Redacted UI summaries from docs/provider-protocol.md; secrets are write-only except the local listener reveal action. */
+interface ProviderSummary {
+  id: string; name: string; type: 'feishu' | 'remote'; enabled: boolean; status: string; error?: string;
+  app_id?: string; recipient_open_id?: string; address?: string; tls?: boolean; server_name?: string; secret_set?: boolean; token_set?: boolean;
+}
+interface RemoteSummary {
+  enabled: boolean; listen: string; status: string; tls: boolean; token_set: boolean; tls_cert_file?: string; tls_key_file?: string;
+  peers: { node_id: string; name?: string; connected_at: string; connected?: boolean; pending: number; last_ack?: string }[];
+}
+interface ProvidersPage { node_id: string; providers: ProviderSummary[]; default_provider_id?: string; remote: RemoteSummary; editable: boolean }
+interface RemotePage extends RemoteSummary { node_id: string; editable: boolean }
+type ProviderConfig = Pick<ProviderSummary, 'name' | 'type' | 'enabled'> & Partial<Pick<ProviderSummary, 'id' | 'app_id' | 'recipient_open_id' | 'address' | 'tls' | 'server_name'>> & { app_secret?: string; token?: string };
 interface Tone { label: string; tone: string }
 type TranslatedText = string | (() => string);
 const resolveText = (value?: TranslatedText): string => typeof value === 'function' ? value() : value ?? '';
-/** Pushed by the desktop shell as a `nootify-update` event; mirrors `UpdateView` in src-tauri/src/update.rs. A plain browser never receives it. */
+/** Pushed by the desktop shell as a `nootify-update` event; mirrors `View` in desktop/internal/updater. A plain browser never receives it. */
 interface UpdateView {
   phase: 'idle' | 'checking' | 'current' | 'available' | 'downloading' | 'installing' | 'restarting' | 'failed';
   current: string; version: string | null; received: number; total: number | null; error: string | null; checked_at: number | null;
@@ -33,12 +51,14 @@ function translatedLabels() {
     logs: { hash: '#/logs', group: t('消息桥接'), title: t('运行日志'), section: 'logs-view' },
     sessions: { hash: '#/sessions', group: t('消息桥接'), title: t('路由会话'), section: 'sessions-view' },
     agents: { hash: '#/agents', group: t('消息桥接'), title: 'Agents', section: 'agents-view' },
-    'pulls-internal': { hash: '#/pulls/internal', group: 'GitHub', title: t('我们仓库的 PR'), section: 'pulls-view' },
-    'pulls-upstream': { hash: '#/pulls/upstream', group: 'GitHub', title: t('提交上游的 PR'), section: 'pulls-view' },
-    repos: { hash: '#/repos', group: 'GitHub', title: t('PR 订阅'), section: 'repos-view' },
+    providers: { hash: '#/providers', group: t('消息桥接'), title: 'Providers', section: 'providers-view' },
+    'pulls-internal': { hash: '#/pulls/internal', group: 'Repos', title: t('我们仓库的 PR'), section: 'pulls-view' },
+    'pulls-upstream': { hash: '#/pulls/upstream', group: 'Repos', title: t('提交上游的 PR'), section: 'pulls-view' },
+    repos: { hash: '#/repos', group: 'Repos', title: t('PR 订阅'), section: 'repos-view' },
     'settings-general': { hash: '#/settings/general', group: t('设置'), title: t('通用'), section: 'settings-view' },
     'settings-github': { hash: '#/settings/github', group: t('设置'), title: 'GitHub', section: 'settings-view' },
     'settings-lark': { hash: '#/settings/lark', group: t('设置'), title: t('飞书'), section: 'settings-view' },
+    'settings-remote': { hash: '#/settings/remote', group: t('设置'), title: t('远程接入'), section: 'settings-view' },
     'settings-tailscale': { hash: '#/settings/tailscale', group: t('设置'), title: 'Tailscale', section: 'settings-view' },
     'settings-backup': { hash: '#/settings/backup', group: t('设置'), title: t('导入导出'), section: 'settings-view' },
     'settings-about': { hash: '#/settings/about', group: t('设置'), title: t('关于'), section: 'settings-view' },
@@ -65,7 +85,7 @@ function translatedLabels() {
     app_mismatch: t('该群属于另一个飞书应用'), sender_not_allowed: t('发送者不在允许名单'), duplicate: t('重复消息'), unsupported_message: t('暂不处理此消息类型'),
     host_mismatch: t('会话位于另一台机器'), invalid_content: t('消息内容无效'), delivery_failed: t('投递失败'), input_rejected: t('客户端拒绝此输入'),
   };
-  const sourceNames: Record<string, string> = { host: t('服务'), sessions: t('会话'), lark: t('飞书'), pulls: 'GitHub', agents: 'Agents' };
+  const sourceNames: Record<string, string> = { host: t('服务'), sessions: t('会话'), lark: t('飞书'), providers: 'Providers', pulls: 'GitHub', agents: 'Agents' };
   const categories: Record<string, Tone> = {
     incoming: { label: t('用户消息'), tone: 'muted' }, progress: { label: t('会话进度'), tone: 'muted' }, reply: { label: t('会话回复'), tone: 'muted' },
     system: { label: t('连接与系统'), tone: 'muted' }, ignored: { label: t('已忽略'), tone: 'muted' }, error: { label: t('异常'), tone: 'error' },
@@ -86,7 +106,7 @@ function translatedLabels() {
   const reviews: Record<string, Tone> = {
     APPROVED: { label: t('已批准'), tone: 'ok' }, CHANGES_REQUESTED: { label: t('需要修改'), tone: 'error' }, REVIEW_REQUIRED: { label: t('待审查'), tone: 'warn' },
   };
-  const moduleNames: Record<string, string> = { sessions: t('会话'), lark: t('飞书'), pulls: 'GitHub' };
+  const moduleNames: Record<string, string> = { sessions: t('会话'), lark: t('飞书'), providers: 'Providers', pulls: 'GitHub' };
   const moduleStates: Record<string, Tone> = {
     ready: { label: t('就绪'), tone: 'ok' }, idle: { label: t('等待刷新'), tone: 'warn' }, refreshing: { label: t('刷新中'), tone: 'warn' },
     stale: { label: t('刷新失败'), tone: 'error' }, error: { label: t('异常'), tone: 'error' }, failed: { label: t('异常'), tone: 'error' },
@@ -138,6 +158,7 @@ const isPullView = (view: View): view is 'pulls-internal' | 'pulls-upstream' => 
 /** Views backed by the GitHub module's snapshot, loaded separately from the two-second page snapshot. */
 const usesPulls = (view: View): boolean => isPullView(view) || view === 'repos';
 const isSettingsView = (view: View): boolean => view.startsWith('settings-');
+const localOwnerLocked = (): boolean => /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname) && !ownerTransport.authorized;
 
 const state = {
   view: viewFromHash(),
@@ -147,6 +168,11 @@ const state = {
   outcome: 'all', pullFilter: 'all', pullSort: 'asc' as 'asc' | 'desc', repoFilter: 'all',
   pendingRepos: new Set<string>(), repoError: '' as TranslatedText, openRepoSources: new Set<string>(),
   agents: undefined as AgentsPage | undefined, agentsError: '' as TranslatedText, pendingAgents: new Set<string>(), openPreviews: new Set<string>(),
+  providers: undefined as ProvidersPage | undefined, loadingProviders: false, providersBusy: false, providersError: '' as TranslatedText, providersReadError: false,
+  providerEditor: undefined as { id?: string; step: 'choose' | 'configure'; type: ProviderSummary['type']; secretSet: boolean; tokenSet: boolean } | undefined, providerEditorError: '' as TranslatedText,
+  providerDelete: undefined as ProviderSummary | undefined, providerDeleteError: '' as TranslatedText, providerDeleteOpener: undefined as HTMLElement | undefined,
+  remote: undefined as RemotePage | undefined, loadingRemote: false, remoteBusy: false, remoteError: '' as TranslatedText, remoteReadError: false,
+  remoteEdited: false, remoteNote: '' as TranslatedText, remoteSecretLoading: false, remoteSecretRevealed: false, remoteRevision: 0,
   settings: undefined as (SettingsPage & { editable: boolean }) | undefined, github: undefined as GitHubSettings | undefined, loadingGitHub: false,
   tailscale: undefined as (TailscalePage & { editable: boolean }) | undefined, loadingTailscale: false, tailscaleError: '' as TranslatedText,
   settingsNote: undefined as { text: TranslatedText; error: boolean; source?: 'settings-read' } | undefined, pendingSettings: new Set<string>(),
@@ -554,6 +580,331 @@ function renderRepos(): void {
   }));
 }
 
+// ---- Providers and downstream access ----
+function providerStatus(status: string, enabled = true, error?: string): Tone {
+  if (!enabled) return { label: t('未启用'), tone: 'muted' };
+  if (error) return { label: t('连接失败'), tone: 'error' };
+  const labels: Record<string, Tone> = {
+    ready: { label: t('已连接'), tone: 'ok' }, connected: { label: t('已连接'), tone: 'ok' }, listening: { label: t('监听中'), tone: 'ok' },
+    connecting: { label: t('连接中'), tone: 'warn' }, starting: { label: t('连接中'), tone: 'warn' }, reconnecting: { label: t('重连中'), tone: 'warn' },
+    error: { label: t('连接失败'), tone: 'error' }, failed: { label: t('连接失败'), tone: 'error' }, disconnected: { label: t('未连接'), tone: 'warn' },
+    stopped: { label: t('已停止'), tone: 'muted' }, disabled: { label: t('未启用'), tone: 'muted' },
+  };
+  return labels[status] ?? { label: status || t('未确认'), tone: 'muted' };
+}
+const providerTypeName = (type: ProviderSummary['type']): string => type === 'feishu' ? t('飞书') : t('远程 Nootify');
+const addressValid = (address: string): boolean => {
+  const match = /^(\[[^\]\s]+\]|[^:\s/]+):(\d{1,5})$/.exec(address);
+  return !!match && Number(match[2]) > 0 && Number(match[2]) <= 65535;
+};
+let providersRevision = 0;
+async function loadProviders(): Promise<void> {
+  if (state.loadingProviders || state.providersBusy) return;
+  state.loadingProviders = true;
+  const revision = providersRevision;
+  try {
+    const response = await fetch('/ui/api/providers', { cache: 'no-store', signal: AbortSignal.timeout(8000) });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const page = await response.json() as ProvidersPage;
+    page.editable = page.editable && !localOwnerLocked();
+    if (revision === providersRevision) {
+      state.providers = page;
+      if (state.providersReadError) { state.providersError = ''; state.providersReadError = false; }
+    }
+  } catch (error) {
+    if (revision === providersRevision && (!state.providersError || state.providersReadError)) {
+      state.providersReadError = true; state.providersError = () => t('无法读取 Providers：{p0}', { p0: (error as Error).message });
+    }
+  } finally { state.loadingProviders = false; renderProviders(); renderAgents(); }
+}
+function renderProviders(): void {
+  const page = state.providers;
+  const editable = page?.editable === true;
+  const busy = state.providersBusy;
+  $('providers-count').textContent = page?.providers.length ? number(page.providers.length) : '';
+  $('providers-banner').hidden = !state.providersError; setText('providers-banner', resolveText(state.providersError));
+  $('providers-readonly').hidden = !page || editable;
+  $<HTMLButtonElement>('provider-add').disabled = !editable || busy;
+  $('providers-retry').hidden = !state.providersError;
+  $<HTMLButtonElement>('providers-retry').disabled = state.loadingProviders || busy;
+  const selected = page?.providers.find(provider => provider.id === page.default_provider_id);
+  setText('providers-summary', !page ? t('正在读取 Providers…') : selected ? t('默认：{p0}', { p0: selected.name }) : t('尚未选择默认 Provider'));
+  $('providers-empty').hidden = !page || page.providers.length > 0;
+  if (changed('provider-rows', [page?.providers, page?.default_provider_id, editable, busy])) replaceRows($('provider-rows'), (page?.providers ?? []).map(provider => {
+    const item = node('div', undefined, 'provider-card'); item.setAttribute('role', 'listitem'); item.dataset.providerId = provider.id;
+    const row = node('div', undefined, 'setting provider-row');
+    const main = node('div', undefined, 'setting-main');
+    const title = node('div', undefined, 'provider-row-title'); title.append(node('span', provider.name, 'setting-title'));
+    if (provider.id === page?.default_provider_id) title.append(node('span', t('默认'), 'tag'));
+    const details = node('div', undefined, 'setting-sub provider-identity');
+    details.append(node('span', providerTypeName(provider.type)), node('span', provider.type === 'feishu' ? provider.app_id : provider.address, 'mono'));
+    main.append(title, details);
+    if (provider.error) main.append(node('div', provider.error, 'setting-sub tone-error provider-error'));
+    const tone = providerStatus(provider.status, provider.enabled, provider.error);
+    row.append(main, node('span', tone.label, `provider-status tone-${tone.tone}`));
+    const actions = node('div', undefined, 'setting-actions');
+    const enabledLabel = node('label', undefined, 'provider-enable-label');
+    const enabled = node('input', undefined, 'switch'); enabled.type = 'checkbox'; enabled.setAttribute('role', 'switch'); enabled.checked = provider.enabled;
+    enabled.disabled = !editable || busy; enabled.dataset.key = `provider-enabled-${provider.id}`;
+    enabled.setAttribute('aria-label', t('启用 {p0}', { p0: provider.name }));
+    enabled.addEventListener('change', () => {
+      const { id, name, type, app_id, recipient_open_id, address, tls, server_name } = provider;
+      void mutateProvider({ action: 'save', provider: { id, name, type, app_id, recipient_open_id, address, tls, server_name, enabled: enabled.checked } });
+    });
+    enabledLabel.append(node('span', t('启用'), 'setting-sub'), enabled); actions.append(enabledLabel);
+    const edit = node('button', t('编辑'), 'text-button'); edit.type = 'button'; edit.disabled = !editable || busy; edit.dataset.key = `provider-edit-${provider.id}`;
+    edit.setAttribute('aria-label', t('编辑 {p0}', { p0: provider.name })); edit.addEventListener('click', () => openProviderEditor(provider)); actions.append(edit);
+    const makeDefault = node('button', t('设为默认'), 'text-button'); makeDefault.type = 'button'; makeDefault.disabled = !editable || busy || !provider.enabled || provider.id === page?.default_provider_id;
+    makeDefault.dataset.key = `provider-default-${provider.id}`; makeDefault.setAttribute('aria-label', t('将 {p0} 设为默认', { p0: provider.name }));
+    makeDefault.addEventListener('click', () => { void mutateProvider({ action: 'default', id: provider.id }); }); actions.append(makeDefault);
+    const remove = node('button', t('删除'), 'text-button danger'); remove.type = 'button'; remove.disabled = !editable || busy; remove.dataset.key = `provider-delete-${provider.id}`;
+    remove.setAttribute('aria-label', t('删除 {p0}', { p0: provider.name })); remove.addEventListener('click', () => openProviderDelete(provider, remove)); actions.append(remove);
+    row.append(actions); item.append(row); return item;
+  }));
+  renderProviderEditor(); renderProviderDelete();
+}
+function openProviderEditor(provider?: ProviderSummary, type?: ProviderSummary['type']): void {
+  if (state.providers?.editable !== true || state.providersBusy) return;
+  state.providerEditor = { id: provider?.id, step: provider || type ? 'configure' : 'choose', type: provider?.type ?? type ?? 'feishu', secretSet: provider?.secret_set === true, tokenSet: provider?.token_set === true };
+  state.providerEditorError = ''; state.providersError = '';
+  field('provider-type-search').value = '';
+  field('provider-name').value = provider?.name ?? '';
+  field('provider-enabled').checked = provider?.enabled ?? true;
+  field('provider-app-id').value = provider?.app_id ?? ''; field('provider-app-secret').value = '';
+  field('provider-recipient').value = provider?.recipient_open_id ?? '';
+  field('provider-address').value = provider?.address ?? ''; field('provider-token').value = '';
+  field('provider-tls').checked = provider?.tls ?? true; field('provider-server-name').value = provider?.server_name ?? '';
+  renderProviders();
+  const dialog = $<HTMLDialogElement>('provider-dialog');
+  if (!dialog.open) dialog.showModal();
+  (state.providerEditor.step === 'choose' ? field('provider-type-search') : field('provider-name')).focus();
+}
+function backToProviderTypes(): void {
+  const editor = state.providerEditor;
+  if (!editor || editor.id || state.providersBusy || state.providers?.editable !== true) return;
+  const type = editor.type;
+  openProviderEditor(); $('provider-choose-' + type).focus();
+}
+function renderProviderTypes(): void {
+  const query = field('provider-type-search').value.trim().toLocaleLowerCase();
+  let visible = 0;
+  for (const option of document.querySelectorAll<HTMLButtonElement>('#provider-type-options button')) {
+    const type = option.dataset.providerType!;
+    const terms = `${option.textContent} ${type === 'feishu' ? 'feishu lark 飞书 机器人 bot' : 'remote nootify grpc 远程'}`.toLocaleLowerCase();
+    option.hidden = !!query && !terms.includes(query);
+    option.disabled = state.providers?.editable !== true || state.providersBusy;
+    if (!option.hidden) visible++;
+  }
+  $('provider-type-empty').hidden = visible > 0;
+  field('provider-type-search').disabled = state.providers?.editable !== true || state.providersBusy;
+}
+function closeProviderEditor(restore = true): void {
+  if (state.providersBusy && restore) return;
+  const id = state.providerEditor?.id;
+  state.providerEditor = undefined; state.providerEditorError = '';
+  field('provider-app-secret').value = ''; field('provider-token').value = ''; field('provider-type-search').value = '';
+  const dialog = $<HTMLDialogElement>('provider-dialog');
+  if (dialog.open) dialog.close();
+  renderProviders();
+  if (restore && state.view === 'providers') ($('provider-rows').querySelector<HTMLElement>(`[data-key="${CSS.escape(`provider-edit-${id}`)}"]`) ?? $('provider-add')).focus();
+}
+function renderProviderEditor(): void {
+  const editor = state.providerEditor;
+  $('provider-editor').hidden = !editor || editor.step === 'choose';
+  $('provider-chooser').hidden = !editor || editor.step !== 'choose';
+  if (!editor) return;
+  const editable = state.providers?.editable === true;
+  const busy = state.providersBusy;
+  const type = editor.type;
+  const choosing = editor.step === 'choose';
+  const current = state.providers?.providers.find(provider => provider.id === editor.id);
+  setText('provider-editor-title', choosing ? t('添加 Provider') : editor.id ? t('编辑 Provider') : t('配置{p0}', { p0: providerTypeName(type) }));
+  setText('provider-editor-status', choosing ? t('选择接入类型，然后填写连接信息。') : current ? [providerStatus(current.status, current.enabled, current.error).label, current.error].filter(Boolean).join(' · ') : t('保存后连接此接入。'));
+  setText('provider-type-name', providerTypeName(type));
+  $('provider-back').hidden = choosing || !!editor.id;
+  $<HTMLButtonElement>('provider-back').disabled = !editable || busy;
+  $<HTMLButtonElement>('provider-dialog-close').disabled = busy;
+  $<HTMLButtonElement>('provider-chooser-cancel').disabled = busy;
+  $<HTMLFieldSetElement>('provider-fields').disabled = choosing || !editable || busy;
+  renderProviderTypes();
+  $('provider-feishu-fields').hidden = type !== 'feishu'; $<HTMLFieldSetElement>('provider-feishu-fields').disabled = type !== 'feishu';
+  $('provider-remote-fields').hidden = type !== 'remote'; $<HTMLFieldSetElement>('provider-remote-fields').disabled = type !== 'remote';
+  field('provider-app-id').required = type === 'feishu'; field('provider-app-secret').required = type === 'feishu' && !editor.secretSet;
+  field('provider-address').required = type === 'remote'; field('provider-token').required = type === 'remote' && !editor.tokenSet;
+  field('provider-server-name').disabled = !field('provider-tls').checked;
+  setText('provider-secret-hint', editor.secretSet ? t('已保存，留空则不修改') : t('填写此应用的 App Secret。'));
+  setText('provider-token-hint', editor.tokenSet ? t('已保存，留空则不修改') : t('填写远程节点提供的访问令牌。'));
+  $('provider-editor-error').hidden = !state.providerEditorError; setText('provider-editor-error', resolveText(state.providerEditorError));
+  setText('provider-editor-local', editable ? '' : t('请在本机修改。'));
+  $<HTMLButtonElement>('provider-save').disabled = choosing || !editable || busy;
+  $<HTMLButtonElement>('provider-cancel').disabled = busy;
+  setText('provider-save', busy ? t('保存中…') : t('保存'));
+  $('provider-dialog').setAttribute('aria-busy', String(busy));
+}
+type ProviderAction = { action: 'save'; provider: ProviderConfig } | { action: 'delete' | 'default'; id: string };
+async function mutateProvider(body: ProviderAction, target: 'page' | 'editor' | 'delete' = 'page'): Promise<void> {
+  if (state.providers?.editable !== true || state.providersBusy) return;
+  state.providersBusy = true; providersRevision++; state.providersError = ''; state.providersReadError = false; state.providerEditorError = ''; state.providerDeleteError = '';
+  renderProviders();
+  try {
+    state.providers = await post<ProvidersPage>('/ui/api/providers', body);
+    state.providersBusy = false;
+    if (target === 'editor' || (body.action === 'delete' && state.providerEditor?.id === body.id)) closeProviderEditor(target === 'editor');
+    if (target === 'delete') closeProviderDelete();
+  } catch (error) {
+    const message = () => t('无法更新 Provider：{p0}', { p0: (error as Error).message });
+    if (target === 'editor') state.providerEditorError = message;
+    else if (target === 'delete') state.providerDeleteError = message;
+    else state.providersError = message;
+  } finally { state.providersBusy = false; renderProviders(); renderAgents(); }
+}
+async function saveProvider(): Promise<void> {
+  const editor = state.providerEditor;
+  if (!editor || editor.step !== 'configure' || state.providers?.editable !== true || state.providersBusy) return;
+  const type = editor.type;
+  const provider: ProviderConfig = { ...(editor.id ? { id: editor.id } : {}), name: field('provider-name').value.trim(), type, enabled: field('provider-enabled').checked };
+  let invalid: string | undefined;
+  if (!provider.name) invalid = 'provider-name';
+  else if (type === 'feishu') {
+    provider.app_id = field('provider-app-id').value.trim(); provider.recipient_open_id = field('provider-recipient').value.trim();
+    const secret = field('provider-app-secret').value;
+    if (secret) provider.app_secret = secret;
+    if (!provider.app_id) invalid = 'provider-app-id'; else if (!secret && !editor.secretSet) invalid = 'provider-app-secret';
+  } else {
+    provider.address = field('provider-address').value.trim(); provider.tls = field('provider-tls').checked; provider.server_name = provider.tls ? field('provider-server-name').value.trim() : '';
+    const token = field('provider-token').value; if (token) provider.token = token;
+    if (!addressValid(provider.address)) invalid = 'provider-address'; else if (!token && !editor.tokenSet) invalid = 'provider-token';
+  }
+  if (invalid) {
+    state.providerEditorError = invalid === 'provider-address' ? () => t('请填写有效的主机和端口，例如 host:9418。') : () => t('请填写必填字段。');
+    renderProviderEditor(); field(invalid).focus(); return;
+  }
+  await mutateProvider({ action: 'save', provider }, 'editor');
+}
+function openProviderDelete(provider: ProviderSummary, opener: HTMLElement): void {
+  if (state.providers?.editable !== true || state.providersBusy) return;
+  state.providerDelete = provider; state.providerDeleteError = ''; state.providerDeleteOpener = opener;
+  renderProviderDelete();
+  const dialog = $<HTMLDialogElement>('provider-delete-dialog');
+  if (!dialog.open) dialog.showModal();
+  $('provider-delete-cancel').focus();
+}
+function closeProviderDelete(restore = true): void {
+  if (state.providersBusy) return;
+  const opener = state.providerDeleteOpener;
+  state.providerDelete = undefined; state.providerDeleteError = ''; state.providerDeleteOpener = undefined;
+  $<HTMLDialogElement>('provider-delete-dialog').close();
+  renderProviders();
+  const key = opener?.dataset.key;
+  const restored = key ? $('provider-rows').querySelector<HTMLElement>(`[data-key="${CSS.escape(key)}"]`) : undefined;
+  if (restore && state.view === 'providers') (restored ?? $('provider-add')).focus();
+}
+function renderProviderDelete(): void {
+  const provider = state.providerDelete; if (!provider) return;
+  setText('provider-delete-detail', t('删除“{p0}”？此操作会断开接入，不会删除 agent 的原始对话。', { p0: provider.name }));
+  $('provider-delete-error').hidden = !state.providerDeleteError; setText('provider-delete-error', resolveText(state.providerDeleteError));
+  $<HTMLButtonElement>('provider-delete-confirm').disabled = state.providers?.editable !== true || state.providersBusy;
+  $<HTMLButtonElement>('provider-delete-cancel').disabled = state.providersBusy;
+  setText('provider-delete-confirm', state.providersBusy ? t('处理中…') : t('删除'));
+  $('provider-delete-dialog').setAttribute('aria-busy', String(state.providersBusy));
+}
+function hideRemoteToken(): void {
+  state.remoteRevision++; state.remoteSecretLoading = false;
+  if (state.remoteSecretRevealed) field('remote-token').value = '';
+  state.remoteSecretRevealed = false; field('remote-token').type = 'password';
+}
+function fillRemote(): void {
+  const page = state.remote; if (!page) return;
+  hideRemoteToken();
+  field('remote-enabled').checked = page.enabled; field('remote-listen').value = page.listen;
+  field('remote-token').value = ''; field('remote-tls').checked = page.tls;
+  field('remote-cert').value = page.tls_cert_file ?? ''; field('remote-key').value = page.tls_key_file ?? '';
+}
+async function loadRemote(): Promise<void> {
+  if (state.loadingRemote || state.remoteBusy) return;
+  state.loadingRemote = true;
+  const revision = state.remoteRevision;
+  try {
+    const response = await fetch('/ui/api/settings/remote', { cache: 'no-store', signal: AbortSignal.timeout(8000) });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const page = await response.json() as RemotePage;
+    page.editable = page.editable && !localOwnerLocked();
+    if (revision !== state.remoteRevision) return;
+    state.remote = page;
+    if (state.remoteReadError) { state.remoteError = ''; state.remoteReadError = false; }
+    if (!state.remoteEdited && !state.remoteSecretLoading && field('remote-token').type !== 'text') fillRemote();
+    if (!state.remote.editable) hideRemoteToken();
+  } catch (error) {
+    if (revision === state.remoteRevision && (!state.remoteError || state.remoteReadError)) {
+      state.remoteReadError = true; state.remoteError = () => t('无法读取远程接入：{p0}', { p0: (error as Error).message });
+    }
+  }
+  finally { state.loadingRemote = false; renderRemote(); }
+}
+function renderRemote(): void {
+  const page = state.remote; const editable = page?.editable === true; const busy = state.remoteBusy;
+  $('remote-banner').hidden = !state.remoteError; setText('remote-banner', resolveText(state.remoteError));
+  $('remote-readonly').hidden = !page || editable;
+  setText('remote-node', page ? t('节点 {p0}', { p0: page.node_id }) : t('正在读取设置…'));
+  setTone('remote-state', page ? providerStatus(page.status, page.enabled) : { label: t('读取中'), tone: 'muted' });
+  $('remote-retry').hidden = !state.remoteError; $<HTMLButtonElement>('remote-retry').disabled = state.loadingRemote || busy;
+  $<HTMLFieldSetElement>('remote-fields').disabled = !editable || busy;
+  const tls = field('remote-tls').checked;
+  $('remote-tls-fields').hidden = !tls; $<HTMLFieldSetElement>('remote-tls-fields').disabled = !tls;
+  setText('remote-tls-hint', page?.tls ? t('路径属于运行 Nootify 的电脑。留空保留已保存的证书和私钥路径。') : t('填写运行 Nootify 的电脑上的 PEM 证书和私钥文件路径。'));
+  setText('remote-token-hint', state.remoteSecretLoading ? t('正在读取访问令牌…') : page?.token_set ? t('已保存，留空则不修改') : t('留空则自动生成访问令牌。'));
+  const visible = field('remote-token').type === 'text';
+  const label = visible ? t('隐藏访问令牌') : t('显示访问令牌');
+  $('remote-token-toggle').setAttribute('aria-label', label); $('remote-token-toggle').title = label;
+  $('remote-token-toggle').setAttribute('aria-pressed', String(visible)); $('remote-token-slash').toggleAttribute('hidden', !visible);
+  $<HTMLButtonElement>('remote-token-toggle').disabled = !editable || busy || state.remoteSecretLoading;
+  $<HTMLButtonElement>('remote-save').disabled = !editable || busy || state.remoteSecretLoading;
+  setText('remote-save', busy ? t('保存中…') : t('保存'));
+  setText('remote-save-note', resolveText(state.remoteNote)); $('remote-form').setAttribute('aria-busy', String(busy || state.remoteSecretLoading));
+  $('remote-peers-empty').hidden = !page || page.peers.length > 0;
+  if (changed('remote-peers', page?.peers)) replaceRows($('remote-peer-rows'), (page?.peers ?? []).map(peer => {
+    const item = node('div', undefined, 'entry'); item.setAttribute('role', 'listitem');
+    const row = node('div', undefined, 'row remote-peer-row');
+    const connection = peer.connected === false ? t('未连接') : t('已连接');
+    row.append(rowMain(peer.name || peer.node_id, `${connection} · ${peer.node_id} · ${t('连接于 {p0}', { p0: fullTime(peer.connected_at) })}`),
+      sideBlock({ label: t('{p0} 条待确认', { p0: number(peer.pending) }), tone: peer.pending ? 'warn' : 'muted' }, peer.last_ack ? t('最后回执 {p0}', { p0: ago(peer.last_ack) }) : t('尚无回执')));
+    item.append(row); return item;
+  }));
+}
+async function saveRemote(): Promise<void> {
+  if (state.remote?.editable !== true || state.remoteBusy || state.remoteSecretLoading) return;
+  const listen = field('remote-listen').value.trim(); const tls = field('remote-tls').checked;
+  const cert = field('remote-cert').value.trim(); const key = field('remote-key').value.trim();
+  if (!addressValid(listen) || (tls && !state.remote.tls && (!cert || !key))) {
+    state.remoteReadError = false;
+    state.remoteError = !addressValid(listen) ? () => t('请填写有效的主机和端口，例如 host:9418。') : () => t('请填写 TLS 证书和私钥路径。');
+    renderRemote(); field(!addressValid(listen) ? 'remote-listen' : !cert ? 'remote-cert' : 'remote-key').focus(); return;
+  }
+  const token = state.remoteSecretRevealed ? '' : field('remote-token').value;
+  const body = { enabled: field('remote-enabled').checked, listen, ...(token ? { token } : {}),
+    ...(!tls ? { tls_cert_file: '', tls_key_file: '' } : { ...(cert ? { tls_cert_file: cert } : {}), ...(key ? { tls_key_file: key } : {}) }) };
+  state.remoteBusy = true; state.remoteError = ''; state.remoteReadError = false; state.remoteNote = ''; state.remoteRevision++;
+  renderRemote();
+  try {
+    state.remote = await post<RemotePage>('/ui/api/settings/remote', body);
+    state.remoteEdited = false; fillRemote(); state.remoteNote = () => t('远程接入已保存');
+  } catch (error) { state.remoteError = () => t('无法保存远程接入：{p0}', { p0: (error as Error).message }); }
+  finally { state.remoteBusy = false; renderRemote(); }
+}
+async function toggleRemoteToken(): Promise<void> {
+  if (state.remote?.editable !== true || state.remoteBusy || state.remoteSecretLoading) return;
+  if (field('remote-token').type === 'text') { hideRemoteToken(); renderRemote(); return; }
+  if (field('remote-token').value) { field('remote-token').type = 'text'; renderRemote(); return; }
+  if (!state.remote.token_set) return;
+  const revision = ++state.remoteRevision; state.remoteSecretLoading = true; state.remoteError = ''; state.remoteReadError = false; renderRemote();
+  try {
+    const secret = await post<{ token: string }>('/ui/api/settings/remote/secret');
+    if (revision !== state.remoteRevision || state.view !== 'settings-remote' || state.remote?.editable !== true || field('remote-token').value) return;
+    field('remote-token').value = secret.token; field('remote-token').type = 'text'; state.remoteSecretRevealed = true;
+  } catch (error) { if (revision === state.remoteRevision) state.remoteError = () => t('无法查看访问令牌：{p0}', { p0: (error as Error).message }); }
+  finally { if (revision === state.remoteRevision) state.remoteSecretLoading = false; renderRemote(); }
+}
+
 // ---- Agents ----
 const home = (path: string): string => path.replace(/^(?:\/Volumes\/[^/]+)?\/(?:Users|home)\/[^/]+(?=\/)/, '~');
 function agentDetail(agent: AgentPrompt): string {
@@ -561,15 +912,21 @@ function agentDetail(agent: AgentPrompt): string {
   if (agent.status === 'conflict') return t('文件里的 nootify 标记不成对，请先手动修正');
   if (agent.status === 'error') return agent.error ?? t('无法读取文件');
   if (agent.status === 'outdated') return t('写入内容与当前版本不同');
-  return agent.injected ? t('新对话会按说明使用飞书') : t('勾选后写入飞书说明');
+  return agent.injected ? t('新对话会按说明使用消息接入') : t('勾选后写入通知说明');
 }
+let agentsRevision = 0;
 async function loadAgents(): Promise<void> {
+  const revision = ++agentsRevision;
   try {
     const response = await fetch('/ui/api/agents', { cache: 'no-store', signal: AbortSignal.timeout(8000) });
     if (!response.ok) throw new Error(response.status === 404 ? t('Agents 模块未启用') : `HTTP ${response.status}`);
-    state.agents = await response.json() as AgentsPage;
-  } catch (error) { state.agentsError = () => t('无法读取 agent 状态：{p0}', { p0: (error as Error).message }); }
-  renderChrome(); renderAgents();
+    const page = await response.json() as AgentsPage;
+    if (revision !== agentsRevision) return;
+    state.agents = page;
+    state.agents.editable = state.agents.editable && !localOwnerLocked();
+    state.agentsError = '';
+  } catch (error) { if (revision === agentsRevision) state.agentsError = () => t('无法读取 agent 状态：{p0}', { p0: (error as Error).message }); }
+  if (revision === agentsRevision) { renderChrome(); renderAgents(); }
 }
 async function setAgent(agent: AgentPrompt, enabled: boolean): Promise<void> {
   if (state.agents?.editable !== true || state.pendingAgents.has(agent.agent)) return;
@@ -588,14 +945,14 @@ function renderAgents(): void {
   $('agents-card').hidden = !page?.agents.length;
   $('agents-count').textContent = page ? (page.agents.some(agent => agent.injected) ? number(page.agents.filter(agent => agent.injected).length) : '') : '';
   const remote = page?.editable !== true;
-  const banner = resolveText(state.agentsError) || (page && remote ? t('通过 Tailscale 访问时只能查看；请在这台 Mac 上修改 agent 提示词。') : '');
+  const banner = resolveText(state.agentsError) || (page && remote ? localOwnerLocked() ? t('当前窗口未获授权。请从本机 Nootify 桌面端打开设置。') : t('通过 Tailscale 访问时只能查看；请在这台 Mac 上修改 agent 提示词。') : '');
   $('agents-banner').hidden = !banner; $('agents-banner').textContent = banner;
-  const channel = page?.channel;
-  setText('channel-title', t('飞书通知'));
-  setTone('channel-state', !page ? { label: t('读取中'), tone: 'muted' } : !channel ? { label: t('未启用'), tone: 'muted' }
-    : channel.configured ? { label: t('已配置'), tone: 'ok' } : { label: t('未配置'), tone: 'muted' });
-  setText('channel-sub', !page ? t('正在读取飞书配置…') : !channel ? t('飞书模块未启用') : !channel.configured ? t('未配置飞书应用凭据，提示词写入后也无法建群：到「设置 · 飞书」配置')
-    : channel.recipient ? t('接收人 {p0} · 已绑定 {p1} 个群', { p0: channel.recipient, p1: number(channel.groups) }) : t('还没有设置接收人：到「设置 · 飞书」填写'));
+  const providers = state.providers;
+  const selected = providers?.providers.find(provider => provider.id === providers.default_provider_id);
+  setText('channel-title', t('消息接入'));
+  setTone('channel-state', selected ? providerStatus(selected.status, selected.enabled, selected.error) : { label: providers ? t('未配置') : t('读取中'), tone: 'muted' });
+  setText('channel-sub', state.providersError ? resolveText(state.providersError) : !providers ? t('正在读取 Providers…') : !selected ? t('在 Providers 中添加接入并设为默认。')
+    : t('默认：{p0} · {p1}', { p0: selected.name, p1: providerTypeName(selected.type) }));
   if (state.view !== 'agents' || !page) return;
   if (!changed('agent-rows', [page, [...state.pendingAgents]])) return;
   replaceRows($('agent-rows'), page.agents.map(agent => {
@@ -603,7 +960,7 @@ function renderAgents(): void {
     const row = node('label', undefined, 'row');
     const box = node('input', undefined, 'check'); box.type = 'checkbox'; box.checked = agent.injected; box.dataset.key = agent.agent;
     box.disabled = remote || state.pendingAgents.has(agent.agent) || ['conflict', 'error'].includes(agent.status);
-    box.setAttribute('aria-label', t('向 {p0} 写入飞书说明', { p0: agent.name }));
+    box.setAttribute('aria-label', t('向 {p0} 写入通知说明', { p0: agent.name }));
     box.addEventListener('change', () => { void setAgent(agent, box.checked); });
     row.append(box, rowMain(agent.name, `${(agent.files ?? [agent.file]).map(home).join(' · ')} · ${agentDetail(agent)}`), sideBlock(promptStates[agent.status] ?? promptStates.error));
     const extra = node('div', undefined, 'agent-extra');
@@ -650,6 +1007,7 @@ async function loadSettings(): Promise<boolean> {
     const response = await fetch('/ui/api/settings', { cache: 'no-store', signal: AbortSignal.timeout(8000) });
     if (!response.ok) throw new Error(response.status === 404 ? t('设置模块未启用') : `HTTP ${response.status}`);
     state.settings = await response.json() as SettingsPage & { editable: boolean };
+    state.settings.editable = state.settings.editable && !localOwnerLocked();
     state.larkConnectionType ??= state.settings.lark.connection_type ?? 'bot';
     if (state.recipientDirectory && state.recipientDirectory.app_id !== state.settings.lark.app_id) invalidateRecipientDirectory();
     if (!state.larkEdited) fillLark();
@@ -727,6 +1085,7 @@ function renderTailscale(): void {
 }
 function loadSettingsView(): void {
   if (!isSettingsView(state.view) || state.view === 'settings-general') return;
+  if (state.view === 'settings-remote') { void loadRemote(); return; }
   void loadSettings();
   if (state.view === 'settings-github') void loadGitHub();
   if (state.view === 'settings-lark') void loadLarkRegistration();
@@ -1106,12 +1465,13 @@ function renderSettings(): void {
   renderUpdate();
   if (!isSettingsView(state.view)) return;
   if (state.view === 'settings-general') { $('settings-banner').hidden = true; return; }
+  if (state.view === 'settings-remote') { $('settings-banner').hidden = true; renderRemote(); return; }
   const remote = state.settings?.editable === false;
   const login = state.github?.login;
   const note = state.settingsNote ?? (state.view === 'settings-github' && login?.status === 'failed' ? { text: t('GitHub 登录失败：{p0}', { p0: githubErrors[login.error ?? ''] ?? login.error }), error: true }
     : state.view === 'settings-tailscale' && state.tailscaleError ? { text: state.tailscaleError, error: true }
     : state.view === 'settings-tailscale' && state.tailscale?.login.status === 'failed' ? { text: t('Tailscale 登录失败：{p0}', { p0: tailscaleErrors[state.tailscale.login.error ?? ''] ?? t('请重试。') }), error: true }
-    : remote ? { text: t('通过 Tailscale 访问时只能查看；请在这台 Mac 上修改设置。'), error: false } : undefined);
+    : remote ? { text: localOwnerLocked() ? t('当前窗口未获授权。请从本机 Nootify 桌面端打开设置。') : t('通过 Tailscale 访问时只能查看；请在这台 Mac 上修改设置。'), error: false } : undefined);
   const banner = $('settings-banner');
   banner.hidden = !note; banner.className = note && !note.error ? 'banner note' : 'banner';
   setText('settings-banner', resolveText(note?.text));
@@ -1245,7 +1605,7 @@ function renderChrome(): void {
   for (const link of document.querySelectorAll<HTMLAnchorElement>('.nav-item')) {
     if (link.dataset.view === state.view) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current');
   }
-  for (const section of ['logs-view', 'sessions-view', 'agents-view', 'pulls-view', 'repos-view', 'settings-view']) $(section).hidden = section !== meta.section;
+  for (const section of ['logs-view', 'sessions-view', 'agents-view', 'providers-view', 'pulls-view', 'repos-view', 'settings-view']) $(section).hidden = section !== meta.section;
   for (const panel of document.querySelectorAll<HTMLElement>('[data-panel]')) panel.hidden = panel.dataset.panel !== state.view;
   $('settings-subnav').hidden = !isSettingsView(state.view);
   $('settings-link').toggleAttribute('data-open', isSettingsView(state.view));
@@ -1275,12 +1635,18 @@ function renderChrome(): void {
   }
   const local = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
   $('access-label').textContent = local ? location.host : t('经 Tailscale');
+  $('owner-access').hidden = !localOwnerLocked();
+  $('owner-authorize').hidden = !(window as Window & { __NOOTIFY_PLATFORM__?: string }).__NOOTIFY_PLATFORM__;
+  // Never recommend executable commands obtained from an unverified local listener.
+  const ownerCommand = ownerTransport.authorized ? state.snapshot.access?.owner_ui_command : undefined;
+  $('owner-auth-command').hidden = !ownerCommand;
+  $('owner-auth-command').textContent = ownerCommand ?? '';
   const tailnet = state.snapshot.access?.tailnet_url;
   $('tailnet-line').hidden = !local || !tailnet;
   $('tailnet-url').textContent = tailnet ? tailnet.replace(/^https?:\/\//, '').replace(/\/$/, '') : '';
   $('tailnet-url').title = tailnet ? t('tailnet 内其他设备的访问地址：{p0}', { p0: tailnet }) : '';
 }
-function renderAll(): void { renderChrome(); renderLogs(); renderSessions(); renderAgents(); renderPulls(); renderRepos(); renderSettings(); }
+function renderAll(): void { renderChrome(); renderLogs(); renderSessions(); renderProviders(); renderAgents(); renderPulls(); renderRepos(); renderSettings(); }
 async function loadSnapshot(): Promise<void> {
   if (state.loading) return;
   state.loading = true;
@@ -1297,6 +1663,7 @@ async function loadSnapshot(): Promise<void> {
     state.connected = false; state.connectionError = (error as Error).message;
     $('error').textContent = t('无法连接本机服务：{p0}。正在自动重试。', { p0: (error as Error).message });
     $('error').hidden = false; $('connection').textContent = t('连接中断'); $('connection-dot').className = 'dot error';
+    renderChrome();
   } finally { state.loading = false; }
 }
 async function loadPulls(): Promise<void> {
@@ -1312,10 +1679,11 @@ async function loadPulls(): Promise<void> {
   finally { state.loadingPulls = false; renderChrome(); renderPulls(); renderRepos(); }
 }
 async function refreshNow(): Promise<void> {
-  if (state.view === 'agents') {
-    state.agentsError = '';
-    await Promise.all([loadSnapshot(), loadAgents()]); return;
+  if (state.view === 'agents' || state.view === 'providers') {
+    if (state.view === 'agents') state.agentsError = '';
+    await Promise.all([loadSnapshot(), loadProviders(), ...(state.view === 'agents' ? [loadAgents()] : [])]); return;
   }
+  if (state.view === 'settings-remote') { await Promise.all([loadSnapshot(), loadRemote()]); return; }
   if (isSettingsView(state.view)) {
     await Promise.all([loadSnapshot(), loadSettings(), ...(state.view === 'settings-github' ? [loadGitHub()] : []), ...(state.view === 'settings-tailscale' ? [loadTailscale()] : [])]);
     return;
@@ -1329,9 +1697,51 @@ async function refreshNow(): Promise<void> {
   await loadPulls();
 }
 
+$('owner-authorize').addEventListener('click', () => { location.href = 'nootify://settings/authorize'; });
+$('provider-add').addEventListener('click', () => openProviderEditor());
+$('providers-retry').addEventListener('click', () => { state.providersError = ''; state.providersReadError = false; void loadProviders(); });
+$('provider-tls').addEventListener('change', renderProviderEditor);
+for (const id of ['provider-cancel', 'provider-chooser-cancel', 'provider-dialog-close']) $(id).addEventListener('click', () => closeProviderEditor());
+$('provider-back').addEventListener('click', backToProviderTypes);
+$('provider-type-search').addEventListener('input', renderProviderTypes);
+for (const type of ['feishu', 'remote'] as const) $('provider-choose-' + type).addEventListener('click', () => openProviderEditor(undefined, type));
+$('provider-type-search').addEventListener('keydown', event => {
+  const options = [...document.querySelectorAll<HTMLButtonElement>('#provider-type-options button')].filter(option => !option.hidden && !option.disabled);
+  if (event.key === 'ArrowDown') { event.preventDefault(); options[0]?.focus(); }
+  else if (event.key === 'Enter' && options.length === 1) { event.preventDefault(); options[0]!.click(); }
+});
+$('provider-type-options').addEventListener('keydown', event => {
+  const options = [...document.querySelectorAll<HTMLButtonElement>('#provider-type-options button')].filter(option => !option.hidden && !option.disabled);
+  const index = options.indexOf(document.activeElement as HTMLButtonElement);
+  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+    event.preventDefault(); options[Math.max(0, Math.min(options.length - 1, index + (event.key === 'ArrowDown' ? 1 : -1)))]?.focus();
+  } else if (event.key === 'Home' || event.key === 'End') { event.preventDefault(); options[event.key === 'Home' ? 0 : options.length - 1]?.focus(); }
+});
+$('provider-editor').addEventListener('submit', event => { event.preventDefault(); void saveProvider(); });
+$('provider-dialog').addEventListener('cancel', event => { event.preventDefault(); closeProviderEditor(); });
+$('provider-dialog').addEventListener('keydown', event => {
+  if (event.key === 'Escape') { event.preventDefault(); closeProviderEditor(); }
+});
+$('provider-delete-cancel').addEventListener('click', () => closeProviderDelete());
+$('provider-delete-confirm').addEventListener('click', () => {
+  if (state.providerDelete) void mutateProvider({ action: 'delete', id: state.providerDelete.id }, 'delete');
+});
+$('provider-delete-dialog').addEventListener('cancel', event => { event.preventDefault(); closeProviderDelete(); });
+$('remote-form').addEventListener('submit', event => { event.preventDefault(); void saveRemote(); });
+$('remote-form').addEventListener('input', event => {
+  state.remoteEdited = true; state.remoteNote = '';
+  if (event.target === field('remote-token')) { state.remoteSecretRevealed = false; state.remoteRevision++; state.remoteSecretLoading = false; }
+});
+$('remote-tls').addEventListener('change', () => { state.remoteEdited = true; renderRemote(); });
+$('remote-retry').addEventListener('click', () => { state.remoteError = ''; state.remoteReadError = false; void loadRemote(); });
+$('remote-token-toggle').addEventListener('click', () => { void toggleRemoteToken(); });
+
 window.addEventListener('hashchange', () => {
   closeTitlebarSearches();
   state.view = viewFromHash();
+  if (state.view !== 'settings-remote') hideRemoteToken();
+  if (state.view !== 'providers') { closeProviderEditor(false); if (state.providerDelete) closeProviderDelete(false); }
+  if (state.view === 'providers' || state.view === 'agents') void loadProviders();
   if (state.view !== 'settings-lark') { showLarkSecret(false); if (state.recipientPicker) closeRecipientPicker(); }
   state.settingsNote = undefined;
   renderAll();
@@ -1624,18 +2034,20 @@ document.addEventListener('keydown', event => {
   }
 });
 
+const languageDropdown = new Dropdown($<HTMLButtonElement>('language'), $('language-options'));
+
 function renderLanguage(): void {
   ({ views, descriptions, reasons, sourceNames, categories, outcomeTabs, pullTabs, repoTabs, agentNames, promptStates, adapters, availability, reviews, moduleNames, moduleStates, credentialSources, githubErrors, tailscaleErrors } = translatedLabels());
   relative = new Intl.RelativeTimeFormat(locale(), { numeric: 'auto' });
   translateDocument();
   state.signatures.clear();
-  $<HTMLSelectElement>('language').value = languagePreference();
+  languageDropdown.value = languagePreference();
   renderAll();
   renderLogs(true); // Paused logs still need their labels refreshed.
   requestAnimationFrame(revealActiveNavigation);
 }
 $('language').addEventListener('change', () => {
-  const value = $<HTMLSelectElement>('language').value;
+  const value = languageDropdown.value;
   if (!isPreference(value)) return;
   setLanguage(value);
   renderLanguage();
@@ -1660,6 +2072,7 @@ requestAnimationFrame(revealActiveNavigation);
 window.addEventListener('resize', revealActiveNavigation);
 void loadSnapshot();
 void loadAgents();
+if (state.view === 'providers' || state.view === 'agents') void loadProviders();
 if (usesPulls(state.view)) void loadPulls();
 loadSettingsView();
 setInterval(() => {
@@ -1667,5 +2080,7 @@ setInterval(() => {
   if (state.view === 'settings-github' && loginActive(state.github?.login)) void loadGitHub();
   if (state.view === 'settings-lark' && (larkRegistrationActive() || state.larkReconcilePending || !state.larkRegistration)) void loadLarkRegistration();
   if (state.view === 'settings-tailscale') void loadTailscale();
+  if (state.view === 'providers' || state.view === 'agents') void loadProviders();
+  if (state.view === 'settings-remote') void loadRemote();
 }, 2000);
 setInterval(() => { if (usesPulls(state.view)) void loadPulls(); }, 10000);

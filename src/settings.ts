@@ -19,6 +19,8 @@ import type { LarkApi } from './lark-metadata.js';
 import { inspectLarkSetup, LarkRegistration, type LarkRegistrationOptions, type LarkRegistrationPage, type LarkRegistrationResult, type LarkSetup } from './lark-registration.js';
 import { DIRECTORY_FRESH_MS, DIRECTORY_MAX_AGE_MS, LarkDirectoryCache } from './lark-directory-cache.js';
 import { mergeRecipients } from './lark-profile.js';
+import type { CompatibilityConfig, CompatibilityStartup, CompatibilitySync, CompatibilityUpdate, ProvidersService } from './providers.js';
+import { CoreError, coreErrorCode, provenCoreRejection } from './provider-core.js';
 
 const FORMAT = 'nootify-config';
 const EXPORTS_KEPT = 10;
@@ -27,13 +29,15 @@ const packageFile = new URL('../../package.json', import.meta.url);
 /** Reject malformed application IDs before verifying or saving credentials. */
 const isAppId = (value: unknown): value is string => typeof value === 'string' && /^cli_[0-9a-fA-F]{16}$/.test(value);
 const isObject = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
+const rejected = (error: unknown): boolean => provenCoreRejection(error) || error instanceof HttpError && !coreErrorCode(error)
+  && [400, 401, 403, 404, 405, 409, 413, 415, 422, 429].includes(error.status);
 
 /** Public Settings data; secrets are retrieved separately by an explicit local-only action. */
 export interface SettingsPage {
   version: string;
   exports_dir: string;
   last_export?: string;
-  lark: { status: string; configured: boolean; connection_type: LarkConnectionType; source?: CredentialSource; app_id?: string; saved: boolean; recipient?: string; groups: number };
+  lark: { status: string; configured: boolean; connection_type: LarkConnectionType; source?: CredentialSource; app_id?: string; saved: boolean; recipient?: string; groups: number; mirror_status?: 'pending' };
 }
 export interface LarkRecipientsPage extends Omit<LarkDirectory, 'permission'> { permission?: LarkPermissionHelp; cached?: boolean; fetched_at?: number; refresh_after?: number; expires_at?: number }
 export interface GitHubSettings { account?: GitHubAccount; login: GitHubLogin }
@@ -41,6 +45,7 @@ export interface GitHubSettings { account?: GitHubAccount; login: GitHubLogin }
 export interface ImportSummary {
   exported_at?: string; app_id?: string; recipient?: string; pulls_config: boolean; follow?: number; backends: string[]; agents: AgentId[];
   warnings: string[];
+  provider_count?: number;
 }
 /** The exported file. It holds secrets, so it is only ever written to disk, never returned over HTTP. */
 interface ConfigFile {
@@ -49,6 +54,7 @@ interface ConfigFile {
   pulls?: { config?: unknown; follow?: { repository: string; follow: boolean }[] };
   backends?: Partial<Record<'codex' | 'opencode', BackendConnection>>;
   agents?: AgentId[];
+  providers?: Record<string, unknown>;
 }
 export interface LarkControl {
   credentials?: Credentials;
@@ -56,6 +62,12 @@ export interface LarkControl {
   status(): string;
   channel(): { recipient?: string; groups: number };
   configure(credentials?: Credentials): Promise<void>;
+  refreshCompatibilityCredentials?(credentials?: Credentials, providerId?: string): void;
+  compatibilityProviderId?(): string;
+  setCompatibilitySync?(sync: CompatibilitySync): void;
+  setCompatibilityStartup?(startup: CompatibilityStartup): void;
+  setRecipient?(openId: string): Promise<void>;
+  setRecipientSync?(sync: (openId: string) => Promise<void>): void;
 }
 export interface PullPreferences {
   preferences(): Promise<{ config?: unknown; follow: { repository: string; follow: boolean }[] }>;
@@ -65,6 +77,7 @@ export interface AgentControl { list(): Promise<AgentPrompt[]>; set(agent: Agent
 export interface SettingsOptions {
   state: State; lark: LarkControl; github: GitHubAuth; pulls: PullPreferences; agents: AgentControl;
   tailscale?: TailscaleService;
+  providers?: Pick<ProvidersService, 'exportConfig' | 'importConfig' | 'syncNetwork'>;
   mcpConfig?: string; source?: CredentialSource; env?: NodeJS.ProcessEnv;
   verify?: (credentials: Credentials) => Promise<void>;
   registration?: LarkRegistrationOptions;
@@ -119,6 +132,14 @@ function parseConfig(value: unknown): ConfigFile {
       if (value.backends[adapter] !== undefined) result.backends[adapter] = backend(value.backends[adapter], adapter);
     }
   }
+  if (value.providers !== undefined) {
+    const core = value.providers;
+    if (!isObject(core) || core.version !== 1 || !Array.isArray(core.providers)
+      || core.providers.some(provider => !isObject(provider) || !['feishu', 'remote'].includes(String(provider.type))
+        || typeof provider.id !== 'string' || typeof provider.name !== 'string')
+      || (core.remote !== undefined && !isObject(core.remote))) throw new HttpError(400, 'Invalid providers configuration');
+    result.providers = core;
+  }
   if (value.agents !== undefined) {
     if (!Array.isArray(value.agents) || !value.agents.every(isAgent)) throw new HttpError(400, 'Invalid agents section');
     result.agents = AGENT_IDS.filter(agent => (value.agents as AgentId[]).includes(agent));
@@ -128,7 +149,8 @@ function parseConfig(value: unknown): ConfigFile {
 function summarize(file: ConfigFile): ImportSummary {
   return { ...(file.exported_at ? { exported_at: file.exported_at } : {}), ...(file.lark?.app_id ? { app_id: file.lark.app_id } : {}),
     ...(file.lark?.recipient_open_id ? { recipient: file.lark.recipient_open_id } : {}), pulls_config: file.pulls?.config !== undefined,
-    ...(file.pulls?.follow ? { follow: file.pulls.follow.length } : {}), backends: Object.keys(file.backends ?? {}), agents: file.agents ?? [], warnings: [] };
+    ...(file.pulls?.follow ? { follow: file.pulls.follow.length } : {}), backends: Object.keys(file.backends ?? {}), agents: file.agents ?? [], warnings: [],
+    ...(file.providers ? { provider_count: (file.providers.providers as unknown[]).length } : {}) };
 }
 
 /** Owner settings behind the Settings pages. Page callers are limited to this Mac by the UI layer. */
@@ -141,24 +163,110 @@ export class SettingsService {
   private readonly env: NodeJS.ProcessEnv;
   private readonly report: (record: Record<string, unknown>) => void;
   private readonly registration: LarkRegistration;
+  private mirrorPending = false;
+  private mirrorRetry?: NodeJS.Timeout;
+  private stopping = false;
   constructor(private readonly options: SettingsOptions) {
     this.source = options.source; this.env = options.env ?? process.env; this.report = options.report ?? (() => {});
     this.registration = new LarkRegistration((result, signal) => this.acceptLarkRegistration(result, signal), this.report, options.registration);
     this.directoryStore = new LarkDirectoryCache(options.state.directory);
+    options.lark.setCompatibilitySync?.((update, preview) => this.syncProviderCompatibility(update, preview));
+    options.lark.setCompatibilityStartup?.(reconcile => this.syncProviderCompatibility(reconcile));
+    options.lark.setRecipientSync?.(openId => this.setRecipient(openId));
+  }
+  /** Mirror the core's committed legacy provider without saving it again through the compatibility configure path. */
+  private syncProviderCompatibility(update: CompatibilityUpdate, preview?: () => Promise<CompatibilityConfig>): Promise<void> {
+    return this.serialized(async () => {
+      const { lark, state } = this.options;
+      const environment = await resolveCredentials(this.env, {});
+      if (preview && environment?.source === 'environment') {
+        const candidate = (await preview()).credentials;
+        if (candidate?.appId !== environment.credentials.appId || candidate?.appSecret !== environment.credentials.appSecret) {
+          throw new HttpError(409, 'Provider changes conflict with the active environment Feishu credentials');
+        }
+      }
+      const current = lark.credentials;
+      const saved = { appId: state.settings.lark_app_id, appSecret: state.settings.lark_app_secret };
+      const { credentials, recipient, provider_id } = await update(environment?.credentials,
+        isOpenId(this.env.LARK_NOTIFY_OPEN_ID) ? this.env.LARK_NOTIFY_OPEN_ID : undefined);
+      const previousApp = saved.appId ?? current?.appId;
+      const scopeChanged = previousApp && previousApp !== credentials?.appId && [...state.bindings.values()].some(binding => !binding.app_id);
+      const mirrorChanged = scopeChanged || saved.appId !== credentials?.appId || saved.appSecret !== credentials?.appSecret
+        || state.settings.lark_recipient_open_id !== (recipient || undefined) || !credentials && state.settings.lark_connection_type !== undefined;
+      let failed = false;
+      try {
+        // The core already committed. Keep its mirror authoritative in memory even if this disk write fails.
+        if (mirrorChanged) await state.save({ apply: () => {
+          this.scopeLarkBindings(credentials?.appId, saved.appId ?? current?.appId);
+          if (credentials) {
+            if (state.settings.lark_app_id !== credentials.appId) state.settings.lark_connection_type = 'bot';
+            state.settings.lark_app_id = credentials.appId; state.settings.lark_app_secret = credentials.appSecret;
+          } else {
+            delete state.settings.lark_app_id; delete state.settings.lark_app_secret; delete state.settings.lark_connection_type;
+          }
+          if (recipient) state.settings.lark_recipient_open_id = recipient; else delete state.settings.lark_recipient_open_id;
+        }, rollback: () => {} });
+        this.mirrorPending = false; clearTimeout(this.mirrorRetry); this.mirrorRetry = undefined;
+      } catch { failed = true; this.mirrorPending = true; this.scheduleMirrorRetry(); }
+      const fromEnvironment = environment?.source === 'environment' && environment.credentials.appId === credentials?.appId
+        && environment.credentials.appSecret === credentials?.appSecret;
+      this.source = credentials ? fromEnvironment ? 'environment' : 'settings' : undefined;
+      lark.refreshCompatibilityCredentials?.(credentials, provider_id);
+      if (current?.appId !== credentials?.appId || current?.appSecret !== credentials?.appSecret
+        || saved.appId !== credentials?.appId || saved.appSecret !== credentials?.appSecret) {
+        this.directoryRefresh++; await this.directoryStore.clear();
+      }
+      if (failed) throw this.mirrorError();
+    });
+  }
+  private mirrorError(): HttpError {
+    const error = new HttpError(409, 'Provider change committed; saving its local compatibility mirror is pending');
+    error.cause = new CoreError('committed_not_mirrored', error.message); return error;
+  }
+  private scheduleMirrorRetry(): void {
+    this.report({ source: 'providers', status: 'compatibility_mirror_pending' });
+    if (!this.stopping && !this.mirrorRetry) this.mirrorRetry = setTimeout(() => {
+      this.mirrorRetry = undefined; void this.serialized(async () => {}).catch(() => {});
+    }, 1000).unref();
+  }
+  private async repairMirror(): Promise<void> {
+    if (!this.mirrorPending) return;
+    try { await this.options.state.save(); }
+    catch { this.scheduleMirrorRetry(); throw this.mirrorError(); }
+    this.mirrorPending = false; clearTimeout(this.mirrorRetry); this.mirrorRetry = undefined;
   }
   private get exportsDir(): string { return join(this.options.state.directory, 'exports'); }
   private serialized<T>(operation: () => Promise<T>): Promise<T> {
-    const pending = this.writes.catch(() => {}).then(operation);
+    const pending = this.writes.catch(() => {}).then(async () => { await this.repairMirror(); return operation(); });
     this.writes = pending;
     return pending;
   }
   /** Apply local configuration only when its State write starts; failed writes cannot leak into another queued snapshot. */
-  private persistSettings(change: () => void): Promise<void> {
+  private async persistSettings(change: () => void): Promise<() => void> {
     const { state } = this.options;
     let before: typeof state.settings | undefined; let applied: typeof state.settings | undefined;
     let beforeBackends: typeof state.backends = new Map(); let appliedBackends: typeof state.backends = new Map();
     let owners: { binding: LarkBinding; before?: string; applied?: string }[] = [];
-    return state.save({
+    const rollback = () => {
+      if (!before || !applied) return;
+      const keys = new Set([...Object.keys(before), ...Object.keys(applied)] as (keyof typeof state.settings)[]);
+      for (const key of keys) {
+        // Preserve an unrelated writer's newer value while reverting this transaction's changes.
+        if (before[key] === applied[key] || state.settings[key] !== applied[key]) continue;
+        if (before[key] === undefined) delete state.settings[key];
+        else Object.assign(state.settings, { [key]: before[key] });
+      }
+      for (const adapter of new Set([...beforeBackends.keys(), ...appliedBackends.keys()])) {
+        if (beforeBackends.get(adapter) === appliedBackends.get(adapter) || state.backends.get(adapter) !== appliedBackends.get(adapter)) continue;
+        const previous = beforeBackends.get(adapter);
+        if (previous) state.backends.set(adapter, previous); else state.backends.delete(adapter);
+      }
+      for (const owner of owners) {
+        if (owner.before === owner.applied || owner.binding.app_id !== owner.applied) continue;
+        if (owner.before === undefined) delete owner.binding.app_id; else owner.binding.app_id = owner.before;
+      }
+    };
+    await state.save({
       apply: () => {
         before = { ...state.settings }; beforeBackends = new Map(state.backends);
         owners = [...state.bindings.values()].map(binding => ({ binding, before: binding.app_id }));
@@ -167,27 +275,9 @@ export class SettingsService {
           applied = { ...state.settings }; appliedBackends = new Map(state.backends);
           for (const owner of owners) owner.applied = owner.binding.app_id;
         }
-      },
-      rollback: () => {
-        if (!before || !applied) return;
-        const keys = new Set([...Object.keys(before), ...Object.keys(applied)] as (keyof typeof state.settings)[]);
-        for (const key of keys) {
-          // Preserve an unrelated writer's newer value while reverting this transaction's changes.
-          if (before[key] === applied[key] || state.settings[key] !== applied[key]) continue;
-          if (before[key] === undefined) delete state.settings[key];
-          else Object.assign(state.settings, { [key]: before[key] });
-        }
-        for (const adapter of new Set([...beforeBackends.keys(), ...appliedBackends.keys()])) {
-          if (beforeBackends.get(adapter) === appliedBackends.get(adapter) || state.backends.get(adapter) !== appliedBackends.get(adapter)) continue;
-          const previous = beforeBackends.get(adapter);
-          if (previous) state.backends.set(adapter, previous); else state.backends.delete(adapter);
-        }
-        for (const owner of owners) {
-          if (owner.before === owner.applied || owner.binding.app_id !== owner.applied) continue;
-          if (owner.before === undefined) delete owner.binding.app_id; else owner.binding.app_id = owner.before;
-        }
-      },
+      }, rollback,
     });
+    return rollback;
   }
   private larkConnectionType(): LarkConnectionType {
     return this.source === 'settings' ? this.options.state.settings.lark_connection_type ?? 'bot' : 'bot';
@@ -199,7 +289,7 @@ export class SettingsService {
     const configured = Boolean(lark.credentials?.appId.trim() && lark.credentials?.appSecret.trim());
     return { version, exports_dir: this.exportsDir, ...(this.lastExport ? { last_export: this.lastExport } : {}),
       lark: { status: configured ? lark.status() : 'disabled', configured, connection_type: this.larkConnectionType(), source: this.source, app_id: lark.credentials?.appId, saved: Boolean(state.settings.lark_app_id && state.settings.lark_app_secret),
-        recipient: channel.recipient ?? state.settings.lark_recipient_open_id, groups: channel.groups } };
+        recipient: channel.recipient ?? state.settings.lark_recipient_open_id, groups: channel.groups, ...(this.mirrorPending ? { mirror_status: 'pending' as const } : {}) } };
   }
   /** Asking GitHub costs a network round trip, so polling during a login reads only the flow. */
   async github(): Promise<GitHubSettings> {
@@ -218,17 +308,23 @@ export class SettingsService {
   async setTailscaleEnabled(enabled: unknown): Promise<void> {
     if (!this.options.tailscale) throw new HttpError(404, 'Tailscale settings are not enabled');
     await this.options.tailscale.setEnabled(enabled);
+    await this.options.providers?.syncNetwork();
   }
   startTailscaleLogin(): Promise<TailscaleLogin> {
     if (!this.options.tailscale) throw new HttpError(404, 'Tailscale settings are not enabled');
-    return this.options.tailscale.startLogin();
+    return this.options.tailscale.startLogin().then(async result => { await this.options.providers?.syncNetwork(); return result; });
   }
-  async cancelTailscaleLogin(): Promise<void> { await this.options.tailscale?.cancelLogin(); }
+  async cancelTailscaleLogin(): Promise<void> { await this.options.tailscale?.cancelLogin(); await this.options.providers?.syncNetwork(); }
   async logoutTailscale(): Promise<void> {
     if (!this.options.tailscale) throw new HttpError(404, 'Tailscale settings are not enabled');
     await this.options.tailscale.logout();
+    await this.options.providers?.syncNetwork();
   }
-  async stop(): Promise<void> { await this.registration.stop(); await this.options.github.stop(); await this.writes.catch(() => {}); }
+  async stop(): Promise<void> {
+    this.stopping = true; clearTimeout(this.mirrorRetry);
+    await this.registration.stop(); await this.options.github.stop(); await this.writes.catch(() => {});
+    await this.repairMirror().catch(() => {});
+  }
 
   larkRegistration(): LarkRegistrationPage { return this.registration.page(); }
   startLarkRegistration(): LarkRegistrationPage {
@@ -245,8 +341,7 @@ export class SettingsService {
     return setup;
   }
   /** Persist legacy group ownership in the same snapshot as an application change. */
-  private scopeLarkBindings(nextAppId?: string): void {
-    const previousApp = this.options.lark.credentials?.appId;
+  private scopeLarkBindings(nextAppId?: string, previousApp = this.options.lark.credentials?.appId): void {
     if (!previousApp || previousApp === nextAppId) return;
     for (const binding of this.options.state.bindings.values()) if (!binding.app_id) binding.app_id = previousApp;
   }
@@ -257,7 +352,7 @@ export class SettingsService {
       await (this.options.verify ?? verifyCredentials)(result.credentials);
       signal.throwIfAborted();
       const { state, lark } = this.options;
-      await this.persistSettings(() => {
+      const rollback = await this.persistSettings(() => {
         signal.throwIfAborted();
         // An open_id belongs to an app. Never carry an old app's trusted recipient into the new one.
         this.scopeLarkBindings(result.credentials.appId);
@@ -267,19 +362,37 @@ export class SettingsService {
         state.settings.lark_connection_type = 'personal-app';
         if (result.recipient) state.settings.lark_recipient_open_id = result.recipient;
       });
-      await this.reload(true);
+      await this.reloadSettings(rollback, true);
       return this.larkSetup(result.credentials.appId, signal);
     });
   }
 
+  private async reloadSettings(rollback: () => void, forceReconnect = false, recipient?: string): Promise<void> {
+    const current = this.options.lark.credentials;
+    try {
+      await this.reload(forceReconnect);
+      if (recipient && this.options.lark.credentials) await this.options.lark.setRecipient?.(recipient);
+    } catch (error) {
+      if (rejected(error)) await this.persistSettings(rollback);
+      else if (coreErrorCode(error) === 'committed_not_durable') {
+        const resolved = await resolveCredentials(this.env, this.options.state.settings, this.options.mcpConfig);
+        this.options.lark.refreshCompatibilityCredentials?.(resolved?.credentials); this.source = resolved?.source;
+        if (current?.appId !== resolved?.credentials.appId || current?.appSecret !== resolved?.credentials.appSecret) {
+          this.directoryRefresh++; await this.directoryStore.clear();
+        }
+      }
+      throw error;
+    }
+  }
   /** Re-derives the active bot from its sources and moves the connection only if that changed it. */
-  private async reload(forceReconnect = false): Promise<void> {
+  private async reload(forceReconnect = false, preserveProviders = false): Promise<void> {
     const { lark, state, mcpConfig } = this.options;
     const resolved = await resolveCredentials(this.env, state.settings, mcpConfig);
-    this.source = resolved?.source;
     const current = lark.credentials;
-    if (!forceReconnect && current?.appId === resolved?.credentials.appId && current?.appSecret === resolved?.credentials.appSecret) return;
-    await lark.configure(resolved?.credentials);
+    if (!forceReconnect && current?.appId === resolved?.credentials.appId && current?.appSecret === resolved?.credentials.appSecret) { this.source = resolved?.source; return; }
+    if (preserveProviders && lark.refreshCompatibilityCredentials) lark.refreshCompatibilityCredentials(resolved?.credentials);
+    else await lark.configure(resolved?.credentials);
+    this.source = resolved?.source;
     if (current?.appId !== resolved?.credentials.appId || current?.appSecret !== resolved?.credentials.appSecret) { this.directoryRefresh++; await this.directoryStore.clear(); }
     this.report({ source: 'lark', status: 'lark_configured', reason: resolved ? resolved.credentials.appId : undefined });
   }
@@ -304,13 +417,13 @@ export class SettingsService {
       const credentials = { appId, appSecret: secret.trim() };
       try { await (this.options.verify ?? verifyCredentials)(credentials); }
       catch (error) { throw new HttpError(400, `Could not verify these credentials with Feishu: ${(error as Error).message}`); }
-      await this.persistSettings(() => {
+      const rollback = await this.persistSettings(() => {
         this.scopeLarkBindings(credentials.appId);
         if (lark.credentials?.appId !== credentials.appId) delete state.settings.lark_recipient_open_id;
         state.settings.lark_connection_type = connectionType ?? (state.settings.lark_app_id === credentials.appId ? state.settings.lark_connection_type ?? 'bot' : 'bot');
         state.settings.lark_app_id = credentials.appId; state.settings.lark_app_secret = credentials.appSecret;
       });
-      await this.reload(true);
+      await this.reloadSettings(rollback, true);
     });
   }
   /** Falls back to the MCP file, if any, and refuses rather than leaving saved credentials half removed if it is unreadable. */
@@ -320,12 +433,12 @@ export class SettingsService {
       const { state, mcpConfig } = this.options;
       const { lark_app_id: _id, lark_app_secret: _secret, ...rest } = state.settings;
       const fallback = await resolveCredentials(this.env, rest, mcpConfig);
-      await this.persistSettings(() => {
+      const rollback = await this.persistSettings(() => {
         this.scopeLarkBindings(fallback?.credentials.appId);
         if (fallback?.credentials.appId !== this.options.lark.credentials?.appId) delete state.settings.lark_recipient_open_id;
         delete state.settings.lark_app_id; delete state.settings.lark_app_secret; delete state.settings.lark_connection_type;
       });
-      await this.reload();
+      await this.reloadSettings(rollback);
     });
   }
   async larkRecipients(onProgress?: (page: LarkRecipientsPage) => void, signal?: AbortSignal, refresh = false): Promise<LarkRecipientsPage> {
@@ -388,7 +501,10 @@ export class SettingsService {
     return this.serialized(async () => {
       if (appId !== undefined && appId !== this.options.lark.credentials?.appId) throw new HttpError(409, 'Feishu credentials changed; reload the directory');
       if (!isOpenId(openId)) throw new HttpError(400, 'Expected a Feishu open_id (ou_…)');
-      await this.persistSettings(() => { this.options.state.settings.lark_recipient_open_id = openId; });
+      const { state, lark } = this.options;
+      const rollback = await this.persistSettings(() => { state.settings.lark_recipient_open_id = openId; });
+      try { await lark.setRecipient?.(openId); }
+      catch (error) { if (rejected(error)) await this.persistSettings(rollback); throw error; }
     });
   }
 
@@ -402,7 +518,8 @@ export class SettingsService {
     }));
     return { format: FORMAT, version: 1, exported_at: new Date().toISOString(),
       lark: { ...(credentials ? { app_id: credentials.appId, app_secret: credentials.appSecret, connection_type: this.larkConnectionType() } : {}), ...(recipient ? { recipient_open_id: recipient } : {}) },
-      pulls: await pulls.preferences(), backends, agents: (await agents.list()).filter(agent => agent.injected).map(agent => agent.agent) };
+      pulls: await pulls.preferences(), backends, agents: (await agents.list()).filter(agent => agent.injected).map(agent => agent.agent),
+      ...(this.options.providers ? { providers: await this.options.providers.exportConfig() } : {}) };
   }
   /** Returns only where the file went: the page has no bearer token, so secrets never travel over its HTTP routes. */
   exportConfig(): Promise<{ path: string; summary: ImportSummary }> {
@@ -425,29 +542,73 @@ export class SettingsService {
     this.registration.cancel();
     return this.serialized(async () => {
       const file = parseConfig(value);
-      const { state, pulls, agents } = this.options;
+      const { state, pulls, agents, lark } = this.options;
       const summary = summarize(file);
-      const effective = file.lark?.app_id ? await resolveCredentials(this.env,
-        { ...state.settings, lark_app_id: file.lark.app_id, lark_app_secret: file.lark.app_secret }, this.options.mcpConfig) : undefined;
-      await this.persistSettings(() => {
-        if (file.lark?.app_id) {
-          const nextAppId = effective?.credentials.appId;
-          this.scopeLarkBindings(nextAppId);
-          if (nextAppId !== this.options.lark.credentials?.appId) delete state.settings.lark_recipient_open_id;
-          state.settings.lark_app_id = file.lark.app_id; state.settings.lark_app_secret = file.lark.app_secret;
-          state.settings.lark_connection_type = file.lark.connection_type ?? 'bot';
+      if (file.providers && !this.options.providers) throw new HttpError(400, 'Provider configuration is not supported by this service');
+      const environment = await resolveCredentials(this.env, {});
+      const importedProviders = file.providers?.providers as Record<string, unknown>[] | undefined;
+      const activeId = lark.compatibilityProviderId?.() ?? 'legacy-feishu';
+      const preferredApp = environment?.credentials.appId ?? file.lark?.app_id;
+      const matching = importedProviders?.filter(provider => provider.type === 'feishu' && provider.app_id === preferredApp) ?? [];
+      const legacy = matching.find(provider => provider.enabled === true) ?? matching.find(provider => provider.id === activeId) ?? matching[0]
+        ?? importedProviders?.find(provider => provider.id === activeId && provider.type === 'feishu')
+        ?? importedProviders?.find(provider => provider.id === 'legacy-feishu' && provider.type === 'feishu');
+      const imported = legacy && typeof legacy.app_id === 'string' && typeof legacy.app_secret === 'string'
+        ? { appId: legacy.app_id, appSecret: legacy.app_secret } : undefined;
+      const proposed = { ...state.settings };
+      if (file.providers) {
+        delete proposed.lark_app_id; delete proposed.lark_app_secret;
+        if (imported) { proposed.lark_app_id = imported.appId; proposed.lark_app_secret = imported.appSecret; }
+      } else if (file.lark?.app_id) { proposed.lark_app_id = file.lark.app_id; proposed.lark_app_secret = file.lark.app_secret; }
+      // Resolve before changing either store. Environment precedence cannot leave the core and compatibility API using different apps.
+      const effective = await resolveCredentials(this.env, proposed, this.options.mcpConfig);
+      if (file.providers && effective?.source === 'environment' && (!imported || imported.appId !== effective.credentials.appId || imported.appSecret !== effective.credentials.appSecret)) {
+        throw new HttpError(409, 'Imported providers conflict with the active environment Feishu credentials; preserve the environment provider');
+      }
+      const previous = lark.credentials;
+      const refreshImported = async (allowConfigure = true) => {
+        if (lark.refreshCompatibilityCredentials) lark.refreshCompatibilityCredentials(imported, typeof legacy?.id === 'string' ? legacy.id : undefined);
+        else if (allowConfigure && (previous?.appId !== imported?.appId || previous?.appSecret !== imported?.appSecret)) await lark.configure(imported);
+        this.source = imported ? effective?.source ?? 'settings' : undefined;
+        if (previous?.appId !== imported?.appId || previous?.appSecret !== imported?.appSecret) { this.directoryRefresh++; await this.directoryStore.clear(); }
+      };
+      const rollback = await this.persistSettings(() => {
+        if (file.providers) {
+          this.scopeLarkBindings(imported?.appId);
+          if (imported) {
+            state.settings.lark_app_id = imported.appId; state.settings.lark_app_secret = imported.appSecret;
+            state.settings.lark_connection_type = file.lark?.app_id === imported.appId ? file.lark.connection_type ?? 'bot' : 'bot';
+          } else { delete state.settings.lark_app_id; delete state.settings.lark_app_secret; delete state.settings.lark_connection_type; }
+          const recipient = typeof legacy?.recipient_open_id === 'string' ? legacy.recipient_open_id : undefined;
+          if (recipient) state.settings.lark_recipient_open_id = recipient; else delete state.settings.lark_recipient_open_id;
+        } else {
+          if (file.lark?.app_id) {
+            const nextAppId = effective?.credentials.appId;
+            this.scopeLarkBindings(nextAppId);
+            if (nextAppId !== lark.credentials?.appId) delete state.settings.lark_recipient_open_id;
+            state.settings.lark_app_id = file.lark.app_id; state.settings.lark_app_secret = file.lark.app_secret;
+            state.settings.lark_connection_type = file.lark.connection_type ?? 'bot';
+          }
+          if (file.lark?.recipient_open_id) state.settings.lark_recipient_open_id = file.lark.recipient_open_id;
         }
-        if (file.lark?.recipient_open_id) state.settings.lark_recipient_open_id = file.lark.recipient_open_id;
         for (const adapter of ['codex', 'opencode'] as const) {
           const connection = file.backends?.[adapter];
           if (connection) state.backends.set(adapter, connection);
         }
       });
+      if (file.providers) {
+        try { await this.options.providers!.importConfig(file.providers); }
+        catch (error) {
+          if (rejected(error)) await this.persistSettings(rollback);
+          else if (coreErrorCode(error) === 'committed_not_durable') await refreshImported(false);
+          throw error;
+        }
+        await refreshImported();
+      } else await this.reloadSettings(rollback, false, file.lark?.recipient_open_id);
       if (file.pulls) await pulls.restore(file.pulls);
       for (const agent of file.agents ?? []) {
         try { await agents.set(agent, true); } catch (error) { summary.warnings.push(`${agent}: ${(error as Error).message}`); }
       }
-      await this.reload();
       if (file.lark?.app_id && this.source === 'environment') summary.warnings.push('LARK_APP_ID and LARK_APP_SECRET are set for this process and stay in use');
       this.report({ source: 'host', status: 'config_imported' });
       return summary;

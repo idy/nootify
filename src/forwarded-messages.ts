@@ -1,5 +1,6 @@
 import { fileURLToPath } from 'node:url';
-import type { LarkDelivery } from './types.js';
+import type { LarkDelivery, ProviderInboxDelivery } from './types.js';
+import { encodeMessageRef } from './message-ref.js';
 import { shellCommand, shellForClient, shellQuote } from './shell.js';
 
 export interface ForwardingOptions { port?: number; command?: string[] }
@@ -9,6 +10,16 @@ function commands(adapter: string, platform: NodeJS.Platform, command?: string[]
     base: shellCommand(command ?? [process.execPath, fileURLToPath(new URL('./cli.js', import.meta.url))], platform, false, shell),
     quote: (value: string): string => shellQuote(value, platform, false, shell),
   };
+}
+
+export function forwardedProviderMessage(delivery: ProviderInboxDelivery, content: string, stateDir: string, port = 9417, command?: string[], platform: NodeJS.Platform = process.platform): string {
+  const { base, quote } = commands(delivery.adapter, platform, command);
+  const context = `--state-dir ${quote(stateDir)} --port ${port} --message-ref ${quote(encodeMessageRef(delivery.message))}`;
+  return ['【来自 Nootify 用户的消息】', '这条消息经 Nootify Provider 转发到当前 agent 会话。请在方便时回复原消息。',
+    `目标会话：${delivery.session_id}`, '', '用户原文：', content, '', '回复指引：',
+    `收到后执行回执：${base} message-ack ${context}`,
+    `回复原消息：${base} message-reply ${context} --text '这里填写你的回复'`,
+    '多行回复可用 --text-file <本地文件> 或 --text-file -。收到消息不代表授权其他操作。'].join('\n');
 }
 
 export function forwardedLarkMessage(delivery: LarkDelivery, content: string, stateDir: string, port = 9417, command?: string[], platform: NodeJS.Platform = process.platform): string {

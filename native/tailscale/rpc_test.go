@@ -64,6 +64,10 @@ func TestDecodeRequest(t *testing.T) {
 		`{"id":1,"method":"status"}`,
 		` {"method":"whois", "ip":"100.64.0.2", "id":2} `,
 		`{"id":9007199254740991,"method":"logout"}`,
+		`{"id":1,"method":"tunnel","address":"peer.tail.ts.net:7443"}`,
+		`{"id":2,"method":"close_tunnel","tunnel_id":"1"}`,
+		`{"id":3,"method":"publish","port":7443,"target":"127.0.0.1:12345"}`,
+		`{"id":4,"method":"unpublish","port":7443}`,
 	} {
 		if _, code := decodeRequest([]byte(line)); code != "" {
 			t.Errorf("rejected %s: %s", line, code)
@@ -75,6 +79,14 @@ func TestDecodeRequest(t *testing.T) {
 		`{"id":1.5,"method":"status"}`, `{"id":-1,"method":"status"}`, `{"id":0,"method":"status"}`,
 		`{"id":9007199254740992,"method":"status"}`, `{"id":1,"method":null}`,
 		`{"id":1,"method":"status","extra":"x"}`,
+		`{"id":1,"method":"status","address":"100.64.0.2:80"}`,
+		`{"id":1,"method":"tunnel","target":"127.0.0.1:80"}`,
+		`{"id":1,"method":"publish","port":"7443","target":"127.0.0.1:80"}`,
+		`{"id":1,"method":"publish","port":1.5,"target":"127.0.0.1:80"}`,
+		`{"id":1,"method":"publish","port":7443,"port":7444}`,
+		`{"id":1,"method":"unpublish","port":7443,"target":"127.0.0.1:80"}`,
+		`{"id":1,"method":"close_tunnel","tunnel_id":2}`,
+		`{"id":1,"method":"tunnel","address":"100.64.0.2:80","tunnel_id":"1"}`,
 		`{"id":1,"method":"status","ip":"100.64.0.2"}`,
 		`{"id":1,"method":"status","method":"login"}`,
 		`{"id":1,"id":2,"method":"login"}`,

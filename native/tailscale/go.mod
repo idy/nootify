@@ -3,6 +3,7 @@ module github.com/idy/nootify/native/tailscale
 go 1.27.3
 
 require (
+	github.com/tailscale/go-winio v0.0.0-20231025203758-c4f33415bf55
 	golang.org/x/sys v0.49.0
 	tailscale.com v1.104.5
 )
@@ -31,7 +32,6 @@ require (
 	github.com/pires/go-proxyproto v0.15.0 // indirect
 	github.com/safchain/ethtool v0.7.0 // indirect
 	github.com/tailscale/certstore v0.1.1-0.20260409135935-3638fb84b77d // indirect
-	github.com/tailscale/go-winio v0.0.0-20231025203758-c4f33415bf55 // indirect
 	github.com/tailscale/hujson v0.0.0-20260727124030-b80ff77dac4f // indirect
 	github.com/tailscale/peercred v0.0.0-20250107143737-35a0c7bd7edc // indirect
 	github.com/tailscale/web-client-prebuilt v0.0.0-20260917222731-e0ed2d0d0fea // indirect

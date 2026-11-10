@@ -3,12 +3,19 @@ import { access, chmod, constants, lstat, mkdir } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+export interface EmbeddedTailscaleTunnel { id: string; network: 'unix' | 'npipe'; address: string; token: string }
+export interface EmbeddedTailscalePublication { port: number }
+
 export interface EmbeddedTailscaleClient {
   start(target: string, exited: (error?: string) => void): Promise<void>;
   status(): Promise<unknown>;
   whois(ip: string): Promise<unknown>;
   login(): Promise<void>;
   logout(): Promise<void>;
+  tunnel?(address: string): Promise<EmbeddedTailscaleTunnel>;
+  closeTunnel?(tunnelId: string): Promise<void>;
+  publish?(port: number, target: string): Promise<EmbeddedTailscalePublication>;
+  unpublish?(port: number): Promise<void>;
   stop(): Promise<void>;
 }
 /** Ambient credentials, control servers and system-daemon configuration must never enroll this node. */
@@ -21,7 +28,7 @@ export function embeddedBinaryCandidates(platform: NodeJS.Platform = process.pla
   const target = platform === 'win32' ? `${cpu}-pc-windows-msvc` : platform === 'darwin' ? `${cpu}-apple-darwin` : `${cpu}-unknown-linux-gnu`;
   const extension = platform === 'win32' ? '.exe' : '';
   return [join(dirname(process.execPath), `nootify-tsnet${extension}`),
-    fileURLToPath(new URL(`../../src-tauri/binaries/nootify-tsnet-${target}${extension}`, import.meta.url))];
+    fileURLToPath(new URL(`../../build/binaries/nootify-tsnet-${target}${extension}`, import.meta.url))];
 }
 async function helperBinary(): Promise<string> {
   const candidates = process.env.NOOTIFY_TSNET_BIN ? [resolve(process.env.NOOTIFY_TSNET_BIN)] : embeddedBinaryCandidates();
@@ -128,6 +135,22 @@ export class TsnetClient implements EmbeddedTailscaleClient {
   whois(ip: string): Promise<unknown> { return this.request('whois', { ip }); }
   async login(): Promise<void> { await this.request('login'); }
   async logout(): Promise<void> { await this.request('logout'); }
+  async tunnel(address: string): Promise<EmbeddedTailscaleTunnel> {
+    const result = await this.request('tunnel', { address }) as Partial<EmbeddedTailscaleTunnel> | null;
+    if (!result || typeof result.id !== 'string' || !result.id || typeof result.address !== 'string' || !result.address
+      || typeof result.token !== 'string' || !/^[0-9a-f]{64}$/.test(result.token)) throw new Error('embedded_protocol_error');
+    const pipePrefix = String.raw`\\.\pipe\nootify-tunnel-`;
+    const validEndpoint = process.platform === 'win32'
+      ? result.network === 'npipe' && result.address.startsWith(pipePrefix) && /^[0-9a-f]{32}$/.test(result.address.slice(pipePrefix.length))
+      : result.network === 'unix' && result.address.startsWith('/') && !result.address.includes('\0');
+    if (!validEndpoint) throw new Error('embedded_protocol_error');
+    return { id: result.id, network: result.network!, address: result.address, token: result.token };
+  }
+  async closeTunnel(tunnelId: string): Promise<void> { await this.request('close_tunnel', { tunnel_id: tunnelId }); }
+  publish(port: number, target: string): Promise<EmbeddedTailscalePublication> {
+    return this.request('publish', { port, target }) as Promise<EmbeddedTailscalePublication>;
+  }
+  async unpublish(port: number): Promise<void> { await this.request('unpublish', { port }); }
   async stop(): Promise<void> {
     const run = this.current; if (!run) return;
     run.stopped = true;

@@ -17,11 +17,12 @@ import { LarkService } from '../src/lark.js';
 import { LarkThreads } from '../src/lark-threads.js';
 import { createServiceHost, type HostOptions } from '../src/server.js';
 import { SessionsService } from '../src/sessions.js';
-import { SettingsService, type AgentControl, type LarkControl } from '../src/settings.js';
+import { SettingsService, type AgentControl, type LarkControl, type SettingsOptions } from '../src/settings.js';
 import { State } from '../src/state.js';
 import { DIRECTORY_FRESH_MS, LarkDirectoryCache } from '../src/lark-directory-cache.js';
 import type { TailnetAccess } from '../src/tailnet.js';
 import { failSettingsWriteBehindOlderSaves } from './state-failures.js';
+import { HttpError } from '../src/types.js';
 
 const appId = 'cli_0123456789abcdef';
 async function temporary(t: TestContext): Promise<string> {
@@ -63,7 +64,7 @@ async function mcpFile(t: TestContext): Promise<string> {
   await writeFile(path, JSON.stringify({ mcpServers: { lark: { env: { LARK_APP_ID: 'cli_mcp', LARK_APP_SECRET: 'mcp-secret' } } } }));
   return path;
 }
-async function harness(t: TestContext, options: { env?: NodeJS.ProcessEnv; mcpConfig?: string; verify?: (credentials: Credentials) => Promise<void>; setAgent?: () => Promise<void> } = {}) {
+async function harness(t: TestContext, options: { env?: NodeJS.ProcessEnv; mcpConfig?: string; verify?: (credentials: Credentials) => Promise<void>; setAgent?: () => Promise<void>; providers?: SettingsOptions['providers'] } = {}) {
   const dir = await temporary(t);
   const state = await State.open(dir);
   const configured: (Credentials | undefined)[] = [];
@@ -77,7 +78,7 @@ async function harness(t: TestContext, options: { env?: NodeJS.ProcessEnv; mcpCo
   const pulls = new PullRequestsService(dir);
   const revealed: string[] = []; const reports: Record<string, unknown>[] = [];
   const settings = new SettingsService({ state, lark, pulls, agents, github: new GitHubAuth(state, () => {}, () => {}, 'client-1'), env: options.env ?? {}, mcpConfig: options.mcpConfig,
-    verify: options.verify ?? (async () => {}), reveal: async path => { revealed.push(path); }, report: record => reports.push(record) });
+    providers: options.providers, verify: options.verify ?? (async () => {}), reveal: async path => { revealed.push(path); }, report: record => reports.push(record) });
   return { dir, state, lark, pulls, agents, settings, configured, enabled, revealed, reports };
 }
 async function serve(t: TestContext, logs: EventLog, options: HostOptions): Promise<string> {
@@ -86,8 +87,68 @@ async function serve(t: TestContext, logs: EventLog, options: HostOptions): Prom
   t.after(() => { server.closeAllConnections(); server.close(); });
   return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 }
-const action = (origin: string, path: string, body?: unknown, headers: Record<string, string> = { 'x-nootify-ui': '1' }) => fetch(origin + path,
+const ownerHeaders = { 'x-nootify-ui': '1', authorization: 'Bearer test-token' };
+const action = (origin: string, path: string, body?: unknown, headers: Record<string, string> = ownerHeaders) => fetch(origin + path,
   { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+
+test('provider configuration backups keep every secret on disk and restore without importing node identity', async t => {
+  const backup = { version: 1, providers: [{ id: 'remote-a', name: 'Office', type: 'remote', enabled: true,
+    address: 'office.example.ts.net:9418', token: 'private-remote-token' }], default_provider_id: 'remote-a',
+    remote: { enabled: false, listen: '127.0.0.1:9418', token: 'private-listener-token' } };
+  const source = await harness(t, { providers: { async exportConfig() { return backup; }, async importConfig() {}, async syncNetwork() {} } });
+  const exported = await source.settings.exportConfig();
+  assert.equal(exported.summary.provider_count, 1);
+  assert.ok(!JSON.stringify(exported).includes('private-remote-token'));
+  const document = JSON.parse(await readFile(exported.path, 'utf8')) as { providers: unknown };
+  assert.deepEqual(document.providers, backup);
+  let restored: unknown;
+  const target = await harness(t, { providers: { async exportConfig() { return {}; }, async importConfig(config) { restored = config; }, async syncNetwork() {} } });
+  const preview = await target.settings.previewImport(document);
+  assert.equal(preview.provider_count, 1); assert.ok(!JSON.stringify(preview).includes('private-listener-token'));
+  assert.equal(restored, undefined);
+  await target.settings.importConfig(document);
+  assert.deepEqual(restored, backup);
+});
+
+for (const existing of [false, true]) {
+  test(`provider backup refreshes compatibility credentials and directory state on ${existing ? 'existing' : 'fresh'} installations`, async t => {
+    let imported: Record<string, unknown> | undefined;
+    const h = await harness(t, { providers: { async exportConfig() { return imported ?? {}; }, async importConfig(config) { imported = config; }, async syncNetwork() {} } });
+    const oldCredentials = { appId, appSecret: 'old-account-secret' };
+    if (existing) {
+      h.lark.credentials = oldCredentials;
+      await new LarkDirectoryCache(h.dir).write(oldCredentials, { app_id: appId, users: [{ open_id: 'ou_old', name: 'Synthetic old contact' }], truncated: false, permission_limited: false });
+    }
+    const refreshed: (Credentials | undefined)[] = [];
+    Object.assign(h.lark, { refreshCompatibilityCredentials(credentials?: Credentials) {
+      refreshed.push(credentials); h.lark.credentials = credentials;
+      h.lark.api = credentials ? { appId: credentials.appId } as LarkApi : undefined;
+    } });
+    t.mock.method(h.lark, 'configure', async () => { throw new Error('compatibility refresh must not overwrite imported providers'); });
+    const credentials = { appId: 'cli_fedcba9876543210', appSecret: 'new-account-secret' };
+    const backup = { version: 1, providers: [{ id: 'legacy-feishu', name: 'Imported provider', type: 'feishu', enabled: false,
+      app_id: credentials.appId, app_secret: credentials.appSecret, recipient_open_id: 'ou_imported' }] };
+    await h.settings.importConfig({ format: 'nootify-config', version: 1,
+      lark: { app_id: credentials.appId, app_secret: credentials.appSecret }, providers: backup });
+    assert.deepEqual(h.lark.credentials, credentials);
+    assert.equal(h.lark.api?.appId, credentials.appId);
+    assert.deepEqual(refreshed, [credentials]);
+    assert.equal(await new LarkDirectoryCache(h.dir).read(oldCredentials), undefined);
+    assert.deepEqual(h.settings.larkSecret(), { app_id: credentials.appId, app_secret: credentials.appSecret });
+    const exported = JSON.parse(await readFile((await h.settings.exportConfig()).path, 'utf8'));
+    assert.equal(exported.lark.app_id, credentials.appId); assert.equal(exported.lark.app_secret, credentials.appSecret);
+    assert.deepEqual(exported.providers, backup, 'compatibility refresh preserves exact imported provider settings');
+  });
+}
+
+test('a rejected core configuration cannot partially import legacy settings', async t => {
+  const h = await harness(t, { providers: { async exportConfig() { return {}; }, async importConfig() { throw new HttpError(400, 'invalid provider credentials'); }, async syncNetwork() {} } });
+  await assert.rejects(h.settings.importConfig({ format: 'nootify-config', version: 1,
+    lark: { app_id: appId, app_secret: 'must-not-save' },
+    providers: { version: 1, providers: [{ id: 'bad', name: 'Bad', type: 'feishu' }] } }), /invalid provider credentials/);
+  assert.equal(h.state.settings.lark_app_id, undefined);
+  assert.equal(h.configured.length, 0);
+});
 
 test('a device login shows the code, keeps the token private and refreshes afterwards', async t => {
   const github = fakeGitHub(t);
@@ -249,7 +310,8 @@ test('recipient directory reads are local-only and selections refuse a changed a
   const local = await serve(t, logs, { settings });
   const remote = await serve(t, logs, { settings, via: 'tailnet', tailnet: { authorize: async () => undefined, url: () => undefined } as unknown as TailnetAccess });
   const path = '/ui/api/settings/lark/recipients';
-  assert.equal((await action(local, path, undefined, {})).status, 403);
+  assert.equal((await action(local, path, undefined, { authorization: ownerHeaders.authorization })).status, 403);
+  assert.equal((await action(local, path, undefined, { 'x-nootify-ui': '1' })).status, 403);
   assert.equal((await action(remote, path)).status, 403);
   assert.equal(reads, 0);
   const result = await action(local, path);
@@ -264,6 +326,36 @@ test('recipient directory reads are local-only and selections refuse a changed a
   assert.equal(state.settings.lark_recipient_open_id, 'ou_owner');
   lark.credentials = undefined;
   await assert.rejects(settings.larkRecipients(), /Configure/);
+});
+
+for (const previous of [undefined, 'ou_original']) {
+  test(`a core recipient rejection preserves ${previous ? 'the existing selection' : 'an unset selection'} in memory and on disk`, async t => {
+    const { state, lark, settings, dir } = await harness(t);
+    lark.credentials = { appId, appSecret: 'synthetic-secret' };
+    if (previous) state.settings.lark_recipient_open_id = previous;
+    await state.save();
+    let fail = true;
+    lark.setRecipient = async () => { if (fail) throw new HttpError(400, 'synthetic provider rejection'); };
+    await assert.rejects(settings.setRecipient('ou_rejected', appId), /synthetic provider rejection/);
+    assert.equal(state.settings.lark_recipient_open_id, previous);
+    assert.equal((await State.open(dir)).settings.lark_recipient_open_id, previous);
+    await state.save();
+    assert.equal((await State.open(dir)).settings.lark_recipient_open_id, previous, 'a later unrelated save cannot persist a rejected recipient');
+    fail = false;
+    await settings.setRecipient('ou_accepted', appId);
+    assert.equal((await State.open(dir)).settings.lark_recipient_open_id, 'ou_accepted');
+  });
+}
+
+test('recipient persistence failures never update the core provider', async t => {
+  const { state, lark, settings, dir } = await harness(t);
+  state.settings.lark_recipient_open_id = 'ou_original'; await state.save();
+  const updates: string[] = [];
+  lark.setRecipient = async openId => { updates.push(openId); };
+  await failSettingsWriteBehindOlderSaves(t, state, () => settings.setRecipient('ou_rejected'));
+  assert.deepEqual(updates, []);
+  assert.equal(state.settings.lark_recipient_open_id, 'ou_original');
+  assert.equal((await State.open(dir)).settings.lark_recipient_open_id, 'ou_original');
 });
 
 test('recipient snapshots are cached, while an explicit retry reads fresh provider data', async t => {
@@ -589,7 +681,8 @@ test('settings pages never carry secrets, and only this Mac can change anything'
   const remote = await serve(t, logs, { settings, via: 'tailnet', tailnet: { authorize: async () => undefined, url: () => undefined } as unknown as TailnetAccess });
   const save = { app_id: appId, app_secret: 'page-secret' };
 
-  assert.equal((await action(local, '/ui/api/settings/lark', save, {})).status, 403, 'needs the UI header');
+  assert.equal((await action(local, '/ui/api/settings/lark', save, { authorization: ownerHeaders.authorization })).status, 403, 'needs the UI header');
+  assert.equal((await action(local, '/ui/api/settings/lark', save, { 'x-nootify-ui': '1' })).status, 403, 'needs owner authentication');
   assert.equal((await action(remote, '/ui/api/settings/lark', save)).status, 403, 'refused on the Tailscale listener');
   assert.equal((await action(remote, '/ui/api/settings/export')).status, 403);
   assert.equal((await action(remote, '/ui/api/settings/github/login', { action: 'start' })).status, 403);
@@ -600,10 +693,10 @@ test('settings pages never carry secrets, and only this Mac can change anything'
   assert.equal((await action(local, '/ui/api/settings/lark', save)).status, 200);
   assert.equal(configured.length, 1);
   const revealPath = '/ui/api/settings/lark/secret';
-  assert.equal((await action(local, revealPath, undefined, {})).status, 403, 'revealing needs the UI header');
+  assert.equal((await action(local, revealPath, undefined, { authorization: ownerHeaders.authorization })).status, 403, 'revealing needs the UI header');
   assert.equal((await action(remote, revealPath)).status, 403, 'remote browsers cannot reveal secrets');
-  assert.equal((await action(local, revealPath, undefined, { 'x-nootify-ui': '1', origin: 'http://attacker.test' })).status, 403);
-  assert.equal((await action(local, revealPath, undefined, { 'x-nootify-ui': '1', 'sec-fetch-site': 'cross-site' })).status, 403);
+  assert.equal((await action(local, revealPath, undefined, { ...ownerHeaders, origin: 'http://attacker.test' })).status, 403);
+  assert.equal((await action(local, revealPath, undefined, { ...ownerHeaders, 'sec-fetch-site': 'cross-site' })).status, 403);
   assert.notEqual((await fetch(local + revealPath)).status, 200, 'GET cannot reveal a secret');
   const revealed = await action(local, revealPath);
   assert.equal(revealed.status, 200);
@@ -615,7 +708,7 @@ test('settings pages never carry secrets, and only this Mac can change anything'
   assert.equal((await action(local, '/ui/api/settings/recipient', { open_id: 'ou_owner' })).status, 200);
   assert.equal(((await (await action(local, '/ui/api/settings/recipient', { open_id: 'bad' })).json()) as { error: string }).error, 'Expected a Feishu open_id (ou_…)');
 
-  const page = await (await fetch(`${local}/ui/api/settings`)).json() as { editable: boolean; lark: { recipient?: string } };
+  const page = await (await fetch(`${local}/ui/api/settings`, { headers: ownerHeaders })).json() as { editable: boolean; lark: { recipient?: string } };
   assert.deepEqual([page.editable, page.lark.recipient], [true, 'ou_owner']);
   assert.equal(((await (await fetch(`${remote}/ui/api/settings`)).json()) as { editable: boolean }).editable, false);
   const exported = await action(local, '/ui/api/settings/export');
@@ -628,12 +721,12 @@ test('settings pages never carry secrets, and only this Mac can change anything'
   assert.equal((await action(local, '/ui/api/settings/github/login', { action: 'other' })).status, 400);
   assert.equal((await action(local, '/ui/api/settings/github/login', { action: 'start' })).status, 200);
   await until(() => settings.startGitHubLogin().status === 'waiting');
-  assert.equal(((await (await fetch(`${local}/ui/api/settings/github`)).json()) as { login: { code?: string } }).login.code, 'ABCD-1234');
+  assert.equal(((await (await fetch(`${local}/ui/api/settings/github`, { headers: ownerHeaders })).json()) as { login: { code?: string } }).login.code, 'ABCD-1234');
   assert.deepEqual(((await (await fetch(`${remote}/ui/api/settings/github`)).json()) as { login: unknown }).login, { status: 'waiting' }, 'the code stays on this Mac');
   assert.equal((await action(local, '/ui/api/settings/github/login', { action: 'cancel' })).status, 200);
   await settings.stop();
   state.settings.github_token = github.token;
-  const account = await (await fetch(`${local}/ui/api/settings/github`)).text();
+  const account = await (await fetch(`${local}/ui/api/settings/github`, { headers: ownerHeaders })).text();
   assert.equal((JSON.parse(account) as { account: { login: string } }).account.login, 'octo');
   for (const path of ['/ui/api/settings', '/ui/api/settings/github', '/ui/api/snapshot']) assert.ok(!(await (await fetch(local + path)).text()).includes(github.token), path);
   assert.equal((await action(local, '/ui/api/settings/github/login', { action: 'sign-out' })).status, 200);

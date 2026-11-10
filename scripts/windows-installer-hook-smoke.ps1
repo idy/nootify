@@ -1,5 +1,5 @@
 #requires -Version 5.1
-# Compile and execute only a dummy payload, using the exact production NSIS hooks.
+# Headless dummy payload/isolated receipt probes using exact production NSIS macros.
 [CmdletBinding()]
 param()
 $ErrorActionPreference = 'Stop'
@@ -20,6 +20,10 @@ $startupVariables = @('NODE_OPTIONS', 'NODE_PATH', 'NODE_EXTRA_CA_CERTS', 'NODE_
 $phase = 'preflight'
 $failure = $null
 $results = New-Object 'Collections.Generic.List[object]'
+# New-Item requires an existing parent. A fresh runner has Software, but no
+# Nootify key; keep the random fixture outside the application's registry tree.
+$receiptSubkey = 'Software\NootifyInstallerReceiptProbe.' + [Guid]::NewGuid().ToString('N')
+$receiptKey = 'HKCU:\' + $receiptSubkey
 
 function Quote-Argument([string]$Value) {
     return '"' + ($Value -replace '(\\*)"', '$1$1\"' -replace '(\\+)$', '$1$1') + '"'
@@ -112,8 +116,9 @@ try {
     $phase = 'download and verify NSIS 3.13'
     $archive = Join-Path $fixture 'nsis-3.13.zip'
     $ProgressPreference = 'SilentlyContinue' # PS5.1 progress rendering slows downloads greatly.
-    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-    Invoke-WebRequest -UseBasicParsing -TimeoutSec 60 -Uri 'https://github.com/tauri-apps/binary-releases/releases/download/nsis-3.13/nsis-3.13.zip' -OutFile $archive
+    # Use the same mirror fallback and checksum policy as production packaging.
+    & $node (Join-Path $PSScriptRoot 'nsis.mjs') --download $archive
+    if ($LASTEXITCODE -ne 0) { throw 'Pinned NSIS downloader failed; refusing extraction' }
     if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -cne 'BA63DFFC4410EE89193E1CB5A41989991BD77C61068DA17E3156D136B7B0B3D8') {
         throw 'NSIS archive SHA256 mismatch; refusing extraction'
     }
@@ -139,17 +144,60 @@ const clean = {};
 for (const name of ['NODE_OPTIONS', 'NODE_PATH', 'NODE_EXTRA_CA_CERTS', 'NODE_ICU_DATA']) {
   clean[name] = !process.env[name];
 }
-fs.appendFileSync(path.resolve(__dirname, '../../..', 'calls.jsonl'), JSON.stringify({ command, clean }) + '\n');
-if (Object.values(clean).some(value => !value)) { process.exitCode = 10; }
+const windows = process.env.SystemRoot || process.env.SYSTEMROOT;
+const safeWorkingDirectory = !!windows && ['System32', 'SysWOW64'].some(directory =>
+  path.resolve(windows, directory).toLowerCase() === path.resolve(process.cwd()).toLowerCase());
+fs.appendFileSync(path.resolve(__dirname, '../../..', 'calls.jsonl'), JSON.stringify({ command, clean, safe_working_directory: safeWorkingDirectory }) + '\n');
+if (Object.values(clean).some(value => !value) || !safeWorkingDirectory) { process.exitCode = 10; }
 '@
     foreach ($diagnostics in @($true, $false)) {
         $variant = $(if ($diagnostics) { 'diagnostic' } else { 'production' })
         $phase = "compile $variant probe"
         $installer = Join-Path $fixture "$variant-hook-probe.exe"
-        $arguments = '/V4 ' + (Quote-Argument ("/DPROBE_OUTPUT=$installer")) +
+        $arguments = '/V4 ' + (Quote-Argument ("/DPROBE_OUTPUT=$installer")) + ' ' + (Quote-Argument ("/DPROBE_RECEIPT_KEY=$receiptSubkey")) +
             $(if (!$diagnostics) { ' /DPROBE_NO_DIAGNOSTICS' } else { '' }) + ' ' +
             (Quote-Argument (Join-Path $PSScriptRoot 'windows-installer-hook-smoke.nsi'))
         Run-Native $compiler $arguments "compile-$variant" @{ NOOTIFY_INSTALLER_HOOK_DIAGNOSTICS = '0' }
+        if ($diagnostics) {
+            # Exact production receipt macros, in a silent probe with a fresh
+            # isolated HKCU key. No installer payload/service action can run.
+            $usedDrives = @([IO.Directory]::GetLogicalDrives() | ForEach-Object { $_.Substring(0, 1).ToUpperInvariant() })
+            $unusedDrive = @([char[]]'ZYXWVUTSRQPONMLKJIHGFEDCBA' | Where-Object { [string]$_ -notin $usedDrives })[0]
+            $unavailable = [string]$unusedDrive + ':\Nootify pending receipt probe'
+            $validToken = [Guid]::NewGuid().ToString('B')
+            $receiptCases = @(
+                @{ name = 'target-only'; target = $unavailable; mode = 'clear'; exit = 0 },
+                @{ name = 'token-only'; token = $validToken; mode = 'clear'; exit = 0 },
+                @{ name = 'empty-token'; target = $unavailable; token = ''; mode = 'clear'; exit = 0 },
+                @{ name = 'invalid-type'; target = $unavailable; token = 42; type = 'DWord'; mode = 'blocked'; exit = 1 },
+                @{ name = 'invalid-pair'; target = $unavailable; token = 'malformed-token'; mode = 'blocked'; exit = 1 },
+                @{ name = 'valid-other-unavailable'; target = $unavailable; token = $validToken; mode = 'blocked'; exit = 1 },
+                @{ name = 'valid-matching-unavailable'; target = $unavailable; token = $validToken; mode = 'matching'; exit = 0 }
+            )
+            foreach ($case in $receiptCases) {
+                $phase = 'receipt-' + $case.name
+                if (Test-Path -LiteralPath $receiptKey) { throw 'Refusing a pre-existing receipt probe key' }
+                try {
+                    $null = New-Item -Path $receiptKey
+                    if ($case.ContainsKey('target')) { $null = New-ItemProperty -LiteralPath $receiptKey -Name Target -Value $case.target -PropertyType String }
+                    if ($case.ContainsKey('token')) {
+                        $type = $(if ($case.ContainsKey('type')) { $case.type } else { 'String' })
+                        $null = New-ItemProperty -LiteralPath $receiptKey -Name Token -Value $case.token -PropertyType $type
+                    }
+                    $before = Get-ItemProperty -LiteralPath $receiptKey | ConvertTo-Json -Compress
+                    Run-Native $installer ('/S /RECEIPT=' + $case.mode) $phase @{} $case.exit
+                    if ($case.mode -eq 'clear') {
+                        if (Test-Path -LiteralPath $receiptKey) { throw 'Incomplete pending receipt survived the destination check' }
+                    } elseif (!(Test-Path -LiteralPath $receiptKey) -or (Get-ItemProperty -LiteralPath $receiptKey | ConvertTo-Json -Compress) -cne $before) {
+                        throw 'Complete or unreadable pending authority was changed'
+                    }
+                    if (Test-Path -LiteralPath (Join-Path $fixture 'payload')) { throw 'Receipt probe unexpectedly ran payload hooks' }
+                    $results.Add(@{ case = $phase; result = 'passed' })
+                } finally {
+                    if (Test-Path -LiteralPath $receiptKey) { Remove-Item -LiteralPath $receiptKey -Recurse -Force }
+                }
+            }
+        }
         foreach ($poisoned in @($false, $true)) {
             foreach ($mode in @(0, 1)) {
                 $label = $variant + '-' + $(if ($poisoned) { 'poisoned' } else { 'clean' }) + "-mode-$mode"
@@ -191,6 +239,7 @@ if (Object.values(clean).some(value => !value)) { process.exitCode = 10; }
                     throw "$label recorded unexpected CLI commands"
                 }
                 foreach ($call in $calls) {
+                    if ($call.safe_working_directory -ne $true) { throw "$label inherited an unsafe installer plugin directory" }
                     foreach ($name in $startupVariables) {
                         if ($call.clean.$name -ne $true) { throw "$label inherited a Node startup variable" }
                     }
@@ -210,4 +259,4 @@ if (Object.values(clean).some(value => !value)) { process.exitCode = 10; }
         ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $outputDir 'diagnostics.json') -Encoding UTF8
 }
 if ($failure) { throw "Windows installer hook probe failed: $failure. See .cache/windows-installer-hook-smoke native traces." }
-Write-Host 'Native Windows installer/uninstaller hook probe passed all eight production/diagnostic environment/update cases.'
+Write-Host 'Headless Windows hook and pending-receipt probes passed all environment/update/publication cases.'

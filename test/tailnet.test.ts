@@ -125,7 +125,7 @@ test('the tailnet listener serves the owner, starts background PR refreshes and 
   assert.equal((await call(port, '/ui/api/agents', { ...browser, 'x-nootify-ui': '1' }, 'POST', prompt)).status, 403, 'agent prompts cannot be changed over Tailscale');
   assert.equal(JSON.parse((await call(port, '/ui/api/agents', browser)).body).editable, false);
   const localPort = (local.address() as AddressInfo).port;
-  const here = { host: `127.0.0.1:${localPort}` };
+  const here = { host: `127.0.0.1:${localPort}`, authorization: 'Bearer test-token' };
   assert.equal((await call(localPort, '/ui/api/agents', { ...here, 'x-nootify-ui': '1' }, 'POST', prompt)).status, 200);
   assert.equal((await call(localPort, '/ui/api/agents', here, 'POST', prompt)).status, 403, 'the UI header is required on this Mac too');
   assert.equal((await call(localPort, '/ui/api/agents', { ...here, 'x-nootify-ui': '1' }, 'POST', JSON.stringify({ agent: 'other', enabled: true }))).status, 400);
