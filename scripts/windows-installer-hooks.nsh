@@ -1,9 +1,8 @@
-; Lifecycle checked against @tauri-apps/cli 2.12.4:
-; https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.12.4/crates/tauri-bundler/src/bundle/windows/nsis/installer.nsi
-; PREINSTALL is before all File commands. The updater passes /UPDATE, sets
-; $UpdateMode=1, and normally skips the old uninstaller. PREUNINSTALL is before
-; any Delete commands. An interactive uninstall-before-upgrade is a real
-; uninstall; the next app launch installs its task again.
+; The production installer stages and verifies its payload through the transaction
+; helper, which invokes the same owned bundled CLI after recording running state.
+; PREINSTALL remains for compatibility/hook probes; PREUNINSTALL precedes Delete.
+; /UPDATE sets $UpdateMode=1 and preserves this installation's task and state.
+; Real uninstall removes only the task owned by this exact bundled CLI.
 ;
 ; Only the bundled CLI determines task/process ownership. Never use taskkill by
 ; image name, delete another installation's task, or continue after a stop error.
@@ -67,8 +66,23 @@
     ; The CLI allows 150 seconds for serialized service management. Give it
     ; time to report failure itself before aborting replacement/deletion.
     !insertmacro NootifyInstallerTrace "manage ${COMMAND}: invoking CLI"
+    ; Legacy service scripts compile C# using bare framework assembly names.
+    ; Never inherit $PLUGINSDIR: its native System.dll shadows the .NET DLL.
+    Push $R8
+    StrCpy $R8 "$OUTDIR"
+    ClearErrors
+    SetOutPath "$SYSDIR"
+    ${If} ${Errors}
+      SetOutPath "$R8"
+      Pop $R8
+      Pop $0
+      SetErrorLevel 1
+      Abort "Unable to select a safe service command directory. Installed files are unchanged."
+    ${EndIf}
     nsExec::ExecToLog /TIMEOUT=160000 '"$INSTDIR\node.exe" "$INSTDIR\service\dist\src\cli.js" ${COMMAND}'
     Pop $0
+    SetOutPath "$R8"
+    Pop $R8
     !insertmacro NootifyInstallerTrace "manage ${COMMAND}: result=$0"
     ${If} $0 != 0
       DetailPrint "Nootify ${COMMAND} failed ($0). Installed files have not been replaced or removed."
@@ -91,6 +105,6 @@
   ${EndIf}
 !macroend
 
-; Tauri's .onInstSuccess handles /R after a successful /UPDATE, including /S and
-; /P installs. tauri-plugin-updater supplies /R by default; the relaunched app
-; starts the task. Do not start it before replacement has finished, or twice.
+; The transaction helper restores a previously running service independently of
+; /R. .onInstSuccess handles optional desktop launch only, including /S /UPDATE.
+; A deliberately stopped service is not started by the transaction helper.

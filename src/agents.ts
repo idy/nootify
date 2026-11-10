@@ -66,11 +66,11 @@ export function promptBlock(agent: AgentId, options: PromptOptions): string {
   const address = options.tailnetAddress?.();
   return [
     BEGIN,
-    '## Feishu updates through Nootify',
+    '## Session updates through Nootify',
     '',
-    'Nootify gives each conversation its own Feishu group, so the user can follow your progress and reply from Feishu.',
+    'Nootify connects each conversation to the configured notification provider, directly or through another Nootify. The user can follow progress and reply from there.',
     '',
-    "- For work longer than a quick answer, open this conversation's group first. Later calls reuse it; Nootify keeps the session's routing token in the group announcement:",
+    "- For work longer than a quick answer, open this conversation's notification session first. Later calls reuse its provider binding:",
     `  ${run('thread-open', '--session-name "<short task title>"')}`,
     ...(polled ? ['- Run thread-open once per conversation. Keep the returned session_id in this conversation and replace "<returned session_id>" in all subsequent commands with it. Reuse it with --session-id when retrying thread-open; do not reuse another conversation\'s ID or derive it from a project directory.'] : []),
     "- Post progress, blockers and results as you go, in the user's language. Each message is prefixed with the session name:",
@@ -83,7 +83,7 @@ export function promptBlock(agent: AgentId, options: PromptOptions): string {
       '- Read each returned message.text as user input. Follow its original-channel receipt and reply commands, then acknowledge that inbox item using its returned message.id:',
       `  ${run('thread-ack', '--message-id "<returned message.id>"')}`,
       '- Inbox reads are repeatable until acknowledged. Polling cannot wake an idle or closed conversation; do not busy-poll or claim that queued messages have already been read.',
-    ] : ['- Messages from the user in that group arrive here marked 【来自飞书用户的消息】 with `lark-ack` and `lark-reply` commands; answer them when convenient.']),
+    ] : ['- Messages arrive marked 【来自 Nootify 用户的消息】 with `message-ack` and `message-reply` commands carrying their full source reference. Older messages may use 【来自飞书用户的消息】 with `lark-ack` and `lark-reply`. Follow the commands attached to each message and answer when convenient.']),
     "- Nootify maintains this block; change it on Nootify's Agents page instead of editing it here.",
     END,
   ].join('\n');

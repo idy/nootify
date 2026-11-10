@@ -68,6 +68,12 @@ function Get-TaskInstanceCount {
     }
     return $count
 }
+function Test-OwnedTaskRunning($Task) {
+    if (!$Task) { return $false }
+    # Call only after Assert-Owned. Include hidden Scheduler instances and queued
+    # work, whose imminent process creation Stop must also drain.
+    return ((Get-TaskInstanceCount) -gt 0 -or $Task.State -eq 4 -or $Task.State -eq 2)
+}
 function Assert-Owned($Task) {
     $definition = $Task.Definition
     $description = [string]$definition.RegistrationInfo.Description
@@ -154,9 +160,22 @@ function New-ServiceTask {
     return $scheduler.GetFolder('\').RegisterTaskDefinition($taskName, $definition, 2, $ownerSid, $null, 3, $null)
 }
 function Import-ServiceRunner {
-    # Use the verified entry script path: extracted function scriptblocks have no PSScriptRoot.
-    # Only System.dll/mscorlib types are used, including on Windows PowerShell 5.1.
-    if (!('Nootify.ServiceJob' -as [type])) { Add-Type -LiteralPath (Join-Path (Split-Path -Parent (Full-Path $scriptPath)) 'service-runner.cs') }
+    if (!('Nootify.ServiceJob' -as [type])) {
+        # NSIS's working directory contains its native System.dll plug-in. Default
+        # Add-Type references probe that directory before the framework directory.
+        # CompilerParameters are passed unchanged, without bare default references;
+        # neither PowerShell's location nor the process working directory is changed.
+        $framework = [Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()
+        $compiler = [CodeDom.Compiler.CompilerParameters]::new()
+        $compiler.GenerateInMemory = $true
+        $compiler.CompilerOptions = '/nostdlib+'
+        foreach ($assembly in @('mscorlib.dll', 'System.dll', 'System.Core.dll')) {
+            $null = $compiler.ReferencedAssemblies.Add((Join-Path $framework $assembly))
+        }
+        $null = $compiler.ReferencedAssemblies.Add([Management.Automation.PSObject].Assembly.Location)
+        # Use the verified entry script path: extracted functions have no PSScriptRoot.
+        Add-Type -LiteralPath (Join-Path (Split-Path -Parent (Full-Path $scriptPath)) 'service-runner.cs') -CompilerParameters $compiler
+    }
 }
 function Get-BootSequence { return [Nootify.ServiceJob]::ReadBootSequence() }
 function Get-TerminalSessionId { return [Nootify.ServiceJob]::ReadTerminalSessionId() }
@@ -348,11 +367,13 @@ try {
     $scheduler = New-Object -ComObject 'Schedule.Service'
     $scheduler.Connect()
     if ($Action -eq 'Run') { exit (Run-Service) }
-    # Status stays read-only and cheap: one COM lookup, no subprocess, HTTP request, or lock wait.
+    # Status stays read-only and cheap: COM lookups only, no subprocess, HTTP request, or lock wait.
     if ($Action -ne 'Status') { $operationLock = Enter-Lock "Global\Nootify.Service.Management.$ownerSid" 60000 }
     $task = Get-Task
     if ($task) { $record = Assert-Owned $task }
-    if ($Action -eq 'Status') { $stdoutWriter.WriteLine((@{ installed = [bool]$task } | ConvertTo-Json -Compress)); exit 0 }
+    if ($Action -eq 'Status') { $stdoutWriter.WriteLine((@{ installed = [bool]$task; running = [bool](Test-OwnedTaskRunning $task); enabled = [bool]($task -and $task.Enabled) } | ConvertTo-Json -Compress)); exit 0 }
+    $wasRunning = $false
+    if ($Action -eq 'Stop' -or $Action -eq 'Uninstall') { $wasRunning = [bool](Test-OwnedTaskRunning $task) }
     if ($Action -eq 'Install') {
         if ($task) {
             if ($McpConfig -and !(Same-Path $record.mcp $McpConfig)) { throw 'The installed task uses another MCP config; uninstall it before changing its configuration' }
@@ -372,7 +393,9 @@ try {
         if ($task -and $Action -eq 'Uninstall') { $scheduler.GetFolder('\').DeleteTask($taskName, 0) }
     }
     $status = @{ Install = 'installed'; Start = 'started'; Restart = 'restarted'; Stop = 'stopped'; Uninstall = 'uninstalled' }[$Action]
-    $stdoutWriter.WriteLine((@{ installed = [bool]($task -and $Action -ne 'Uninstall'); status = $status; task = $taskName } | ConvertTo-Json -Compress))
+    $result = @{ installed = [bool]($task -and $Action -ne 'Uninstall'); status = $status; task = $taskName }
+    if ($Action -eq 'Stop' -or $Action -eq 'Uninstall') { $result.was_running = $wasRunning }
+    $stdoutWriter.WriteLine(($result | ConvertTo-Json -Compress))
 } catch {
     if ($Action -eq 'Run' -and (Test-Path -LiteralPath $StateDir -PathType Container)) {
         try { [IO.File]::AppendAllText((Join-Path $StateDir 'stderr.log'), "Scheduled Task: $($_.Exception.Message)`r`n") } catch { }

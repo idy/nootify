@@ -29,6 +29,8 @@ type fakeNode struct {
 	listener    net.Listener
 	listenErr   error
 	listen      func() (net.Listener, error)
+	dial        func(context.Context, string, string) (net.Conn, error)
+	listenPort  func(int) (net.Listener, error)
 	close       func() error
 	started     atomic.Int32
 	clientCalls atomic.Int32
@@ -53,6 +55,18 @@ func (n *fakeNode) Listen() (net.Listener, error) {
 		return n.listen()
 	}
 	return n.listener, n.listenErr
+}
+func (n *fakeNode) Dial(ctx context.Context, network, address string) (net.Conn, error) {
+	if n.dial != nil {
+		return n.dial(ctx, network, address)
+	}
+	return nil, errors.New("unexpected_dial")
+}
+func (n *fakeNode) ListenPort(port int) (net.Listener, error) {
+	if n.listenPort != nil {
+		return n.listenPort(port)
+	}
+	return nil, errors.New("unexpected_listen_port")
 }
 func (n *fakeNode) Close() error {
 	n.closed.Add(1)

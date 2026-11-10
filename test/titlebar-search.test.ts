@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { setImmediate as nextTurn } from 'node:timers/promises';
 import { test } from 'node:test';
 import { parseHTML } from 'linkedom';
+import { authorizeUiFixture, settleUiFixture } from './ui-transport-fixture.js';
 
 test('collapsed titlebar searches handle macOS blur before toggle click and preserve dismissal paths', async t => {
   const { window, document } = parseHTML(await readFile(new URL('../../public/index.html', import.meta.url), 'utf8'));
@@ -20,17 +21,12 @@ test('collapsed titlebar searches handle macOS blur before toggle click and pres
   };
   const descriptors = new Map(Object.keys(globals).map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
   for (const [key, value] of Object.entries(globals)) Object.defineProperty(globalThis, key, { configurable: true, value });
-  t.after(() => {
+  t.after(async () => {
+    await settleUiFixture();
     for (const [key, descriptor] of descriptors) {
       if (descriptor) Object.defineProperty(globalThis, key, descriptor); else Reflect.deleteProperty(globalThis, key);
     }
   });
-  const prototype = window.HTMLSelectElement.prototype;
-  const selectValue = Object.getOwnPropertyDescriptor(prototype, 'value')!;
-  Object.defineProperty(prototype, 'value', { ...selectValue, set(this: HTMLSelectElement, value: string) {
-    for (const option of this.querySelectorAll('option')) option.selected = option.value === value;
-  } });
-  t.after(() => Object.defineProperty(prototype, 'value', selectValue));
   t.mock.method(globalThis, 'setInterval', (() => 0) as unknown as typeof globalThis.setInterval);
   t.mock.method(globalThis, 'fetch', async (input: string | URL | Request) => {
     const path = new URL(String(input), 'http://127.0.0.1:9417').pathname;
@@ -38,6 +34,7 @@ test('collapsed titlebar searches handle macOS blur before toggle click and pres
     if (path === '/ui/api/agents') return Response.json({ agents: [], editable: true });
     assert.fail(`Unexpected request: ${path}`);
   });
+  authorizeUiFixture(t);
   await import('../src/ui-app.js');
   await nextTurn();
 

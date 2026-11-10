@@ -11,7 +11,7 @@ import { promisify } from 'node:util';
 import { NootifyClient } from '../src/client.js';
 import { LarkService } from '../src/lark.js';
 import type { LarkApi } from '../src/lark-metadata.js';
-import { registerPolledSession, sessionInbox } from '../src/polled-sessions.js';
+import { discardCanceledInbox, registerPolledSession, sessionInbox } from '../src/polled-sessions.js';
 import { createServiceHost } from '../src/server.js';
 import { SessionsService } from '../src/sessions.js';
 import { State } from '../src/state.js';
@@ -76,7 +76,10 @@ test('inboxes enforce message and queue limits without dropping older input', as
   assert.match((await f.client.receiveThread('bounded', 'trae')).messages[0].text, /message-20$/);
 });
 test('a failed inbox acknowledgment is rolled back before an overlapping save takes its snapshot', async t => {
-  const f = await fixture(t); await registerPolledSession(f.state, 'trae', 'atomic-ack', 'Task'); await f.sessions.send('atomic-ack', 'Keep this input', 'trae');
+  const f = await fixture(t); await registerPolledSession(f.state, 'trae', 'atomic-ack', 'Task');
+  let releases = 0; f.sessions.setInboxConsumer(async () => { releases++; });
+  await f.sessions.send('atomic-ack', 'Keep this input', 'trae', { text: 'Keep this input', source: { channel: 'provider',
+    delivery: { adapter: 'trae', session_id: 'atomic-ack', message: { origin_node_id: 'source', provider_id: 'bot', message_id: 'pending' } } } });
   const message = (await f.client.receiveThread('atomic-ack', 'trae')).messages[0];
   let entered!: () => void; let release!: () => void;
   const started = new Promise<void>(resolve => { entered = resolve; }); const gate = new Promise<void>(resolve => { release = resolve; });
@@ -90,7 +93,26 @@ test('a failed inbox acknowledgment is rolled back before an overlapping save ta
   const failed = assert.rejects(acknowledgment, /Injected state transaction failure/); release(); await failed; await overlapping;
   assert.ok(f.state.inboxMessages.has(message.id)); const restored = await State.open(f.directory);
   assert.ok(restored.inboxMessages.has(message.id)); assert.equal(restored.settings.lark_recipient_open_id, 'ou_changed');
+  assert.equal(releases, 0, 'a failed durable deletion cannot release the callback route');
+  await f.client.acknowledgeThread('atomic-ack', 'trae', message.id);
+  assert.equal(releases, 1); assert.equal((await State.open(f.directory)).inboxMessages.has(message.id), false);
 });
+test('a cancellation snapshot cannot remove a later inbox entry with the same reference', async t => {
+  const f = await fixture(t); await registerPolledSession(f.state, 'workbuddy', 'snapshot-scoped', 'Retained task');
+  const message = { origin_node_id: 'source', provider_id: 'bot', message_id: 'canceled-input' };
+  const origin = { text: 'Input', source: { channel: 'provider' as const,
+    delivery: { adapter: 'workbuddy' as const, session_id: 'snapshot-scoped', message } } };
+  await f.sessions.send('snapshot-scoped', 'Input', 'workbuddy', origin);
+  const original = [...f.state.inboxMessages.values()][0];
+  const snapshot = [{ inbox_id: original.id, message }];
+  await f.sessions.send('snapshot-scoped', 'Later input', 'workbuddy', { ...origin, text: 'Later input' });
+  const later = [...f.state.inboxMessages.values()].find(item => item.id !== original.id)!;
+  await discardCanceledInbox(f.state, snapshot, [message]);
+  const restored = await State.open(f.directory);
+  assert.equal(restored.inboxMessages.has(original.id), false); assert.equal(restored.inboxMessages.get(later.id)?.text, 'Later input');
+  assert.equal(restored.sessions.get('snapshot-scoped')?.session_name, 'Retained task');
+});
+
 test('failed hostname reconciliation retains the prior registration and queued input', async t => {
   const f = await fixture(t); await registerPolledSession(f.state, 'trae', 'retained', 'Original task'); await f.sessions.send('retained', 'Pending input', 'trae');
   const saved = { ...f.state.session('retained'), host_id: 'previous-mac-hostname' }; f.state.sessions.set('retained', saved); await f.state.save();

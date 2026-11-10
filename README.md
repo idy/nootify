@@ -2,16 +2,22 @@
 
 Follow your coding agents from Feishu and send replies back to
 the matching conversation on your computer. Nootify is a Windows and macOS tray
-app that also keeps your GitHub pull requests in view.
+app that also keeps your GitHub pull requests in view. Connect a Feishu bot
+directly or use another Nootify node as your notification provider.
 
 [Website](https://nootify.idy.dev/) · [Download](https://github.com/idy/nootify/releases/latest) · [Setup guide](docs/guide.md#agents-and-notification-channels) · [Discord](https://discord.gg/JMJZ4mDcc4)
 
 ## What it does
 
-- Gives each agent conversation its own Feishu group.
-- Automatically backfills missing Feishu groups for eligible existing conversations.
-- Routes replies to existing Claude Code, Codex, and OpenCode sessions.
-- Adds a receipt reaction to successfully routed Feishu messages.
+- Gives each agent session its own notification destination, such as a Feishu group.
+- Supports multiple named instances of two provider types: **Feishu bot** over
+  WebSocket and **Remote Nootify** over authenticated gRPC.
+- Discovers eligible existing conversations locally and backfills missing
+  notification destinations.
+- Routes replies to existing Claude Code, Codex, and OpenCode sessions, preserving
+  the original message's return path across Nootify nodes.
+- Supports plain text and rich text; explicit session acknowledgments add a
+  receipt reaction in Feishu.
 - Supports Trae and WorkBuddy through an inbox they check at work milestones;
   it cannot wake an idle or closed conversation in those clients.
 - Shows pull requests from your projects and contributions, including review,
@@ -28,18 +34,24 @@ Download the installer for your computer from [GitHub Releases](https://github.c
 | Windows 10/11, x64 | Run the `-setup.exe` installer for your user account. |
 
 macOS users can also use the [Homebrew tap](https://github.com/idy/homebrew#install).
-The app includes its service and Node.js runtime. Current macOS packages are
-ad-hoc signed and not notarized; Windows installers are not code-signed.
+The app includes its service, Node.js runtime, Go notification core, and embedded
+Tailscale helper. Current macOS packages are ad-hoc signed and not notarized;
+Windows installers are not code-signed.
 
 ## Get started
 
-1. Open Nootify and configure your bot and trusted recipient under
-   **Settings → Feishu**.
+1. Open **Providers** and add a **Feishu bot** with its App ID, App Secret, and
+   trusted recipient's `open_id`, or a **Remote Nootify** with its server address,
+   token, and TLS settings. Enable the instance and choose your default provider.
 2. On the **Agents** page, enable the clients you use. Codex Desktop connects
    automatically on macOS; configure an existing Codex app-server or OpenCode
    connection when needed.
-3. Start a new agent conversation. It receives instructions to open its group,
-   thread, or topic and post progress; reply there to continue the conversation.
+3. Start a new agent conversation. It receives instructions to open its
+   notification session and post progress; reply there to continue the conversation.
+
+To serve other Nootify nodes, configure the listener under **Settings → Remote
+access** (`远程接入`). The legacy personal-app QR setup remains linked from the
+Feishu provider editor for migration.
 
 Your computer, local service, and target session must remain available. A delivered
 reply does not automatically approve a permission request.
@@ -55,36 +67,65 @@ Reproducible bugs can also be filed as [GitHub issues](https://github.com/idy/no
 
 ## Development
 
-Requires Node.js 22.13+ and npm. From the repository root:
+Requires Node.js 22.13+, npm, and the Go versions pinned in `desktop/go.mod`,
+`native/core/go.mod`, and `native/tailscale/go.mod`. From the repository root:
 
 ```sh
 npm ci
+npm run core:build
 npm run check
 npm test
+npm run core:test
+npm run desktop:test
 ```
 
-Desktop builds also require Rust, the Go version pinned in
-`native/tailscale/go.mod`, and the platform's native toolchain.
+For process-level integration checks without opening any desktop windows:
+
+```bash
+npm run test:integration
+```
+
+This runs real CLI, TypeScript service, stdio, and gRPC processes with temporary
+state and ephemeral loopback ports. The external bot is synthetic; no Feishu,
+Tailscale enrollment, system-service management, or production credentials are
+used. All owned processes and temporary state are cleaned up after the run.
+The JUnit report is `.cache/headless-integration.xml`.
+
+The Go core owns provider connections, notification-session mappings, and durable
+delivery/replay state. The Node service starts it through private stdio RPC and
+retains the TypeScript UI, agent input adapters, local session discovery, GitHub
+integration, and desktop lifecycle. Production Feishu ingestion uses WebSocket
+events; it does not run the legacy history poller.
+
+The desktop shell uses [MyGo](https://github.com/egoist/mygo) with the system
+WebView. Desktop builds use Go and Node.js; Rust and Cargo are not required.
 See [desktop builds](docs/guide.md#build-the-desktop-app).
 
 | Path | Contents |
 | --- | --- |
-| `src/` | Local service, CLI, Feishu messaging, and agent adapters |
-| `src/message-ingress.ts` | Feishu event/history normalization and sender/content admission |
+| `native/core/` | Go notification core: Feishu WebSocket, remote gRPC, sessions, and private durable JSON state |
+| `src/provider-core.ts`, `src/providers.ts` | Private Node stdio bridge, provider control, and local agent delivery completion |
+| `src/` | Local HTTP service, CLI, TypeScript UI, agent adapters, discovery, and GitHub integration |
+| `native/tailscale/` | Embedded Tailscale identity, browser proxy, and core TCP tunnels/listeners |
 | `public/` | Local application UI |
-| `src-tauri/`, `desktop/`, `native/` | Desktop app and bundled runtimes |
+| `src/dropdown.ts` | Shared authored dropdown behavior, keyboard navigation, and popup positioning |
+| `desktop/` | Go/MyGo desktop host, native tray, signed updater, and offline assets |
 | `site/` | Public website |
-| `test/` | Automated checks |
+| `test/` | Node regression checks and test-only headless service wiring |
+| `integration/`, `scripts/integration.mjs` | Headless CLI/HTTP/stdio/gRPC process integration and isolated build runner |
 
 ## Documentation
 
 - [Setup and notification channels](docs/guide.md#agents-and-notification-channels)
+- [Providers and remote nodes](docs/guide.md#providers-and-remote-nodes)
+- [Provider core protocol](docs/provider-protocol.md)
 - [Client connections and input transports](docs/guide.md#agent-input-transports)
 - [Settings and troubleshooting](docs/guide.md#settings)
+- [Shared UI controls](docs/ui-components.md)
 - [Tailscale remote access](docs/guide.md#tailscale-access)
 - [TypeScript client and service API](docs/guide.md#typescript-client-and-module-api)
 - [Website preview and deployment](docs/guide.md#project-website)
-- [Builds, updates, and releases](docs/guide.md#tauri-desktop-application-and-system-tray)
+- [Builds, updates, and releases](docs/guide.md#mygo-desktop-application-and-system-tray)
 
 ## License
 

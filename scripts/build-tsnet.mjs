@@ -10,7 +10,7 @@ const run = promisify(execFile);
 const root = fileURLToPath(new URL('../', import.meta.url));
 const source = join(root, 'native', 'tailscale');
 export async function buildTsnet(target = buildTarget()) {
-  const binary = join(root, 'src-tauri', 'binaries', sidecarName('nootify-tsnet', target));
+  const binary = join(root, 'build', 'binaries', sidecarName('nootify-tsnet', target));
   const env = { ...process.env, GOOS: target.goos, GOARCH: target.goarch, CGO_ENABLED: '0' };
   await mkdir(dirname(binary), { recursive: true });
   const temporary = `${binary}.partial`;

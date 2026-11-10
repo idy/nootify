@@ -263,7 +263,7 @@ test('remote owners cannot change node settings or receive its authorization URL
   const { listener, mutations, settings, logs } = await proxyHost(t);
   const local = createServiceHost([], 'test-token', logs, { settings }); local.listen(0, '127.0.0.1'); await once(local, 'listening');
   t.after(() => { local.closeAllConnections(); local.close(); }); const port = (local.address() as AddressInfo).port;
-  const here = response(await exchange(`tcp://127.0.0.1:${port}`, [httpRequest('/ui/api/settings/tailscale', { headers: { Host: `127.0.0.1:${port}` } })]));
+  const here = response(await exchange(`tcp://127.0.0.1:${port}`, [httpRequest('/ui/api/settings/tailscale', { headers: { Host: `127.0.0.1:${port}`, Authorization: 'Bearer test-token' } })]));
   assert.equal(here.body.editable, true); assert.equal(here.body.login.url, loginUrl);
   const remote = response(await exchange(listener.target, [proxyLine() + httpRequest('/ui/api/settings/tailscale')]));
   assert.equal(remote.body.editable, false); assert.deepEqual(remote.body.login, { status: 'waiting' });

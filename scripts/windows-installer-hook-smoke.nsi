@@ -1,4 +1,5 @@
-; Tiny real installer: no app files, registry, state, task or service operations.
+; Headless native probe: dummy hooks or isolated temporary registry receipts.
+; No installed app files, private state, real tasks or services are used.
 Unicode true
 RequestExecutionLevel user
 SilentInstall silent
@@ -13,7 +14,13 @@ OutFile "${PROBE_OUTPUT}"
   !define NOOTIFY_INSTALLER_HOOK_LOG "$EXEDIR\nootify-installer-hook.log"
 !endif
 !include "windows-installer-hooks.nsh"
+!include "${__FILEDIR__}\..\windows\pending-receipt.nsh"
+!ifndef PROBE_RECEIPT_KEY
+  !define PROBE_RECEIPT_KEY "Software\Nootify\InstallerReceiptProbe"
+!endif
 Var UpdateMode
+Var PendingLocation
+Var FreshToken
 
 !macro ProbeInit UNINSTALL
   StrCpy $UpdateMode 0
@@ -33,6 +40,36 @@ Var UpdateMode
 
 Function .onInit
   !insertmacro ProbeInit 0
+  ClearErrors
+  ${GetOptions} $0 "/RECEIPT=" $3
+  ${IfNot} ${Errors}
+    SetRegView 64
+    !insertmacro NootifyReadPendingReceipt "${PROBE_RECEIPT_KEY}"
+    ${If} $3 == "clear"
+      ${If} $PendingLocation != ""
+      ${OrIf} $FreshToken != ""
+        SetErrorLevel 2
+        Quit
+      ${EndIf}
+    ${Else}
+      ${If} $PendingLocation == ""
+      ${OrIf} $FreshToken == ""
+        SetErrorLevel 2
+        Quit
+      ${EndIf}
+    ${EndIf}
+    ${If} $3 == "matching"
+      StrCpy $INSTDIR $PendingLocation
+    ${EndIf}
+    !insertmacro NootifyCheckPendingDestination
+    ${If} $3 != "clear"
+    ${AndIf} $3 != "matching"
+      SetErrorLevel 2
+      Quit
+    ${EndIf}
+    SetErrorLevel 0
+    Quit
+  ${EndIf}
 FunctionEnd
 Function un.onInit
   !insertmacro ProbeInit 1

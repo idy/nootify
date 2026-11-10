@@ -44,22 +44,37 @@ test('all marked static UI messages and dynamic translation keys have a catalog 
   }
   const script = await readFile(new URL('../../src/ui-app.ts', import.meta.url), 'utf8');
   for (const match of script.matchAll(/\bt\('([^']+)'/g)) assert.ok(Object.hasOwn(english, match[1]), `Missing dynamic translation: ${match[1]}`);
-  assert.match(page, /<select[^>]+id="language"/);
+  const { document } = parseHTML(page);
+  assert.equal(document.querySelector('select'), null, 'UI dropdowns must use the authored control');
+  assert.equal(document.getElementById('language')!.getAttribute('role'), 'combobox');
+  assert.equal(document.querySelectorAll('#language-options [role="option"]').length, 3);
   assert.match(page, /data-view="settings-general"/);
 });
 
-test('settings and agent notification UI expose only Feishu in both languages', async () => {
+test('provider navigation and agent summaries replace the legacy global Feishu entry in both languages', async () => {
   const page = await readFile(new URL('../../public/index.html', import.meta.url), 'utf8');
   const { document } = parseHTML(page);
   assert.deepEqual([...document.querySelectorAll('#settings-subnav [data-view]')].map(link => link.getAttribute('data-view')), [
-    'settings-general', 'settings-github', 'settings-lark', 'settings-tailscale', 'settings-backup', 'settings-about',
+    'settings-general', 'settings-github', 'settings-remote', 'settings-tailscale', 'settings-backup', 'settings-about',
   ]);
   assert.equal(document.querySelectorAll('[data-panel="settings-lark"]').length, 1);
   assert.equal(document.querySelector('#notification-channel, #channel-save, [id^="slack-"], [id^="telegram-"]'), null);
-  assert.equal(document.querySelector('#channel-title')!.textContent, '飞书通知');
-  assert.equal(document.querySelector('#channel-settings')!.getAttribute('href'), '#/settings/lark');
+  assert.equal(document.querySelector('#channel-title')!.textContent, '消息接入');
+  assert.equal(document.querySelector('#channel-settings')!.getAttribute('href'), '#/providers');
+  assert.ok(document.querySelector('[data-view="providers"]'));
+  assert.equal(document.querySelector('#settings-subnav [href="#/settings/lark"]'), null);
+  assert.ok(document.querySelector('[data-panel="settings-remote"]'));
+  assert.equal(document.querySelectorAll('.nav-label')[1].textContent, 'Repos');
+  assert.equal(document.querySelector('[data-view="settings-github"]')!.textContent, 'GitHub');
+  assert.doesNotMatch(page, /每台电脑独立轮询/);
   assert.ok(document.querySelector('#channel-state'));
   assert.equal(document.querySelector('#agents-view select'), null);
+  assert.ok(document.querySelector('dialog#provider-dialog #provider-editor'));
+  assert.equal(document.querySelector('#provider-editor select'), null);
+  assert.equal(document.querySelector('#provider-add')!.parentElement!.firstElementChild!.id, 'provider-add');
+  assert.deepEqual([...document.querySelectorAll('#provider-type-options button strong')].map(item => item.textContent), ['飞书机器人', '远程 Nootify gRPC']);
+  assert.equal(translate('en', '远程 Nootify gRPC'), 'Remote Nootify gRPC');
+  assert.equal(translate('en', '搜索接入类型'), 'Search provider types');
   assert.doesNotMatch(page, /slack|telegram/i);
   assert.doesNotMatch(JSON.stringify(english), /slack|telegram|default notification channel/i);
   assert.equal(translate('en', '飞书通知'), 'Feishu notifications');

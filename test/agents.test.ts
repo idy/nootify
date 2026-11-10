@@ -97,13 +97,13 @@ test('agents sharing one prompt target cannot overwrite each other\'s commands',
   assert.equal(await readFile(process.platform === 'win32' ? f.files.claude : f.files.codex, 'utf8'), 'shared instructions\n', 'removing a block remains possible');
 });
 
-test('obsolete provider instructions are replaced with the Feishu-only prompt', async t => {
+test('obsolete provider instructions are replaced with the session-based provider prompt', async t => {
   const f = await fixture(t);
   await writeFile(f.files.claude, `${BEGIN}\n## Legacy notification provider\nUse chat-ack and chat-reply.\n${END}\n`);
   assert.equal((await f.agents.inspect('claude')).status, 'outdated');
   await f.agents.set('claude', true);
   const block = await readFile(f.files.claude, 'utf8');
-  assert.match(block, /Feishu updates through Nootify/); assert.match(block, /lark-ack/); assert.match(block, /lark-reply/);
+  assert.match(block, /Session updates through Nootify/); assert.match(block, /message-ack/); assert.match(block, /message-reply/); assert.match(block, /lark-ack/); assert.match(block, /lark-reply/);
   assert.ok(!block.includes('chat-ack')); assert.ok(!block.includes('--channel'));
   assert.equal((await f.agents.inspect('claude')).status, 'current');
 });
@@ -142,7 +142,7 @@ for (const agent of ['trae', 'workbuddy'] as const) {
     assert.match(written, new RegExp(`thread-receive --agent ${agent} --session-id`));
     assert.match(written, /thread-ack.*--message-id "<returned message.id>"/);
     assert.match(written, /cannot wake an idle or closed conversation/);
-    assert.match(written, /Feishu group/);
+    assert.match(written, /notification provider/);
     assert.ok(!written.includes('--channel'));
     await f.agents.set(agent, false);
     assert.equal(await readFile(f.files[agent], 'utf8'), original);

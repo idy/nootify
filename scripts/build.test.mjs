@@ -55,7 +55,7 @@ test('PE validation rejects wrong architecture and truncated executables without
 });
 
 test('the committed ICO contains multiple Windows icon sizes', async () => {
-  const icon = await readFile(new URL('../src-tauri/icons/icon.ico', import.meta.url));
+  const icon = await readFile(new URL('../desktop/icons/icon.ico', import.meta.url));
   assert.equal(icon.readUInt16LE(0), 0);
   assert.equal(icon.readUInt16LE(2), 1);
   assert.ok(icon.readUInt16LE(4) >= 3);
