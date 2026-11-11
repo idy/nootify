@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { Agent, createServer, request as httpRequest, type Server } from 'node:http';
+import { Agent, createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -23,11 +23,16 @@ async function fixture(t: TestContext, slowDirectory = false) {
   const page = { node_id: 'synthetic-node', providers: [], remote: { enabled: false, listen: '127.0.0.1:9418', status: 'disabled', tls: false, token_set: true, peers: [] } };
   const providers = { async page() { return page; }, async action() { writes++; return page; }, async remoteSecret() { reads++; return { token: 'synthetic-remote-secret' }; } } as unknown as ProvidersService;
   const settings = { async larkRecipients(send?: (value: unknown) => void, signal?: AbortSignal) { send?.({ users: [{ name: 'private-directory-entry' }] }); if (slowDirectory && !signal?.aborted) await new Promise<void>(done => signal?.addEventListener('abort', () => done(), { once: true })); return { users: [{ name: 'private-directory-entry' }] }; } } as unknown as SettingsSource;
-  const server = createServiceHost([], token, logs, { providers, settings }); server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  let server = createServiceHost([], token, logs, { providers, settings }); server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const port = (server.address() as { port: number }).port;
   const base = `http://127.0.0.1:${port}/`;
+  const restart = async () => {
+    await stop(server);
+    server = createServiceHost([], token, logs, { providers, settings });
+    server.listen(port, '127.0.0.1'); await once(server, 'listening');
+  };
   t.after(async () => { if (server.listening) await stop(server); await logs.flush(); await rm(directory, { recursive: true, force: true }); });
-  return { token, server, base, port, reads: () => reads, writes: () => writes };
+  return { token, get server() { return server; }, base, port, restart, reads: () => reads, writes: () => writes };
 }
 export function transportFor(url: string, network?: typeof fetch): UiTransport {
   const parsed = new URL(url); const parameters = new URLSearchParams(parsed.hash.slice(1));
@@ -36,6 +41,24 @@ export function transportFor(url: string, network?: typeof fetch): UiTransport {
 }
 async function gateway(t: TestContext, f: Awaited<ReturnType<typeof fixture>>) {
   const gateway = await startOwnerUiGateway(f.base, f.token, '#/providers'); t.after(() => gateway.close()); return gateway;
+}
+function interceptDaemon(f: Awaited<ReturnType<typeof fixture>>, intercept: (request: IncomingMessage, response: ServerResponse) => boolean) {
+  const handler = f.server.listeners('request')[0] as (request: IncomingMessage, response: ServerResponse) => void;
+  f.server.removeAllListeners('request');
+  f.server.on('request', (request, response) => { if (!intercept(request, response)) handler(request, response); });
+}
+function interceptAuthenticatedDaemon(t: TestContext, f: Awaited<ReturnType<typeof fixture>>, intercept: (request: IncomingMessage, response: ServerResponse) => boolean | Promise<boolean>) {
+  const open = UiSessions.prototype.open;
+  t.mock.method(UiSessions.prototype, 'open', async function(this: UiSessions, request: IncomingMessage, response: ServerResponse) {
+    const inner = await open.call(this, request, response);
+    if (inner && request.headers.host === new URL(f.base).host && await intercept(inner, response)) return;
+    return inner;
+  });
+}
+function gate() {
+  let release!: () => void;
+  const promise = new Promise<void>(done => { release = done; });
+  return { promise, release };
 }
 
 test('forged UI headers, old cross-port cookies and unauthenticated browser POSTs cannot authorize settings', async t => {
@@ -252,6 +275,209 @@ test('Tailnet repository actions reach their authorized listener while anonymous
   await assert.rejects(local.fetch('/ui/api/repos', { method: 'POST', body: '{}' }), /authorization/);
 });
 
+test('the first gateway GET recovers an idle daemon session without expiring the browser session', async t => {
+  const f = await fixture(t); const create = UiSessions.prototype.create;
+  let aged = false; let challenges = 0;
+  t.mock.method(UiSessions.prototype, 'create', function(this: UiSessions, deriveKey?: Parameters<UiSessions['create']>[0]) {
+    if (!deriveKey || aged) return create.call(this, deriveKey);
+    // Only the initial daemon lease is old; the independently created frontend lease stays current.
+    aged = true; const now = Date.now(); const clock = t.mock.method(Date, 'now', () => now - uiSessionIdle - 1);
+    try { return create.call(this, deriveKey); } finally { clock.mock.restore(); }
+  });
+  f.server.prependListener('request', request => { if (request.url?.startsWith('/ui/api/auth/challenge')) challenges++; });
+  const g = await gateway(t, f); const client = transportFor(g.url);
+  const response = await client.fetch('/ui/api/providers');
+  assert.equal(response.status, 200); assert.equal((await response.json()).editable, true);
+  assert.equal(challenges, 2); assert.equal(client.authorized, true);
+  assert.equal((await (await client.fetch('/ui/api/providers')).json()).editable, true);
+  assert.equal(challenges, 2, 'subsequent reads reuse the recovered session');
+});
+
+test('the first gateway GET after a daemon restart succeeds on fresh proof', async t => {
+  const f = await fixture(t); const g = await gateway(t, f); const client = transportFor(g.url);
+  assert.equal((await (await client.fetch('/ui/api/providers')).json()).editable, true);
+  await f.restart(); let challenges = 0;
+  f.server.prependListener('request', request => { if (request.url?.startsWith('/ui/api/auth/challenge')) challenges++; });
+  const response = await client.fetch('/ui/api/providers');
+  assert.equal(response.status, 200); assert.equal((await response.json()).editable, true);
+  assert.equal(challenges, 1); assert.equal(client.authorized, true);
+});
+
+test('a second interrupted GET ends recovery and leaves later requests able to reconnect', async t => {
+  const f = await fixture(t); let challenges = 0; let reads = 0;
+  f.server.prependListener('request', request => { if (request.url?.startsWith('/ui/api/auth/challenge')) challenges++; });
+  interceptAuthenticatedDaemon(t, f, (request, response) => {
+    if (request.url !== '/ui/api/providers') return false;
+    if (++reads <= 2) { response.destroy(); return true; }
+    return false;
+  });
+  const g = await gateway(t, f); const client = transportFor(g.url);
+  const failed = await client.fetch('/ui/api/providers');
+  assert.equal(failed.status, 502); await failed.text();
+  assert.deepEqual([reads, challenges], [2, 2], 'only one replay and one fresh proof are allowed');
+  assert.equal(client.authorized, true);
+  assert.equal((await (await client.fetch('/ui/api/providers')).json()).editable, true);
+  assert.deepEqual([reads, challenges], [3, 3]);
+});
+
+test('failed fresh daemon proof stops the first GET without sending another operation', async t => {
+  const f = await fixture(t); let challenges = 0; let grants = 0; let reads = 0;
+  interceptDaemon(f, (request, response) => {
+    if (request.url === '/ui/api/auth/grant') grants++;
+    if (request.url?.startsWith('/ui/api/auth/challenge') && ++challenges > 1) {
+      request.resume(); response.end(JSON.stringify({ challenge: 'A'.repeat(32), issued_at: Date.now(), proof: 'B'.repeat(43) })); return true;
+    }
+    return false;
+  });
+  interceptAuthenticatedDaemon(t, f, (request, response) => {
+    if (request.url !== '/ui/api/providers') return false;
+    reads++; response.destroy(); return true;
+  });
+  const g = await gateway(t, f); const client = transportFor(g.url);
+  const failed = await client.fetch('/ui/api/providers');
+  assert.equal(failed.status, 502); await failed.text();
+  assert.deepEqual([reads, challenges, grants], [1, 2, 1]);
+  assert.equal(client.authorized, true);
+});
+
+test('authenticated daemon error statuses are forwarded without recovery', async t => {
+  const f = await fixture(t); let challenges = 0; let reads = 0;
+  f.server.prependListener('request', request => { if (request.url?.startsWith('/ui/api/auth/challenge')) challenges++; });
+  interceptAuthenticatedDaemon(t, f, (request, response) => {
+    if (request.url !== '/ui/api/providers') return false;
+    reads++; response.writeHead(503, { 'content-type': 'application/json' }); response.end('{"error":"temporarily unavailable"}'); return true;
+  });
+  const g = await gateway(t, f); const client = transportFor(g.url);
+  const failed = await client.fetch('/ui/api/providers');
+  assert.equal(failed.status, 503); assert.deepEqual(await failed.json(), { error: 'temporarily unavailable' });
+  assert.deepEqual([reads, challenges], [1, 1]); assert.equal(client.authorized, true);
+});
+
+test('an interrupted mutation with an unknown result is never replayed', async t => {
+  const f = await fixture(t); let challenges = 0; let mutations = 0;
+  f.server.prependListener('request', request => { if (request.url?.startsWith('/ui/api/auth/challenge')) challenges++; });
+  interceptAuthenticatedDaemon(t, f, (request, response) => {
+    if (request.url === '/ui/api/providers' && request.method === 'POST') {
+      mutations++;
+      // Let the real action run, then lose its response before any headers are sent.
+      response.end = (() => { response.destroy(); return response; }) as typeof response.end;
+    }
+    return false;
+  });
+  const g = await gateway(t, f); const client = transportFor(g.url);
+  const failed = await client.fetch('/ui/api/providers', { method: 'POST', body: '{"action":"save"}' });
+  assert.equal(failed.status, 502); await failed.text();
+  assert.deepEqual([f.writes(), mutations, challenges], [1, 1, 1]);
+  assert.equal((await (await client.fetch('/ui/api/providers')).json()).editable, true);
+  assert.deepEqual([f.writes(), mutations, challenges], [1, 1, 2]);
+});
+
+test('an interrupted GET stream is not recovered after authenticated data is forwarded', { timeout: 15000 }, async t => {
+  const f = await fixture(t); let challenges = 0; let reads = 0; let interrupted!: ServerResponse;
+  f.server.prependListener('request', request => { if (request.url?.startsWith('/ui/api/auth/challenge')) challenges++; });
+  interceptAuthenticatedDaemon(t, f, (request, response) => {
+    if (request.url !== '/ui/api/providers') return false;
+    reads++; interrupted = response;
+    response.writeHead(200, { 'content-type': 'text/plain' }); response.write('authenticated partial body'); return true;
+  });
+  const g = await gateway(t, f); const client = transportFor(g.url);
+  const response = await client.fetch('/ui/api/providers'); const reader = response.body!.getReader();
+  assert.equal(new TextDecoder().decode((await reader.read()).value), 'authenticated partial body');
+  interrupted.destroy();
+  await assert.rejects(reader.read());
+  assert.deepEqual([reads, challenges], [1, 1]);
+});
+
+test('authenticated GET headers alone prevent recovery when the body is interrupted', async t => {
+  const f = await fixture(t); let challenges = 0; let reads = 0; let daemonId = ''; let interrupted!: ServerResponse;
+  f.server.prependListener('request', request => { if (request.url?.startsWith('/ui/api/auth/challenge')) challenges++; });
+  const create = UiSessions.prototype.create;
+  t.mock.method(UiSessions.prototype, 'create', function(this: UiSessions, deriveKey?: Parameters<UiSessions['create']>[0]) {
+    const capability = create.call(this, deriveKey); if (deriveKey) daemonId = capability.id; return capability;
+  });
+  const open = UiCodec.prototype.open;
+  t.mock.method(UiCodec.prototype, 'open', async function(this: UiCodec, envelope: UiEnvelope, request: string, direction: string) {
+    const frame = await open.call(this, envelope, request, direction);
+    // Fail after the verified headers have returned through fetch, before any data frame.
+    if (this.capability.id === daemonId && direction === 'response:0') setImmediate(() => interrupted.destroy());
+    return frame;
+  });
+  interceptAuthenticatedDaemon(t, f, (request, response) => {
+    if (request.url !== '/ui/api/providers') return false;
+    reads++; interrupted = response; response.writeHead(200); response.flushHeaders(); return true;
+  });
+  const g = await gateway(t, f); const client = transportFor(g.url);
+  await assert.rejects(client.fetch('/ui/api/providers'));
+  assert.deepEqual([reads, challenges], [1, 1]);
+});
+
+test('cancelling a GET before response headers does not recover or break the valid session', { timeout: 15000 }, async t => {
+  const f = await fixture(t); let challenges = 0; let reads = 0;
+  const started = gate(), disconnected = gate();
+  f.server.prependListener('request', request => { if (request.url?.startsWith('/ui/api/auth/challenge')) challenges++; });
+  interceptAuthenticatedDaemon(t, f, (request, response) => {
+    if (request.url !== '/ui/api/providers' || ++reads !== 1) return false;
+    response.once('close', disconnected.release); started.release(); return true;
+  });
+  const g = await gateway(t, f); const client = transportFor(g.url); const abort = new AbortController();
+  const cancelled = assert.rejects(client.fetch('/ui/api/providers', { signal: abort.signal }));
+  await started.promise; abort.abort(); await cancelled; await disconnected.promise;
+  assert.deepEqual([reads, challenges], [1, 1]); assert.equal(client.authorized, true);
+  assert.equal((await (await client.fetch('/ui/api/providers')).json()).editable, true);
+  assert.deepEqual([reads, challenges], [2, 1]);
+});
+
+test('cancelling during shared recovery proof does not replay the cancelled GET', { timeout: 15000 }, async t => {
+  const f = await fixture(t); const proof = gate(), seen = gate(), disconnected = gate();
+  let challenges = 0; let grants = 0; let reads = 0; let drop = true; let watched = false;
+  const handler = f.server.listeners('request')[0] as (request: IncomingMessage, response: ServerResponse) => void;
+  t.after(proof.release);
+  interceptDaemon(f, (request, response) => {
+    if (request.url?.startsWith('/ui/api/auth/challenge') && ++challenges > 1) {
+      seen.release(); void proof.promise.then(() => handler(request, response)); return true;
+    }
+    if (request.url === '/ui/api/auth/grant') grants++;
+    if (drop && request.url === '/ui/api/secure') { drop = false; request.resume(); response.end('{}'); return true; }
+    return false;
+  });
+  const open = UiSessions.prototype.open;
+  t.mock.method(UiSessions.prototype, 'open', async function(this: UiSessions, request: IncomingMessage, response: ServerResponse) {
+    const inner = await open.call(this, request, response);
+    if (inner?.url === '/ui/api/providers') {
+      if (request.headers.host === new URL(f.base).host) reads++;
+      else if (!watched) { watched = true; response.once('close', disconnected.release); }
+    }
+    return inner;
+  });
+  const g = await gateway(t, f); const client = transportFor(g.url); const abort = new AbortController();
+  const cancelled = assert.rejects(client.fetch('/ui/api/providers', { signal: abort.signal }));
+  await seen.promise;
+  const survivor = client.fetch('/ui/api/providers');
+  abort.abort(); await cancelled; await disconnected.promise;
+  proof.release();
+  assert.equal((await (await survivor).json()).editable, true);
+  assert.deepEqual([reads, challenges, grants], [1, 2, 2], 'only the live waiter may use the shared fresh session');
+});
+
+test('a GET timeout cannot start recovery or reset its timeout budget', { timeout: 15000 }, async t => {
+  const f = await fixture(t); let challenges = 0; let reads = 0; let budgets = 0;
+  const timeout = AbortSignal.timeout; const deadline = new AbortController(); const started = gate();
+  t.mock.method(AbortSignal, 'timeout', (milliseconds: number) => {
+    if (milliseconds !== 185000) return timeout(milliseconds);
+    budgets++; return deadline.signal;
+  });
+  f.server.prependListener('request', request => { if (request.url?.startsWith('/ui/api/auth/challenge')) challenges++; });
+  interceptAuthenticatedDaemon(t, f, (request) => {
+    if (request.url !== '/ui/api/providers') return false;
+    reads++; started.release(); return true;
+  });
+  const g = await gateway(t, f); const client = transportFor(g.url);
+  const request = client.fetch('/ui/api/providers'); await started.promise;
+  deadline.abort(new DOMException('Timed out', 'TimeoutError'));
+  const failed = await request; assert.equal(failed.status, 502); await failed.text();
+  assert.deepEqual([reads, challenges, budgets], [1, 1, 1]);
+});
+
 test('concurrent gateway reconnects share one bootstrap and revoke every issued session', { timeout: 15000 }, async t => {
   const f = await fixture(t);
   const handler = f.server.listeners('request')[0] as (request: import('node:http').IncomingMessage, response: import('node:http').ServerResponse) => void;
@@ -271,12 +497,14 @@ test('concurrent gateway reconnects share one bootstrap and revoke every issued 
   });
   const g = await gateway(t, f); const client = transportFor(g.url);
   drop = true;
-  const failed = await client.fetch('/ui/api/providers'); assert.equal(failed.status, 502); await failed.text();
-  const concurrent = Promise.all(Array.from({ length: 40 }, async () => (await (await client.fetch('/ui/api/providers')).json()).editable));
+  const first = client.fetch('/ui/api/providers');
   await reconnectSeen;
+  const concurrent = Promise.all(Array.from({ length: 40 }, async () => (await (await client.fetch('/ui/api/providers')).json()).editable));
   await new Promise<void>(done => setImmediate(done));
-  assert.equal(challenges, 2, 'all reconnect requests must await one proof');
+  assert.equal(challenges, 2, 'the first read and concurrent reads must await one proof');
   release();
+  const recovered = await first;
+  assert.equal(recovered.status, 200); assert.equal((await recovered.json()).editable, true);
   assert.ok((await concurrent).every(Boolean)); assert.equal(grants, 2);
   await g.close();
   const all = [];
@@ -300,8 +528,7 @@ test('gateway close waits for an in-flight proof and revokes its late capability
   });
   const g = await gateway(t, f); const client = transportFor(g.url);
   drop = true;
-  const failed = await client.fetch('/ui/api/providers'); assert.equal(failed.status, 502); await failed.text();
-  const reconnect = client.fetch('/ui/api/providers').catch(() => undefined);
+  const reconnect = client.fetch('/ui/api/providers').then(response => response.text()).catch(() => undefined);
   await reconnectSeen;
   let finished = false;
   const closing = g.close().then(() => { finished = true; });
