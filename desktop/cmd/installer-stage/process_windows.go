@@ -1,11 +1,28 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os/exec"
+	"path/filepath"
 	"syscall"
+	"time"
 	"unsafe"
+
+	"github.com/idy/nootify/internal/service"
 )
+
+func (s installedService) captureRegistration() (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 170*time.Second)
+	defer cancel()
+	return service.CaptureWindowsLegacyTask(ctx, service.Options{Executable: filepath.Join(s.target, "Nootify.exe")})
+}
+
+func (s installedService) restoreRegistration(receipt string, state serviceState) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 170*time.Second)
+	defer cancel()
+	return service.RestoreWindowsLegacyTask(ctx, service.Options{Executable: filepath.Join(s.target, "Nootify.exe")}, receipt, state.Running, state.Enabled)
+}
 
 var kernel32 = syscall.NewLazyDLL("kernel32.dll")
 var moveFileEx = kernel32.NewProc("MoveFileExW")

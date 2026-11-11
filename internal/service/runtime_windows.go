@@ -32,11 +32,12 @@ var wtsQuery = wts.NewProc("WTSQuerySessionInformationW")
 var wtsFree = wts.NewProc("WTSFreeMemory")
 
 type taskState struct {
-	Installed bool   `json:"installed"`
-	Running   bool   `json:"running"`
-	Enabled   bool   `json:"enabled"`
-	Task      string `json:"task"`
-	Record    *struct {
+	Installed    bool   `json:"installed"`
+	Running      bool   `json:"running"`
+	Enabled      bool   `json:"enabled"`
+	Task         string `json:"task"`
+	Registration string `json:"registration"`
+	Record       *struct {
 		MCP     string `json:"mcp"`
 		Version int    `json:"version"`
 	} `json:"record"`
@@ -44,11 +45,17 @@ type taskState struct {
 
 func powershellLiteral(value string) string { return "'" + strings.ReplaceAll(value, "'", "''") + "'" }
 func taskCommand(ctx context.Context, action string, options Options) (taskState, error) {
+	return taskCommandRegistration(ctx, action, options, "")
+}
+func taskCommandRegistration(ctx context.Context, action string, options Options, registration string) (taskState, error) {
 	// This source is embedded and passed as a literal script block. No checkout,
 	// installed script, modules, profile, or current-directory code is loaded.
 	script := "& {\n" + taskScript + "\n} -Action " + powershellLiteral(action) + " -Executable " + powershellLiteral(options.Executable) + " -StateDir " + powershellLiteral(options.StateDir) + fmt.Sprintf(" -Port %d", options.Port)
 	if options.MCPConfig != "" {
 		script += " -McpConfig " + powershellLiteral(options.MCPConfig)
+	}
+	if registration != "" {
+		script += " -Registration " + powershellLiteral(registration)
 	}
 	encoded, err := powerShellCommand(script)
 	if err != nil {
@@ -373,7 +380,7 @@ func manageWindows(ctx context.Context, action string, options Options) (any, er
 	if err != nil {
 		return nil, err
 	}
-	if action == "install" || action == "start" || action == "restart" {
+	if action == "install" || action == "start" || action == "restart" || action == "enable" {
 		metadata, e := buildinfo.ReadFile(options.Executable)
 		if e != nil || metadata.Main.Path != "github.com/idy/nootify" {
 			return nil, errors.New("the replacement must be a current Nootify Go executable; service registration and private state were retained")
@@ -386,7 +393,21 @@ func manageWindows(ctx context.Context, action string, options Options) (any, er
 		}
 		defer unlock()
 	}
-	state, err := taskCommand(ctx, "Status", options)
+	return manageWindowsTask(action, windowsTaskControl{
+		command: func(action string) (taskState, error) { return taskCommand(ctx, action, options) },
+		stop:    func() error { return stopTask(ctx, options, sid) },
+		start:   func() error { return startTask(ctx, options) },
+	})
+}
+
+type windowsTaskControl struct {
+	command func(string) (taskState, error)
+	stop    func() error
+	start   func() error
+}
+
+func manageWindowsTask(action string, control windowsTaskControl) (any, error) {
+	state, err := control.command("Status")
 	if err != nil {
 		return nil, err
 	}
@@ -395,42 +416,51 @@ func manageWindows(ctx context.Context, action string, options Options) (any, er
 		return result, nil
 	}
 	if action == "install" {
-		state, err = taskCommand(ctx, "Install", options)
+		state, err = control.command("Install")
 		if err != nil {
 			return nil, err
 		}
 		result.Installed = state.Installed
 		if state.Record != nil && state.Record.Version == 1 {
-			err = stopTask(ctx, options, sid)
+			err = control.stop()
 			if err == nil {
-				_, err = taskCommand(ctx, "Migrate", options)
+				_, err = control.command("Migrate")
 			}
 		}
 		if err == nil {
-			err = startTask(ctx, options)
+			err = control.start()
 		}
 	} else if action == "start" || action == "restart" {
 		if !state.Installed {
 			return nil, errors.New("Nootify is not installed; use service-install")
 		}
 		if action == "restart" || state.Record != nil && state.Record.Version == 1 {
-			err = stopTask(ctx, options, sid)
+			err = control.stop()
 			if err == nil && state.Record != nil && state.Record.Version == 1 {
-				_, err = taskCommand(ctx, "Migrate", options)
+				_, err = control.command("Migrate")
 			}
 		}
 		if err == nil {
-			err = startTask(ctx, options)
+			err = control.start()
+		}
+	} else if action == "enable" && state.Record != nil && state.Record.Version == 1 {
+		// Migrate enabled-but-idle legacy registrations without a demand start.
+		err = control.stop()
+		if err == nil {
+			_, err = control.command("Migrate")
+		}
+		if err == nil {
+			_, err = control.command("Enable")
 		}
 	} else if action == "stop" || action == "uninstall" {
 		result.WasRunning = boolPointer(state.Running)
-		err = stopTask(ctx, options, sid)
+		err = control.stop()
 		if err == nil && action == "uninstall" {
-			_, err = taskCommand(ctx, "Uninstall", options)
+			_, err = control.command("Uninstall")
 			result.Installed = false
 		}
 	} else {
-		_, err = taskCommand(ctx, strings.ToUpper(action[:1])+action[1:], options)
+		_, err = control.command(strings.ToUpper(action[:1]) + action[1:])
 	}
 	if err != nil {
 		return nil, err
@@ -439,6 +469,66 @@ func manageWindows(ctx context.Context, action string, options Options) (any, er
 	result.Enabled = nil
 	result.Status = map[string]string{"install": "installed", "start": "started", "restart": "restarted", "stop": "stopped", "uninstall": "uninstalled", "enable": "enabled", "disable": "disabled"}[action]
 	return result, nil
+}
+
+// CaptureWindowsLegacyTask returns only an ownership-validated v1 Scheduler XML
+// receipt, before installer stop/migration changes the original registration.
+func CaptureWindowsLegacyTask(ctx context.Context, options Options) (string, error) {
+	options, err := normalize(options)
+	if err != nil {
+		return "", err
+	}
+	state, err := taskCommand(ctx, "Capture", options)
+	if err != nil {
+		return "", err
+	}
+	if len(state.Registration) > 16384 {
+		return "", errors.New("legacy task registration exceeds rollback receipt limit")
+	}
+	return state.Registration, nil
+}
+
+// RestoreWindowsLegacyTask is the installer's bounded rollback path. It never
+// treats the old desktop executable as a Go server. The embedded controller
+// revalidates both registrations and restores only the exact bundled Node action.
+func RestoreWindowsLegacyTask(ctx context.Context, options Options, registration string, running, enabled bool) error {
+	if registration == "" || len(registration) > 16384 {
+		return errors.New("missing or oversized owned legacy task receipt")
+	}
+	options, err := normalize(options)
+	if err != nil {
+		return err
+	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	sid, err := ownerSID()
+	if err != nil {
+		return err
+	}
+	unlock, err := mutex(ctx, "Global\\Nootify.Service.Management."+sid, 60*time.Second)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	// Retain the same job ownership and completed-drain verification used by
+	// normal service management, including when Scheduler reports idle.
+	if err = stopTask(ctx, options, sid); err != nil {
+		return err
+	}
+	if _, err = taskCommandRegistration(ctx, "Restore", options, registration); err != nil {
+		return err
+	}
+	if running {
+		if err = startTask(ctx, options); err != nil {
+			return err
+		}
+	}
+	action := "Disable"
+	if enabled {
+		action = "Enable"
+	}
+	_, err = taskCommand(ctx, action, options)
+	return err
 }
 
 // PrepareServe runs before the managed service can open private state or spawn

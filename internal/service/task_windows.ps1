@@ -1,11 +1,12 @@
 # Windows PowerShell 5.1; no elevation, password, service account, or machine-wide task.
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)][ValidateSet('Install', 'Start', 'Stop', 'Uninstall', 'Status', 'Enable', 'Disable', 'Migrate')][string]$Action,
+    [Parameter(Mandatory = $true)][ValidateSet('Install', 'Start', 'Stop', 'Uninstall', 'Status', 'Enable', 'Disable', 'Migrate', 'Capture', 'Restore')][string]$Action,
     [Parameter(Mandatory = $true)][string]$Executable,
     [Parameter(Mandatory = $true)][string]$StateDir,
     [ValidateRange(1, 65535)][int]$Port = 9417,
-    [string]$McpConfig
+    [string]$McpConfig,
+    [string]$Registration
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
@@ -183,7 +184,26 @@ try {
     $task = Get-Task
     $record = $null
     if ($task) { $record = Assert-Owned $task }
-    if ($Action -eq 'Install') {
+    $captured = ''
+    if ($Action -eq 'Capture') {
+        if ($task -and $record.version -eq 1) { $captured = [string]$task.Xml }
+    } elseif ($Action -eq 'Restore') {
+        # A receipt is data, never a PowerShell program. Validate the complete old
+        # action and current registration independently before replacing either.
+        if (!$Registration -or $Registration.Length -gt 16384) { throw 'Invalid legacy task receipt' }
+        $definition = $scheduler.NewTask(0)
+        $definition.XmlText = $Registration
+        $original = Assert-Owned ([pscustomobject]@{ Definition = $definition })
+        if ($original.version -ne 1) { throw 'Rollback requires an exact owned legacy registration' }
+        if (!$task -or $task.Enabled -or (Test-OwnedTaskRunning $task)) { throw 'Owned task must be disabled and drained before restoration' }
+        foreach ($path in @($original.script, $original.node, $original.server)) {
+            if (!(Test-Path -LiteralPath $path -PathType Leaf)) { throw 'Original legacy service payload is missing' }
+        }
+        # Disabled publication cannot start a previously idle job through a trigger.
+        $definition.Settings.Enabled = $false
+        $task = $scheduler.GetFolder('\').RegisterTaskDefinition($taskName, $definition, 4, $ownerSid, $null, 3, $null)
+        $record = Assert-Owned $task
+    } elseif ($Action -eq 'Install') {
         if ($task) {
             if ($McpConfig -and !(Same-Path $record.mcp $McpConfig)) { throw 'The installed task uses another MCP config; uninstall it before changing its configuration' }
         } else {
@@ -212,5 +232,5 @@ try {
     } elseif ($Action -eq 'Uninstall') {
         if ($task) { $scheduler.GetFolder('\').DeleteTask($taskName,0); $task = $null }
     }
-    $stdoutWriter.WriteLine((@{ installed = [bool]$task; running = [bool](Test-OwnedTaskRunning $task); enabled = [bool]($task -and $task.Enabled); task = $taskName; record = $record } | ConvertTo-Json -Depth 5 -Compress))
+    $stdoutWriter.WriteLine((@{ installed = [bool]$task; running = [bool](Test-OwnedTaskRunning $task); enabled = [bool]($task -and $task.Enabled); task = $taskName; record = $record; registration = $captured } | ConvertTo-Json -Depth 5 -Compress))
 } catch { $stderrWriter.WriteLine($_.Exception.Message); exit 1 }
