@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/idy/nootify/internal/privatepath"
 	"github.com/idy/nootify/internal/storage"
 )
 
@@ -445,7 +446,7 @@ func (s *Service) writeExport(f configFile) (string, error) {
 	if e := os.MkdirAll(dir, 0700); e != nil {
 		return "", e
 	}
-	if e := os.Chmod(dir, 0700); e != nil {
+	if e := privatepath.Protect(dir, true); e != nil {
 		return "", e
 	}
 	id := make([]byte, 4)
@@ -462,7 +463,10 @@ func (s *Service) writeExport(f configFile) (string, error) {
 	if e != nil {
 		return "", e
 	}
-	_, e = file.Write(append(b, '\n'))
+	e = privatepath.Protect(path, false)
+	if e == nil {
+		_, e = file.Write(append(b, '\n'))
+	}
 	if e == nil {
 		e = file.Sync()
 	}

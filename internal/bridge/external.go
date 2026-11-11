@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/idy/nootify/internal/storage"
 	_ "modernc.org/sqlite"
 )
 
@@ -83,8 +84,11 @@ func (s *Service) findCodexThread(ctx context.Context, id string) (*codexThread,
 	if len(names) == 0 {
 		return nil, nil
 	}
-	u := url.URL{Scheme: "file", Path: filepath.ToSlash(filepath.Join(s.codexHome(), names[0]))}
-	db, err := sql.Open("sqlite", u.String()+"?mode=ro")
+	u, err := storage.SQLiteReadOnlyURL(filepath.Join(s.codexHome(), names[0]))
+	if err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("sqlite", u.String())
 	if err != nil {
 		return nil, err
 	}

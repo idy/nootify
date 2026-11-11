@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -20,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/idy/nootify/internal/storage"
 	_ "modernc.org/sqlite"
 )
 
@@ -716,7 +716,10 @@ func latestDatabase(directory string) (string, error) {
 	return path, nil
 }
 func queryRows(ctx context.Context, file, table string, build func(map[string]bool) string) ([]map[string]any, error) {
-	u := url.URL{Scheme: "file", Path: filepath.ToSlash(file)}
+	u, e := storage.SQLiteReadOnlyURL(file)
+	if e != nil {
+		return nil, e
+	}
 	q := u.Query()
 	q.Set("mode", "ro")
 	q.Add("_pragma", "busy_timeout(1000)")

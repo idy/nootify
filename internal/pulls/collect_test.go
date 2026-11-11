@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -89,7 +90,12 @@ func TestTargetedGraphQLClassificationAndDetails(t *testing.T) {
 		jsonResponse(w, 200, map[string]any{"data": reply})
 	}))
 	defer server.Close()
-	config, e := ParseConfig([]byte(`{"upstreamOwners":["ExternalOrg"],"ownedOwners":["ManualOrg"],"scanRoots":["/must-not-scan"],"followDefault":"all"}`), t.TempDir())
+	home := t.TempDir()
+	input, e := json.Marshal(map[string]any{"upstreamOwners": []string{"ExternalOrg"}, "ownedOwners": []string{"ManualOrg"}, "scanRoots": []string{filepath.Join(home, "must-not-scan")}, "followDefault": "all"})
+	if e != nil {
+		t.Fatal(e)
+	}
+	config, e := ParseConfig(input, home)
 	if e != nil {
 		t.Fatal(e)
 	}

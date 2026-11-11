@@ -12,6 +12,27 @@ import (
 	"time"
 )
 
+func TestLANListenerAcceptsAvailableFixedPort(t *testing.T) {
+	probe, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := probe.Addr().(*net.TCPAddr).Port
+	if err := probe.Close(); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := listenLAN(port)
+	if err != nil {
+		t.Fatal("loopback reservation prevented the wildcard listener:", err)
+	}
+	defer listener.Close()
+	connection, err := net.DialTimeout("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), time.Second)
+	if err != nil {
+		t.Fatal("fixed-port listener lost loopback access:", err)
+	}
+	connection.Close()
+}
+
 func TestLANServiceBoundary(t *testing.T) {
 	s := newFixture(t)
 	hostname, err := os.Hostname()

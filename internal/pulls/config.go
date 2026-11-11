@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/idy/nootify/internal/privatepath"
 )
 
 type jsonRaw = json.RawMessage
@@ -164,6 +166,9 @@ func writePrivate(dir, name string, value any) error {
 		return e
 	}
 	b = append(b, '\n')
+	if e = privatepath.Protect(dir, true); e != nil {
+		return e
+	}
 	f, e := os.CreateTemp(dir, "."+name+"-*.tmp")
 	if e != nil {
 		return e
@@ -171,7 +176,7 @@ func writePrivate(dir, name string, value any) error {
 	path := f.Name()
 	defer os.Remove(path)
 	defer f.Close()
-	if e = f.Chmod(0600); e != nil {
+	if e = privatepath.Protect(path, false); e != nil {
 		return e
 	}
 	if _, e = f.Write(b); e != nil {

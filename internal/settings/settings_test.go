@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/idy/nootify/internal/storage"
+	"github.com/idy/nootify/internal/testutil"
 )
 
 const testApp = "cli_0123456789abcdef"
@@ -311,9 +312,8 @@ func TestExportAndImportKeepSecretsOnPrivateDisk(t *testing.T) {
 		t.Fatal("full provider state omitted")
 	}
 	for path, want := range map[string]os.FileMode{path: 0600, s.exportsDir(): 0700} {
-		info, e := os.Stat(path)
-		if e != nil || info.Mode().Perm() != want {
-			t.Fatalf("private export mode: %v %v", info, e)
+		if e := testutil.CheckPrivatePath(path, want); e != nil {
+			t.Fatal("private export access:", e)
 		}
 	}
 	var imported map[string]any
@@ -495,9 +495,8 @@ func TestRecipientStreamingCacheAndCredentialScope(t *testing.T) {
 	if e != nil || d.Cached || calls.Load() == before {
 		t.Fatalf("cache crossed secret scope: %v", e)
 	}
-	info, e := os.Stat(filepath.Join(s.options.Store.Directory, "lark-directory-cache.json"))
-	if e != nil || info.Mode().Perm() != 0600 {
-		t.Fatal("directory cache is not private")
+	if e := testutil.CheckPrivatePath(filepath.Join(s.options.Store.Directory, "lark-directory-cache.json"), 0600); e != nil {
+		t.Fatal("directory cache is not private:", e)
 	}
 }
 func TestRecipientCancellationStopsRequestsWithoutCaching(t *testing.T) {

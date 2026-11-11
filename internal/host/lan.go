@@ -10,11 +10,11 @@ import (
 	"strings"
 )
 
-// macOS permits a reusable wildcard socket to coexist with an already bound
+// macOS and Windows permit a wildcard socket to coexist with an already bound
 // loopback socket. Reserve the exact CLI/desktop endpoint before binding the
 // wildcard so an old loopback-only service is rejected before any state opens.
 func listenLAN(port int) (net.Listener, error) {
-	if runtime.GOOS == "darwin" && port != 0 {
+	if (runtime.GOOS == "darwin" || runtime.GOOS == "windows") && port != 0 {
 		guard, err := net.Listen("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
 		if err != nil {
 			return nil, err

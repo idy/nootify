@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+
+	"github.com/idy/nootify/internal/privatepath"
 )
 
 var regexpUpstream = regexp.MustCompile(`(?i)^upstream(?:[-_].*)?$`)
@@ -193,10 +195,11 @@ func (s *Service) loadCache() {
 		return
 	}
 	if current, ok := validCache(data); ok {
-		s.current = current
-		if e := os.Chmod(path, 0600); e != nil {
+		if e := privatepath.Protect(path, false); e != nil {
 			s.current.Warnings = append(s.current.Warnings, "Could not load session PR cache: "+safeError(e))
+			return
 		}
+		s.current = current
 	} else {
 		s.current.Warnings = append(s.current.Warnings, "Rebuilding subscriptions from session metadata; the earlier account-wide cache is not used.")
 	}

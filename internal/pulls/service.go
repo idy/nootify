@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/idy/nootify/internal/privatepath"
 	"golang.org/x/text/collate"
 	"golang.org/x/text/language"
 )
@@ -84,7 +85,7 @@ func New(opts Options) (*Service, error) {
 	if e := os.MkdirAll(opts.StateDir, 0700); e != nil {
 		return nil, e
 	}
-	if e := os.Chmod(opts.StateDir, 0700); e != nil {
+	if e := privatepath.Protect(opts.StateDir, true); e != nil {
 		return nil, e
 	}
 	s := &Service{opts: opts, choices: map[string]FollowChoice{}, choiceOrder: []string{}, current: collected{Internal: []PullRequest{}, Upstream: []PullRequest{}, Involved: []involvement{}, LocalForks: []string{}, Authors: []string{}, Warnings: []string{}}, refresh: make(chan struct{}, 1)}

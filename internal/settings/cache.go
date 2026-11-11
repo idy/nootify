@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/idy/nootify/internal/privatepath"
 )
 
 type cacheEntry struct {
@@ -90,6 +92,9 @@ func (c *directoryCache) read(creds Credentials) *cacheEntry {
 	if c.cleared {
 		return nil
 	}
+	if e := privatepath.Protect(c.path, false); e != nil {
+		return nil
+	}
 	info, e := os.Lstat(c.path)
 	if e != nil || !info.Mode().IsRegular() || info.Size() > 32*1024*1024 {
 		return nil
@@ -155,13 +160,16 @@ func atomicPrivate(path string, data []byte) error {
 	if e := os.MkdirAll(dir, 0700); e != nil {
 		return e
 	}
+	if e := privatepath.Protect(dir, true); e != nil {
+		return e
+	}
 	f, e := os.CreateTemp(dir, ".nootify-*.tmp")
 	if e != nil {
 		return e
 	}
 	defer os.Remove(f.Name())
 	defer f.Close()
-	if e = f.Chmod(0600); e != nil {
+	if e = privatepath.Protect(f.Name(), false); e != nil {
 		return e
 	}
 	if _, e = f.Write(data); e != nil {

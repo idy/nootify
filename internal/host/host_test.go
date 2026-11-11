@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -152,9 +154,16 @@ func TestOccupiedPortDoesNotTouchState(t *testing.T) {
 	}
 	defer listener.Close()
 	directory := t.TempDir() + "/must-not-create"
-	_, err = New(context.Background(), Options{Port: listener.Addr().(*net.TCPAddr).Port, StateDir: directory, Assets: fstest.MapFS{"index.html": {Data: []byte("ui")}}})
-	if err == nil || !strings.Contains(err.Error(), "address already in use") {
+	server, err := New(context.Background(), Options{Port: listener.Addr().(*net.TCPAddr).Port, StateDir: directory, Assets: fstest.MapFS{"index.html": {Data: []byte("ui")}}})
+	if server != nil {
+		t.Cleanup(func() { _ = server.Close() })
+	}
+	var listenErr *net.OpError
+	if !errors.As(err, &listenErr) || listenErr.Op != "listen" {
 		t.Fatalf("occupied service was replaced: %v", err)
+	}
+	if _, err := os.Stat(directory); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("occupied-port startup touched state: %v", err)
 	}
 }
 

@@ -15,6 +15,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/idy/nootify/internal/testutil"
 )
 
 func writeFixture(t *testing.T, path string, v any) {
@@ -157,11 +159,8 @@ func TestCacheChoiceAndRefreshFailure(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	for _, name := range []string{"pulls-cache.json"} {
-		st, e := os.Stat(filepath.Join(dir, name))
-		if e != nil || st.Mode().Perm()&0077 != 0 {
-			t.Fatalf("cache permissions: %v %v", st, e)
-		}
+	if e := testutil.CheckPrivatePath(filepath.Join(dir, "pulls-cache.json"), 0600); e != nil {
+		t.Fatal("cache permissions:", e)
 	}
 	mu.Lock()
 	fail = true

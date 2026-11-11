@@ -78,7 +78,10 @@ func TestLegacyRestoreValidatesExactRegistrationWithoutRealTaskWrites(t *testing
 					t.Fatal(err)
 				}
 			}
-			functions, _, ok := strings.Cut(taskScript[strings.Index(taskScript, "function Full-Path"):], "\ntry {\n    $Executable")
+			// Git checkouts on Windows may embed CRLF source. Use one normalized
+			// copy for both function extraction and the actual controller below.
+			source := strings.ReplaceAll(taskScript, "\r\n", "\n")
+			functions, _, ok := strings.Cut(source[strings.Index(source, "function Full-Path"):], "\ntry {\n    $Executable")
 			if !ok {
 				t.Fatal("missing task controller entry")
 			}
@@ -132,7 +135,7 @@ $fixtureScheduler | Add-Member ScriptMethod GetRunningTasks { param($flags) retu
 `
 			// Execute the actual Restore branch with fake Scheduler access. The
 			// production catch still exits nonzero on every ownership refusal.
-			controller := strings.ReplaceAll(taskScript, "New-Object -ComObject 'Schedule.Service'", "$fixtureScheduler")
+			controller := strings.ReplaceAll(source, "New-Object -ComObject 'Schedule.Service'", "$fixtureScheduler")
 			script := fixture + "\n& {\n" + controller + "\n} -Action Restore -Executable $Executable -StateDir $StateDir -Registration $receipt\n" + `
 if($mutation -eq ''){
  if($global:writes -ne 1 -or $global:fixtureTask.Enabled -or $global:fixtureTask.Definition.XmlText -cne $expected){throw 'Original XML was not restored disabled'}

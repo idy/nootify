@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/idy/nootify/internal/privatepath"
 	_ "modernc.org/sqlite"
 )
 
@@ -65,7 +66,7 @@ func Open(directory string) (s *Store, err error) {
 	if err = os.MkdirAll(directory, 0700); err != nil {
 		return nil, err
 	}
-	if err = os.Chmod(directory, 0700); err != nil {
+	if err = privatepath.Protect(directory, true); err != nil {
 		return nil, err
 	}
 	token, err := privateToken(filepath.Join(directory, "auth-token"))
@@ -77,13 +78,11 @@ func Open(directory string) (s *Store, err error) {
 	if err != nil {
 		return nil, err
 	}
-	err = f.Chmod(0600)
-	closeErr := f.Close()
-	if err != nil {
+	if err = f.Close(); err != nil {
 		return nil, err
 	}
-	if closeErr != nil {
-		return nil, closeErr
+	if err = protectDatabaseFiles(path); err != nil {
+		return nil, err
 	}
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -170,8 +169,23 @@ func Open(directory string) (s *Store, err error) {
 	if err = tx.Commit(); err != nil {
 		return nil, err
 	}
+	if err = protectDatabaseFiles(path); err != nil {
+		return nil, err
+	}
 	return &Store{Directory: directory, Token: token, db: db}, nil
 }
+
+// Repair existing SQLite sidecars before use and newly created ones before
+// exposing the store. A protected parent cannot repair a child's explicit DACL.
+func protectDatabaseFiles(path string) error {
+	for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
+		if err := privatepath.Protect(path+suffix, false); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
 func privateToken(path string) (string, error) {
 	b, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -179,15 +193,18 @@ func privateToken(path string) (string, error) {
 		if _, err = rand.Read(key); err != nil {
 			return "", err
 		}
-		// Publish only a complete, synced token. An exclusive hard link keeps
-		// concurrent creators from replacing the winner or observing an empty file.
+		// Publish only a complete, synced private token. Exclusive publication
+		// prevents a concurrent creator replacing the winner or observing an empty file.
 		f, e := os.CreateTemp(filepath.Dir(path), ".auth-token-*")
 		if e != nil {
 			return "", e
 		}
 		temporary := f.Name()
 		defer os.Remove(temporary)
-		_, e = f.WriteString(hex.EncodeToString(key))
+		e = privatepath.Protect(temporary, false)
+		if e == nil {
+			_, e = f.WriteString(hex.EncodeToString(key))
+		}
 		if e == nil {
 			e = f.Sync()
 		}
@@ -197,7 +214,7 @@ func privateToken(path string) (string, error) {
 		if e != nil {
 			return "", e
 		}
-		if e = os.Link(temporary, path); e != nil && !errors.Is(e, os.ErrExist) {
+		if e = publishToken(temporary, path); e != nil && !errors.Is(e, os.ErrExist) {
 			return "", e
 		}
 		b, err = os.ReadFile(path)
@@ -209,6 +226,11 @@ func privateToken(path string) (string, error) {
 	decoded, err := hex.DecodeString(s)
 	if err != nil || len(decoded) != 32 || s != strings.ToLower(s) {
 		return "", errors.New("invalid private service authentication file")
+	}
+	if runtime.GOOS == "windows" {
+		if err := privatepath.Protect(path, false); err != nil {
+			return "", err
+		}
 	}
 	return s, nil
 }
@@ -494,13 +516,16 @@ func WritePrivate(path string, data []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
+	if err := privatepath.Protect(filepath.Dir(path), true); err != nil {
+		return err
+	}
 	f, err := os.CreateTemp(filepath.Dir(path), ".nootify-write-")
 	if err != nil {
 		return err
 	}
 	tmp := f.Name()
 	defer os.Remove(tmp)
-	if err = f.Chmod(0600); err == nil {
+	if err = privatepath.Protect(tmp, false); err == nil {
 		_, err = f.Write(data)
 	}
 	if err == nil {

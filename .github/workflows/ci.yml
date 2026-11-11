@@ -77,6 +77,7 @@ jobs:
       - name: Build embedded browser assets before Go compilation
         run: npm run build
       - name: Test and vet unified Go backend and desktop
+        shell: bash
         run: |
           go test ./...
           go vet ./...

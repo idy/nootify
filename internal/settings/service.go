@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/idy/nootify/internal/privatepath"
 	"github.com/idy/nootify/internal/storage"
 )
 
@@ -304,6 +305,9 @@ func (s *Service) SetRecipient(ctx context.Context, openID, appID any) error {
 func (s *Service) exportsDir() string { return filepath.Join(s.options.Store.Directory, "exports") }
 func (s *Service) Reveal(ctx context.Context) error {
 	if e := os.MkdirAll(s.exportsDir(), 0700); e != nil {
+		return e
+	}
+	if e := privatepath.Protect(s.exportsDir(), true); e != nil {
 		return e
 	}
 	s.mu.Lock()
