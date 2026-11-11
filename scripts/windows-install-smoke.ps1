@@ -49,17 +49,24 @@ function Get-TestTask {
     }
 }
 function Get-TestInstanceCount {
-    $running = $scheduler.GetRunningTasks(1) # TASK_ENUM_HIDDEN
-    $total = $running.Count
-    if ($null -eq $total -or $total -lt 0) { throw 'Cannot query hidden running task instances' }
-    $count = 0
+    $watch = [Diagnostics.Stopwatch]::StartNew()
     $expectedPath = '\' + $taskName
-    for ($index = 1; $index -le $total; $index++) {
-        $path = [string]$running.Item($index).Path
-        if (!$path) { throw 'Running task path is unavailable' }
-        if ([string]::Equals($path, $expectedPath, [StringComparison]::OrdinalIgnoreCase)) { $count++ }
+    while ($true) {
+        $running = $scheduler.GetRunningTasks(1) # TASK_ENUM_HIDDEN
+        $total = $running.Count
+        if ($null -eq $total -or $total -lt 0) { throw 'Cannot query hidden running task instances' }
+        $count = 0
+        $complete = $true
+        for ($index = 1; $index -le $total; $index++) {
+            $path = [string]$running.Item($index).Path
+            if (!$path) { $complete = $false; break }
+            if ([string]::Equals($path, $expectedPath, [StringComparison]::OrdinalIgnoreCase)) { $count++ }
+        }
+        if ($complete) { return $count }
+        # Observe a fresh complete snapshot; never accept a partial count as zero.
+        if ($watch.Elapsed.TotalSeconds -ge 2) { throw 'Running task path is unavailable' }
+        Start-Sleep -Milliseconds 50
     }
-    return $count
 }
 function Get-TestApps {
     return @(Get-CimInstance Win32_Process -Filter "Name = 'Nootify.exe'" | Where-Object {

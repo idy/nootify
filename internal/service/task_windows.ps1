@@ -55,24 +55,34 @@ function Get-Task {
 }
 function Get-TaskInstanceCount {
     # GetInstances(0) can omit this hidden task even while Scheduler reports Running.
-    # Use the API with an explicit TASK_ENUM_HIDDEN flag, then select the exact root path.
-    $running = $scheduler.GetRunningTasks(1)
-    $total = $running.Count
-    if ($null -eq $total -or $total -lt 0) { throw 'Cannot verify running Scheduled Task instances' }
+    # Use TASK_ENUM_HIDDEN and match the exact root path. Scheduler transitions can
+    # leave an item without a path; discard that entire snapshot and reread it.
+    $watch = [Diagnostics.Stopwatch]::StartNew()
     $expectedPath = '\' + $taskName
-    $count = 0
-    for ($index = 1; $index -le $total; $index++) {
-        $path = [string]$running.Item($index).Path
-        if (!$path) { throw 'Cannot verify a running Scheduled Task path' }
-        if ([string]::Equals($path, $expectedPath, [StringComparison]::OrdinalIgnoreCase)) { $count++ }
+    while ($true) {
+        $running = $scheduler.GetRunningTasks(1)
+        $total = $running.Count
+        if ($null -eq $total -or $total -lt 0) { throw 'Cannot verify running Scheduled Task instances' }
+        $count = 0
+        $complete = $true
+        for ($index = 1; $index -le $total; $index++) {
+            $path = [string]$running.Item($index).Path
+            if (!$path) { $complete = $false; break }
+            if ([string]::Equals($path, $expectedPath, [StringComparison]::OrdinalIgnoreCase)) { $count++ }
+        }
+        if ($complete) { return $count }
+        # Never interpret an incomplete enumeration as no running instances.
+        if ($watch.Elapsed.TotalSeconds -ge 2) { throw 'Cannot verify a running Scheduled Task path' }
+        Start-Sleep -Milliseconds 50
     }
-    return $count
 }
 function Test-OwnedTaskRunning($Task) {
     if (!$Task) { return $false }
-    # Call only after Assert-Owned. Include hidden Scheduler instances and queued
-    # work, whose imminent process creation Stop must also drain.
-    return ((Get-TaskInstanceCount) -gt 0 -or $Task.State -eq 4 -or $Task.State -eq 2)
+    # Call only after Assert-Owned. Positive state on this exact owned task is
+    # sufficient; unrelated transient Scheduler entries cannot invalidate it.
+    if ($Task.State -eq 4 -or $Task.State -eq 2) { return $true }
+    # A stopped result still requires complete hidden-inclusive enumeration.
+    return ((Get-TaskInstanceCount) -gt 0)
 }
 function Legacy-Run-Arguments($Record) {
     $parts = @('-NoLogo', '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', (Quote-Argument $Record.script), '-Action', 'Run', '-NodePath', (Quote-Argument $Record.node), '-ServerPath', (Quote-Argument $Record.server), '-StateDir', (Quote-Argument $Record.state), '-Port', [string]$Record.port)
@@ -223,9 +233,9 @@ try {
     } elseif ($Action -eq 'Start') {
         if (!$task) { throw 'Nootify is not installed; use service-install' }
         $task.Enabled = $true
-        if ((Get-TaskInstanceCount) -eq 0) { Assert-PortFree; $null = $task.Run($null) }
+        if (!(Test-OwnedTaskRunning $task)) { Assert-PortFree; $null = $task.Run($null) }
     } elseif ($Action -eq 'Stop') {
-        if ($task) { $task.Enabled = $false; if ((Get-TaskInstanceCount) -gt 0) { $task.Stop(0) } }
+        if ($task) { $task.Enabled = $false; if (Test-OwnedTaskRunning $task) { $task.Stop(0) } }
     } elseif ($Action -eq 'Disable' -or $Action -eq 'Enable') {
         if ($task) { $task.Enabled = ($Action -eq 'Enable') }
         elseif ($Action -eq 'Enable') { throw 'Owned service task is missing' }
