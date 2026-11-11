@@ -4,8 +4,7 @@ import { setImmediate as nextTurn } from 'node:timers/promises';
 import { test } from 'node:test';
 import { parseHTML } from 'linkedom';
 import { authorizeUiFixture, settleUiFixture } from './ui-transport-fixture.js';
-import type { SettingsPage } from '../src/settings.js';
-import type { LarkRegistrationPage } from '../src/lark-registration.js';
+import type { SettingsPage, LarkRegistrationPage } from '../src/ui-types.js';
 
 async function until(check: () => boolean, message: string): Promise<void> {
   for (let attempt = 0; attempt < 1000; attempt++) { if (check()) return; await new Promise(resolve => setTimeout(resolve, 1)); }

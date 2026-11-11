@@ -23,6 +23,8 @@ Var PendingLocation
 Var FreshToken
 
 !macro ProbeInit UNINSTALL
+  InitPluginsDir
+  File /oname=nootify-installer-stage.exe "${PROBE_HELPER}"
   StrCpy $UpdateMode 0
   ${GetParameters} $0
   ClearErrors

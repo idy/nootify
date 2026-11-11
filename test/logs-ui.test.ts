@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { parseHTML } from 'linkedom';
 import { authorizeUiFixture, settleUiFixture } from './ui-transport-fixture.js';
-import type { LogEntry } from '../src/events.js';
+import type { LogEntry } from '../src/ui-types.js';
 
 async function until(check: () => boolean, message: string): Promise<void> {
   for (let attempt = 0; attempt < 1000; attempt++) { if (check()) return; await new Promise(resolve => setTimeout(resolve, 1)); }

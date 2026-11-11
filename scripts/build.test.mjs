@@ -3,18 +3,15 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { buildTarget, NODE_VERSION, nodeArchive, sidecarName, verifyNodeShasums } from './build-targets.mjs';
+import { buildTarget } from './build-targets.mjs';
 import { verifyWindowsX64 } from './bundle-utils.mjs';
 
 const mac = buildTarget('aarch64-apple-darwin');
 const windows = buildTarget('x86_64-pc-windows-msvc');
 
-test('desktop target selection keeps macOS ARM64 and Windows x64 sidecars distinct', () => {
+test('desktop target selection keeps supported Go platforms distinct', () => {
   assert.equal(buildTarget('', 'darwin', 'arm64'), mac);
   assert.equal(buildTarget('', 'win32', 'x64'), windows);
-  assert.equal(sidecarName('node', mac), 'node-aarch64-apple-darwin');
-  assert.equal(sidecarName('node', windows), 'node-x86_64-pc-windows-msvc.exe');
-  assert.equal(sidecarName('nootify-tsnet', windows), 'nootify-tsnet-x86_64-pc-windows-msvc.exe');
   assert.deepEqual(windows.bundles, ['nsis']);
   assert.deepEqual(mac.bundles, ['app', 'dmg']);
   assert.equal(windows.goos, 'windows');
@@ -23,21 +20,17 @@ test('desktop target selection keeps macOS ARM64 and Windows x64 sidecars distin
   assert.throws(() => buildTarget('x86_64-unknown-linux-gnu'), /Unsupported/);
 });
 
-test('both official Node archives require matching pinned and published checksums', () => {
-  assert.equal(NODE_VERSION, 'v24.22.2');
-  assert.equal(nodeArchive(windows), 'node-v24.22.2-win-x64.zip');
-  assert.equal(nodeArchive(mac), 'node-v24.22.2-darwin-arm64.tar.gz');
-  const sums = `${mac.nodeSha256}  ${nodeArchive(mac)}\r\n${windows.nodeSha256}  ${nodeArchive(windows)}\r\n`;
-  verifyNodeShasums(sums, mac);
-  verifyNodeShasums(sums, windows);
-  assert.throws(() => verifyNodeShasums(sums.replace(windows.nodeSha256, '0'.repeat(64)), windows), /pins/);
-  assert.throws(() => verifyNodeShasums(`${windows.nodeSha256}  node-v24.22.2-win-arm64.zip`, windows), /no entry/);
+test('production targets contain no downloaded Node runtime or helper metadata', () => {
+  for (const target of [mac, windows]) {
+    assert.ok(!('nodeRelease' in target));
+    assert.ok(!('nodeSha256' in target));
+  }
 });
 
 test('PE validation rejects wrong architecture and truncated executables without running them', async t => {
   const work = await mkdtemp(join(tmpdir(), 'nootify-build-test-'));
   t.after(() => rm(work, { recursive: true, force: true }));
-  const path = join(work, 'node.exe');
+  const path = join(work, 'Nootify.exe');
   const pe = Buffer.alloc(134);
   pe.write('MZ');
   pe.writeUInt32LE(128, 60);

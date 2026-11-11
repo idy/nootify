@@ -1,4 +1,4 @@
-package main
+package core
 
 import (
 	"context"
@@ -254,6 +254,18 @@ type Operation struct {
 type rpcError struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+}
+
+// RPCError is the stable, sanitized public error returned by the core bridge.
+type RPCError = rpcError
+
+// PublicError maps an internal error to the same safe representation used by
+// the legacy protocol, including uncertain durability and acceptance outcomes.
+func PublicError(err error) *RPCError {
+	if err == nil {
+		return nil
+	}
+	return publicError(err)
 }
 
 func (e *rpcError) Error() string  { return e.Message }

@@ -32,42 +32,9 @@
 !endif
 !macroend
 
-; Clear only this installer's process environment, before Node parses its options.
-; Delete without reading/truncating the value. ERROR_ENVVAR_NOT_FOUND is already safe.
-!macro NootifyClearNodeVariable NAME
-  Push $1
-  System::Call 'kernel32::SetEnvironmentVariableW(w "${NAME}", p 0) i.r0 ?e'
-  Pop $1
-  !insertmacro NootifyInstallerTrace "clear ${NAME}: result=$0 error=$1"
-  ${If} $0 = 0
-  ${AndIf} $1 != 203
-    DetailPrint "Unable to clear ${NAME} for Nootify service management."
-    Pop $1
-    Pop $0
-    SetErrorLevel 1
-    Abort "Unable to prepare Nootify's service environment. Installed files have not been replaced or removed."
-  ${EndIf}
-  Pop $1
-!macroend
-
 !macro NootifyManageInstalledService COMMAND
-  ${If} ${FileExists} "$INSTDIR\node.exe"
-  ${OrIf} ${FileExists} "$INSTDIR\service\dist\src\cli.js"
-    ${IfNot} ${FileExists} "$INSTDIR\node.exe"
-    ${OrIfNot} ${FileExists} "$INSTDIR\service\dist\src\cli.js"
-      SetErrorLevel 1
-      Abort "Nootify's installed service files are incomplete. Repair the installation before continuing."
-    ${EndIf}
+  ${If} ${FileExists} "$INSTDIR\Nootify.exe"
     Push $0
-    !insertmacro NootifyClearNodeVariable NODE_OPTIONS
-    !insertmacro NootifyClearNodeVariable NODE_PATH
-    !insertmacro NootifyClearNodeVariable NODE_EXTRA_CA_CERTS
-    !insertmacro NootifyClearNodeVariable NODE_ICU_DATA
-    ; The CLI allows 150 seconds for serialized service management. Give it
-    ; time to report failure itself before aborting replacement/deletion.
-    !insertmacro NootifyInstallerTrace "manage ${COMMAND}: invoking CLI"
-    ; Legacy service scripts compile C# using bare framework assembly names.
-    ; Never inherit $PLUGINSDIR: its native System.dll shadows the .NET DLL.
     Push $R8
     StrCpy $R8 "$OUTDIR"
     ClearErrors
@@ -79,15 +46,16 @@
       SetErrorLevel 1
       Abort "Unable to select a safe service command directory. Installed files are unchanged."
     ${EndIf}
-    nsExec::ExecToLog /TIMEOUT=160000 '"$INSTDIR\node.exe" "$INSTDIR\service\dist\src\cli.js" ${COMMAND}'
+    ; Current Go controls inspect legacy registrations without executing old
+    ; installed Node/GUI binaries. The helper remains outside exchanged payload.
+    nsExec::ExecToLog /TIMEOUT=900000 '"$PLUGINSDIR\nootify-installer-stage.exe" --action ${COMMAND} --target "$INSTDIR"'
     Pop $0
     SetOutPath "$R8"
     Pop $R8
     !insertmacro NootifyInstallerTrace "manage ${COMMAND}: result=$0"
     ${If} $0 != 0
-      DetailPrint "Nootify ${COMMAND} failed ($0). Installed files have not been replaced or removed."
       SetErrorLevel 1
-      Abort "Unable to stop Nootify's background service. Close it and retry."
+      Abort "Unable to stop Nootify's background service. Installed files were retained."
     ${EndIf}
     Pop $0
   ${EndIf}

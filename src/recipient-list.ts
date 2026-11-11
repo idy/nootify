@@ -1,4 +1,4 @@
-import type { LarkRecipient } from './lark-directory.js';
+import type { LarkRecipient } from './ui-types.js';
 import { recipientDisplayName } from './lark-profile.js';
 
 export interface RecipientListOptions {

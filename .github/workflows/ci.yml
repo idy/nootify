@@ -28,10 +28,10 @@ jobs:
           cache: npm
       - uses: actions/setup-go@v6
         with:
-          go-version-file: native/core/go.mod
-          cache-dependency-path: native/core/go.sum
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
       - run: npm ci
-      - name: Exercise CLI, TypeScript service and Go gRPC nodes without a desktop
+      - name: Exercise Go CLI and service without a desktop
         run: npm run test:integration
       - name: Upload headless integration report
         if: always()
@@ -70,27 +70,17 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version-file: desktop/go.mod
-          cache-dependency-path: |
-            desktop/go.sum
-            native/tailscale/go.sum
-            native/core/go.sum
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
 
-      - name: Test embedded Tailscale client
-        working-directory: native/tailscale
-        run: go test ./...
-
-      - name: Test notification provider core
-        working-directory: native/core
-        run: go test ./...
-
-      - name: Test and vet MyGo desktop module
-        working-directory: desktop
+      - run: npm ci
+      - name: Build embedded browser assets before Go compilation
+        run: npm run build
+      - name: Test and vet unified Go backend and desktop
         run: |
           go test ./...
           go vet ./...
 
-      - run: npm ci
 
       - name: Run headless process integration tests
         timeout-minutes: 5
@@ -154,15 +144,9 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      # Real staging validates the pinned runtime, PE/Mach-O architecture,
-      # Windows task resources, production lockfile, and embedded tsnet build.
-      - name: Cache the Node.js runtime download
-        uses: actions/cache@v6
-        with:
-          path: .cache/node
-          key: node-runtime-${{ matrix.target }}-${{ hashFiles('scripts/build-targets.mjs', 'scripts/stage-service.mjs') }}
+      # Build the single executable with embedded browser assets and license notices.
       # CI has no release signing key. Build the actual app/NSIS payload so
-      # installer hooks, ICO, sidecar layout and platform config are validated.
+      # installer hooks, ICO, single executable payload and platform config are validated.
       - name: Build desktop bundle without updater signing
         run: npm run desktop:build -- --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --no-sign --ci
 

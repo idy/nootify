@@ -297,7 +297,10 @@ Function NootifyPreflightPayload
       Abort "The target service directory is a reparse point. Choose an empty directory."
     ${EndIf}
   ${EndIf}
+  ; Existing license trees are package-owned only inside this registered target.
+  System::Call 'kernel32::GetFileAttributesW(w "$INSTDIR\licenses") i.r2'
   ${If} $0 != -1
+  ${OrIf} $2 != -1
   ${OrIf} ${FileExists} "$INSTDIR\Nootify.exe"
   ${OrIf} ${FileExists} "$INSTDIR\node.exe"
   ${OrIf} ${FileExists} "$INSTDIR\nootify-core.exe"
@@ -325,8 +328,6 @@ FunctionEnd
 Function NootifyPreflightInstalledFiles
   ${If} $RegisteredLocation != ""
     ${IfNot} ${FileExists} "$INSTDIR\Nootify.exe"
-    ${OrIfNot} ${FileExists} "$INSTDIR\node.exe"
-    ${OrIfNot} ${FileExists} "$INSTDIR\service\dist\src\cli.js"
       SetErrorLevel 1
       Abort "Nootify's installed files are incomplete. Repair the installation before continuing."
     ${EndIf}
@@ -336,9 +337,8 @@ FunctionEnd
 !macro NootifyPreflightDesktop OPERATION
   Push $0
   Push $1
-  ; OPEN_EXISTING + GENERIC_WRITE checks replaceability without creating,
-  ; truncating or changing the existing executable. Share all other accesses.
-  ; A mapped desktop image (or another write-denying handle) fails this check.
+  ; Read-only process inspection distinguishes the desktop from the same executable
+  ; running the background service. Exchange checks writeability after the job drains.
   StrCpy $1 0
   ${If} $UpdateMode = 1
     ; The updater starts this installer before its own process has exited.
@@ -349,17 +349,19 @@ FunctionEnd
     ${IfNot} ${FileExists} "$INSTDIR\Nootify.exe"
       ${ExitDo}
     ${EndIf}
-    System::Call 'kernel32::CreateFileW(w "$INSTDIR\Nootify.exe", i 0x40000000, i 7, p 0, i 3, i 0x80, p 0) p.r0'
-    ${If} $0 != -1
-      System::Call 'kernel32::CloseHandle(p r0)'
+    ; Both GUI and daemon map Nootify.exe. Inspect the exact command line
+    ; before mutation; only the owned service may keep the shared image mapped.
+    nsExec::ExecToLog /TIMEOUT=30000 '"$PLUGINSDIR\nootify-installer-stage.exe" --action preflight --target "$INSTDIR"'
+    Pop $0
+    ${If} $0 = 0
       ${ExitDo}
     ${EndIf}
     ${If} $1 = 0
       Pop $1
       Pop $0
       SetErrorLevel 1
-      MessageBox MB_OK|MB_ICONSTOP "Close Nootify and retry the ${OPERATION}. Its executable is still in use or cannot be replaced. The existing files and service have not been changed." /SD IDOK
-      Abort "Nootify.exe is not writable; existing files and service are unchanged."
+      MessageBox MB_OK|MB_ICONSTOP "Close Nootify and retry the ${OPERATION}. Its desktop process is still running or cannot be verified. The existing files and service have not been changed." /SD IDOK
+      Abort "Nootify desktop is still running; existing files and service are unchanged."
     ${EndIf}
     Sleep 250
     IntOp $1 $1 - 1
@@ -399,10 +401,7 @@ Section "Nootify" Install
   SetOverwrite on
   ClearErrors
   File "${PAYLOAD}\Nootify.exe"
-  File "${PAYLOAD}\node.exe"
-  File "${PAYLOAD}\nootify-core.exe"
-  File "${PAYLOAD}\nootify-tsnet.exe"
-  File /r "${PAYLOAD}\service"
+  File /r "${PAYLOAD}\licenses"
   WriteUninstaller "$INSTDIR\.nootify-installer\new\uninstall.exe"
   ${If} ${Errors}
     SetErrorLevel 1

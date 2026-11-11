@@ -132,29 +132,20 @@ try {
     })
     if ($compilers.Count -ne 1) { throw "Expected exactly one pinned NSIS root compiler, found $($compilers.Count)" }
     $compiler = $compilers[0].FullName
-    $cliSource = @'
-'use strict';
-const fs = require('node:fs');
-const path = require('node:path');
-const command = process.argv[2];
-if (process.argv.length !== 3 || !['service-stop', 'service-uninstall'].includes(command)) {
-  process.stderr.write('Unexpected dummy CLI command\n'); process.exit(9);
-}
-const clean = {};
-for (const name of ['NODE_OPTIONS', 'NODE_PATH', 'NODE_EXTRA_CA_CERTS', 'NODE_ICU_DATA']) {
-  clean[name] = !process.env[name];
-}
-const windows = process.env.SystemRoot || process.env.SYSTEMROOT;
-const safeWorkingDirectory = !!windows && ['System32', 'SysWOW64'].some(directory =>
-  path.resolve(windows, directory).toLowerCase() === path.resolve(process.cwd()).toLowerCase());
-fs.appendFileSync(path.resolve(__dirname, '../../..', 'calls.jsonl'), JSON.stringify({ command, clean, safe_working_directory: safeWorkingDirectory }) + '\n');
-if (Object.values(clean).some(value => !value) || !safeWorkingDirectory) { process.exitCode = 10; }
-'@
+    $helperSource = Join-Path $fixture 'hook-helper.go'
+    $helper = Join-Path $fixture 'hook-helper.exe'
+    [IO.File]::WriteAllText($helperSource, @'
+package main
+import("encoding/json";"flag";"os";"path/filepath";"strings")
+func main(){ action:=flag.String("action","","");target:=flag.String("target","","");flag.Parse();if *action!="service-stop"&&*action!="service-uninstall"{os.Exit(9)};cwd,_:=os.Getwd();system:=os.Getenv("SystemRoot");safe:=strings.EqualFold(cwd,filepath.Join(system,"System32"))||strings.EqualFold(cwd,filepath.Join(system,"SysWOW64"));f,e:=os.OpenFile(filepath.Join(*target,"calls.jsonl"),os.O_CREATE|os.O_APPEND|os.O_WRONLY,0600);if e!=nil{os.Exit(10)};defer f.Close();json.NewEncoder(f).Encode(map[string]any{"command":*action,"safe_working_directory":safe});if !safe{os.Exit(11)}}
+'@)
+    & go build -o $helper $helperSource
+    if ($LASTEXITCODE -ne 0) { throw 'Cannot build the Go hook fixture' }
     foreach ($diagnostics in @($true, $false)) {
         $variant = $(if ($diagnostics) { 'diagnostic' } else { 'production' })
         $phase = "compile $variant probe"
         $installer = Join-Path $fixture "$variant-hook-probe.exe"
-        $arguments = '/V4 ' + (Quote-Argument ("/DPROBE_OUTPUT=$installer")) + ' ' + (Quote-Argument ("/DPROBE_RECEIPT_KEY=$receiptSubkey")) +
+        $arguments = '/V4 ' + (Quote-Argument ("/DPROBE_OUTPUT=$installer")) + ' ' + (Quote-Argument ("/DPROBE_HELPER=$helper")) + ' ' + (Quote-Argument ("/DPROBE_RECEIPT_KEY=$receiptSubkey")) +
             $(if (!$diagnostics) { ' /DPROBE_NO_DIAGNOSTICS' } else { '' }) + ' ' +
             (Quote-Argument (Join-Path $PSScriptRoot 'windows-installer-hook-smoke.nsi'))
         Run-Native $compiler $arguments "compile-$variant" @{ NOOTIFY_INSTALLER_HOOK_DIAGNOSTICS = '0' }
@@ -204,11 +195,9 @@ if (Object.values(clean).some(value => !value) || !safeWorkingDirectory) { proce
                 $phase = $label
                 $caseDir = Join-Path $fixture $label
                 $payload = Join-Path $caseDir 'payload'
-                $cliDir = Join-Path $payload 'service\dist\src'
-                $null = New-Item -ItemType Directory -Path $cliDir
-                Copy-Item -LiteralPath $node -Destination (Join-Path $payload 'node.exe')
+                $null = New-Item -ItemType Directory -Path $payload
+                Copy-Item -LiteralPath $helper -Destination (Join-Path $payload 'Nootify.exe')
                 Copy-Item -LiteralPath $installer -Destination (Join-Path $caseDir 'hook-probe.exe')
-                [IO.File]::WriteAllText((Join-Path $cliDir 'cli.js'), $cliSource)
                 $values = @{}
                 if ($poisoned) {
                     $missing = Join-Path $caseDir 'nootify-hook-missing-preload.cjs'
@@ -218,13 +207,7 @@ if (Object.values(clean).some(value => !value) || !safeWorkingDirectory) { proce
                         NODE_EXTRA_CA_CERTS = (Join-Path $caseDir 'missing-ca.pem')
                         NODE_ICU_DATA = (Join-Path $caseDir 'missing-icu')
                     }
-                    # Prove the inherited preload alone would prevent Node from starting. The other
-                    # fixture values stay out of the control so an ICU startup failure cannot mask it.
-                    Run-Native (Join-Path $payload 'node.exe') '-e "process.exit(0)"' "$label-control" @{ NODE_OPTIONS = $values.NODE_OPTIONS } 1
-                    $control = Read-SafeLog (Join-Path $outputDir "$label-control.stderr.log")
-                    if ($control -notmatch 'MODULE_NOT_FOUND' -or $control -notmatch 'nootify-hook-missing-preload\.cjs') {
-                        throw 'Missing-preload negative control did not reject startup as expected'
-                    }
+
                 }
                 $switches = '/S' + $(if ($mode -eq 1) { ' /UPDATE' } else { '' })
                 Invoke-Hook (Join-Path $caseDir 'hook-probe.exe') $switches $caseDir "$label-install" $values 'NSIS_HOOK_PREINSTALL' $mode $diagnostics
@@ -240,9 +223,7 @@ if (Object.values(clean).some(value => !value) || !safeWorkingDirectory) { proce
                 }
                 foreach ($call in $calls) {
                     if ($call.safe_working_directory -ne $true) { throw "$label inherited an unsafe installer plugin directory" }
-                    foreach ($name in $startupVariables) {
-                        if ($call.clean.$name -ne $true) { throw "$label inherited a Node startup variable" }
-                    }
+
                 }
                 $results.Add(@{ case = $label; diagnostics = $diagnostics; result = 'passed'; install = 'service-stop'; uninstall = $uninstallCommand })
                 Write-Host "Windows installer hook smoke: $label passed"

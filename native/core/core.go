@@ -1,4 +1,4 @@
-package main
+package core
 
 import (
 	"context"
@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"sort"
 	"sync"
 )
@@ -28,6 +29,17 @@ type Core struct {
 	server           *remoteServer
 	dialMu           sync.Mutex
 	dials            map[string]chan dialResult
+	tailnetDial      func(context.Context, string, string) (net.Conn, error)
+}
+
+// SetTailnetDialer installs the embedded, encrypted Tailnet transport. The caller
+// must supply the in-process Tailscale service's Dial method, never a host TCP
+// dialer: successful connections are trusted as proof of embedded encryption.
+// Set it before Start; passing nil restores the legacy private stdio bridge.
+func (c *Core) SetTailnetDialer(dial func(context.Context, string, string) (net.Conn, error)) {
+	c.dialMu.Lock()
+	c.tailnetDial = dial
+	c.dialMu.Unlock()
 }
 
 func NewCore(parent context.Context, s *Store, emit func(string, any) error) (*Core, error) {

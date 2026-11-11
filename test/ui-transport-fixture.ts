@@ -1,6 +1,7 @@
 import type { TestContext } from 'node:test';
 import { randomBytes } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
+import { UiCodec, encode, type UiEnvelope, type UiRequest } from '../src/ui-transport.js';
 
 let active = 0;
 export async function settleUiFixture(): Promise<void> {
@@ -11,9 +12,8 @@ export async function settleUiFixture(): Promise<void> {
     await delay(2); quiet = active === 0 ? quiet + 1 : 0;
   }
 }
-import { UiCodec, encode, type UiEnvelope, type UiRequest } from '../src/ui-transport.js';
 
-/** Adapt existing synthetic API fixtures to the real browser encryption boundary. No production auth bypass. */
+/** Wrap a mocked API in browser encryption frames, without starting a backend. */
 export function authorizeUiFixture(t: TestContext): void {
   for (const method of ['encrypt', 'decrypt'] as const) {
     const operation = crypto.subtle[method].bind(crypto.subtle);

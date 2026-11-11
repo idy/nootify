@@ -172,6 +172,7 @@ Controls use modest curved corners; groups are slightly rounder. The modal uses 
 
 ## Components
 
+- **Native tray menu:** use the platform's menu material, typography, hover, disabled states, and keyboard shortcuts. Keep Open Nootify, one application status, Software Updates, Settings, and Quit Nootify; an available update may expose its direct install action. Settings retains `CmdOrCtrl+,` and Quit retains `CmdOrCtrl+Q`. Keep background-service/module/start/restart/install controls out of the everyday menu. Status changes update existing items without rebuilding the menu. Do not imitate this native surface with browser HTML/CSS.
 - **Buttons:** quiet text actions in settings; blue filled confirmation/retry and bordered panel-colored cancellation in the modal. Dialog buttons have (34px) minimum height. Primary hover uses brightness (.94); disabled primary has opacity (.5). Secondary and text actions use the hover surface. Global keyboard focus remains visible.
 - **Fields:** neutral fill, soft border, field radius; focused settings fields change border color. The modal search uses a stronger blue focus border, (10px) corners, and (11px 12px) padding.
 - **Dropdowns:** web selectors use the authored `Dropdown` component and shared `.dropdown-button`, `.dropdown-menu`, and `.dropdown-option` styles, rather than native select popups. Triggers compose the field surface with a (30px) height and at least (160px) width. Menus use (10px) corners, (4px) padding, (32px) minimum option height, (6px) option corners, and `--dropdown-shadow` (0 8px 24px, black at .12 in light appearance and .32 in dark appearance). Selected options show a blue check; active options use the neutral hover surface. The body-portaled menu stays within the viewport, flips above when needed, and avoids card clipping. Arrow keys, Home/End, and typeahead highlight options; Enter/Space commits, Escape cancels, and Tab/outside interaction/navigation/ancestor scrolling dismisses. Focus remains on the combobox trigger. See `docs/ui-components.md` for the shared markup and API.
@@ -188,11 +189,13 @@ Controls use modest curved corners; groups are slightly rounder. The modal uses 
 - **Do** use the bundled application font roles with system Chinese fallbacks, preserving semantic colors and automatic appearance.
 - **Do** preserve useful loaded contacts and a reachable footer while loading or explaining access.
 - **Do** keep portraits as runtime provider data and the permission QR as locally generated functional imagery.
+- **Do** use the operating system's native menu appearance and shortcuts for the tray.
 
 ### Don't:
 
 - **Don't** persist a recipient from a row click; use explicit confirmation.
 - **Don't** let full IDs outrank human names or duplicate an alias already supplied by the provider.
 - **Don't** describe a QR scan as automatic application authorization.
+- **Don't** expose background-service, module, or start/restart/install controls in the everyday tray menu.
 
 Not canonized or repaired: incumbent navigation section-label styling is outside this local extension and is not promoted into a reusable eyebrow/kicker rule; unrelated application drift is outside the write boundary. No decorative raster assets ship.

@@ -1,21 +1,12 @@
 import { t, locale, number, list as formatList, translateDocument, languagePreference, setLanguage, isPreference, languageStorageKey, type NativeLanguage } from './ui-i18n.js';
-import type { LogEntry } from './events.js';
-import type { PullRequest, PullSnapshot, RepositoryEntry } from './github.js';
-import type { ModuleStatus, PublicSession } from './types.js';
-import type { AgentPrompt } from './agents.js';
-import type { GitHubLogin } from './github-auth.js';
-import type { GitHubSettings, ImportSummary, SettingsPage, LarkRecipientsPage } from './settings.js';
-import type { TailscalePage } from './tailscale.js';
-import type { LarkPermissionHelp } from './lark-permissions.js';
-import type { LarkRegistrationPage, LarkSetup } from './lark-registration.js';
-import type { LarkConnectionType } from './state.js';
+import type { LogEntry, PullRequest, PullSnapshot, RepositoryEntry, ModuleStatus, PublicSession, AgentPrompt, GitHubLogin, GitHubSettings, ImportSummary, SettingsPage, LarkRecipientsPage, TailscalePage, LarkPermissionHelp, LarkRegistrationPage, LarkSetup, LarkConnectionType } from './ui-types.js';
 import { mergeRecipients, recipientDisplayName } from './lark-profile.js';
 import { RecipientListRenderer } from './recipient-list.js';
 import { Dropdown } from './dropdown.js';
 import { browserUiTransport } from './ui-transport.js';
 
 const ownerTransport = browserUiTransport(location, history);
-// Every API path, including streamed directories and reads, uses the same protected transport.
+// Desktop sessions retain encryption; direct local pages use same-origin UI APIs.
 const fetch = ownerTransport.fetch;
 
 interface PullSummary { internal: number; upstream: number; followed: number; running: boolean; lastSuccessAt?: string; error?: string; signedOut?: boolean }
@@ -158,7 +149,6 @@ const isPullView = (view: View): view is 'pulls-internal' | 'pulls-upstream' => 
 /** Views backed by the GitHub module's snapshot, loaded separately from the two-second page snapshot. */
 const usesPulls = (view: View): boolean => isPullView(view) || view === 'repos';
 const isSettingsView = (view: View): boolean => view.startsWith('settings-');
-const localOwnerLocked = (): boolean => /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname) && !ownerTransport.authorized;
 
 const state = {
   view: viewFromHash(),
@@ -606,7 +596,7 @@ async function loadProviders(): Promise<void> {
     const response = await fetch('/ui/api/providers', { cache: 'no-store', signal: AbortSignal.timeout(8000) });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const page = await response.json() as ProvidersPage;
-    page.editable = page.editable && !localOwnerLocked();
+
     if (revision === providersRevision) {
       state.providers = page;
       if (state.providersReadError) { state.providersError = ''; state.providersReadError = false; }
@@ -828,7 +818,7 @@ async function loadRemote(): Promise<void> {
     const response = await fetch('/ui/api/settings/remote', { cache: 'no-store', signal: AbortSignal.timeout(8000) });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const page = await response.json() as RemotePage;
-    page.editable = page.editable && !localOwnerLocked();
+
     if (revision !== state.remoteRevision) return;
     state.remote = page;
     if (state.remoteReadError) { state.remoteError = ''; state.remoteReadError = false; }
@@ -923,7 +913,7 @@ async function loadAgents(): Promise<void> {
     const page = await response.json() as AgentsPage;
     if (revision !== agentsRevision) return;
     state.agents = page;
-    state.agents.editable = state.agents.editable && !localOwnerLocked();
+
     state.agentsError = '';
   } catch (error) { if (revision === agentsRevision) state.agentsError = () => t('无法读取 agent 状态：{p0}', { p0: (error as Error).message }); }
   if (revision === agentsRevision) { renderChrome(); renderAgents(); }
@@ -945,7 +935,7 @@ function renderAgents(): void {
   $('agents-card').hidden = !page?.agents.length;
   $('agents-count').textContent = page ? (page.agents.some(agent => agent.injected) ? number(page.agents.filter(agent => agent.injected).length) : '') : '';
   const remote = page?.editable !== true;
-  const banner = resolveText(state.agentsError) || (page && remote ? localOwnerLocked() ? t('当前窗口未获授权。请从本机 Nootify 桌面端打开设置。') : t('通过 Tailscale 访问时只能查看；请在这台 Mac 上修改 agent 提示词。') : '');
+  const banner = resolveText(state.agentsError) || (page && remote ? t('通过 Tailscale 访问时只能查看；请在这台 Mac 上修改 agent 提示词。') : '');
   $('agents-banner').hidden = !banner; $('agents-banner').textContent = banner;
   const providers = state.providers;
   const selected = providers?.providers.find(provider => provider.id === providers.default_provider_id);
@@ -1007,7 +997,7 @@ async function loadSettings(): Promise<boolean> {
     const response = await fetch('/ui/api/settings', { cache: 'no-store', signal: AbortSignal.timeout(8000) });
     if (!response.ok) throw new Error(response.status === 404 ? t('设置模块未启用') : `HTTP ${response.status}`);
     state.settings = await response.json() as SettingsPage & { editable: boolean };
-    state.settings.editable = state.settings.editable && !localOwnerLocked();
+
     state.larkConnectionType ??= state.settings.lark.connection_type ?? 'bot';
     if (state.recipientDirectory && state.recipientDirectory.app_id !== state.settings.lark.app_id) invalidateRecipientDirectory();
     if (!state.larkEdited) fillLark();
@@ -1471,7 +1461,7 @@ function renderSettings(): void {
   const note = state.settingsNote ?? (state.view === 'settings-github' && login?.status === 'failed' ? { text: t('GitHub 登录失败：{p0}', { p0: githubErrors[login.error ?? ''] ?? login.error }), error: true }
     : state.view === 'settings-tailscale' && state.tailscaleError ? { text: state.tailscaleError, error: true }
     : state.view === 'settings-tailscale' && state.tailscale?.login.status === 'failed' ? { text: t('Tailscale 登录失败：{p0}', { p0: tailscaleErrors[state.tailscale.login.error ?? ''] ?? t('请重试。') }), error: true }
-    : remote ? { text: localOwnerLocked() ? t('当前窗口未获授权。请从本机 Nootify 桌面端打开设置。') : t('通过 Tailscale 访问时只能查看；请在这台 Mac 上修改设置。'), error: false } : undefined);
+    : remote ? { text: t('通过 Tailscale 访问时只能查看；请在这台 Mac 上修改设置。'), error: false } : undefined);
   const banner = $('settings-banner');
   banner.hidden = !note; banner.className = note && !note.error ? 'banner note' : 'banner';
   setText('settings-banner', resolveText(note?.text));
@@ -1635,12 +1625,6 @@ function renderChrome(): void {
   }
   const local = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
   $('access-label').textContent = local ? location.host : t('经 Tailscale');
-  $('owner-access').hidden = !localOwnerLocked();
-  $('owner-authorize').hidden = !(window as Window & { __NOOTIFY_PLATFORM__?: string }).__NOOTIFY_PLATFORM__;
-  // Never recommend executable commands obtained from an unverified local listener.
-  const ownerCommand = ownerTransport.authorized ? state.snapshot.access?.owner_ui_command : undefined;
-  $('owner-auth-command').hidden = !ownerCommand;
-  $('owner-auth-command').textContent = ownerCommand ?? '';
   const tailnet = state.snapshot.access?.tailnet_url;
   $('tailnet-line').hidden = !local || !tailnet;
   $('tailnet-url').textContent = tailnet ? tailnet.replace(/^https?:\/\//, '').replace(/\/$/, '') : '';
@@ -1697,7 +1681,6 @@ async function refreshNow(): Promise<void> {
   await loadPulls();
 }
 
-$('owner-authorize').addEventListener('click', () => { location.href = 'nootify://settings/authorize'; });
 $('provider-add').addEventListener('click', () => openProviderEditor());
 $('providers-retry').addEventListener('click', () => { state.providersError = ''; state.providersReadError = false; void loadProviders(); });
 $('provider-tls').addEventListener('change', renderProviderEditor);

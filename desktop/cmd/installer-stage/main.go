@@ -12,6 +12,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/idy/nootify/internal/service"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -86,11 +87,22 @@ func runHiddenContext(ctx context.Context, d *diagnostics, phase, file string, a
 }
 
 func (s installedService) command(action string) ([]byte, error) {
-	return runHidden(s.diagnostics, action, filepath.Join(s.target, "node.exe"), filepath.Join(s.target, "service", "dist", "src", "cli.js"), "service-"+action)
+	ctx, cancel := context.WithTimeout(context.Background(), 170*time.Second)
+	defer cancel()
+	// The helper is compiled with current Go controls, so it can inspect and drain
+	// an exact legacy install without executing its obsolete Node or desktop binary.
+	s.diagnostics.record(action, "command", "begin", "", nil, nil)
+	result, err := service.Manage(ctx, action, service.Options{Executable: filepath.Join(s.target, "Nootify.exe")})
+	if err != nil {
+		s.diagnostics.record(action, "command", "failure", "", err, nil)
+		return nil, errors.New("owned service command failed or timed out")
+	}
+	s.diagnostics.record(action, "command", "success", "", nil, nil)
+	return json.Marshal(result)
 }
 
 func (s installedService) snapshot() (serviceState, error) {
-	if !exists(filepath.Join(s.target, "node.exe")) && !exists(filepath.Join(s.target, "service")) {
+	if !exists(filepath.Join(s.target, "Nootify.exe")) {
 		return serviceState{}, nil
 	}
 	data, err := s.command("status") // Validates exact bundled task ownership first.
@@ -151,69 +163,40 @@ func (s installedService) powerShell(phase, script string) ([]byte, error) {
 }
 
 func (s installedService) enable(enabled bool) error {
-	if !exists(filepath.Join(s.target, "node.exe")) && !exists(filepath.Join(s.target, "service")) {
+	if !exists(filepath.Join(s.target, "Nootify.exe")) {
 		return nil
 	}
-	// The old bundled CLI performs its complete ownership check first. Recheck
-	// the exact install paths on the same COM object whose Enabled flag changes.
-	data, err := s.command("status")
-	if err != nil {
-		return err
-	}
-	var status struct {
-		Installed *bool `json:"installed"`
-	}
-	if err := json.Unmarshal(data, &status); err != nil || status.Installed == nil {
-		return errors.New("invalid service status before enabling")
-	}
-	if !*status.Installed {
-		if enabled {
-			return errors.New("owned service task is missing")
-		}
-		return nil
-	}
-	literal := "'" + strings.ReplaceAll(s.target, "'", "''") + "'"
-	value := "$false"
+	action := "disable"
 	if enabled {
-		value = "$true"
+		action = "enable"
 	}
-	script := `$ErrorActionPreference='Stop'; $env:PSModulePath=[IO.Path]::Combine($PSHOME,'Modules'); $target=` + literal + `
-$scriptPath=Join-Path $target 'service\windows\service.ps1'
-$tokens=$null; $parseErrors=$null
-$ast=[Management.Automation.Language.Parser]::ParseFile($scriptPath,[ref]$tokens,[ref]$parseErrors)
-if($parseErrors.Count -ne 0){throw 'Invalid bundled service script'}
-$required=@('Full-Path','Same-Path','Quote-Argument','Run-Arguments','Assert-Owned')
-$loaded=0
-foreach($statement in $ast.EndBlock.Statements){
-  if($statement -is [Management.Automation.Language.FunctionDefinitionAst] -and $statement.Name -in $required){
-    . ([scriptblock]::Create($statement.Extent.Text)); $loaded++
-  }
-}
-if($loaded -ne $required.Count){throw 'Missing bundled ownership checks'}
-$scriptPath=Full-Path $scriptPath
-$NodePath=Full-Path (Join-Path $target 'node.exe')
-$ServerPath=Full-Path (Join-Path $target 'service\dist\src\server.js')
-$StateDir=Full-Path (Join-Path $env:LOCALAPPDATA 'Nootify\state')
-$Port=9417
-$ownerSid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-$descriptionPrefix='Nootify per-user service v1: '
-$powerShell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-$s=New-Object -ComObject 'Schedule.Service'; $s.Connect()
-$task=$s.GetFolder('\').GetTask('Nootify.Service.'+$ownerSid)
-$null=Assert-Owned $task
-$task.Enabled=` + value
-	_, err = s.powerShell("enable", script)
+	_, err := s.command(action)
 	return err
 }
 
 func (s installedService) stop() error {
-	if !exists(filepath.Join(s.target, "node.exe")) && !exists(filepath.Join(s.target, "service")) {
+	if !exists(filepath.Join(s.target, "Nootify.exe")) {
 		return nil
 	}
 	_, err := s.command("stop")
 	return err
 }
 func (s installedService) start() error { _, err := s.command("start"); return err }
+
+func (s installedService) preflightDesktop() error {
+	target := powershellPathLiteral(filepath.Join(s.target, "Nootify.exe"))
+	script := `$ErrorActionPreference='Stop'; $env:PSModulePath=[IO.Path]::Combine($PSHOME,'Modules'); $target=` + target + `
+foreach($p in @(Get-CimInstance Win32_Process -Filter "Name = 'Nootify.exe'")) {
+ if($p.ExecutablePath -and [string]::Equals([IO.Path]::GetFullPath($p.ExecutablePath),$target,[StringComparison]::OrdinalIgnoreCase)) {
+  if(!$p.CommandLine -or $p.CommandLine -notmatch '^\s*(?:"[^"]+"|\S+)\s+(?:serve|service-(?:install|start|restart|stop|uninstall|status|enable|disable))(?=\s|$)') { throw 'Close Nootify and retry; an installed desktop process is still running' }
+ }
+}`
+	_, err := s.powerShell("preflight", script)
+	return err
+}
+func powershellPathLiteral(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+}
 
 func main() {
 	action := flag.String("action", "", "prepare, apply, recover, finish or remove")
@@ -247,6 +230,12 @@ func main() {
 	t := transaction{target: filepath.Clean(*target), diagnostics: d, freshToken: *freshToken, service: installedService{target: filepath.Clean(*target), diagnostics: d}}
 	var err error
 	switch *action {
+	case "service-stop":
+		_, err = t.service.(installedService).command("stop")
+	case "service-uninstall":
+		_, err = t.service.(installedService).command("uninstall")
+	case "preflight":
+		err = t.service.(installedService).preflightDesktop()
 	case "prepare":
 		err = t.prepare()
 	case "apply":

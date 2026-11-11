@@ -17,7 +17,7 @@ const transactionName = ".nootify-installer"
 
 // Only these package-owned roots can ever be exchanged or removed. Private
 // state and other files in the installation directory are never transaction data.
-var payloadRoots = []string{"Nootify.exe", "node.exe", "nootify-core.exe", "nootify-tsnet.exe", "service", "uninstall.exe"}
+var payloadRoots = []string{"Nootify.exe", "node.exe", "nootify-core.exe", "nootify-tsnet.exe", "service", "licenses", "uninstall.exe"}
 
 type journal struct {
 	Version    int      `json:"version"`
@@ -303,7 +303,7 @@ func (t transaction) validate(manifestPath string) (result error) {
 	if !reflect.DeepEqual(actual, expected) {
 		return errors.New("staged payload does not match the installer SHA-256 manifest")
 	}
-	for _, path := range []string{"Nootify.exe", "node.exe", "nootify-core.exe", "nootify-tsnet.exe", "service/dist/src/cli.js", "service/dist/src/server.js", "uninstall.exe"} {
+	for _, path := range []string{"Nootify.exe", "licenses/third-party-notices.txt", "uninstall.exe"} {
 		info, err := os.Lstat(filepath.Join(t.dir("new"), filepath.FromSlash(path)))
 		if err != nil {
 			return err
@@ -386,6 +386,9 @@ func (t transaction) apply(manifestPath string) (result error) {
 				return err
 			}
 		}
+		if !exists(t.dir("new", root)) {
+			continue
+		} // Legacy roots are cleanup-only in current payloads.
 		if err := t.observe("install", root, func() error { return renamePayload(t.dir("new", root), filepath.Join(t.target, root)) }); err != nil {
 			return err
 		}

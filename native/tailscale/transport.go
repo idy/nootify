@@ -1,4 +1,4 @@
-package main
+package tailscale
 
 import (
 	"context"
@@ -279,6 +279,60 @@ func (m *tcpTransport) finish(b *tcpBridge) {
 		delete(m.publications, b.port)
 	}
 	close(b.done)
+}
+
+// dialDirect reserves the same bounded tunnel capacity as the compatibility
+// bridge, but returns an encrypted embedded socket without a local IPC hop.
+func (m *tcpTransport) dialDirect(ctx context.Context, address string) (net.Conn, error) {
+	b, err := m.reserve(ctx, 0)
+	if err != nil {
+		return nil, errors.New(contextError(err, err.Error()))
+	}
+	dialCtx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(b.ctx, cancel)
+	conn, err := m.dial(dialCtx, "tcp", address)
+	stop()
+	canceled := dialCtx.Err() != nil || b.ctx.Err() != nil
+	cancel()
+	if err != nil || conn == nil || canceled {
+		if conn != nil {
+			_ = conn.Close()
+		}
+		m.finish(b)
+		if canceled {
+			return nil, errors.New("canceled")
+		}
+		return nil, errors.New(contextError(err, "dial_failed"))
+	}
+	owned := &directTunnelConn{Conn: conn, release: func() { m.finish(b) }}
+	context.AfterFunc(b.ctx, func() { _ = owned.Close() })
+	return owned, nil
+}
+
+type directTunnelConn struct {
+	net.Conn
+	once     sync.Once
+	release  func()
+	closeErr error
+}
+
+func (c *directTunnelConn) Close() error {
+	c.once.Do(func() { c.closeErr = c.Conn.Close(); c.release() })
+	return c.closeErr
+}
+
+func (c *directTunnelConn) CloseWrite() error {
+	if conn, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return conn.CloseWrite()
+	}
+	return errors.New("half_close_unsupported")
+}
+
+func (c *directTunnelConn) CloseRead() error {
+	if conn, ok := c.Conn.(interface{ CloseRead() error }); ok {
+		return conn.CloseRead()
+	}
+	return errors.New("half_close_unsupported")
 }
 
 // The RPC context only owns allocation. Established bridges belong to the

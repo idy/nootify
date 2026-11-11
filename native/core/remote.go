@@ -1,4 +1,4 @@
-package main
+package core
 
 import (
 	"context"
@@ -890,6 +890,26 @@ func (c *Core) dial(ctx context.Context, address string) (net.Conn, error) {
 	embedded := false
 	var token, network string
 	if c.store.Snapshot().Tailnet && isTailnet(address) {
+		c.dialMu.Lock()
+		direct := c.tailnetDial
+		c.dialMu.Unlock()
+		if direct != nil {
+			dialCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+			stop := context.AfterFunc(c.ctx, cancel)
+			defer func() { stop(); cancel() }()
+			conn, err := direct(dialCtx, "tcp", address)
+			if err != nil || conn == nil {
+				if conn != nil {
+					conn.Close()
+				}
+				return nil, fault("unavailable", "embedded tailnet dial failed")
+			}
+			if dialCtx.Err() != nil {
+				conn.Close()
+				return nil, dialCtx.Err()
+			}
+			return &embeddedRemoteConn{Conn: conn}, nil
+		}
 		id := uid()
 		ch := make(chan dialResult, 1)
 		c.dialMu.Lock()

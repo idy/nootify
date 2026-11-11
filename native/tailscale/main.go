@@ -1,6 +1,7 @@
-// nootify-tsnet owns Nootify's embedded Tailscale node. Its only control channel
-// is private newline-delimited JSON on stdin/stdout; it never uses a host daemon.
-package main
+// Package tailscale owns Nootify's embedded Tailscale node. The unified runtime
+// uses Service directly; the private stdio protocol remains a compatibility API.
+// Neither entry point uses a host Tailscale daemon.
+package tailscale
 
 import (
 	"context"
@@ -26,8 +27,10 @@ var tailscaleVersion = "development"
 
 func helperVersion() string { return "nootify-tsnet " + strings.TrimPrefix(tailscaleVersion, "v") }
 
-func main() {
-	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
+// RunStdio preserves the standalone helper command for compatibility. The
+// unified runtime should use NewService and its typed methods instead.
+func RunStdio(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Writer) int {
+	return run(args, stdin, stdout, stderr)
 }
 
 func run(args []string, stdin io.ReadCloser, stdout io.WriteCloser, stderr io.Writer) int {

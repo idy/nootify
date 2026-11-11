@@ -7,7 +7,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { createHash } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs, promisify } from 'node:util';
-import { buildTarget, sidecarName } from './build-targets.mjs';
+import { buildTarget } from './build-targets.mjs';
 import { runNpm, verifyExecutable, verifyWindowsX64 } from './bundle-utils.mjs';
 import { stageServiceBundle } from './stage-service.mjs';
 import { withNsisCompiler } from './nsis.mjs';
@@ -41,7 +41,7 @@ export function desktopPaths(target, base = root, development = false) {
   const output = join(base, 'build', development ? 'dev' : 'desktop', target.triple);
   const app = join(output, 'macos', 'Nootify.app');
   return {
-    output, app, service: join(base, 'build', 'resources', 'service'), binaries: join(base, 'build', 'binaries'),
+    output, app, resources: join(base, 'build', 'resources', 'licenses'),
     executable: target.platform === 'darwin' ? join(app, 'Contents', 'MacOS', 'Nootify') : join(output, 'payload', 'Nootify.exe'),
     payload: join(output, 'payload'), macos: join(output, 'macos'), dmg: join(output, 'dmg'), nsis: join(output, 'nsis'),
   };
@@ -92,18 +92,14 @@ export async function copyPayload(target, paths, base = root) {
   const binDir = target.platform === 'darwin' ? join(paths.app, 'Contents', 'MacOS') : paths.payload;
   const resourceDir = target.platform === 'darwin' ? join(paths.app, 'Contents', 'Resources') : paths.payload;
   await mkdir(binDir, { recursive: true });
-  for (const name of ['node', 'nootify-core', 'nootify-tsnet']) {
-    const destination = join(binDir, `${name}${target.extension}`);
-    await copyFile(join(paths.binaries, sidecarName(name, target)), destination);
-    await chmod(destination, 0o755);
-  }
-  await cp(paths.service, join(resourceDir, 'service'), { recursive: true, dereference: false });
+  await mkdir(resourceDir, { recursive: true });
+  await cp(paths.resources, join(resourceDir, 'licenses'), { recursive: true, dereference: false });
   if (target.platform === 'darwin') await copyFile(join(base, 'desktop', 'icons', 'icon.icns'), join(resourceDir, 'icon.icns'));
 }
 
-async function compileDesktop(target, paths, version, appID) {
+export async function compileDesktop(target, paths, version, appID) {
   const env = { ...process.env, GOOS: target.goos, GOARCH: target.goarch, CGO_ENABLED: '0' };
-  const { stdout } = await run('go', ['list', '-m', '-mod=readonly', '-f', '{{.Version}}', 'github.com/egoist/mygo'], { cwd: join(root, 'desktop'), env });
+  const { stdout } = await run('go', ['list', '-m', '-mod=readonly', '-f', '{{.Version}}', 'github.com/egoist/mygo'], { cwd: root, env });
   if (stdout.trim() !== MYGO_VERSION) throw new Error(`desktop must pin MyGo ${MYGO_VERSION}, found ${stdout.trim()}`);
   const args = ['build', '-mod=readonly', '-trimpath', '-buildvcs=false'];
   let source = join(root, 'desktop');
@@ -111,9 +107,11 @@ async function compileDesktop(target, paths, version, appID) {
   try {
     if (target.platform === 'win32') {
       // Go does not discover newly added .syso files through -overlay. Compile
-      // an exact temporary module copy so generated files never touch desktop/.
-      temporarySource = await mkdtemp(join(paths.output, '.source-'));
-      await cp(source, temporarySource, { recursive: true });
+      // an exact temporary package copy below desktop/ so internal imports remain valid.
+      temporarySource = await mkdtemp(join(root, 'desktop', '.build-source-'));
+      for (const entry of await readdir(source)) {
+        if (!entry.startsWith('.build-source-')) await cp(join(source, entry), join(temporarySource, entry), { recursive: true });
+      }
       source = temporarySource;
       const syso = join(source, 'nootify_windows_amd64.syso');
       const hostEnv = { ...process.env, CGO_ENABLED: '0' }; delete hostEnv.GOOS; delete hostEnv.GOARCH;
@@ -126,7 +124,7 @@ async function compileDesktop(target, paths, version, appID) {
   }
   await chmod(paths.executable, 0o755);
   if (target.platform === 'win32') await verifyWindowsX64(paths.executable);
-  else await verifyExecutable(paths.executable, `nootify-desktop ${version}`, target);
+  else await verifyExecutable(paths.executable, `nootify ${version}`, target);
 }
 
 export async function createMacDmg(source, output, { execute = run, wait = delay } = {}) {
@@ -159,13 +157,7 @@ export async function createMacDmg(source, output, { execute = run, wait = delay
 async function packageMac(paths, version, appID, bundles) {
   await writeFile(join(paths.app, 'Contents', 'Info.plist'), macInfoPlist(version, appID));
   await writeFile(join(paths.app, 'Contents', 'PkgInfo'), 'APPL????');
-  // Sign inside-out. The Node runtime must retain the JIT entitlement; signing
-  // only the outer app or using --deep to sign can silently discard it.
-  for (const name of ['node', 'nootify-core', 'nootify-tsnet', 'Nootify']) {
-    const args = ['--force', '--sign', '-', '--options', 'runtime', '--timestamp=none'];
-    if (name === 'node') args.push('--entitlements', join(root, 'desktop', 'Entitlements.plist'));
-    await run('/usr/bin/codesign', [...args, join(paths.app, 'Contents', 'MacOS', name)], { cwd: root });
-  }
+  await run('/usr/bin/codesign', ['--force', '--sign', '-', '--options', 'runtime', '--timestamp=none', join(paths.app, 'Contents', 'MacOS', 'Nootify')], { cwd: root });
   await run('/usr/bin/codesign', ['--force', '--sign', '-', '--options', 'runtime', '--timestamp=none', paths.app], { cwd: root });
   await run('/usr/bin/codesign', ['--verify', '--deep', '--strict', paths.app], { cwd: root });
   // The updater archive keeps the existing Nootify.app top-level member.

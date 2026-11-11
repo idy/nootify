@@ -16,8 +16,9 @@ import (
 
 	"github.com/egoist/mygo"
 	"github.com/idy/nootify/desktop/internal/language"
-	"github.com/idy/nootify/desktop/internal/service"
 	"github.com/idy/nootify/desktop/internal/updater"
+	"github.com/idy/nootify/internal/app"
+	"github.com/idy/nootify/internal/service"
 )
 
 // The packager supplies these from root package.json and the bundle identity.
@@ -52,7 +53,6 @@ type shell struct {
 	actionPending        bool
 	action               language.Text
 	actionError          error
-	moduleLabels         []string
 	serviceHandoff       *serviceHandoff
 	updateShutdown       updateShutdown
 	startupGate          <-chan struct{}
@@ -66,8 +66,15 @@ type shell struct {
 }
 
 func main() {
+	if handled, err := app.Run(context.Background(), os.Args[1:], version, os.Stdout, os.Stderr); handled {
+		if err != nil {
+			_ = json.NewEncoder(os.Stderr).Encode(service.Failure(err))
+			os.Exit(1)
+		}
+		return
+	}
 	if slices.Contains(os.Args[1:], "--version") {
-		fmt.Println("nootify-desktop " + version)
+		fmt.Println("nootify " + version)
 		return
 	}
 	defer func() {
@@ -191,7 +198,7 @@ func main() {
 			return
 		}
 		bundle, bundleErr := service.Current()
-		if appID != "dev.idy.nootify" {
+		if appID != "dev.idy.nootify" || version == "0.0.0-dev" {
 			bundle = nil
 		}
 		s.service = service.New(home, bundle)
@@ -292,7 +299,7 @@ window.__NOOTIFY_PLATFORM__ = '` + platform + `';
 })();`
 }
 
-// All callers run on the UI thread; child exit revokes its origin even before the next health poll.
+// All callers run on the UI thread; gateway closure revokes its origin even before the next health poll.
 func (s *shell) trustedDocument(raw string) bool {
 	if !s.policy.allowed(raw) {
 		return false
@@ -522,7 +529,7 @@ func (s *shell) serviceWorker(bundleErr error) {
 		installed, inspectErr := s.service.Installed(s.ctx)
 		// Old independent daemons can outlive a manual app replacement. Health is
 		// advisory only: the bundled CLI still proves exact ownership before restart.
-		if !s.suppressServiceStart && err == nil && h.UITransport == 0 && installed && inspectErr == nil && s.service.Bundle != nil && !legacyRestarted {
+		if !s.suppressServiceStart && err == nil && h.Backend != "go" && installed && inspectErr == nil && s.service.Bundle != nil && !legacyRestarted {
 			legacyRestarted = true
 			s.runServiceAction("restart")
 			h, err = service.CheckHealth(s.ctx, client, service.URL)

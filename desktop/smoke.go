@@ -102,6 +102,12 @@ func (s *shell) exerciseSmoke(report map[string]any) error {
 		return err
 	}
 	report["tray_present"] = true
+	for _, id := range []string{"service", "modules", "refresh", "start", "restart", "install_service", "action"} {
+		if s.menu.ItemByID(id) != nil {
+			return fmt.Errorf("tray exposes removed service control %q", id)
+		}
+	}
+	report["tray_application_actions_only"] = true
 	s.window.Close()
 	if err := smokeWait("close hides without destroying", func() bool { return !s.window.IsVisible() && !s.window.IsDestroyed() }); err != nil {
 		return err

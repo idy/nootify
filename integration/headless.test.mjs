@@ -8,14 +8,18 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
-import { encodeMessageRef } from '../dist/src/providers.js';
+// Go's JSON map encoder orders keys; retain every return-reference field in that order.
+const encodeMessageRef = message => Buffer.from(JSON.stringify(
+  Object.fromEntries(Object.keys(message).sort().map(key => [key, message[key]])),
+)).toString('base64url');
 
 const execute = promisify(execFile);
 const root = fileURLToPath(new URL('../', import.meta.url));
 const work = process.env.NOOTIFY_INTEGRATION_ROOT;
-const coreBinary = process.env.NOOTIFY_INTEGRATION_CORE_BIN;
+const serviceBinary = process.env.NOOTIFY_INTEGRATION_SERVICE_BIN;
+const cliBinary = process.env.NOOTIFY_INTEGRATION_CLI_BIN;
 const upstreamBinary = process.env.NOOTIFY_INTEGRATION_UPSTREAM_BIN;
-if (![work, coreBinary, upstreamBinary].every(value => value && isAbsolute(value))) {
+if (![work, serviceBinary, cliBinary, upstreamBinary].every(value => value && isAbsolute(value))) {
   throw new Error('Run npm run test:integration to create an isolated headless workspace');
 }
 const runtimeEnv = Object.fromEntries(Object.entries(process.env)
@@ -91,8 +95,9 @@ async function request(url, token, method = 'GET', body) {
 async function startService(name) {
   const stateDir = join(work, name);
   await mkdir(stateDir, { recursive: true, mode: 0o700 });
-  const process = launch(globalThis.process.execPath, [join(root, 'dist/test/helpers/headless-service.js'), '--state-dir', stateDir],
-    { ...runtimeEnv, NOOTIFY_CORE_BIN: coreBinary, NOOTIFY_HEADLESS_WORKSPACE: work }, 'service-ready');
+  const process = launch(serviceBinary, ['-test.run=^TestHeadlessServiceProcess$', '-test.timeout=100s'],
+    { ...runtimeEnv, NOOTIFY_HEADLESS_WORKSPACE: work, NOOTIFY_HEADLESS_STATE_DIR: stateDir,
+      NOOTIFY_INTEGRATION_CLI_BIN: cliBinary }, 'service-ready');
   const ready = await process.ready;
   assert.equal(ready.headless, true);
   assert.notEqual(ready.port, 9417);
@@ -104,7 +109,7 @@ async function startService(name) {
 }
 async function cli(service, command, args = []) {
   assert.ok(cliCommands.has(command), 'headless integration must never invoke platform service management');
-  const { stdout } = await execute(process.execPath, [join(root, 'dist/src/cli.js'), command,
+  const { stdout } = await execute(cliBinary, [command,
     '--state-dir', service.stateDir, '--port', String(service.port), ...args],
   { cwd: root, env: runtimeEnv, windowsHide: true, timeout: 10_000, maxBuffer: 1 << 20 });
   return JSON.parse(stdout);
@@ -117,7 +122,7 @@ async function configure(service, upstream) {
   await eventually(service.page, page => page.providers[0]?.status === 'connected', 'gRPC subscription');
 }
 
-test('headless: real CLI/HTTP/stdio/gRPC delivery, independent broadcast, reply and offline replay', { timeout: 100_000 }, async t => {
+test('headless: real Go CLI/HTTP/gRPC delivery, independent broadcast, reply and offline replay', { timeout: 100_000 }, async t => {
   t.after(async () => {
     await cleanup();
     process.removeListener('SIGTERM', interrupted); process.removeListener('SIGINT', interrupted);
@@ -126,9 +131,13 @@ test('headless: real CLI/HTTP/stdio/gRPC delivery, independent broadcast, reply 
     const outside = await mkdtemp(join(tmpdir(), 'nootify-headless-outside-'));
     try {
       await writeFile(join(outside, 'sentinel'), 'unchanged');
-      await assert.rejects(execute(process.execPath, [join(root, 'dist/test/helpers/headless-service.js'), '--state-dir', outside],
-        { cwd: root, env: { ...runtimeEnv, NOOTIFY_CORE_BIN: coreBinary, NOOTIFY_HEADLESS_WORKSPACE: work }, windowsHide: true, timeout: 5000 }),
-      /refuses state or binaries outside/);
+      await assert.rejects(execute(serviceBinary, ['-test.run=^TestHeadlessServiceProcess$', '-test.timeout=5s'],
+        { cwd: root, env: { ...runtimeEnv, NOOTIFY_HEADLESS_WORKSPACE: work, NOOTIFY_HEADLESS_STATE_DIR: outside }, windowsHide: true, timeout: 5000 }),
+      error => {
+        assert.equal(error.code, 1);
+        assert.match(error.stdout + error.stderr, /refuses state outside its private workspace/);
+        return true;
+      });
       assert.deepEqual(await readdir(outside), ['sentinel']);
       assert.equal(await readFile(join(outside, 'sentinel'), 'utf8'), 'unchanged');
     } finally { await rm(outside, { recursive: true, force: true }); }
@@ -175,7 +184,7 @@ test('headless: real CLI/HTTP/stdio/gRPC delivery, independent broadcast, reply 
     await emit({ session: firstSession, event_id: 'headless-broadcast', message_id: 'source-message', content: { text: 'headless incoming question' } });
     // Emit returning only proves upstream acceptance. A later event traverses the
     // same ordered subscription, then its persisted completion drains the async
-    // Node delivery path before inspecting the original event's final inbox.
+    // Go delivery path before inspecting the original event's final inbox.
     const barrierId = 'headless-dedup-barrier';
     await emit({ session: firstSession, event_id: barrierId, message_id: 'dedup-barrier-message', content: { text: 'deduplication barrier' } });
     const settled = await eventually(first.state, value => {

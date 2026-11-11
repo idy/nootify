@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import test from 'node:test';
-import { buildTarget, sidecarName } from './build-targets.mjs';
+import { buildTarget } from './build-targets.mjs';
 import { APP_ID, DEV_APP_ID, copyPayload, desktopLinkerFlags, desktopPaths, macInfoPlist, packageVersion, parseDesktopArgs, windowsPayloadManifest } from './desktop.mjs';
 import { NSIS_SHA256, NSIS_URL, NSIS_URLS, downloadNsisArchive, verifyNsisArchive } from './nsis.mjs';
 import { createHash } from 'node:crypto';
@@ -29,8 +29,7 @@ test('bundle paths retain published artifact locations and separate development 
   assert.equal(paths.executable, join(base, 'build/desktop/aarch64-apple-darwin/macos/Nootify.app/Contents/MacOS/Nootify'));
   assert.equal(paths.dmg, join(base, 'build/desktop/aarch64-apple-darwin/dmg'));
   assert.equal(desktopPaths(windows, base).nsis, join(base, 'build/desktop/x86_64-pc-windows-msvc/nsis'));
-  assert.equal(paths.binaries, join(base, 'build/binaries'));
-  assert.equal(paths.service, join(base, 'build/resources/service'));
+  assert.equal(paths.resources, join(base, 'build/resources/licenses'));
   assert.notEqual(desktopPaths(mac, base, true).output, paths.output);
   assert.equal(APP_ID, 'dev.idy.nootify');
   assert.equal(DEV_APP_ID, 'dev.idy.nootify.dev');
@@ -68,22 +67,18 @@ test('package version overrides build native metadata without a second version a
   assert.match(plist, /NSAllowsLocalNetworking/);
 });
 
-test('staged payload preserves the paths pinned by existing LaunchAgents and tasks', async t => {
+test('staged payload contains one executable and its licenses', async t => {
   const base = await temporary(t);
   await put(join(base, 'desktop/icons/icon.icns'), 'icon');
   for (const target of [mac, windows]) {
     const paths = desktopPaths(target, base);
-    for (const name of ['node', 'nootify-core', 'nootify-tsnet']) await put(join(paths.binaries, sidecarName(name, target)), `${name} ${target.triple}`);
-    await put(join(paths.service, 'dist/src/cli.js'), 'cli');
-    await put(join(paths.service, 'dist/src/server.js'), 'server');
+    await put(join(paths.resources, 'third-party-notices.txt'), 'notices');
     await put(paths.executable, 'desktop');
     await copyPayload(target, paths, base);
     const binaries = target === mac ? join(paths.app, 'Contents/MacOS') : paths.payload;
     const resources = target === mac ? join(paths.app, 'Contents/Resources') : paths.payload;
-    assert.deepEqual((await readdir(binaries)).filter(file => !['service', 'uninstall.exe'].includes(file)).sort(),
-      [`Nootify${target.extension}`, `node${target.extension}`, `nootify-core${target.extension}`, `nootify-tsnet${target.extension}`].sort());
-    assert.equal(await readFile(join(resources, 'service/dist/src/cli.js'), 'utf8'), 'cli');
-    assert.equal(await readFile(join(resources, 'service/dist/src/server.js'), 'utf8'), 'server');
+    assert.deepEqual((await readdir(binaries)).filter(file => file !== 'licenses').sort(), [`Nootify${target.extension}`]);
+    assert.equal(await readFile(join(resources, 'licenses/third-party-notices.txt'), 'utf8'), 'notices');
   }
 });
 
@@ -119,7 +114,8 @@ test('production NSIS stages before transactional replacement and guards uninsta
   const hooks = await readFile(join(root, 'scripts/windows-installer-hooks.nsh'), 'utf8');
   assert.match(hooks, /NSIS_HOOK_PREINSTALL\s+!insertmacro NootifyManageInstalledService service-stop/);
   assert.match(hooks, /\$UpdateMode = 1\s+!insertmacro NootifyManageInstalledService service-stop\s+\$\{Else\}\s+!insertmacro NootifyManageInstalledService service-uninstall/);
-  for (const variable of ['NODE_OPTIONS', 'NODE_PATH', 'NODE_EXTRA_CA_CERTS', 'NODE_ICU_DATA']) assert.match(hooks, new RegExp(`NootifyClearNodeVariable ${variable}`));
+  assert.match(hooks, /nootify-installer-stage\.exe.*--action \$\{COMMAND\}/);
+  assert.doesNotMatch(hooks, /node\.exe|cli\.js/);
 });
 
 test('install and uninstall share a nondestructive desktop preflight with bounded updater handoff', async () => {
@@ -130,8 +126,7 @@ test('install and uninstall share a nondestructive desktop preflight with bounde
   assert.match(installer, /Function NootifyPreflightDesktop\s+!insertmacro NootifyPreflightDesktop "installation"\s+FunctionEnd/);
   assert.match(installer, /Function un\.NootifyPreflightDesktop\s+!insertmacro NootifyPreflightDesktop "uninstallation"\s+FunctionEnd/);
   assert.match(guard, /\$UpdateMode = 1[\s\S]*StrCpy \$1 80/);
-  assert.match(guard, /CreateFileW\(w "\$INSTDIR\\Nootify\.exe", i 0x40000000, i 7, p 0, i 3, i 0x80, p 0\)/);
-  assert.match(guard, /CloseHandle\(p r0\)/);
+  assert.match(guard, /nootify-installer-stage\.exe.*--action preflight --target/);
   assert.match(guard, /Sleep 250\s+IntOp \$1 \$1 - 1/);
   assert.match(guard, /SetErrorLevel 1[\s\S]*Close Nootify and retry[\s\S]*\/SD IDOK[\s\S]*Abort/);
   assert.doesNotMatch(guard, /service-stop|RMDir|Delete|taskkill|TerminateProcess|FileOpen/i);
@@ -147,7 +142,8 @@ test('fresh Windows targets refuse unowned payload before stopping or recursivel
   assert.match(guard, /GetFileAttributesW\(w "\$INSTDIR\\service"\)/);
   assert.match(guard, /IntOp \$1 \$0 & 0x400[\s\S]*reparse point/);
   assert.match(guard, /ReadRegStr \$0 HKCU "\$\{UNINSTALL_KEY\}" "InstallLocation"[\s\S]*\$0 != \$INSTDIR[\s\S]*Abort/);
-  assert.match(guard, /IfNot.*FileExists.*Nootify\.exe[\s\S]*OrIfNot.*node\.exe[\s\S]*OrIfNot.*cli\.js[\s\S]*Abort/);
+  assert.match(guard, /IfNot.*FileExists.*Nootify\.exe[\s\S]*Abort/);
+  assert.doesNotMatch(guard.slice(guard.indexOf('Function NootifyPreflightInstalledFiles')), /node\.exe|cli\.js/);
   const destinationStart = installer.indexOf('Function NootifyCheckRegisteredDestination');
   const destination = installer.slice(destinationStart, installer.indexOf('FunctionEnd', destinationStart));
   assert.match(destination, /ReadRegStr \$RegisteredLocation[\s\S]*\$RegisteredLocation != ""[\s\S]*\$RegisteredLocation != \$INSTDIR[\s\S]*Abort/);
@@ -186,10 +182,10 @@ test('incomplete receipt cleanup precedes destination lock and shares headless n
 test('Windows payload manifest verifies exact extracted bytes and excludes generated uninstaller', async t => {
   const work = await temporary(t);
   await put(join(work, 'Nootify.exe'), 'desktop');
-  await put(join(work, 'service/dist/src/cli.js'), 'cli');
+  await put(join(work, 'licenses/third-party-notices.txt'), 'notices');
   assert.deepEqual(await windowsPayloadManifest(work), {
     'Nootify.exe': createHash('sha256').update('desktop').digest('hex'),
-    'service/dist/src/cli.js': createHash('sha256').update('cli').digest('hex'),
+    'licenses/third-party-notices.txt': createHash('sha256').update('notices').digest('hex'),
   });
 });
 
