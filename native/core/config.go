@@ -72,8 +72,8 @@ func validateRemote(r RemoteConfig) error {
 	}
 	if r.Enabled {
 		ip := net.ParseIP(host)
-		if (ip == nil || !ip.IsLoopback()) && r.CertFile == "" {
-			return fault("invalid_argument", "public listeners require TLS; plaintext must use a numeric loopback address")
+		if r.CertFile == "" && host != "" && (ip == nil || !(ip.IsUnspecified() || ip.IsLoopback() || ip.IsPrivate())) {
+			return fault("invalid_argument", "public listeners require TLS; plaintext must bind a numeric loopback, private LAN, or wildcard address")
 		}
 		if strings.TrimSpace(r.Token) == "" || strings.ContainsAny(r.Token, "\r\n") {
 			return fault("invalid_argument", "a valid remote token is required")

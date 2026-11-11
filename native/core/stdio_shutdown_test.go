@@ -237,10 +237,10 @@ func TestStdioBytesBufferOutputCompatibility(t *testing.T) {
 	t.Cleanup(func() { _ = writer.Close(); _ = reader.Close(); waitStdioShutdown(t, done) })
 	go func() { serveErr = serveStdio(context.Background(), c, reader, &output); close(done) }()
 	must(t, awaitStdioIO(t, func() error {
-		_, err := fmt.Fprintln(writer, `{"id":1,"method":"transport.configure","params":{"tailnet_enabled":true}}`)
+		_, err := fmt.Fprintln(writer, `{"id":1,"method":"provider.save","params":{"id":"buffered","name":"Buffered","type":"remote","address":"127.0.0.1:9418","token":"test-token","enabled":false}}`)
 		return err
 	}))
-	await(t, func() bool { return c.store.Snapshot().Tailnet })
+	await(t, func() bool { return c.store.Snapshot().Providers["buffered"].ID == "buffered" })
 	must(t, writer.Close())
 	waitStdioShutdown(t, done)
 	must(t, serveErr)

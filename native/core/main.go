@@ -37,11 +37,7 @@ func (c *Core) Handle(ctx context.Context, method string, raw json.RawMessage, l
 		Status     string         `json:"status"`
 		Transport  string         `json:"transport_status"`
 		Error      string         `json:"error"`
-		Address    string         `json:"address"`
-		Token      string         `json:"token"`
-		Network    string         `json:"network"`
 		Event      Event          `json:"event"`
-		Tailnet    bool           `json:"tailnet_enabled"`
 		Automatic  bool           `json:"automatic"`
 		ChatID     string         `json:"chat_id"`
 		SenderID   string         `json:"sender_open_id"`
@@ -147,21 +143,6 @@ func (c *Core) Handle(ctx context.Context, method string, raw json.RawMessage, l
 		}
 		canceled, err := c.CanceledInbox(raw)
 		return map[string]any{"reconciled": true, "canceled": canceled}, err
-	case "dial.complete":
-		return map[string]any{"completed": true}, c.completeDial(p.RequestID, p.Address, p.Error, p.Token, p.Network)
-	case "transport.configure":
-		c.ops.Lock()
-		defer c.ops.Unlock()
-		before := c.store.Snapshot().Tailnet
-		err := c.store.Update(func(d *State) error { d.Tailnet = p.Tailnet; return nil })
-		if stateCommitted(err) && before != p.Tailnet {
-			for _, cfg := range c.store.Snapshot().Providers {
-				if cfg.Type == "remote" {
-					c.startProvider(cfg)
-				}
-			}
-		}
-		return map[string]any{"tailnet_enabled": p.Tailnet}, err
 	case "migration.import":
 		return c.Migrate(raw)
 	case "config.export":
@@ -442,7 +423,7 @@ func serveStdio(parent context.Context, c *Core, in io.Reader, out io.Writer) er
 			_ = write(rpcResponse{ID: 0, Error: &rpcError{"invalid_argument", "invalid request JSON"}})
 			continue
 		}
-		completion := req.Method == "delivery.complete" || req.Method == "dial.complete"
+		completion := req.Method == "delivery.complete"
 		if !completion && active.Load() >= 128 {
 			_ = write(rpcResponse{ID: req.ID, Error: &rpcError{"resource_exhausted", "too many concurrent requests"}})
 			continue

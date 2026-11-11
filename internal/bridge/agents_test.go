@@ -22,6 +22,19 @@ func TestPromptCreatesMissingAgentDirectoriesAndUsesGoCLI(t *testing.T) {
 		if strings.Contains(entry.Block, "cli.js") || strings.Contains(entry.Block, "/node ") {
 			t.Fatalf("Node runtime leaked into prompt %s", entry.Block)
 		}
+		for _, obsolete := range []string{"Tailscale", "tailnet", "port 80", "100.64."} {
+			if strings.Contains(entry.Block, obsolete) {
+				t.Fatalf("obsolete network instructions in %s prompt: %s", agent, entry.Block)
+			}
+		}
+		for _, required := range []string{"direct LAN access", "listener on the configured port", "does not expose this computer's previews, files, or other ports", "separately configured and verified reachable address", "--state-dir", "--text-file -"} {
+			if !strings.Contains(entry.Block, required) {
+				t.Fatalf("missing %q in %s prompt: %s", required, agent, entry.Block)
+			}
+		}
+		if !polled(agent) && (!strings.Contains(entry.Block, "`message-ack` and `message-reply` commands carrying their full source reference") || !strings.Contains(entry.Block, "`lark-ack` and `lark-reply`")) {
+			t.Fatalf("source callback instructions missing: %s", entry.Block)
+		}
 		if !strings.Contains(entry.Block, "Nootify executable") || !strings.Contains(entry.Block, "--port 19417") || !strings.Contains(entry.Block, "thread-open") {
 			t.Fatalf("missing Go CLI context %s", entry.Block)
 		}

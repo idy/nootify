@@ -118,7 +118,7 @@ Each entry reproduces the license files that come with the module or package.
 For one that comes without any, the entry reproduces its declared license
 from the SPDX License List ${SPDX_LICENSE_LIST}.
 
-Nootify includes its service, notification core and Tailscale client in one
+Nootify includes its LAN service and notification core in one
 Go executable. Browser fonts and their OFL licenses are embedded and also
 reproduced beside this file. Node.js is a build tool and is not distributed.
 `;

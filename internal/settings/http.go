@@ -19,7 +19,8 @@ func (s *Service) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	path := r.URL.Path
 	editable := s.options.Editable != nil && s.options.Editable(r)
-	if path == "/ui/api/settings/remote" || strings.HasPrefix(path, "/ui/api/settings/remote/") {
+	if path == "/ui/api/settings/remote" || strings.HasPrefix(path, "/ui/api/settings/remote/") ||
+		path == "/ui/api/settings/tailscale" || strings.HasPrefix(path, "/ui/api/settings/tailscale/") {
 		writeError(w, problem(404, "No such settings route"))
 		return
 	}
@@ -41,23 +42,6 @@ func (s *Service) serveHTTP(w http.ResponseWriter, r *http.Request) {
 				result, err = s.options.GitHub(r.Context())
 				if err == nil && !editable {
 					result = redactLogin(result)
-				}
-			}
-		case "/ui/api/settings/tailscale":
-			if s.options.Tailscale == nil {
-				err = problem(404, "Tailscale settings are not enabled")
-			} else {
-				result, err = s.options.Tailscale(r.Context(), "page", nil)
-				if err == nil {
-					var page map[string]any
-					page, err = jsonObject(result)
-					if err == nil {
-						page["editable"] = editable
-						result = page
-						if !editable {
-							result = redactLogin(page)
-						}
-					}
 				}
 			}
 		case "/ui/api/settings/lark/secret":
@@ -144,26 +128,6 @@ func (s *Service) action(ctx context.Context, path string, body map[string]any) 
 			return v, e
 		}
 		return nil, problem(400, "Expected a GitHub action: start, cancel or sign-out")
-	case "/ui/api/settings/tailscale":
-		if s.options.Tailscale == nil {
-			return nil, problem(404, "Tailscale settings are not enabled")
-		}
-		action := text(body["action"])
-		switch action {
-		case "enable":
-			enabled, ok := body["enabled"].(bool)
-			if !ok {
-				return nil, problem(400, "Expected enabled to be a boolean")
-			}
-			return s.options.Tailscale(ctx, action, &enabled)
-		case "login", "cancel", "logout":
-			v, e := s.options.Tailscale(ctx, action, nil)
-			if action != "login" {
-				v = map[string]any{"accepted": true}
-			}
-			return v, e
-		}
-		return nil, problem(400, "Expected a Tailscale action: enable, login, cancel or logout")
 	}
 	return nil, problem(404, "No such settings action")
 }

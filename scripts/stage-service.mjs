@@ -1,5 +1,5 @@
-// Stage notices only. The browser UI, notification core, service and Tailscale
-// implementation are linked into the single Nootify executable.
+// Stage notices only. The browser UI, notification core and LAN service
+// are linked into the single Nootify executable.
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';

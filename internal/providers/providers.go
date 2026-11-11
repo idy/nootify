@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"net"
 	"net/http"
 	"path/filepath"
 	"sync"
@@ -47,7 +46,6 @@ type Service struct {
 	pendingScopesApp     string
 	mirrorApp            string
 	savedCleared         bool
-	network              func(context.Context) error
 	reconcileMu          sync.Mutex
 	legacyMu             sync.Mutex
 }
@@ -72,8 +70,7 @@ func New(ctx context.Context, o Options) (*Service, error) {
 	}
 	return s, nil
 }
-func (s *Service) Core() *core.Core                                { return s.core }
-func (s *Service) SetNetworkSync(sync func(context.Context) error) { s.network = sync }
+func (s *Service) Core() *core.Core { return s.core }
 func (s *Service) report(value map[string]any) {
 	if s.options.Report != nil {
 		if _, ok := value["source"]; !ok {
@@ -357,7 +354,4 @@ func errorCode(err error) string {
 		return e.Code
 	}
 	return ""
-}
-func (s *Service) SetTailnetDialer(dial func(context.Context, string, string) (net.Conn, error)) {
-	s.core.SetTailnetDialer(dial)
 }

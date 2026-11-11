@@ -70,7 +70,7 @@ func repositoryInput(raw json.RawMessage) string {
 }
 
 // UIHandler implements the existing UI routes, including their custom-header CSRF boundary.
-// Owner/tailnet authentication is provided by the enclosing UI server.
+// Local-owner and LAN access rules are provided by the enclosing UI server.
 func (s *Service) UIHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path

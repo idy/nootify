@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"net"
 	"sort"
 	"sync"
 )
@@ -27,24 +26,11 @@ type Core struct {
 	subs             map[string]map[*Subscription]struct{}
 	emit             func(string, any) error
 	server           *remoteServer
-	dialMu           sync.Mutex
-	dials            map[string]chan dialResult
-	tailnetDial      func(context.Context, string, string) (net.Conn, error)
-}
-
-// SetTailnetDialer installs the embedded, encrypted Tailnet transport. The caller
-// must supply the in-process Tailscale service's Dial method, never a host TCP
-// dialer: successful connections are trusted as proof of embedded encryption.
-// Set it before Start; passing nil restores the legacy private stdio bridge.
-func (c *Core) SetTailnetDialer(dial func(context.Context, string, string) (net.Conn, error)) {
-	c.dialMu.Lock()
-	c.tailnetDial = dial
-	c.dialMu.Unlock()
 }
 
 func NewCore(parent context.Context, s *Store, emit func(string, any) error) (*Core, error) {
 	ctx, cancel := context.WithCancel(parent)
-	c := &Core{store: s, ctx: ctx, cancel: cancel, ops: newOperationGate(), providers: map[string]Provider{}, statuses: map[string]string{}, subs: map[string]map[*Subscription]struct{}{}, emit: emit, dials: map[string]chan dialResult{}}
+	c := &Core{store: s, ctx: ctx, cancel: cancel, ops: newOperationGate(), providers: map[string]Provider{}, statuses: map[string]string{}, subs: map[string]map[*Subscription]struct{}{}, emit: emit}
 	err := s.Update(func(d *State) error {
 		// Upgrade deleted bindings written before resource tombstones existed.
 		for key, binding := range d.Bindings {

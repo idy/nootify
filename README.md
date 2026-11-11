@@ -35,7 +35,7 @@ Download the installer for your computer from [GitHub Releases](https://github.c
 
 macOS users can also use the [Homebrew tap](https://github.com/idy/homebrew#install).
 The app is one Go executable containing the service, CLI, MyGo desktop host,
-notification core, and embedded Tailscale client. TypeScript is used only for the
+notification core, and direct LAN HTTP access. TypeScript is used only for the
 browser UI; the installed app needs no Node.js runtime. Current macOS packages are ad-hoc signed and not notarized;
 Windows installers are not code-signed.
 
@@ -49,6 +49,9 @@ Windows installers are not code-signed.
    connection when needed.
 3. Start a new agent conversation. It receives instructions to open its
    notification session and post progress; reply there to continue the conversation.
+
+For browser access from another device, use the sidebar LAN link, normally
+`http://<LAN-IP>:9417/`; see [LAN access](docs/guide.md#lan-access).
 
 To serve other Nootify nodes, configure the listener under **Settings → Remote
 access** (`远程接入`). The legacy personal-app QR setup remains linked from the
@@ -100,17 +103,15 @@ For an isolated background service without installing a system job:
 npm run test:integration
 ```
 
-The Go backend directly calls the notification core and embedded Tailscale
-libraries. It owns HTTP authentication, SQLite state, agent input adapters,
+The Go backend directly calls the notification core. It owns HTTP authentication, SQLite state, agent input adapters,
 session discovery, PR tracking, settings, CLI commands, and service management.
-There are no Node, notification-core, or Tailscale child processes. The MyGo
+There are no Node or notification-core child processes. The MyGo
 window owns its trusted asset/authorization handler in process; it never launches
 a separate UI service. Closing the window hides it, and the independently managed
 Go background job continues receiving notifications.
 
 Integration tests use temporary private state, ephemeral listeners, and synthetic
-network boundaries. They do not enroll Tailscale, change system jobs, or use
-production credentials. Native smoke checks are separate.
+network boundaries. They do not change system jobs or use production credentials. Native smoke checks are separate.
 
 The desktop shell uses [MyGo](https://github.com/egoist/mygo) with the system
 WebView. Rust and Cargo are not required.
@@ -123,7 +124,6 @@ See [desktop builds](docs/guide.md#build-the-desktop-app).
 | `internal/bridge/` | Agent transports, targeted lookup, prompt instructions, cooperative inboxes |
 | `internal/storage/`, `internal/events/` | Compatible SQLite persistence and bounded private logs |
 | `internal/pulls/`, `internal/settings/` | PR discovery/tracking, native OAuth/setup flows, configuration and contacts |
-| `internal/network/`, `native/tailscale/` | In-process Tailscale device, authorized HTTP access and provider transport |
 | `internal/webui/` | Trusted UI assets, owner proof and encrypted framing in Go |
 | `internal/service/` | Owned LaunchAgent/Scheduled Task management and legacy installation migration |
 | `src/` | Browser UI TypeScript and browser-only API declarations |
@@ -140,7 +140,7 @@ See [desktop builds](docs/guide.md#build-the-desktop-app).
 - [Client connections and input transports](docs/guide.md#agent-input-transports)
 - [Settings and troubleshooting](docs/guide.md#settings)
 - [Shared UI controls](docs/ui-components.md)
-- [Tailscale remote access](docs/guide.md#tailscale-access)
+- [LAN access](docs/guide.md#lan-access)
 - [HTTP service API](docs/guide.md#http-service-api)
 - [Website preview and deployment](docs/guide.md#project-website)
 - [Builds, updates, and releases](docs/guide.md#mygo-desktop-application-and-system-tray)

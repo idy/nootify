@@ -18,7 +18,7 @@ import (
 
 func isolate(t *testing.T) {
 	t.Helper()
-	for _, key := range []string{"LARK_APP_ID", "LARK_APP_SECRET", "LARK_NOTIFY_OPEN_ID", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "XDG_CONFIG_HOME", "OPENCODE_SERVER_URL", "NOOTIFY_TAILNET_USERS"} {
+	for _, key := range []string{"LARK_APP_ID", "LARK_APP_SECRET", "LARK_NOTIFY_OPEN_ID", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "XDG_CONFIG_HOME", "OPENCODE_SERVER_URL"} {
 		t.Setenv(key, "")
 	}
 }
@@ -132,7 +132,7 @@ func TestBrowserEncryptionAgainstUnifiedService(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.Close()
-	for _, path := range []string{"/ui/api/snapshot", "/ui/api/providers", "/ui/api/settings", "/ui/api/agents", "/ui/api/pulls", "/ui/api/settings/tailscale"} {
+	for _, path := range []string{"/ui/api/snapshot", "/ui/api/providers", "/ui/api/settings", "/ui/api/agents", "/ui/api/pulls"} {
 		response, err := client.Fetch(context.Background(), webui.Operation{Method: "GET", Path: path})
 		if err != nil {
 			t.Fatalf("%s: %v", path, err)

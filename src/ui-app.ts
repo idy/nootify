@@ -1,5 +1,5 @@
 import { t, locale, number, list as formatList, translateDocument, languagePreference, setLanguage, isPreference, languageStorageKey, type NativeLanguage } from './ui-i18n.js';
-import type { LogEntry, PullRequest, PullSnapshot, RepositoryEntry, ModuleStatus, PublicSession, AgentPrompt, GitHubLogin, GitHubSettings, ImportSummary, SettingsPage, LarkRecipientsPage, TailscalePage, LarkPermissionHelp, LarkRegistrationPage, LarkSetup, LarkConnectionType } from './ui-types.js';
+import type { LogEntry, PullRequest, PullSnapshot, RepositoryEntry, ModuleStatus, PublicSession, AgentPrompt, GitHubLogin, GitHubSettings, ImportSummary, SettingsPage, LarkRecipientsPage, LarkPermissionHelp, LarkRegistrationPage, LarkSetup, LarkConnectionType } from './ui-types.js';
 import { mergeRecipients, recipientDisplayName } from './lark-profile.js';
 import { RecipientListRenderer } from './recipient-list.js';
 import { Dropdown } from './dropdown.js';
@@ -12,9 +12,9 @@ const fetch = ownerTransport.fetch;
 interface PullSummary { internal: number; upstream: number; followed: number; running: boolean; lastSuccessAt?: string; error?: string; signedOut?: boolean }
 interface Snapshot {
   time: string; modules: ModuleStatus[]; sessions: PublicSession[]; logs: LogEntry[];
-  pulls?: PullSummary; access?: { tailnet_url?: string; owner_authenticated?: boolean; owner_ui_command?: string };
+  pulls?: PullSummary; access?: { lan_url?: string; owner_authenticated?: boolean; owner_ui_command?: string };
 }
-type View = 'logs' | 'sessions' | 'agents' | 'providers' | 'pulls-internal' | 'pulls-upstream' | 'repos' | 'settings-general' | 'settings-github' | 'settings-lark' | 'settings-remote' | 'settings-tailscale' | 'settings-backup' | 'settings-about';
+type View = 'logs' | 'sessions' | 'agents' | 'providers' | 'pulls-internal' | 'pulls-upstream' | 'repos' | 'settings-general' | 'settings-github' | 'settings-lark' | 'settings-remote' | 'settings-backup' | 'settings-about';
 interface AgentsPage { agents: AgentPrompt[]; editable: boolean }
 /** Redacted UI summaries from docs/provider-protocol.md; secrets are write-only except the local listener reveal action. */
 interface ProviderSummary {
@@ -50,7 +50,6 @@ function translatedLabels() {
     'settings-github': { hash: '#/settings/github', group: t('设置'), title: 'GitHub', section: 'settings-view' },
     'settings-lark': { hash: '#/settings/lark', group: t('设置'), title: t('飞书'), section: 'settings-view' },
     'settings-remote': { hash: '#/settings/remote', group: t('设置'), title: t('远程接入'), section: 'settings-view' },
-    'settings-tailscale': { hash: '#/settings/tailscale', group: t('设置'), title: 'Tailscale', section: 'settings-view' },
     'settings-backup': { hash: '#/settings/backup', group: t('设置'), title: t('导入导出'), section: 'settings-view' },
     'settings-about': { hash: '#/settings/about', group: t('设置'), title: t('关于'), section: 'settings-view' },
   };
@@ -67,7 +66,6 @@ function translatedLabels() {
     prompt_injected: t('已写入 agent 提示词'), prompt_removed: t('已移除 agent 提示词'),
     github_login: t('GitHub 已登录'), github_logout: t('GitHub 已退出登录'), lark_configured: t('飞书应用凭据已更新'), config_exported: t('配置已导出'), config_imported: t('配置已导入'),
     lark_registration_complete: t('应用已保存'), lark_registration_failed: t('扫码配置未完成'),
-    tailnet_listening: t('Tailscale 访问已开启'), tailnet_failed: t('Tailscale 监听失败'), tailnet_unavailable: t('Tailscale 未运行，仅本机可访问'),
   };
   const reasons: Record<string, string> = {
     session_not_local: t('本机不存在该会话'), session_archived: t('会话已归档'), session_offline: t('本机会话未运行'),
@@ -109,24 +107,9 @@ function translatedLabels() {
     access_denied: t('已在 GitHub 上拒绝授权'), expired_token: t('验证码已过期，请重新登录'), device_flow_disabled: t('GitHub OAuth App 没有开启 Device Flow'),
     'Not Found': t('GitHub 找不到这个 OAuth App，请检查 Client ID'), missing_client_id: t('这个版本没有配置 GitHub OAuth Client ID'),
   };
-  const tailscaleErrors: Record<string, string> = {
-    embedded_client_missing: t('内置 Tailscale 客户端不可用，请重新安装完整的 Nootify 应用。'),
-    embedded_client_stopped: t('Nootify 节点已离线，正在自动重连。'),
-    embedded_protocol_error: t('内置客户端响应异常，请重新启动 Nootify。'),
-    embedded_request_timeout: t('连接超时，请检查网络后重试。'),
-    embedded_request_failed: t('无法完成操作，请检查网络后重试。'),
-    state_locked: t('这个 Nootify 节点正在被另一个进程使用，请关闭重复运行的 Nootify。'),
-    state_unavailable: t('无法读取 Nootify 节点的登录信息，请检查本机存储权限。'),
-    listener_failed: t('无法开启 Nootify 节点的访问端口，请重新连接。'),
-    startup_failed: t('内置 Tailscale 节点启动失败，请重新连接。'),
-    client_unavailable: t('无法连接内置 Tailscale 客户端，请重启 Nootify。'),
-    status_failed: t('暂时无法读取节点状态，正在重试。'),
-    busy: t('内置客户端忙碌，正在重试。'),
-    timeout: t('连接超时，请检查网络后重试。'),
-  };
-  return { views, descriptions, reasons, sourceNames, categories, outcomeTabs, pullTabs, repoTabs, agentNames, promptStates, adapters, availability, reviews, moduleNames, moduleStates, credentialSources, githubErrors, tailscaleErrors };
+  return { views, descriptions, reasons, sourceNames, categories, outcomeTabs, pullTabs, repoTabs, agentNames, promptStates, adapters, availability, reviews, moduleNames, moduleStates, credentialSources, githubErrors };
 }
-let { views, descriptions, reasons, sourceNames, categories, outcomeTabs, pullTabs, repoTabs, agentNames, promptStates, adapters, availability, reviews, moduleNames, moduleStates, credentialSources, githubErrors, tailscaleErrors } = translatedLabels();
+let { views, descriptions, reasons, sourceNames, categories, outcomeTabs, pullTabs, repoTabs, agentNames, promptStates, adapters, availability, reviews, moduleNames, moduleStates, credentialSources, githubErrors } = translatedLabels();
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
 function node<K extends keyof HTMLElementTagNameMap>(tag: K, text?: string, className?: string): HTMLElementTagNameMap[K] {
@@ -164,7 +147,6 @@ const state = {
   remote: undefined as RemotePage | undefined, loadingRemote: false, remoteBusy: false, remoteError: '' as TranslatedText, remoteReadError: false,
   remoteEdited: false, remoteNote: '' as TranslatedText, remoteSecretLoading: false, remoteSecretRevealed: false, remoteRevision: 0,
   settings: undefined as (SettingsPage & { editable: boolean }) | undefined, github: undefined as GitHubSettings | undefined, loadingGitHub: false,
-  tailscale: undefined as (TailscalePage & { editable: boolean }) | undefined, loadingTailscale: false, tailscaleError: '' as TranslatedText,
   settingsNote: undefined as { text: TranslatedText; error: boolean; source?: 'settings-read' } | undefined, pendingSettings: new Set<string>(),
   larkConnectionType: undefined as LarkConnectionType | undefined,
   larkRegistration: undefined as LarkRegistrationPage | undefined, loadingLarkRegistration: false, larkManual: false,
@@ -935,7 +917,7 @@ function renderAgents(): void {
   $('agents-card').hidden = !page?.agents.length;
   $('agents-count').textContent = page ? (page.agents.some(agent => agent.injected) ? number(page.agents.filter(agent => agent.injected).length) : '') : '';
   const remote = page?.editable !== true;
-  const banner = resolveText(state.agentsError) || (page && remote ? t('通过 Tailscale 访问时只能查看；请在这台 Mac 上修改 agent 提示词。') : '');
+  const banner = resolveText(state.agentsError) || (page && remote ? t('通过局域网访问时只能查看；请在运行 Nootify 的电脑上修改 agent 提示词。') : '');
   $('agents-banner').hidden = !banner; $('agents-banner').textContent = banner;
   const providers = state.providers;
   const selected = providers?.providers.find(provider => provider.id === providers.default_provider_id);
@@ -1024,62 +1006,12 @@ async function loadGitHub(): Promise<void> {
   finally { state.loadingGitHub = false; renderSettings(); }
 }
 
-async function loadTailscale(): Promise<void> {
-  if (state.loadingTailscale) return;
-  state.loadingTailscale = true;
-  try {
-    const response = await fetch('/ui/api/settings/tailscale', { cache: 'no-store', signal: AbortSignal.timeout(12000) });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    state.tailscale = await response.json() as TailscalePage & { editable: boolean };
-    state.tailscaleError = '';
-  } catch (error) { state.tailscaleError = () => t('无法读取 Tailscale 状态：{p0}', { p0: (error as Error).message }); }
-  finally { state.loadingTailscale = false; renderSettings(); }
-}
-function renderTailscale(): void {
-  const data = state.tailscale;
-  const remote = data?.editable !== true;
-  const busy = state.pendingSettings.has('tailscale');
-  const active = loginActive(data?.login);
-  field('tailscale-enabled').checked = data?.enabled ?? false;
-  field('tailscale-enabled').disabled = remote || busy;
-  const connected = data?.status === 'connected';
-  const labels: Record<TailscalePage['status'], Tone> = {
-    disabled: { label: t('已关闭'), tone: 'muted' }, 'needs-login': { label: t('待登录'), tone: 'warn' }, starting: { label: t('连接中'), tone: 'warn' },
-    'needs-approval': { label: t('等待批准'), tone: 'warn' }, connected: { label: t('已连接'), tone: 'ok' }, unavailable: { label: t('不可用'), tone: 'warn' },
-  };
-  setTone('tailscale-state', data ? labels[data.status] : { label: '', tone: 'muted' });
-  setText('tailscale-status', !data ? t('正在检查连接…') : connected ? [data.deviceName, data.account].filter(Boolean).join(' · ')
-    : data.status === 'needs-approval' ? t('请在 Tailscale 管理后台批准 Nootify 这台设备。')
-    : data.status === 'unavailable' ? t('Nootify 内置节点暂时不可用。')
-    : data.status === 'disabled' ? t('独立的 Tailscale 设备，不使用系统客户端。') : t('登录后，Nootify 会作为独立设备加入你的网络。'));
-  setText('tailscale-sharing', !data ? t('正在读取设置…') : !data.enabled ? t('节点已关闭；已有登录信息会保留。')
-    : data.error ? tailscaleErrors[data.error] ?? data.error
-    : data.sharing === 'ready' ? t('已连接，通过 Nootify 节点的 80 端口访问。')
-    : connected ? t('正在开启远程访问…') : t('等待 Nootify 节点连接。'));
-  $('tailscale-sharing').classList.toggle('tone-error', !!data?.error);
-  const login = $<HTMLButtonElement>('tailscale-login');
-  login.hidden = remote || !data || connected || data.login.status === 'starting' || data.status === 'needs-approval';
-  login.disabled = busy;
-  setText('tailscale-login', data?.login.status === 'waiting' ? t('重新获取链接') : data?.enabled ? t('登录 Tailscale') : t('启用并登录'));
-  const logout = $<HTMLButtonElement>('tailscale-logout');
-  logout.hidden = remote || !connected; logout.disabled = busy;
-  $('tailscale-flow').hidden = remote || !active;
-  setText('tailscale-flow-title', data?.login.status === 'waiting' ? t('继续完成 Tailscale 登录') : t('正在准备登录…'));
-  $<HTMLButtonElement>('tailscale-cancel').disabled = busy;
-  const open = $<HTMLAnchorElement>('tailscale-open');
-  open.hidden = remote || !data?.login.url;
-  if (!remote && data?.login.url) open.href = data.login.url; else open.removeAttribute('href');
-  $('tailscale-address-row').hidden = !data?.url;
-  setText('tailscale-address', data?.url ?? '');
-  setText('tailscale-dns', data?.url && data.dnsName ? t('MagicDNS：http://{p0}/', { p0: data.dnsName }) : '');
-}
 function loadSettingsView(): void {
   if (!isSettingsView(state.view) || state.view === 'settings-general') return;
   if (state.view === 'settings-remote') { void loadRemote(); return; }
   void loadSettings();
   if (state.view === 'settings-github') void loadGitHub();
   if (state.view === 'settings-lark') void loadLarkRegistration();
-  if (state.view === 'settings-tailscale') void loadTailscale();
 }
 /** Runs one page action: its buttons are disabled meanwhile, and the result replaces the page's note. */
 async function settingsRun(key: string, failure: TranslatedText, action: () => Promise<TranslatedText | void>): Promise<void> {
@@ -1459,13 +1391,11 @@ function renderSettings(): void {
   const remote = state.settings?.editable === false;
   const login = state.github?.login;
   const note = state.settingsNote ?? (state.view === 'settings-github' && login?.status === 'failed' ? { text: t('GitHub 登录失败：{p0}', { p0: githubErrors[login.error ?? ''] ?? login.error }), error: true }
-    : state.view === 'settings-tailscale' && state.tailscaleError ? { text: state.tailscaleError, error: true }
-    : state.view === 'settings-tailscale' && state.tailscale?.login.status === 'failed' ? { text: t('Tailscale 登录失败：{p0}', { p0: tailscaleErrors[state.tailscale.login.error ?? ''] ?? t('请重试。') }), error: true }
-    : remote ? { text: t('通过 Tailscale 访问时只能查看；请在这台 Mac 上修改设置。'), error: false } : undefined);
+    : remote ? { text: t('通过局域网访问时只能查看；请在运行 Nootify 的电脑上修改设置。'), error: false } : undefined);
   const banner = $('settings-banner');
   banner.hidden = !note; banner.className = note && !note.error ? 'banner note' : 'banner';
   setText('settings-banner', resolveText(note?.text));
-  renderGitHub(remote); renderLark(remote); renderTailscale(); renderBackup(remote);
+  renderGitHub(remote); renderLark(remote); renderBackup(remote);
 }
 
 // ---- Updates ----
@@ -1624,11 +1554,11 @@ function renderChrome(): void {
     }));
   }
   const local = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
-  $('access-label').textContent = local ? location.host : t('经 Tailscale');
-  const tailnet = state.snapshot.access?.tailnet_url;
-  $('tailnet-line').hidden = !local || !tailnet;
-  $('tailnet-url').textContent = tailnet ? tailnet.replace(/^https?:\/\//, '').replace(/\/$/, '') : '';
-  $('tailnet-url').title = tailnet ? t('tailnet 内其他设备的访问地址：{p0}', { p0: tailnet }) : '';
+  $('access-label').textContent = local ? location.host : 'LAN';
+  const lan = state.snapshot.access?.lan_url;
+  $('lan-line').hidden = !local || !lan;
+  $('lan-url').textContent = lan ? lan.replace(/^https?:\/\//, '').replace(/\/$/, '') : '';
+  $('lan-url').title = lan ? t('局域网内其他设备的访问地址：{p0}', { p0: lan }) : '';
 }
 function renderAll(): void { renderChrome(); renderLogs(); renderSessions(); renderProviders(); renderAgents(); renderPulls(); renderRepos(); renderSettings(); }
 async function loadSnapshot(): Promise<void> {
@@ -1669,7 +1599,7 @@ async function refreshNow(): Promise<void> {
   }
   if (state.view === 'settings-remote') { await Promise.all([loadSnapshot(), loadRemote()]); return; }
   if (isSettingsView(state.view)) {
-    await Promise.all([loadSnapshot(), loadSettings(), ...(state.view === 'settings-github' ? [loadGitHub()] : []), ...(state.view === 'settings-tailscale' ? [loadTailscale()] : [])]);
+    await Promise.all([loadSnapshot(), loadSettings(), ...(state.view === 'settings-github' ? [loadGitHub()] : [])]);
     return;
   }
   if (!usesPulls(state.view)) { await loadSnapshot(); return; }
@@ -1740,25 +1670,6 @@ for (const id of ['update-action', 'about-update-action']) $(id).addEventListene
   const action = updateAction(state.update);
   if (action === 'details') location.hash = views['settings-about'].hash;
   else askNative(action);
-});
-type TailscaleAction = { action: 'enable'; enabled: boolean } | { action: 'login' | 'cancel' | 'logout' };
-function runTailscaleAction(body: TailscaleAction, failure: TranslatedText): void {
-  void settingsRun('tailscale', failure, async () => {
-    await post('/ui/api/settings/tailscale', body);
-    await loadTailscale();
-  });
-}
-$('tailscale-enabled').addEventListener('change', () => {
-  runTailscaleAction({ action: 'enable', enabled: field('tailscale-enabled').checked }, () => t('无法修改远程访问'));
-});
-$('tailscale-login').addEventListener('click', () => runTailscaleAction({ action: 'login' }, () => t('无法开始 Tailscale 登录')));
-$('tailscale-cancel').addEventListener('click', () => runTailscaleAction({ action: 'cancel' }, () => t('无法取消登录')));
-$('tailscale-logout').addEventListener('click', () => runTailscaleAction({ action: 'logout' }, () => t('无法退出 Nootify 节点')));
-$('tailscale-copy').addEventListener('click', () => {
-  const url = state.tailscale?.url; if (!url) return;
-  void (navigator.clipboard?.writeText(url) ?? Promise.reject(new Error('Clipboard is unavailable'))).then(() => {
-    setText('tailscale-copy', t('已复制')); setTimeout(() => setText('tailscale-copy', t('复制地址')), 2000);
-  }, () => { getSelection()?.selectAllChildren($('tailscale-address')); setText('tailscale-copy', t('已选中，按 ⌘C')); });
 });
 $('github-login').addEventListener('click', () => {
   void settingsRun('github', () => t('无法开始登录'), async () => {
@@ -2020,7 +1931,7 @@ document.addEventListener('keydown', event => {
 const languageDropdown = new Dropdown($<HTMLButtonElement>('language'), $('language-options'));
 
 function renderLanguage(): void {
-  ({ views, descriptions, reasons, sourceNames, categories, outcomeTabs, pullTabs, repoTabs, agentNames, promptStates, adapters, availability, reviews, moduleNames, moduleStates, credentialSources, githubErrors, tailscaleErrors } = translatedLabels());
+  ({ views, descriptions, reasons, sourceNames, categories, outcomeTabs, pullTabs, repoTabs, agentNames, promptStates, adapters, availability, reviews, moduleNames, moduleStates, credentialSources, githubErrors } = translatedLabels());
   relative = new Intl.RelativeTimeFormat(locale(), { numeric: 'auto' });
   translateDocument();
   state.signatures.clear();
@@ -2062,7 +1973,6 @@ setInterval(() => {
   void loadSnapshot();
   if (state.view === 'settings-github' && loginActive(state.github?.login)) void loadGitHub();
   if (state.view === 'settings-lark' && (larkRegistrationActive() || state.larkReconcilePending || !state.larkRegistration)) void loadLarkRegistration();
-  if (state.view === 'settings-tailscale') void loadTailscale();
   if (state.view === 'providers' || state.view === 'agents') void loadProviders();
   if (state.view === 'settings-remote') void loadRemote();
 }, 2000);

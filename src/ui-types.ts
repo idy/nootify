@@ -150,16 +150,6 @@ export interface LarkPermission { url?: string; scopes: string[] }
 
 export interface LarkPermissionHelp extends LarkPermission { url: string; qr: string }
 
-export interface TailscalePage {
-  enabled: boolean;
-  status: 'disabled' | 'needs-login' | 'starting' | 'needs-approval' | 'connected' | 'unavailable';
-  deviceName: string; account?: string; address?: string; dnsName?: string; url?: string;
-  sharing: 'off' | 'starting' | 'ready' | 'error'; error?: string;
-  login: TailscaleLogin;
-}
-
-export interface TailscaleLogin { status: 'idle' | 'starting' | 'waiting' | 'failed'; url?: string; error?: string }
-
 export interface LarkRegistrationPage {
   status: 'idle' | 'starting' | 'waiting' | 'connecting' | 'complete' | 'failed';
   url?: string;

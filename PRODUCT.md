@@ -20,7 +20,7 @@ An agent session is the business identity. Platform groups and topics are privat
 
 ## Operating Context
 
-The application ships as one Go executable with background-service, CLI, and Go/MyGo desktop modes. The Go backend directly owns the HTTP API, agent transports, session discovery, repository tracking, settings, notification core, and embedded Tailscale client. TypeScript is limited to the browser UI, which is compiled and embedded during the build; the installed application does not use a Node runtime or notification/Tailscale sidecars.
+The application ships as one Go executable with background-service, CLI, and Go/MyGo desktop modes. The Go backend directly owns the HTTP API, agent transports, session discovery, repository tracking, settings, notification core, and direct LAN HTTP access. TypeScript is limited to the browser UI, which is compiled and embedded during the build; the installed application does not use a Node runtime or notification sidecars.
 
 The desktop uses the system WebView on Windows and macOS. The browser UI shares its design language across those platforms, while the window, tray, menus, keyboard shortcuts, and updater use native platform behavior. Closing the window hides it; quitting the desktop leaves the independently managed Go background job running.
 
@@ -40,7 +40,7 @@ PR subscriptions come from structured session associations, repository anchors, 
 
 ### Local authority
 
-Provider mutations, settings, agent-prompt edits, secret reveal, and contact directories require verified local-owner access. Tailnet viewing does not grant those capabilities. Host/origin checks, authenticated UI framing, and private state protect local control endpoints. The embedded Tailscale identity is separate from the operating system's Tailscale installation.
+Provider mutations, settings, agent-prompt edits, secret reveal, and contact directories require local access from an actual loopback peer. The HTTP service listens on all interfaces, accepts loopback and private LAN peers, and checks the Host against its own interface addresses or system hostname and service port. Origin/fetch-site checks remain enforced. LAN browser access is read-only except repository follow choices and PR refresh; bearer-authenticated `/v1/` APIs allow private LAN callers, with remote identity management restricted to loopback. Desktop gateway API traffic uses authenticated encryption; direct LAN HTTP is plaintext. Nootify does not manage a VPN device or alter the operating system's Tailscale installation.
 
 ### Application workflows
 
@@ -62,9 +62,9 @@ Web dropdowns use the existing authored component, with keyboard selection, visi
 
 ## Evidence on Hand
 
-The implemented Go runtime lives under `internal/`, `native/core/`, and `native/tailscale/`; the native shell and tray live under `desktop/`. Browser UI source is in `src/`, with HTML/CSS and embedded assets in `public/`. The penguin mark is `desktop/brand.svg`.
+The implemented Go runtime lives under `internal/` and `native/core/`; the native shell and tray live under `desktop/`. Browser UI source is in `src/`, with HTML/CSS and embedded assets in `public/`. The penguin mark is `desktop/brand.svg`.
 
-Durable validation includes Go tests under `internal/host/`, `internal/bridge/`, `internal/providers/`, `internal/pulls/`, `internal/settings/`, `internal/network/`, and `native/core/`; browser regressions are under `test/`. `desktop/smoke.go` exercises the actual native tray, language changes, window lifecycle, and update bridge. `integration/headless.test.mjs` exercises real Go CLI/HTTP/gRPC processes with a synthetic upstream bot.
+Durable validation includes Go tests under `internal/host/`, `internal/bridge/`, `internal/providers/`, `internal/pulls/`, `internal/settings/` and `native/core/`; browser regressions are under `test/`. `desktop/smoke.go` exercises the actual native tray, language changes, window lifecycle, and update bridge. `integration/headless.test.mjs` exercises real Go CLI/HTTP/gRPC processes with a synthetic upstream bot.
 
 Use clearly identified synthetic contacts for general previews. Label read-only live profile checks separately and limit them to the profile needed for verification. Aggregate live diagnostics report counts and timings rather than bulk contact identities or credentials. The recipient component's contract remains `.impeccable/surfaces/feishu-recipient.md`.
 

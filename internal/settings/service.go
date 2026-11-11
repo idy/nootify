@@ -30,7 +30,6 @@ type Options struct {
 	RestorePulls       func(any) error
 	GitHub             func(context.Context) (any, error)
 	GitHubAction       func(context.Context, string) (any, error)
-	Tailscale          func(context.Context, string, *bool) (any, error)
 	// Env nil uses the process environment. An empty map isolates tests from host credentials.
 	Env                         map[string]string
 	HTTPClient                  *http.Client

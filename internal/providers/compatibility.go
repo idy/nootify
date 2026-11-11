@@ -266,11 +266,6 @@ func (s *Service) completeCompatibilityCommit(ctx context.Context, result any, m
 	if mutationErr == nil {
 		mutationErr = mirrorErr
 	}
-	if s.network != nil {
-		if e := s.network(ctx); e != nil {
-			s.report(map[string]any{"status": "network_reconciliation_failed", "error": e.Error()})
-		}
-	}
 	return result, mutationErr
 }
 func (s *Service) checkEnvironmentMutation(ctx context.Context, method string, body map[string]any) error {

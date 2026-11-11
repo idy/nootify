@@ -11,7 +11,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,7 +19,6 @@ import (
 	"github.com/idy/nootify/internal/bridge"
 	"github.com/idy/nootify/internal/events"
 	"github.com/idy/nootify/internal/httpx"
-	"github.com/idy/nootify/internal/network"
 	"github.com/idy/nootify/internal/providers"
 	"github.com/idy/nootify/internal/pulls"
 	"github.com/idy/nootify/internal/settings"
@@ -49,7 +47,6 @@ type Server struct {
 	pulls     *pulls.Service
 	auth      *pulls.Auth
 	settings  *settings.Service
-	network   *network.Service
 	done      chan struct{}
 	once      sync.Once
 	wg        sync.WaitGroup
@@ -77,7 +74,7 @@ func New(parent context.Context, o Options) (server *Server, err error) {
 	if o.Executable == "" {
 		o.Executable, _ = os.Executable()
 	}
-	listener, err := net.Listen("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(o.Port)))
+	listener, err := listenLAN(o.Port)
 	if err != nil {
 		return nil, err
 	}
@@ -117,12 +114,6 @@ func New(parent context.Context, o Options) (server *Server, err error) {
 		return s.store.SetSettings(map[string]any{"github_token": value})
 	}, Report: s.logs.Report, Changed: s.pulls.RefreshSoon, StateDir: s.store.Directory})
 	s.owner = webui.NewOwner(s.store.Token)
-	s.network, err = network.New(network.Options{Store: s.store, Handler: http.HandlerFunc(s.ServeHTTP), Report: s.logs.Report, Core: s.providers.RawCall})
-	if err != nil {
-		return nil, err
-	}
-	s.providers.SetNetworkSync(s.network.Sync)
-	s.providers.SetTailnetDialer(s.network.Dial)
 	s.settings, err = settings.New(settings.Options{Store: s.store, Version: o.Version, MCPConfig: o.MCPConfig, Report: s.logs.Report, Core: s.providers.Call, Editable: uiEditable, Agents: func() (any, error) { return s.bridge.Agents() }, SetAgent: func(id string, enabled bool) (any, error) { return s.bridge.SetAgent(id, enabled) }, PullPreferences: func() (any, error) { return s.pulls.Preferences() }, RestorePulls: func(value any) error {
 		raw, e := json.Marshal(value)
 		if e != nil {
@@ -143,11 +134,6 @@ func New(parent context.Context, o Options) (server *Server, err error) {
 			return map[string]bool{"accepted": true}, s.auth.SignOut()
 		}
 		return nil, httpx.Fail(400, "Invalid GitHub login action")
-	}, Tailscale: func(ctx context.Context, action string, enabled *bool) (any, error) {
-		if action == "page" {
-			return s.network.Page(ctx)
-		}
-		return s.network.Action(ctx, action, enabled)
 	}})
 	if err != nil {
 		return nil, err
@@ -177,9 +163,6 @@ func New(parent context.Context, o Options) (server *Server, err error) {
 	if err = s.pulls.Start(ctx); err != nil {
 		return nil, err
 	}
-	if err = s.network.Start(ctx); err != nil {
-		return nil, err
-	}
 	s.http = &http.Server{Handler: http.HandlerFunc(s.ServeHTTP), ConnContext: s.owner.ConnContext, ConnState: s.owner.ConnState, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 * 1024}
 	s.wg.Add(1)
 	go func() {
@@ -198,7 +181,9 @@ func New(parent context.Context, o Options) (server *Server, err error) {
 	go func() { <-ctx.Done(); _ = s.Close() }()
 	return s, nil
 }
-func (s *Server) URL() string           { return "http://" + s.listener.Addr().String() }
+func (s *Server) URL() string {
+	return "http://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(s.options.Port))
+}
 func (s *Server) State() *storage.Store { return s.store }
 func (s *Server) Wait(ctx context.Context) error {
 	select {
@@ -230,9 +215,6 @@ func (s *Server) Close() error {
 		} else if s.listener != nil {
 			attempt(s.listener.Close())
 		}
-		if s.network != nil {
-			attempt(s.network.Close())
-		}
 		s.handlers.Wait()
 		if s.settings != nil {
 			s.settings.Close()
@@ -259,8 +241,6 @@ func (s *Server) Close() error {
 	return s.closeErr
 }
 
-var loopback = regexp.MustCompile(`^(localhost|127\.0\.0\.1|\[::1\])(?::[0-9]+)?$`)
-
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.admitMu.Lock()
 	if s.stopping {
@@ -271,10 +251,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.handlers.Add(1)
 	s.admitMu.Unlock()
 	defer s.handlers.Done()
-	viaTailnet := network.IsTailnet(r)
+	remote := !localPeer(r)
 	host := strings.ToLower(r.Host)
-	if !viaTailnet && !loopback.MatchString(host) {
-		httpx.WriteError(w, httpx.Fail(403, "Only loopback hosts are accepted"))
+	if !lanPeer(r) || !s.allowedHost(r) {
+		httpx.WriteError(w, httpx.Fail(403, "Only this computer and its LAN addresses are accepted"))
 		return
 	}
 	pageNavigation := r.Method == "GET" && r.URL.Path == "/" && r.Header.Get("sec-fetch-dest") == "document"
@@ -286,13 +266,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, httpx.Fail(403, "Cross-origin requests are not accepted"))
 		return
 	}
-	if viaTailnet {
+	if remote {
 		if strings.HasPrefix(r.URL.Path, "/ui/api/auth/") || r.URL.Path == "/ui/api/secure" {
 			httpx.WriteError(w, httpx.Fail(403, "Owner authorization is local-only"))
 			return
 		}
-		s.route(w, r)
-		return
 	}
 	s.owner.Wrap(http.HandlerFunc(s.route)).ServeHTTP(w, r)
 }
@@ -303,7 +281,7 @@ func (s *Server) modules() []map[string]string {
 // Direct local UI access does not require an owner-link capsule. Control APIs
 // retain webui.Authenticated; remote proxies must never inherit loopback authority.
 func uiEditable(r *http.Request) bool {
-	if network.IsTailnet(r) {
+	if !localPeer(r) {
 		return false
 	}
 	if webui.Authenticated(r) {
@@ -326,8 +304,8 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.HasPrefix(path, "/ui/api/") {
 		if r.Method == "POST" {
-			tailnetChoice := network.IsTailnet(r) && (path == "/ui/api/repos" || path == "/ui/api/pulls/refresh")
-			if (!editable && !tailnetChoice) || r.Header.Get("x-nootify-ui") != "1" {
+			lanChoice := !localPeer(r) && (path == "/ui/api/repos" || path == "/ui/api/pulls/refresh")
+			if (!editable && !lanChoice) || r.Header.Get("x-nootify-ui") != "1" {
 				httpx.WriteError(w, httpx.Fail(403, "Service owner authorization is required for local settings"))
 				return
 			}
@@ -402,11 +380,11 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 					followed++
 				}
 			}
-			access := map[string]any{"owner_authenticated": webui.Authenticated(r) && !network.IsTailnet(r)}
-			if address := s.network.URL(); address != "" {
-				access["tailnet_url"] = address
+			access := map[string]any{"owner_authenticated": webui.Authenticated(r) && localPeer(r)}
+			if address := s.lanURL(); address != "" {
+				access["lan_url"] = address
 			}
-			if !network.IsTailnet(r) {
+			if localPeer(r) {
 				access["owner_ui_command"] = quote(s.options.Executable) + " ui-url --state-dir " + quote(s.store.Directory) + " --port " + strconv.Itoa(s.options.Port)
 			}
 			httpx.JSON(w, 200, map[string]any{"time": time.Now().UTC().Format(time.RFC3339Nano), "modules": s.modules(), "sessions": s.bridge.List(), "logs": s.logs.Recent(), "pulls": map[string]any{"internal": len(snapshot.Internal), "upstream": len(snapshot.Upstream), "running": snapshot.Refresh.Running, "followed": followed, "lastSuccessAt": snapshot.Refresh.LastSuccessAt, "error": snapshot.Refresh.Error, "signedOut": snapshot.Refresh.SignedOut}, "access": access})
@@ -423,8 +401,12 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, httpx.Fail(403, "Browser-origin requests are not accepted for control APIs"))
 		return
 	}
-	if !webui.Authenticated(r) || network.IsTailnet(r) {
+	if !webui.Authenticated(r) {
 		httpx.WriteError(w, httpx.Fail(401, "Unauthorized"))
+		return
+	}
+	if !localPeer(r) && strings.HasPrefix(path, "/v1/remote/") {
+		httpx.WriteError(w, httpx.Fail(403, "Peer identity management is local-only"))
 		return
 	}
 	if path == "/v1/services" && r.Method == "GET" {
