@@ -10,8 +10,9 @@ directly or use another Nootify node as your notification provider.
 ## What it does
 
 - Gives each agent session its own notification destination, such as a Feishu group.
-- Supports multiple named instances of two provider types: **Feishu bot** over
-  WebSocket and **Remote Nootify** over authenticated gRPC.
+- Supports multiple named channels over two provider types: **Feishu** over
+  WebSocket and **Remote Nootify** over authenticated gRPC. Feishu channels use
+  manually configured bots or personal apps authorized through QR registration.
 - Discovers eligible existing conversations locally and backfills missing
   notification destinations.
 - Routes replies to existing Claude Code, Codex, and OpenCode sessions, preserving
@@ -34,8 +35,9 @@ Download the installer for your computer from [GitHub Releases](https://github.c
 | Windows 10/11, x64 | Run the `-setup.exe` installer for your user account. |
 
 macOS users can also use the [Homebrew tap](https://github.com/idy/homebrew#install).
-The app includes its service, Node.js runtime, Go notification core, and embedded
-Tailscale helper. Current macOS packages are ad-hoc signed and not notarized;
+The app is one Go executable containing the service, CLI, MyGo desktop host,
+notification core, and direct LAN HTTP access. TypeScript is used only for the
+browser UI; the installed app needs no Node.js runtime. Current macOS packages are ad-hoc signed and not notarized;
 Windows installers are not code-signed.
 
 ## Get started
@@ -50,6 +52,9 @@ Windows installers are not code-signed.
    connection when needed.
 3. Start a new agent conversation. It receives instructions to open its
    notification session and post progress; reply there to continue the conversation.
+
+For browser access from another device, use the sidebar LAN link, normally
+`http://<LAN-IPv4>:9417/`; see [LAN access](docs/guide.md#lan-access).
 
 To serve other Nootify nodes, configure the listener under **Settings → Remote
 access** (`远程接入`). Personal apps can be reconnected, reauthorized for the same App ID, and checked
@@ -70,46 +75,61 @@ Reproducible bugs can also be filed as [GitHub issues](https://github.com/idy/no
 
 ## Development
 
-Requires Node.js 22.13+, npm, and the Go versions pinned in `desktop/go.mod`,
-`native/core/go.mod`, and `native/tailscale/go.mod`. From the repository root:
+Requires the Go toolchain pinned in root `go.mod`, plus Node.js and npm to compile
+and test the browser UI. Node.js is a build tool only. From the repository root:
 
 ```sh
 npm ci
-npm run core:build
+npm run build
 npm run check
 npm test
-npm run core:test
-npm run desktop:test
+go test ./...
 ```
 
-For process-level integration checks without opening any desktop windows:
+Build the executable or open the development desktop:
+
+```bash
+go build -o build/nootify ./desktop
+```
+
+```bash
+npm run desktop:dev
+```
+
+The same executable provides the native desktop, CLI commands, and `serve` mode.
+For an isolated background service without installing a system job:
+
+```bash
+./build/nootify serve --state-dir .cache/development-state --port 9419
+```
 
 ```bash
 npm run test:integration
 ```
 
-This runs real CLI, TypeScript service, stdio, and gRPC processes with temporary
-state and ephemeral loopback ports. The external bot is synthetic; no Feishu,
-Tailscale enrollment, system-service management, or production credentials are
-used. All owned processes and temporary state are cleaned up after the run.
-The JUnit report is `.cache/headless-integration.xml`.
+The Go backend directly calls the notification core. It owns HTTP authentication, SQLite state, agent input adapters,
+session discovery, PR tracking, settings, CLI commands, and service management.
+There are no Node or notification-core child processes. The MyGo
+window owns its trusted asset/authorization handler in process; it never launches
+a separate UI service. Closing the window hides it, and the independently managed
+Go background job continues receiving notifications.
 
-For an isolated browser preview of the application UI:
+Integration tests use temporary private state, ephemeral listeners, and synthetic
+network boundaries. They do not change system jobs or use production credentials.
+Native smoke checks are separate.
+
+For an isolated synthetic browser preview of the application UI:
 
 ```bash
 npm run preview:ui
 ```
 
-Open `http://127.0.0.1:9427/#/providers` directly. No authorization link is
-required for local editing. The preview uses synthetic providers, sessions,
-logs, repositories, and contacts through the same local UI APIs. Edits stay in memory and reset
-on restart. The personal-channel scan is synthetic and completes after fifteen
-status reads; its QR points to a nonfunctional demo URL, not a real Feishu grant.
-Real OAuth, provider connections, and filesystem actions are unavailable.
-Use `npm run preview:ui -- --hold-registration` to keep the synthetic QR state
-open while inspecting its responsive layout; Cancel remains available.
-Refreshing a direct local page preserves access without a new capability.
-The optional encrypted desktop/gateway path remains supported.
+The fixture provides synthetic channels, sessions, logs, repositories, and
+contacts. Preview edits are temporary; personal-app QR authorization is simulated
+and never grants a real Feishu app. Real OAuth, provider connections, and filesystem
+actions are unavailable. Use the local URL printed by the preview command.
+The fixture is separate from the installed Go service; preview results do not
+verify native asset embedding, authenticated transport, or desktop behavior.
 
 The frontend uses [Magpie Design System v0.4.1](https://github.com/idy/magpie-design-system/tree/v0.4.1),
 vendored in `public/vendor/magpie/` with its fonts, icons, and licenses. Resources
@@ -118,27 +138,27 @@ Nootify's route layouts and domain-specific list/dialog composition; shared
 controls use the upstream `mds-*` classes. See [shared UI controls](docs/ui-components.md).
 
 The Go core owns provider connections, notification-session mappings, and durable
-delivery/replay state. The Node service starts it through private stdio RPC and
-retains the TypeScript UI, agent input adapters, local session discovery, GitHub
-integration, and desktop lifecycle. Production Feishu ingestion uses WebSocket
-events; it does not run the legacy history poller.
+delivery/replay state. Production Feishu ingestion uses WebSocket events, with
+finite startup/reconnect history reconciliation rather than scheduled polling.
 
 The desktop shell uses [MyGo](https://github.com/egoist/mygo) with the system
-WebView. Desktop builds use Go and Node.js; Rust and Cargo are not required.
+WebView. Rust and Cargo are not required.
 See [desktop builds](docs/guide.md#build-the-desktop-app).
 
 | Path | Contents |
 | --- | --- |
-| `native/core/` | Go notification core: Feishu WebSocket, remote gRPC, sessions, and private durable JSON state |
-| `src/provider-core.ts`, `src/providers.ts` | Private Node stdio bridge, provider control, and local agent delivery completion |
-| `src/` | Local HTTP service, CLI, TypeScript UI, agent adapters, discovery, and GitHub integration |
-| `native/tailscale/` | Embedded Tailscale identity, browser proxy, and core TCP tunnels/listeners |
-| `public/` | Local application UI |
-| `src/dropdown.ts` | Shared authored dropdown behavior, keyboard navigation, and popup positioning |
-| `desktop/` | Go/MyGo desktop host, native tray, signed updater, and offline assets |
+| `internal/host/`, `internal/app/` | Unified Go HTTP service and CLI entry point |
+| `internal/providers/`, `native/core/` | Direct notification dispatch, Feishu WebSocket, remote gRPC, durable delivery state |
+| `internal/bridge/` | Agent transports, targeted lookup, prompt instructions, cooperative inboxes |
+| `internal/storage/`, `internal/events/` | Compatible SQLite persistence and bounded private logs |
+| `internal/pulls/`, `internal/settings/` | PR discovery/tracking, native OAuth/setup flows, configuration and contacts |
+| `internal/webui/` | Trusted UI assets, owner proof and encrypted framing in Go |
+| `internal/service/` | Owned LaunchAgent/Scheduled Task management and legacy installation migration |
+| `src/` | Browser UI TypeScript and browser-only API declarations |
+| `public/` | HTML/CSS and compiled assets embedded in the executable |
+| `desktop/` | MyGo window, tray, updater, installer helper and offline assets |
 | `site/` | Public website |
-| `test/` | Node regression checks and test-only headless service wiring |
-| `integration/`, `scripts/integration.mjs` | Headless CLI/HTTP/stdio/gRPC process integration and isolated build runner |
+| `test/` | Browser/UI regression tests |
 
 ## Documentation
 
@@ -148,8 +168,8 @@ See [desktop builds](docs/guide.md#build-the-desktop-app).
 - [Client connections and input transports](docs/guide.md#agent-input-transports)
 - [Settings and troubleshooting](docs/guide.md#settings)
 - [Shared UI controls](docs/ui-components.md)
-- [Tailscale remote access](docs/guide.md#tailscale-access)
-- [TypeScript client and service API](docs/guide.md#typescript-client-and-module-api)
+- [LAN access](docs/guide.md#lan-access)
+- [HTTP service API](docs/guide.md#http-service-api)
 - [Website preview and deployment](docs/guide.md#project-website)
 - [Builds, updates, and releases](docs/guide.md#mygo-desktop-application-and-system-tray)
 

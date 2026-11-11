@@ -1,26 +1,21 @@
 import assert from 'node:assert/strict';
-import { once } from 'node:events';
-import { readFile, mkdtemp, rm } from 'node:fs/promises';
-import type { AddressInfo } from 'node:net';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
-import { EventLog } from '../src/events.js';
-import { createServiceHost } from '../src/server.js';
 
 const names = ['montserrat-latin.woff2', 'monda-latin.woff2', 'lato-regular-latin.woff2', 'lato-bold-latin.woff2'];
-test('the UI serves the website font bytes locally through every declared font URL', async t => {
-  const directory = await mkdtemp(join(tmpdir(), 'nootify-fonts-')); t.after(() => rm(directory, { recursive: true, force: true }));
-  const logs = await EventLog.open(directory); const server = createServiceHost([], 'font-fixture', logs);
-  server.listen(0, '127.0.0.1'); await once(server, 'listening'); t.after(() => { server.closeAllConnections(); server.close(); });
-  const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  const styles = await fetch(origin + '/ui/fonts.css'); assert.equal(styles.status, 200); assert.match(styles.headers.get('content-type')!, /text\/css/);
-  const css = await styles.text(); const urls = [...css.matchAll(/url\("([^"]+\.woff2)"\)/g)].map(match => new URL(match[1], styles.url));
+test('every declared UI font is a complete local asset identical to the website font', async () => {
+  const stylesheet = new URL('../../public/ui/fonts.css', import.meta.url);
+  const css = await readFile(stylesheet, 'utf8');
+  const urls = [...css.matchAll(/url\("([^"]+\.woff2)"\)/g)].map(match => new URL(match[1], stylesheet));
   assert.deepEqual(urls.map(url => url.pathname.split('/').at(-1)), names);
+  const directory = new URL('./fonts/', stylesheet).pathname;
   for (const url of urls) {
-    assert.equal(url.origin, origin, 'fonts must not depend on an external font service');
-    const response = await fetch(url); assert.equal(response.status, 200); assert.equal(response.headers.get('content-type'), 'font/woff2');
-    const bytes = Buffer.from(await response.arrayBuffer()); assert.equal(bytes.subarray(0, 4).toString(), 'wOF2');
+    assert.equal(url.protocol, 'file:', 'fonts must not depend on an external font service');
+    assert.ok(url.pathname.startsWith(directory), 'fonts must remain in the bundled font directory');
+    assert.equal(url.search, ''); assert.equal(url.hash, '');
+    const bytes = await readFile(url);
+    assert.equal(bytes.subarray(0, 4).toString(), 'wOF2');
+    assert.equal(bytes.readUInt32BE(8), bytes.length, 'WOFF2 file length must match its header');
     assert.deepEqual(bytes, await readFile(new URL(`../../site/shared/${url.pathname.split('/').at(-1)}`, import.meta.url)));
   }
 });

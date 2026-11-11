@@ -1,4 +1,4 @@
-package main
+package core
 
 import (
 	"bufio"
@@ -511,7 +511,7 @@ func TestGRPCAuthenticationAndPrivateMethods(t *testing.T) {
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatal("command loop not stopped")
 	}
-	if validateRemote(RemoteConfig{Enabled: true, Listen: "0.0.0.0:9418", Token: token}) == nil {
+	if validateRemote(RemoteConfig{Enabled: true, Listen: "192.0.2.42:9418", Token: token}) == nil {
 		t.Fatal("public plaintext listener accepted")
 	}
 }
@@ -637,22 +637,25 @@ func TestConfigSecretsBackupValidationAndMigration(t *testing.T) {
 		t.Fatal("migration resurrected a deleted provider")
 	}
 }
-func TestStdioRemainsConcurrentDuringTunnelDial(t *testing.T) {
+func TestStdioRemainsConcurrentDuringProviderRequest(t *testing.T) {
 	c := testCore(t, nil)
 	p := installFake(t, c, "wait")
-	must(t, c.store.Update(func(d *State) error { d.Tailnet = true; delete(d.Providers, "wait"); return nil }))
-	listener := testPrivateTunnelListener(t)
-	var err error
+	must(t, c.store.Update(func(d *State) error { delete(d.Providers, "wait"); return nil }))
+	entered := make(chan struct{})
+	release, unblock := context.WithCancel(context.Background())
+	defer unblock()
 	p.ensure = func(ctx context.Context, s Session) (Binding, error) {
-		conn, err := c.dial(ctx, "100.100.100.100:9418")
-		if err != nil {
-			return Binding{}, err
+		close(entered)
+		select {
+		case <-ctx.Done():
+			return Binding{}, ctx.Err()
+		case <-release.Done():
+			return Binding{Session: s, ChatID: "provider-group"}, nil
 		}
-		conn.Close()
-		return Binding{Session: s, ChatID: "tunnel-group"}, nil
 	}
 	inReader, inWriter := io.Pipe()
 	outReader, outWriter := io.Pipe()
+	t.Cleanup(func() { inReader.Close(); inWriter.Close(); outReader.Close(); outWriter.Close() })
 	done := make(chan error, 1)
 	go func() { done <- serveStdio(context.Background(), c, inReader, outWriter); outWriter.Close() }()
 	scanner := bufio.NewScanner(outReader)
@@ -661,7 +664,7 @@ func TestStdioRemainsConcurrentDuringTunnelDial(t *testing.T) {
 	}
 	// A status round trip proves Start has finished before installing the
 	// configured fixture bot. The Ensure then follows the real provider path.
-	_, err = fmt.Fprintln(inWriter, `{"id":99,"method":"status","params":{}}`)
+	_, err := fmt.Fprintln(inWriter, `{"id":99,"method":"status","params":{}}`)
 	must(t, err)
 	if !scanner.Scan() {
 		t.Fatal("no startup status response")
@@ -680,55 +683,29 @@ func TestStdioRemainsConcurrentDuringTunnelDial(t *testing.T) {
 	c.mu.Unlock()
 	_, err = fmt.Fprintln(inWriter, `{"id":1,"method":"session.ensure","params":{"provider_id":"wait","session":{"adapter":"codex","session_id":"s"}}}`)
 	must(t, err)
-	if !scanner.Scan() {
-		t.Fatal("no dial event")
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("provider request did not start")
 	}
-	var event struct {
-		Event string `json:"event"`
-		Data  struct {
-			RequestID string `json:"request_id"`
-		} `json:"data"`
-	}
-	must(t, json.Unmarshal(scanner.Bytes(), &event))
-	if event.Event != "dial" {
-		t.Fatalf("expected dial, got %s", scanner.Text())
-	}
-	token := strings.Repeat("ab", 32)
-	handshake := make(chan error, 1)
-	go func() {
-		conn, err := listener.Accept()
-		if err != nil {
-			handshake <- err
-			return
-		}
-		defer conn.Close()
-		conn.SetDeadline(time.Now().Add(3 * time.Second))
-		frame := make([]byte, len(embeddedTunnelHandshakePrefix)+len(token)+1)
-		_, err = io.ReadFull(conn, frame)
-		if err == nil && string(frame) != embeddedTunnelHandshakePrefix+token+"\n" {
-			err = fmt.Errorf("unexpected private tunnel handshake")
-		}
-		if err == nil {
-			_, err = conn.Write([]byte{1})
-		}
-		handshake <- err
-	}()
-	complete, _ := json.Marshal(map[string]any{"id": 2, "method": "dial.complete", "params": map[string]any{"request_id": event.Data.RequestID, "address": listener.Addr().String(), "token": token, "network": localTunnelNetwork}})
-	_, err = fmt.Fprintln(inWriter, string(complete))
+	_, err = fmt.Fprintln(inWriter, `{"id":2,"method":"status","params":{}}`)
 	must(t, err)
-	seen := map[int64]bool{}
-	for len(seen) < 2 {
-		if !scanner.Scan() {
-			t.Fatal("response missing")
-		}
-		var response rpcResponse
-		must(t, json.Unmarshal(scanner.Bytes(), &response))
-		if response.Error != nil {
-			t.Fatalf("stdio operation failed: %v", response.Error)
-		}
-		seen[response.ID] = true
+	if !scanner.Scan() {
+		t.Fatal("status response missing during provider request")
 	}
-	must(t, <-handshake)
+	var response rpcResponse
+	must(t, json.Unmarshal(scanner.Bytes(), &response))
+	if response.ID != 2 || response.Error != nil {
+		t.Fatalf("status blocked by provider request: %+v", response)
+	}
+	unblock()
+	if !scanner.Scan() {
+		t.Fatal("provider response missing")
+	}
+	must(t, json.Unmarshal(scanner.Bytes(), &response))
+	if response.ID != 1 || response.Error != nil {
+		t.Fatalf("provider request failed: %+v", response)
+	}
 	inWriter.Close()
 	select {
 	case err := <-done:

@@ -50,12 +50,12 @@ func TestFixedNativeActions(t *testing.T) {
 	}
 }
 func TestOfficialExternalLinks(t *testing.T) {
-	for _, raw := range []string{"https://github.com/idy/nootify/pull/1#discussion_r1", "https://login.tailscale.com/a/abc123", "https://open.feishu.cn/app", "https://open.feishu.cn/app/cli_0123456789abcdef/auth?q=contact:group:readonly", "https://open.feishu.cn/page/cli?user_code=ABCD-1234"} {
+	for _, raw := range []string{"https://github.com/idy/nootify/pull/1#discussion_r1", "https://open.feishu.cn/app", "https://open.feishu.cn/app/cli_0123456789abcdef/auth?q=contact:group:readonly", "https://open.feishu.cn/page/cli?user_code=ABCD-1234"} {
 		if !externalURL(raw) {
 			t.Errorf("blocked %q", raw)
 		}
 	}
-	for _, raw := range []string{"http://github.com/idy/nootify", "https://user@github.com/idy/nootify", "https://github.com:8443/idy/nootify", "https://github.com.evil/idy/nootify", "https://login.tailscale.com/a/a?redirect=evil", "https://login.tailscale.com/a/", "https://open.feishu.cn/document/anything", "https://open.feishu.cn/app#", "https://open.feishu.cn/page/cli?user_code=AB%2DCD", "https://open.feishu.cn/page/cli?user_code=ABCD&other=bad", "https://open.feishu.cn/page/cli?user_code=ABC", "file:///Applications/Calculator.app"} {
+	for _, raw := range []string{"http://github.com/idy/nootify", "https://user@github.com/idy/nootify", "https://github.com:8443/idy/nootify", "https://github.com.evil/idy/nootify", "https://login.tailscale.com/a/abc123", "https://login.tailscale.com/a/a?redirect=evil", "https://login.tailscale.com/a/", "https://open.feishu.cn/document/anything", "https://open.feishu.cn/app#", "https://open.feishu.cn/page/cli?user_code=AB%2DCD", "https://open.feishu.cn/page/cli?user_code=ABCD&other=bad", "https://open.feishu.cn/page/cli?user_code=ABC", "file:///Applications/Calculator.app"} {
 		if externalURL(raw) {
 			t.Errorf("allowed %q", raw)
 		}

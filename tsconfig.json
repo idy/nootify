@@ -3,14 +3,26 @@
     "target": "ES2022",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
     "strict": true,
-    "types": ["node"],
+    "types": [],
     "noEmitOnError": true,
-    "declaration": true,
-    "outDir": "dist",
-    "rootDir": ".",
+    "outDir": "public/ui",
+    "rootDir": "src",
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["src/**/*.ts", "test/**/*.ts"]
+  "include": [
+    "src/ui-app.ts",
+    "src/ui-i18n.ts",
+    "src/ui-types.ts",
+    "src/ui-transport.ts",
+    "src/lark-profile.ts",
+    "src/recipient-list.ts",
+    "src/dropdown.ts"
+  ]
 }

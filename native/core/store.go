@@ -1,4 +1,4 @@
-package main
+package core
 
 import (
 	"encoding/json"
@@ -22,7 +22,6 @@ type State struct {
 	ProviderTombstones map[string]bool            `json:"provider_tombstones"`
 	DefaultProvider    string                     `json:"default_provider_id,omitempty"`
 	Remote             RemoteConfig               `json:"remote"`
-	Tailnet            bool                       `json:"tailnet_enabled"`
 	Migrated           bool                       `json:"legacy_migrated"`
 	Bindings           map[string]Binding         `json:"bindings"`
 	Events             map[string]EventRecord     `json:"events"`

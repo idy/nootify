@@ -1,4 +1,4 @@
-package main
+package core
 
 import (
 	"context"
@@ -80,8 +80,8 @@ func validateRemote(r RemoteConfig) error {
 	}
 	if r.Enabled {
 		ip := net.ParseIP(host)
-		if (ip == nil || !ip.IsLoopback()) && r.CertFile == "" {
-			return fault("invalid_argument", "public listeners require TLS; plaintext must use a numeric loopback address")
+		if r.CertFile == "" && host != "" && (ip == nil || !(ip.IsUnspecified() || ip.IsLoopback() || ip.IsPrivate())) {
+			return fault("invalid_argument", "public listeners require TLS; plaintext must bind a numeric loopback, private LAN, or wildcard address")
 		}
 		if strings.TrimSpace(r.Token) == "" || strings.ContainsAny(r.Token, "\r\n") {
 			return fault("invalid_argument", "a valid remote token is required")
@@ -182,6 +182,27 @@ func (c *Core) SaveProvider(raw json.RawMessage) (ProviderSummary, error) {
 	}
 	return summary(p, status), persistErr
 }
+
+// ReconnectProvider restarts the saved connection without writing configuration.
+// In particular, reconnecting must not fill an intentionally empty default.
+func (c *Core) ReconnectProvider(id string) (ProviderSummary, error) {
+	if id == "" {
+		return ProviderSummary{}, fault("invalid_argument", "provider ID is required")
+	}
+	c.ops.Lock()
+	defer c.ops.Unlock()
+	p, exists := c.store.Snapshot().Providers[id]
+	if !exists {
+		return ProviderSummary{}, fault("not_found", "provider does not exist")
+	}
+	c.startProvider(p)
+	status := "disabled"
+	if p.Enabled {
+		status = "connecting"
+	}
+	return summary(p, status), nil
+}
+
 func (c *Core) DeleteProvider(id string) error {
 	if id == "" {
 		return fault("invalid_argument", "provider ID is required")

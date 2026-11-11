@@ -207,7 +207,7 @@ func validateBundle(root string) error {
 		return errors.New("cannot resolve app bundle directory")
 	}
 	root = canonical
-	for _, name := range []string{"Contents/MacOS/Nootify", "Contents/MacOS/node", "Contents/MacOS/nootify-core", "Contents/MacOS/nootify-tsnet", "Contents/Resources/service/dist/src/cli.js", "Contents/Resources/service/dist/src/server.js", "Contents/Info.plist"} {
+	for _, name := range []string{"Contents/MacOS/Nootify", "Contents/Resources/licenses/third-party-notices.txt", "Contents/Info.plist"} {
 		file := filepath.Join(root, filepath.FromSlash(name))
 		info, err := os.Lstat(file)
 		if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {

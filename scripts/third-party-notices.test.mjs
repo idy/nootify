@@ -46,7 +46,7 @@ test('runtime attribution queries each build module and reproduces every selecte
     const components = await goModules({ goos: 'windows', goarch: 'amd64' }, async (command, args, options) => {
       assert.equal(command, 'go');
       const module = basename(options.cwd);
-      assert.ok(['desktop', 'core', 'tailscale', 'installer-stage'].includes(module), 'root-level toolchain selection must never be used');
+      assert.ok(['desktop', 'installer-stage'].includes(module), 'root-level toolchain selection must never be used');
       assert.equal(options.env.GOOS, 'windows'); assert.equal(options.env.GOARCH, 'amd64'); assert.equal(options.env.CGO_ENABLED, '0');
       calls.push([module, args[0]]);
       if (args[0] === 'list') return { stdout: 'example.com/shared\tv1.0.0\t/module-cache/shared\n' };
@@ -55,16 +55,14 @@ test('runtime attribution queries each build module and reproduces every selecte
         ? { GOROOT: join(dir, 'go128'), GOVERSION: 'go1.28.1' }
         : { GOROOT: join(dir, 'go127'), GOVERSION: 'go1.27.3' }) };
     });
-    assert.equal(calls.length, 8);
-    for (const module of ['desktop', 'core', 'tailscale', 'installer-stage']) assert.deepEqual(calls.filter(([name]) => name === module).map(([, method]) => method).sort(), ['env', 'list']);
+    assert.equal(calls.length, 4);
+    for (const module of ['desktop', 'installer-stage']) assert.deepEqual(calls.filter(([name]) => name === module).map(([, method]) => method).sort(), ['env', 'list']);
     const runtimes = components.filter(component => component.kind === 'Go runtime');
-    assert.deepEqual(runtimes.map(component => component.version), ['go1.27.3', 'go1.28.1']);
-    assert.deepEqual(runtimes[0].executables, ['Nootify', 'nootify-tsnet', 'nootify-installer-stage']);
-    assert.deepEqual(runtimes[1].executables, ['nootify-core']);
+    assert.deepEqual(runtimes.map(component => component.version), ['go1.27.3']);
+    assert.deepEqual(runtimes[0].executables, ['Nootify', 'nootify-installer-stage']);
     assert.equal(components.filter(component => component.kind === 'Go module').length, 1, 'shared dependencies remain deduplicated');
     const notices = await renderNotices('x86_64-pc-windows-msvc', runtimes, []);
-    assert.match(notices, /Go standard library go1\.27\.3[\s\S]*Built into: Nootify, nootify-tsnet[\s\S]*Go 1\.27 runtime license/);
-    assert.match(notices, /Go standard library go1\.28\.1[\s\S]*Built into: nootify-core[\s\S]*Go 1\.28 runtime license/);
+    assert.match(notices, /Go standard library go1\.27\.3[\s\S]*Built into: Nootify, nootify-installer-stage[\s\S]*Go 1\.27 runtime license/);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
@@ -88,8 +86,8 @@ test('notices reproduce shipped license files and fall back to SPDX texts of dec
     const packages = await npmPackages(join(dir, 'node_modules'));
     assert.deepEqual(packages.map(({ name }) => name).sort(), ['@scope/no-file', 'nested', 'see-file', 'with-file']);
     const notices = await renderNotices('aarch64-apple-darwin', modules, packages);
-    assert.match(notices, /- 2 Go runtime\/modules linked into the desktop app, notification core/);
-    assert.match(notices, /- 4 npm packages in service\/node_modules/);
+    assert.match(notices, /- 2 Go runtime\/modules linked into Nootify/);
+    assert.match(notices, /- 4 additional browser dependency packages/);
     assert.match(notices, /npm package: see-file 1\.0\.0\nLicense: SEE LICENSE IN terms\/EULA\.txt\n.*\n\n--- terms\/EULA\.txt ---\n\nEULA text of see-file\n/);
     assert.ok(notices.indexOf('Go module: declared 1.0.0') < notices.indexOf('Go module: dual 1.0.0'));
     assert.ok(notices.indexOf('Go module: dual 1.0.0') < notices.indexOf('npm package: @scope/no-file 3.0.0'));

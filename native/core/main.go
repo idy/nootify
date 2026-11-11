@@ -1,4 +1,4 @@
-package main
+package core
 
 import (
 	"bufio"
@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/signal"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -38,11 +37,7 @@ func (c *Core) Handle(ctx context.Context, method string, raw json.RawMessage, l
 		Status     string         `json:"status"`
 		Transport  string         `json:"transport_status"`
 		Error      string         `json:"error"`
-		Address    string         `json:"address"`
-		Token      string         `json:"token"`
-		Network    string         `json:"network"`
 		Event      Event          `json:"event"`
-		Tailnet    bool           `json:"tailnet_enabled"`
 		Automatic  bool           `json:"automatic"`
 		ChatID     string         `json:"chat_id"`
 		SenderID   string         `json:"sender_open_id"`
@@ -70,6 +65,8 @@ func (c *Core) Handle(ctx context.Context, method string, raw json.RawMessage, l
 		return map[string]any{"active": active}, err
 	case "provider.save":
 		return c.SaveProvider(raw)
+	case "provider.reconnect":
+		return c.ReconnectProvider(p.ID)
 	case "provider.delete":
 		return map[string]any{"deleted": true}, c.DeleteProvider(p.ID)
 	case "provider.default":
@@ -148,21 +145,6 @@ func (c *Core) Handle(ctx context.Context, method string, raw json.RawMessage, l
 		}
 		canceled, err := c.CanceledInbox(raw)
 		return map[string]any{"reconciled": true, "canceled": canceled}, err
-	case "dial.complete":
-		return map[string]any{"completed": true}, c.completeDial(p.RequestID, p.Address, p.Error, p.Token, p.Network)
-	case "transport.configure":
-		c.ops.Lock()
-		defer c.ops.Unlock()
-		before := c.store.Snapshot().Tailnet
-		err := c.store.Update(func(d *State) error { d.Tailnet = p.Tailnet; return nil })
-		if stateCommitted(err) && before != p.Tailnet {
-			for _, cfg := range c.store.Snapshot().Providers {
-				if cfg.Type == "remote" {
-					c.startProvider(cfg)
-				}
-			}
-		}
-		return map[string]any{"tailnet_enabled": p.Tailnet}, err
 	case "migration.import":
 		return c.Migrate(raw)
 	case "config.export":
@@ -443,7 +425,7 @@ func serveStdio(parent context.Context, c *Core, in io.Reader, out io.Writer) er
 			_ = write(rpcResponse{ID: 0, Error: &rpcError{"invalid_argument", "invalid request JSON"}})
 			continue
 		}
-		completion := req.Method == "delivery.complete" || req.Method == "dial.complete"
+		completion := req.Method == "delivery.complete"
 		if !completion && active.Load() >= 128 {
 			_ = write(rpcResponse{ID: req.ID, Error: &rpcError{"resource_exhausted", "too many concurrent requests"}})
 			continue
@@ -470,36 +452,49 @@ func serveStdio(parent context.Context, c *Core, in io.Reader, out io.Writer) er
 		}(req.rpcRequest)
 	}
 }
-func main() {
-	// The SDK's dispatcher constructor logs once before a custom logger can be
-	// installed. Keep all library writes away from the protocol descriptor.
-	protocolOut := os.Stdout
-	os.Stdout = os.Stderr
-	stateDir := flag.String("state-dir", "", "private state directory")
-	version := flag.Bool("version", false, "print protocol version")
-	flag.Parse()
+
+// ServeStdio preserves the legacy private protocol for compatibility. It takes
+// ownership of the streams and the core lifecycle. In-process callers should
+// instead pass an event callback to NewCore, then call Start, Handle, and Close.
+func ServeStdio(ctx context.Context, c *Core, in io.Reader, out io.Writer) error {
+	return serveStdio(ctx, c, in, out)
+}
+
+// RunStdio is the optional legacy command entry. It does not install process
+// signal handlers or change global stdio; its owner supplies cancellation and
+// must keep dependency logging away from the protocol output stream.
+func RunStdio(ctx context.Context, args []string, in io.Reader, out, stderr io.Writer) int {
+	flags := flag.NewFlagSet("nootify-core", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	stateDir := flags.String("state-dir", "", "private state directory")
+	version := flags.Bool("version", false, "print protocol version")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
+		return 2
+	}
 	if *version {
-		fmt.Fprintln(protocolOut, "nootify-core 1")
-		return
+		if _, err := fmt.Fprintln(out, "nootify-core 1"); err != nil {
+			return 1
+		}
+		return 0
 	}
 	if *stateDir == "" {
-		fmt.Fprintln(os.Stderr, "--state-dir is required")
-		os.Exit(2)
+		fmt.Fprintln(stderr, "--state-dir is required")
+		return 2
 	}
 	store, err := OpenStore(*stateDir)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "cannot open private core state")
-		os.Exit(1)
+		fmt.Fprintln(stderr, "cannot open private core state")
+		return 1
 	}
 	defer store.Close()
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
 	core, err := NewCore(ctx, store, nil)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "cannot initialize core state")
-		os.Exit(1)
+		fmt.Fprintln(stderr, "cannot initialize core state")
+		return 1
 	}
-	if err = serveStdio(ctx, core, os.Stdin, protocolOut); err != nil {
-		fmt.Fprintln(os.Stderr, "stdio connection closed with an error")
+	if err = ServeStdio(ctx, core, in, out); err != nil {
+		fmt.Fprintln(stderr, "stdio connection closed with an error")
+		return 1
 	}
+	return 0
 }

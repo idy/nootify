@@ -3,20 +3,21 @@
  * Synthetic browser preview. Build first (`npm run build`), then launch this file
  * through preview_start. Only 127.0.0.1:9427 is used; an occupied port is an error.
  * Open the printed ordinary local URL to edit without an authorization link.
- * An optional #nootify-ui= URL exercises the existing encrypted transport.
- * All fixture mutations disappear on restart. No State, EventLog, agent discovery,
+ * The fixture serves the same browser modules embedded by the native Go host.
+ * All fixture mutations disappear on restart. No storage, agent discovery,
  * provider core, OS services, or credential resolvers are constructed here.
  * Personal channel authorization is simulated (completes after fifteen status reads).
  * OAuth sign-in, legacy registration, backup/import, and folder actions fail explicitly.
  */
 import QRCode from 'qrcode';
-import { randomBytes } from 'node:crypto';
-import { resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
-import { createServiceHost } from '../dist/src/server.js';
-import { requestOwnerUiSession } from '../dist/src/ui-owner-auth.js';
-import { uiSessionUrl } from '../dist/src/ui-session-host.js';
-import { HttpError } from '../dist/src/types.js';
+import { createServer } from 'node:http';
+import { readFile } from 'node:fs/promises';
+import { extname, resolve, sep } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+class HttpError extends Error {
+  constructor(status, message) { super(message); this.status = status; }
+}
 
 export const PREVIEW_ORIGIN = 'http://127.0.0.1:9427';
 const copy = value => structuredClone(value);
@@ -255,8 +256,6 @@ export function createPreviewFixture() {
     { open_id: 'ou_previewrobin', name: 'Preview · Robin Zhou', en_name: 'Robin Zhou' },
   ];
   const feishu = () => providerRows.find(provider => provider.id === 'preview-feishu') ?? providerRows.find(provider => provider.type === 'feishu');
-  let tailState = { enabled: true, status: 'connected', deviceName: 'preview-demo-nootify', account: 'preview@example.invalid',
-    address: '192.0.2.27', dnsName: 'preview-demo.invalid', sharing: 'off', login: { status: 'idle' } };
   const channel = () => ({ name: 'feishu', configured: Boolean(feishu()?.enabled), recipient: feishu()?.recipient_open_id, groups: sessions.length });
   const settings = {
     async page() { return { version: '0.2.0-preview', exports_dir: '/preview/demo/exports (in-memory only)', lark: {
@@ -280,18 +279,11 @@ export function createPreviewFixture() {
       report('providers', 'Updated the demo recipient in memory.');
     },
     async larkSecret() { return { app_id: feishu()?.app_id, app_secret: secrets.get(feishu()?.id) ?? '' }; },
-    async tailscale() { return copy(tailState); },
-    async setTailscaleEnabled(enabled) {
-      enabled = boolean(enabled, 'enabled');
-      tailState = { ...tailState, enabled, status: enabled ? 'connected' : 'disabled', sharing: 'off' };
-      report('host', 'Changed demo Tailscale display state; no device or service was started.');
-    },
     startGitHubLogin: unavailable('GitHub sign-in'), cancelGitHubLogin: unavailable('GitHub sign-in'), signOutGitHub: unavailable('GitHub sign-out'),
     saveLark: unavailable('legacy Feishu setup; use the Providers demo editor'), clearLark: unavailable('legacy Feishu removal; use the Providers demo editor'),
     startLarkRegistration: unavailable('Feishu registration'), cancelLarkRegistration: unavailable('Feishu registration'),
     exportConfig: unavailable('configuration export'), previewImport: unavailable('configuration import'), importConfig: unavailable('configuration import'),
-    reveal: unavailable('opening system folders'), startTailscaleLogin: unavailable('Tailscale sign-in'),
-    cancelTailscaleLogin: unavailable('Tailscale sign-in'), logoutTailscale: unavailable('Tailscale sign-out'),
+    reveal: unavailable('opening system folders'),
   };
   const modules = ['sessions', 'providers', 'pulls', 'agents'].map(name => ({
     name, status: () => 'ready',
@@ -304,10 +296,102 @@ export function createPreviewFixture() {
   return { modules, logs, options: { providers, agents, pulls, settings, channel } };
 }
 
+export function createPreviewServer(fixture = createPreviewFixture()) {
+  const { providers, agents, pulls, settings, channel } = fixture.options;
+  const publicDirectory = fileURLToPath(new URL('../public/', import.meta.url));
+  const mime = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.woff2': 'font/woff2', '.ttf': 'font/ttf' };
+  const editable = value => ({ ...value, editable: true });
+  return createServer(async (request, response) => {
+    const json = (value, status = 200) => {
+      response.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+      response.end(JSON.stringify(value));
+    };
+    try {
+      const origin = `http://${request.headers.host}`;
+      if (![PREVIEW_ORIGIN, 'http://localhost:9427'].includes(origin) || request.headers.origin && request.headers.origin !== origin
+        || request.headers['sec-fetch-site'] && !['none', 'same-origin'].includes(request.headers['sec-fetch-site'])) {
+        throw new HttpError(403, 'Preview requests must use the local origin');
+      }
+      const url = new URL(request.url, origin);
+      const path = url.pathname;
+      if (!path.startsWith('/ui/api/')) {
+        if (request.method !== 'GET' || url.search) throw new HttpError(404, 'No such preview asset');
+        let asset;
+        if (path === '/' || path === '/ui' || path === '/ui/') asset = 'index.html';
+        else if (path === '/ui/styles.css') asset = 'styles.css';
+        else if (path.startsWith('/ui/vendor/magpie/')) asset = path.slice(4);
+        else if (path.startsWith('/ui/')) asset = path.slice(1);
+        if (!asset || !mime[extname(asset)]) throw new HttpError(404, 'No such preview asset');
+        const file = resolve(publicDirectory, asset);
+        if (!file.startsWith(resolve(publicDirectory) + sep)) throw new HttpError(404, 'No such preview asset');
+        let bytes;
+        try { bytes = await readFile(file); } catch { throw new HttpError(404, 'No such preview asset'); }
+        response.writeHead(200, { 'content-type': mime[extname(file)], 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+        response.end(bytes);
+        return;
+      }
+      if (!['GET', 'POST'].includes(request.method)) throw new HttpError(405, 'Unsupported preview method');
+      let body = {};
+      if (request.method === 'POST') {
+        if (request.headers['x-nootify-ui'] !== '1') throw new HttpError(403, 'UI request header required');
+        const chunks = []; let bytes = 0;
+        for await (const chunk of request) {
+          bytes += chunk.length;
+          if (bytes > 65536) throw new HttpError(413, 'Preview request is too large');
+          chunks.push(chunk);
+        }
+        try { body = JSON.parse(Buffer.concat(chunks).toString() || '{}'); } catch { throw new HttpError(400, 'Invalid JSON'); }
+        if (!object(body)) throw new HttpError(400, 'Expected a JSON object');
+      }
+      const read = request.method === 'GET';
+      if (path === '/ui/api/snapshot' && read) {
+        const { body: sessions } = await fixture.modules[0].handle({ method: 'GET', path: '/v1/sessions' });
+        const snapshot = pulls.snapshot();
+        return json({ time: new Date().toISOString(), sessions, logs: fixture.logs.recent(),
+          modules: fixture.modules.map(module => ({ name: module.name, status: module.status() })), channel: channel(),
+          pulls: { internal: snapshot.internal.length, upstream: snapshot.upstream.length, followed: snapshot.repositories.filter(repo => repo.followed).length, ...snapshot.refresh },
+          access: { owner_authenticated: false } });
+      }
+      if (path === '/ui/api/providers') return json(editable(await (read ? providers.page() : providers.action(body))));
+      if (path === '/ui/api/providers/registration' && !read) return json(await providers.registration(body));
+      if (path === '/ui/api/providers/setup' && !read) return json(await providers.setup(body.id));
+      if (path === '/ui/api/settings/remote') return json(editable(await (read ? providers.remote() : providers.configureRemote(body))));
+      if (path === '/ui/api/settings/remote/secret' && !read) return json(await providers.remoteSecret());
+      if (path === '/ui/api/agents') {
+        if (!read) await agents.set(body.agent, body.enabled);
+        return json(editable({ agents: await agents.list() }));
+      }
+      if (path === '/ui/api/pulls' && read) return json(editable(pulls.snapshot()));
+      if (path === '/ui/api/pulls/refresh' && !read) { pulls.refresh(); return json(editable(pulls.snapshot())); }
+      if (path === '/ui/api/repos') {
+        if (!read) await pulls.setChoice(body.repository, body.follow);
+        return json(editable({ repositories: pulls.snapshot().repositories }));
+      }
+      if (path === '/ui/api/settings' && read) return json(editable(await settings.page()));
+      if (path === '/ui/api/settings/github' && read) return json(editable(await settings.github()));
+      if (path === '/ui/api/settings/lark/registration' && !read && body.action === 'status') return json(await settings.larkRegistration());
+      if (path === '/ui/api/settings/lark/permissions' && !read) return json(await settings.larkSetup());
+      if (path === '/ui/api/settings/lark/secret' && !read) return json(await settings.larkSecret());
+      if (path === '/ui/api/settings/lark/recipients/stream' && !read) {
+        const directory = await settings.larkRecipients();
+        response.writeHead(200, { 'content-type': 'application/x-ndjson', 'cache-control': 'no-store' });
+        response.end(JSON.stringify({ type: 'complete', directory }) + '\n');
+        return;
+      }
+      if (path === '/ui/api/settings/recipient' && !read) {
+        await settings.setRecipient(body.open_id, body.app_id);
+        return json(editable(await settings.page()));
+      }
+      throw new HttpError(409, 'Preview only: this operation is unavailable. No real service or filesystem action was performed.');
+    } catch (error) {
+      if (!response.headersSent) json({ error: error.message }, error.status ?? 500);
+      else response.destroy();
+    }
+  });
+}
+
 export async function main() {
-  const fixture = createPreviewFixture();
-  const secret = randomBytes(32).toString('base64url');
-  const server = createServiceHost(fixture.modules, secret, fixture.logs, fixture.options);
+  const server = createPreviewServer();
   const close = () => { server.closeAllConnections(); server.close(); };
   try {
     await new Promise((resolveListen, reject) => {
@@ -315,12 +399,9 @@ export async function main() {
       server.listen(9427, '127.0.0.1', () => { server.off('error', reject); resolveListen(); });
     });
     server.on('error', error => { console.error(`Nootify Preview failed: ${error.message}`); close(); process.exitCode = 1; });
-    const capability = await requestOwnerUiSession(PREVIEW_ORIGIN, secret);
     console.log('Nootify Preview/demo ready. Synthetic data only; edits reset on restart.');
     console.log(`Preview URL: ${PREVIEW_ORIGIN}/#/providers`);
-    console.log(`Optional encrypted preview URL: ${uiSessionUrl(PREVIEW_ORIGIN, capability, '#/providers')}`);
-    console.log('Routes: #/providers, #/logs, #/sessions, #/agents, #/repos, #/pulls/internal, #/pulls/upstream, #/settings/remote, #/settings/tailscale, #/settings/lark');
-    console.log('Direct local preview supports editing and reload without an authorization link.');
+    console.log('Routes: #/providers, #/logs, #/sessions, #/agents, #/repos, #/pulls/internal, #/pulls/upstream, #/settings/remote, #/settings/lark');
     process.once('SIGINT', close);
     process.once('SIGTERM', close);
     return server;

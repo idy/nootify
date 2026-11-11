@@ -44,32 +44,19 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version-file: desktop/go.mod
-          cache-dependency-path: |
-            desktop/go.sum
-            native/tailscale/go.sum
-            native/core/go.sum
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
 
-      - name: Test embedded Tailscale client
-        working-directory: native/tailscale
-        run: go test ./...
-
-      - name: Test notification provider core
-        working-directory: native/core
-        run: go test ./...
-
-      - name: Test and vet MyGo desktop module
-        working-directory: desktop
+      - run: npm ci
+      - name: Build embedded browser assets before Go compilation
+        run: npm run build
+      - name: Test and vet unified Go backend and desktop
+        shell: bash
         run: |
           go test ./...
           go vet ./...
 
-      - uses: actions/cache@v6
-        with:
-          path: .cache/node
-          key: node-runtime-${{ matrix.target }}-${{ hashFiles('scripts/build-targets.mjs', 'scripts/stage-service.mjs') }}
 
-      - run: npm ci
       - run: npm test
 
       # macOS keeps its ad-hoc app/DMG signing; both platforms produce signed

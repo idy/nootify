@@ -2,8 +2,9 @@ node_modules/
 dist/
 *.tsbuildinfo
 build/
-# Node.js downloads cached by scripts/stage-service.mjs
+# Local build caches and generated browser assets.
 .cache/
+/public/ui/
 .impeccable/review/
 .claude/launch.json
 

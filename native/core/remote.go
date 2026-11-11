@@ -1,4 +1,4 @@
-package main
+package core
 
 import (
 	"context"
@@ -7,12 +7,9 @@ import (
 	"crypto/subtle"
 	"crypto/tls"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
-	"io"
 	"net"
 	"net/netip"
-	"strings"
 	"sync"
 	"time"
 
@@ -59,6 +56,23 @@ func loadRemoteCertificate(r RemoteConfig) (*tls.Certificate, error) {
 	return &cert, err
 }
 
+// Plaintext wildcard listeners may accept only loopback and private LAN peers.
+// Reject other sockets before handing them to gRPC or reading credentials.
+type privateRemoteListener struct{ net.Listener }
+
+func (l privateRemoteListener) Accept() (net.Conn, error) {
+	for {
+		conn, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		if privateTCPPeer(conn.RemoteAddr()) {
+			return conn, nil
+		}
+		_ = conn.Close()
+	}
+}
+
 // prepareServer owns a bound socket but does not expose it until state commits.
 func (c *Core) prepareServer(r RemoteConfig) (*remoteServer, error) {
 	if err := validateRemote(r); err != nil {
@@ -71,6 +85,9 @@ func (c *Core) prepareServer(r RemoteConfig) (*remoteServer, error) {
 	listener, err := net.Listen("tcp", r.Listen)
 	if err != nil {
 		return nil, fault("unavailable", "remote listener could not be started")
+	}
+	if cert == nil {
+		listener = privateRemoteListener{Listener: listener}
 	}
 	authContext, revokeAuth := context.WithCancel(c.ctx)
 	s := &remoteServer{core: c, listener: listener, config: r, certificate: cert, authContext: authContext, revokeAuth: revokeAuth}
@@ -545,41 +562,41 @@ type remoteProvider struct {
 	retryWait func(context.Context, time.Duration) error
 }
 
-func numericLoopbackAddress(address string) bool {
+// Plaintext authority must be a numeric loopback or private LAN IP. DNS results
+// never grant permission to send credentials without TLS.
+func numericPrivateAddress(address string) bool {
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
 		return false
 	}
 	ip, err := netip.ParseAddr(host)
-	return err == nil && ip.Zone() == "" && ip.Unmap().IsLoopback()
+	return err == nil && ip.Zone() == "" && (ip.Unmap().IsLoopback() || ip.Unmap().IsPrivate())
 }
 
-// A Tailnet address is only eligible for plaintext over the private embedded
-// bridge. Eligibility never authorizes a direct plaintext network connection.
 func validateRemoteTransport(p ProviderConfig) error {
-	if p.TLS || numericLoopbackAddress(p.Address) || isTailnet(p.Address) {
+	if p.TLS || numericPrivateAddress(p.Address) {
 		return nil
 	}
-	return fault("invalid_argument", "remote providers require TLS unless using numeric loopback or the embedded encrypted bridge")
+	return fault("invalid_argument", "remote providers require TLS unless using a numeric loopback or private LAN address")
 }
 
-// Only the matching private dial.complete path creates this marker. A generic
-// loopback forwarding endpoint or a Tailnet hostname alone proves no encryption.
-type embeddedRemoteConn struct{ net.Conn }
+func privateTCPPeer(address net.Addr) bool {
+	peer, ok := address.(*net.TCPAddr)
+	return ok && peer != nil && (peer.IP.IsLoopback() || peer.IP.IsPrivate())
+}
+
+// Check the connected peer before gRPC can send bearer or identity metadata.
 type guardedRemoteCredentials struct {
 	credentials.TransportCredentials
-	loopback bool
 }
 
 func (g guardedRemoteCredentials) Clone() credentials.TransportCredentials {
-	return guardedRemoteCredentials{TransportCredentials: g.TransportCredentials.Clone(), loopback: g.loopback}
+	return guardedRemoteCredentials{TransportCredentials: g.TransportCredentials.Clone()}
 }
 func (g guardedRemoteCredentials) ClientHandshake(ctx context.Context, authority string, conn net.Conn) (net.Conn, credentials.AuthInfo, error) {
-	_, embedded := conn.(*embeddedRemoteConn)
-	address, tcp := conn.RemoteAddr().(*net.TCPAddr)
-	if !embedded && !(g.loopback && tcp && address.IP.IsLoopback()) {
+	if !privateTCPPeer(conn.RemoteAddr()) {
 		_ = conn.Close()
-		return nil, nil, fault("permission_denied", "plaintext remote transport is not protected by the embedded encrypted bridge")
+		return nil, nil, fault("permission_denied", "plaintext remote transport requires a loopback or private LAN peer")
 	}
 	return g.TransportCredentials.ClientHandshake(ctx, authority, conn)
 }
@@ -590,7 +607,7 @@ func newRemoteProvider(c *Core, p ProviderConfig) *remoteProvider {
 		r.initErr = err
 		return r
 	}
-	var tc credentials.TransportCredentials = guardedRemoteCredentials{TransportCredentials: insecure.NewCredentials(), loopback: numericLoopbackAddress(p.Address)}
+	var tc credentials.TransportCredentials = guardedRemoteCredentials{TransportCredentials: insecure.NewCredentials()}
 	if p.TLS {
 		host, _, _ := net.SplitHostPort(p.Address)
 		serverName := p.ServerName
@@ -600,9 +617,6 @@ func newRemoteProvider(c *Core, p ProviderConfig) *remoteProvider {
 		tc = credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12, ServerName: serverName})
 	}
 	r.conn, r.initErr = grpc.NewClient("passthrough:///"+p.Address, grpc.WithTransportCredentials(tc), grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
-		if !p.TLS && !numericLoopbackAddress(p.Address) && (!isTailnet(p.Address) || !c.store.Snapshot().Tailnet) {
-			return nil, fault("permission_denied", "plaintext remote connections require the enabled embedded encrypted bridge")
-		}
 		return c.dial(ctx, p.Address)
 	}), grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(2*maxPayload), grpc.MaxCallSendMsgSize(2*maxPayload)))
 	if r.initErr == nil {
@@ -816,146 +830,12 @@ func (p *remoteProvider) InboxConsumed(ctx context.Context, m MessageRef) (bool,
 	return out.Consumed, nil
 }
 
-type dialResult struct {
-	Address string
-	Error   string
-	Token   string
-	Network string
-}
-
-const embeddedTunnelHandshakePrefix = "NOOTIFY-TUNNEL/1 "
-const embeddedTunnelHandshakeTimeout = 3 * time.Second
-
-func validTunnelToken(token string) bool {
-	if len(token) != 64 || strings.ToLower(token) != token {
-		return false
-	}
-	_, err := hex.DecodeString(token)
-	return err == nil
-}
-
-func authenticateEmbeddedTunnel(ctx context.Context, conn net.Conn, token string) error {
-	failure := fault("unavailable", "embedded tunnel authentication failed")
-	if !validTunnelToken(token) {
-		return failure
-	}
-	deadline := time.Now().Add(embeddedTunnelHandshakeTimeout)
-	if until, ok := ctx.Deadline(); ok && until.Before(deadline) {
-		deadline = until
-	}
-	if err := conn.SetDeadline(deadline); err != nil {
-		return failure
-	}
-	// Cancellation must interrupt a blocked read or write even without a caller
-	// deadline. Wait for a racing close before returning the socket to gRPC.
-	stopped := make(chan struct{})
-	stop := context.AfterFunc(ctx, func() { conn.Close(); close(stopped) })
-	defer func() {
-		if !stop() {
-			<-stopped
-		}
-	}()
-	frame := embeddedTunnelHandshakePrefix + token + "\n"
-	if n, err := io.WriteString(conn, frame); err != nil || n != len(frame) {
-		return failure
-	}
-	var ack [1]byte
-	if _, err := io.ReadFull(conn, ack[:]); err != nil || ack[0] != 1 || ctx.Err() != nil {
-		return failure
-	}
-	if err := conn.SetDeadline(time.Time{}); err != nil {
-		return failure
-	}
-	return nil
-}
-
-func isTailnet(address string) bool {
-	host, _, err := net.SplitHostPort(address)
-	if err != nil {
-		return false
-	}
-	host = strings.TrimSuffix(strings.ToLower(host), ".")
-	if strings.HasSuffix(host, ".ts.net") {
-		return true
-	}
-	ip, err := netip.ParseAddr(host)
-	if err != nil {
-		return false
-	}
-	ip = ip.Unmap()
-	return netip.MustParsePrefix("100.64.0.0/10").Contains(ip) || netip.MustParsePrefix("fd7a:115c:a1e0::/48").Contains(ip)
-}
 func (c *Core) dial(ctx context.Context, address string) (net.Conn, error) {
-	target := address
-	embedded := false
-	var token, network string
-	if c.store.Snapshot().Tailnet && isTailnet(address) {
-		id := uid()
-		ch := make(chan dialResult, 1)
-		c.dialMu.Lock()
-		if len(c.dials) >= 32 {
-			c.dialMu.Unlock()
-			return nil, fault("resource_exhausted", "too many pending tunnels")
-		}
-		c.dials[id] = ch
-		c.dialMu.Unlock()
-		defer func() { c.dialMu.Lock(); delete(c.dials, id); c.dialMu.Unlock() }()
-		if c.emit == nil {
-			return nil, fault("unavailable", "tunnel bridge is unavailable")
-		}
-		if err := c.emit("dial", map[string]any{"request_id": id, "address": address}); err != nil {
-			return nil, err
-		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-c.ctx.Done():
-			return nil, c.ctx.Err()
-		case result := <-ch:
-			if result.Error != "" {
-				return nil, fault("unavailable", "embedded tunnel failed")
-			}
-			target = result.Address
-			token = result.Token
-			network = result.Network
-			embedded = true
-		}
+	dialCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	stop := context.AfterFunc(c.ctx, cancel)
+	defer func() { stop(); cancel() }()
+	if c.ctx.Err() != nil {
+		return nil, c.ctx.Err()
 	}
-	if embedded {
-		authCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		stop := context.AfterFunc(c.ctx, cancel)
-		defer func() { stop(); cancel() }()
-		conn, err := dialEmbeddedEndpoint(authCtx, network, target)
-		if err != nil {
-			return nil, err
-		}
-		if err := authenticateEmbeddedTunnel(authCtx, conn, token); err != nil {
-			conn.Close()
-			return nil, err
-		}
-		return &embeddedRemoteConn{Conn: conn}, nil
-	}
-	return (&net.Dialer{Timeout: 15 * time.Second}).DialContext(ctx, "tcp", target)
-}
-func (c *Core) completeDial(id, address, msg, token, network string) error {
-	if msg == "" {
-		if !validTunnelToken(token) {
-			return fault("invalid_argument", "tunnel authentication token is required")
-		}
-		if !validEmbeddedEndpoint(network, address) {
-			return fault("invalid_argument", "tunnel endpoint must be private to the local owner")
-		}
-	}
-	c.dialMu.Lock()
-	defer c.dialMu.Unlock()
-	ch := c.dials[id]
-	if ch == nil {
-		return fault("not_found", "dial request does not exist")
-	}
-	select {
-	case ch <- dialResult{Address: address, Error: msg, Token: token, Network: network}:
-		return nil
-	default:
-		return fault("conflict", "dial request already completed")
-	}
+	return (&net.Dialer{}).DialContext(dialCtx, "tcp", address)
 }

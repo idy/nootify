@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { parseHTML } from 'linkedom';
 import { RecipientListRenderer, type RecipientListOptions } from '../src/recipient-list.js';
-import type { LarkRecipient } from '../src/lark-directory.js';
+import type { LarkRecipient } from '../src/ui-types.js';
 import { mergeRecipients } from '../src/lark-profile.js';
 
 const one: LarkRecipient = { open_id: 'ou_one', name: 'One', avatar_url: 'https://image.feishucdn.com/one.png' };
