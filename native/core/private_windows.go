@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"time"
 
 	"golang.org/x/sys/windows"
 )
@@ -65,5 +67,25 @@ func replaceStateFile(from, to string) error {
 	if err != nil {
 		return err
 	}
-	return windows.MoveFileEx(source, target, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH)
+	return retryStateReplacement(func() error {
+		return windows.MoveFileEx(source, target, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH)
+	})
+}
+
+// MoveFileEx cannot replace an open destination, even when its reader allows
+// FILE_SHARE_DELETE. A brief state reader (or scanner) must not strand a delivery
+// completion after the adapter has already accepted it. Retry only the atomic
+// replacement, keeping the synced temporary file and running the mutation once.
+func retryStateReplacement(replace func() error) error {
+	deadline := time.Now().Add(time.Second)
+	for delay := time.Millisecond; ; {
+		err := replace()
+		if err == nil || (!errors.Is(err, windows.ERROR_ACCESS_DENIED) && !errors.Is(err, windows.ERROR_SHARING_VIOLATION)) || !time.Now().Before(deadline) {
+			return err
+		}
+		time.Sleep(delay)
+		if delay < 16*time.Millisecond {
+			delay *= 2
+		}
+	}
 }
