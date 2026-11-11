@@ -409,6 +409,13 @@ func Run(parent context.Context, args []string, version string, stdout, stderr i
 	}
 	result, err = request(method, path, body)
 	if err != nil {
+		if command == "thread-open" {
+			params, _ := body.(map[string]any)
+			kind, _ := params["adapter"].(string)
+			if kind == "trae" || kind == "workbuddy" {
+				return true, fmt.Errorf("%w; retry thread-open with --agent %s --session-id %s", err, kind, params["session_id"])
+			}
+		}
 		return true, err
 	}
 	return true, json.NewEncoder(stdout).Encode(result)

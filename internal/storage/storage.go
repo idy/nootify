@@ -179,20 +179,25 @@ func privateToken(path string) (string, error) {
 		if _, err = rand.Read(key); err != nil {
 			return "", err
 		}
-		f, e := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+		// Publish only a complete, synced token. An exclusive hard link keeps
+		// concurrent creators from replacing the winner or observing an empty file.
+		f, e := os.CreateTemp(filepath.Dir(path), ".auth-token-*")
+		if e != nil {
+			return "", e
+		}
+		temporary := f.Name()
+		defer os.Remove(temporary)
+		_, e = f.WriteString(hex.EncodeToString(key))
 		if e == nil {
-			_, e = f.WriteString(hex.EncodeToString(key))
-			if e == nil {
-				e = f.Sync()
-			}
-			ce := f.Close()
-			if e == nil {
-				e = ce
-			}
-			if e != nil {
-				return "", e
-			}
-		} else if !errors.Is(e, os.ErrExist) {
+			e = f.Sync()
+		}
+		if closeErr := f.Close(); e == nil {
+			e = closeErr
+		}
+		if e != nil {
+			return "", e
+		}
+		if e = os.Link(temporary, path); e != nil && !errors.Is(e, os.ErrExist) {
 			return "", e
 		}
 		b, err = os.ReadFile(path)
