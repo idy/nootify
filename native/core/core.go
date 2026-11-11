@@ -818,7 +818,14 @@ func summary(p ProviderConfig, status string) ProviderSummary {
 			status = "disabled"
 		}
 	}
-	return ProviderSummary{ID: p.ID, Name: p.Name, Type: p.Type, Enabled: p.Enabled, Status: status, AppID: p.AppID, Recipient: p.Recipient, Address: p.Address, TLS: p.TLS, ServerName: p.ServerName, SecretSet: p.AppSecret != "", TokenSet: p.Token != ""}
+	connectionType := FeishuConnectionType("")
+	if p.Type == "feishu" {
+		connectionType = p.ConnectionType
+		if connectionType == "" {
+			connectionType = FeishuConnectionBot
+		}
+	}
+	return ProviderSummary{ID: p.ID, Name: p.Name, Type: p.Type, ConnectionType: connectionType, Enabled: p.Enabled, Status: status, AppID: p.AppID, Recipient: p.Recipient, Address: p.Address, TLS: p.TLS, ServerName: p.ServerName, SecretSet: p.AppSecret != "", TokenSet: p.Token != ""}
 }
 func remoteSummary(d State, status string) RemoteSummary {
 	r := RemoteSummary{Enabled: d.Remote.Enabled, Listen: d.Remote.Listen, Status: status, TLS: d.Remote.CertFile != "", TokenSet: d.Remote.Token != "", CertFile: d.Remote.CertFile, KeyFile: d.Remote.KeyFile, Peers: []PeerSummary{}}

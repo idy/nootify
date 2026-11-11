@@ -19,6 +19,8 @@ export interface UiContext {
   via?: 'loopback' | 'tailnet';
   /** Verified private bearer or authenticated encrypted UI operation; never inferred from Host/header/cookie alone. */
   ownerAuthenticated?: boolean;
+  /** Direct connection from a loopback peer on the local listener, checked by the host. */
+  localAccess?: boolean;
   ownerUiCommand?: string;
 }
 
@@ -26,6 +28,12 @@ const policy = "default-src 'self'; script-src 'self'; style-src 'self'; img-src
 const assets = new Map([
   ['/', { path: new URL('../../public/index.html', import.meta.url), type: 'text/html; charset=utf-8' }],
   ['/ui/styles.css', { path: new URL('../../public/styles.css', import.meta.url), type: 'text/css; charset=utf-8' }],
+  // Pinned same-origin Magpie assets; keep an explicit allowlist at the trusted UI boundary.
+  ...[
+    ...['magpie', 'tokens', 'fonts', 'base', 'components', 'layout'].map(name => [`css/${name}.css`, 'text/css; charset=utf-8']),
+    ...['montserrat-latin', 'monda-latin', 'lato-regular-latin', 'lato-bold-latin'].map(name => [`fonts/${name}.woff2`, 'font/woff2']),
+    ...['icons', 'check', 'caret-down', 'spinner'].map(name => [`icons/${name}.svg`, 'image/svg+xml']),
+  ].map(([file, type]) => [`/ui/vendor/magpie/${file}`, { path: new URL(`../../public/vendor/magpie/${file}`, import.meta.url), type: type! }] as const),
   ['/ui/fonts.css', { path: new URL('../../desktop/fonts.css', import.meta.url), type: 'text/css; charset=utf-8' }],
   ...['montserrat-latin.woff2', 'monda-latin.woff2', 'lato-regular-latin.woff2', 'lato-bold-latin.woff2'].map(name =>
     [`/ui/fonts/${name}`, { path: new URL(`../../desktop/fonts/${name}`, import.meta.url), type: 'font/woff2' }] as const),
@@ -118,10 +126,27 @@ async function settingsAction(request: IncomingMessage, path: string, settings: 
 }
 /** Read-only page data plus page actions: a background GitHub refresh, repository follow choices, and (on this Mac only) agent prompts and settings. */
 export async function serveUi(request: IncomingMessage, response: ServerResponse, path: string, context: UiContext): Promise<boolean> {
-  const editable = context.via !== 'tailnet' && context.ownerAuthenticated === true;
+  const editable = context.via !== 'tailnet' && (context.localAccess === true || context.ownerAuthenticated === true);
   if (request.method === 'POST' && path.startsWith('/ui/api/') && !editable
     && (context.via !== 'tailnet' || path.startsWith('/ui/api/settings/') || path === '/ui/api/providers' || path === '/ui/api/agents')) {
     request.resume(); json(response, 403, { error: 'Service owner authorization is required for local settings' }); return true;
+  }
+  // Registration/status/permission details require local UI access, including
+  // reads: authorization URLs must never leak through a public GET.
+  if (path === '/ui/api/providers/registration' || path === '/ui/api/providers/setup') {
+    if (!editable || request.headers['x-nootify-ui'] !== '1') {
+      request.resume(); json(response, 403, { error: 'Channel authorization requires the local owner UI' });
+    } else if (request.method !== 'POST') {
+      request.resume(); json(response, 405, { error: 'Channel authorization requires POST' });
+    } else {
+      try {
+        const body = await smallJson(request);
+        if (path.endsWith('/registration') && context.providers?.registration) json(response, 200, await context.providers.registration(body));
+        else if (path.endsWith('/setup') && context.providers?.setup && typeof body.id === 'string') json(response, 200, await context.providers.setup(body.id));
+        else json(response, 400, { error: 'Channel authorization is unavailable or the channel ID is missing' });
+      } catch (error) { const failure = settingsError(error); json(response, failure.status, failure); }
+    }
+    return true;
   }
   const providerRoute = path === '/ui/api/providers' || path === '/ui/api/settings/remote' || path === '/ui/api/settings/remote/secret';
   if (providerRoute && (request.method === 'GET' || request.method === 'POST')) {

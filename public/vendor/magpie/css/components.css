@@ -1,0 +1,289 @@
+/*
+ * Magpie Design System: components.
+ * Every class is prefixed `mds-`. State is read from native attributes where
+ * one exists (disabled, aria-selected, aria-current, aria-busy, :checked) and
+ * colour intent from data-tone="neutral|accent|good|warn|error".
+ */
+
+/* ---- Typography roles ------------------------------------------------ */
+/* These explicit families also work when a host page omits base.css. */
+:where(.mds-card, .mds-group, .mds-section-heading, .mds-note, .mds-notice, .mds-status, .mds-check, .mds-loading, .mds-toast, .mds-dialog, .mds-code) { font-family: var(--mds-font); }
+.mds-title { font: 600 var(--mds-text-title)/1.4 var(--mds-font-display); text-wrap: balance; }
+.mds-heading { font: 400 var(--mds-text-heading)/1.5 var(--mds-font-heading); text-wrap: balance; }
+.mds-button, .mds-link-button, .mds-icon-button, .mds-pill { font-family: var(--mds-font-action); font-weight: 500; }
+.mds-input:not(.mds-mono), .mds-select:not(.mds-mono), .mds-textarea:not(.mds-mono) { font-family: var(--mds-font); }
+
+/* ---- Utilities ------------------------------------------------------- */
+/* Components set display, so restate [hidden] for pages that skip base.css. */
+:is([class^="mds-"], [class*=" mds-"])[hidden] { display: none !important; }
+.mds-icon { width: 16px; height: 16px; flex: 0 0 auto; fill: currentColor; stroke: none; }
+.mds-mono { font-family: var(--mds-mono); font-size: var(--mds-text-code); }
+.mds-visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.mds-tabular { font-variant-numeric: tabular-nums; }
+
+/* Tone resolves on the element that names it, so it follows nested themes. */
+[data-tone="neutral"] { --mds-tone: var(--mds-faint); --mds-tone-ink: var(--mds-ink-soft); }
+[data-tone="accent"] { --mds-tone: var(--mds-accent-ink); --mds-tone-ink: var(--mds-accent-ink); }
+[data-tone="good"] { --mds-tone: var(--mds-good); --mds-tone-ink: var(--mds-good-ink); }
+[data-tone="warn"] { --mds-tone: var(--mds-warn); --mds-tone-ink: var(--mds-warn); }
+[data-tone="error"] { --mds-tone: var(--mds-error); --mds-tone-ink: var(--mds-error); }
+
+/* ---- Buttons --------------------------------------------------------- */
+.mds-button {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  min-height: var(--mds-control-height); padding: 6px 12px;
+  border: 1px solid var(--mds-line-strong); border-radius: var(--mds-radius-sm);
+  background: var(--mds-raised); color: var(--mds-ink);
+  font-size: var(--mds-text-note); font-weight: 500; line-height: 1.5; white-space: nowrap;
+  transition: background-color var(--mds-duration-fast), border-color var(--mds-duration-fast), color var(--mds-duration-fast);
+}
+.mds-button:hover:not(:disabled) { background: var(--mds-button-hover); }
+.mds-button .mds-icon { width: 14px; height: 14px; }
+.mds-button--primary { padding-inline: 16px; border-color: var(--mds-accent); background: var(--mds-accent); color: var(--mds-on-accent); }
+.mds-button--primary:hover:not(:disabled) { border-color: var(--mds-accent-hover); background: var(--mds-accent-hover); }
+.mds-button--subtle { border-color: transparent; background: transparent; color: var(--mds-ink-subtle); }
+.mds-button--subtle:hover:not(:disabled) { background: var(--mds-subtle-hover); color: var(--mds-ink); }
+.mds-button--small { min-height: 32px; padding: 4px 10px; }
+
+.mds-link-button {
+  min-height: 28px; padding: 4px 0; border: 0; background: transparent;
+  color: var(--mds-ink-subtle); font-size: var(--mds-text-note); text-align: start;
+}
+.mds-link-button:hover:not(:disabled) { color: var(--mds-ink-strong); }
+
+.mds-icon-button {
+  display: grid; place-items: center; width: 32px; height: 32px; padding: 0;
+  border: 0; border-radius: var(--mds-radius-sm); background: transparent; color: var(--mds-muted);
+}
+.mds-icon-button:hover:not(:disabled) { background: var(--mds-icon-hover); color: var(--mds-ink); }
+
+.mds-button:disabled, .mds-link-button:disabled, .mds-icon-button:disabled { cursor: not-allowed; opacity: .45; }
+
+/* ---- Form controls --------------------------------------------------- */
+.mds-input, .mds-select, .mds-textarea {
+  width: 100%; min-height: var(--mds-control-height); padding: 6px 10px;
+  border: 1px solid var(--mds-line-strong); border-radius: var(--mds-radius-sm);
+  background: var(--mds-field); color: var(--mds-ink); line-height: 1.5;
+  transition: border-color var(--mds-duration-fast), box-shadow var(--mds-duration-fast);
+}
+.mds-input::placeholder, .mds-textarea::placeholder { color: var(--mds-faint); opacity: 1; }
+.mds-input:hover:not(:disabled), .mds-select:hover:not(:disabled), .mds-textarea:hover:not(:disabled) { border-color: var(--mds-field-hover); }
+.mds-input:focus, .mds-select:focus, .mds-textarea:focus { border-color: var(--mds-accent-ink); outline: 2px solid var(--mds-accent-ink); outline-offset: 2px; }
+.mds-input:disabled, .mds-select:disabled, .mds-textarea:disabled { opacity: .6; cursor: not-allowed; }
+.mds-input[aria-invalid="true"], .mds-textarea[aria-invalid="true"], .mds-select[aria-invalid="true"] { border-color: var(--mds-error); }
+.mds-select {
+  padding-right: 28px; appearance: none; cursor: pointer;
+  background-image: url("../icons/caret-down.svg");
+  background-repeat: no-repeat; background-position: right 9px center; background-size: 14px 14px;
+}
+.mds-select option { background: var(--mds-surface); color: var(--mds-ink); }
+.mds-textarea { display: block; min-height: 80px; padding-block: 8px; line-height: 1.6; resize: vertical; }
+.mds-select--inline { width: auto; min-width: 112px; max-width: 180px; font-size: var(--mds-text-note); }
+
+/* ---- Custom dropdown (initSelect) ------------------------------------ */
+/* The hidden native select supplies form data; all interaction uses this trigger. */
+.mds-select-control { display: inline-block; width: 100%; min-width: 0; vertical-align: middle; }
+.mds-select-control--inline { width: auto; min-width: 112px; max-width: 180px; }
+.mds-select-trigger {
+  display: block; width: 100%; min-width: 0; max-width: none;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: start;
+}
+.mds-select-trigger:focus:not(:focus-visible) { outline: none; }
+.mds-select-trigger[aria-expanded="true"] { border-color: var(--mds-accent-ink); }
+.mds-select-menu {
+  position: fixed; inset: auto; z-index: 20; margin: 0; padding: 4px;
+  box-sizing: border-box; max-height: 280px; overflow-y: auto; overscroll-behavior: contain;
+  border: 1px solid var(--mds-line-strong); border-radius: var(--mds-radius-md);
+  background: var(--mds-surface); color: var(--mds-ink);
+  box-shadow: 0 8px 24px var(--mds-toast-shadow);
+  font: 400 var(--mds-text-note)/1.5 var(--mds-font);
+}
+.mds-select-option {
+  position: relative; display: flex; align-items: center; min-height: 32px;
+  padding: 6px 10px 6px 28px; border-radius: var(--mds-radius-xs);
+  cursor: pointer; user-select: none; -webkit-user-select: none; overflow-wrap: anywhere;
+}
+.mds-select-option::before {
+  content: ""; position: absolute; top: 50%; left: 8px; width: 16px; height: 16px;
+  background: var(--mds-accent-ink);
+  -webkit-mask: url("../icons/check.svg") center / contain no-repeat;
+  mask: url("../icons/check.svg") center / contain no-repeat;
+  opacity: 0; transform: translateY(-50%);
+}
+.mds-select-option[aria-selected="true"] { font-weight: 700; }
+.mds-select-option[aria-selected="true"]::before { opacity: 1; }
+.mds-select-option[data-active] { background: var(--mds-selected); color: var(--mds-ink-strong); }
+.mds-select-option[aria-disabled="true"] { opacity: .45; cursor: not-allowed; }
+.mds-select-group { padding: 8px 10px 4px; color: var(--mds-muted); font-family: var(--mds-font-heading); font-size: var(--mds-text-caption); font-weight: 400; }
+@media (pointer: coarse) { .mds-select-option { min-height: 44px; } }
+
+/* An input with a trailing unit: <div class="mds-input-unit"><input class="mds-input"><span>ms</span></div> */
+.mds-input-unit { position: relative; max-width: 160px; }
+.mds-input-unit .mds-input { padding-right: 44px; }
+.mds-input-unit > span { position: absolute; top: 50%; right: 10px; color: var(--mds-muted); font-size: var(--mds-text-caption); transform: translateY(-50%); pointer-events: none; }
+
+/* Inline checkbox with label: <label class="mds-check"><input type="checkbox">Label</label> */
+.mds-check { display: inline-flex; align-items: center; gap: 8px; color: var(--mds-muted); font-size: var(--mds-text-note); cursor: pointer; }
+.mds-check input { margin: 0; accent-color: var(--mds-accent); }
+.mds-check input:focus-visible { outline: 2px solid var(--mds-accent-ink); outline-offset: 3px; }
+
+/* Switch: <label class="mds-switch"><input type="checkbox" role="switch"><span class="mds-switch-track"></span></label> */
+.mds-switch { position: relative; display: inline-flex; flex: 0 0 auto; width: 34px; height: 20px; cursor: pointer; }
+.mds-switch input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: inherit; }
+.mds-switch-track { position: relative; width: 34px; height: 20px; border-radius: var(--mds-radius-pill); background: var(--mds-switch-off); transition: background-color var(--mds-duration); }
+.mds-switch-track::after { content: ""; position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%; background: var(--mds-switch-knob); box-shadow: 0 1px 2px #0006; transition: transform var(--mds-duration) var(--mds-ease); }
+.mds-switch input:checked + .mds-switch-track { background: var(--mds-accent); }
+.mds-switch input:checked + .mds-switch-track::after { transform: translateX(14px); }
+.mds-switch input:focus-visible + .mds-switch-track { outline: 2px solid var(--mds-accent-ink); outline-offset: 3px; }
+.mds-switch input:disabled + .mds-switch-track { opacity: .5; cursor: not-allowed; }
+
+/* ---- Segmented tabs -------------------------------------------------- */
+/* <div class="mds-tabs" role="tablist"><button role="tab" aria-selected="true">…</button>…</div> */
+.mds-tabs { display: inline-flex; flex-shrink: 0; max-width: 100%; gap: 2px; padding: 3px; border: 1px solid var(--mds-line); border-radius: var(--mds-radius-md); background: var(--mds-wash); }
+.mds-tabs > [role="tab"] {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  min-height: 32px; padding: 6px 12px; border: 0; border-radius: var(--mds-radius-sm);
+  background: transparent; color: var(--mds-muted);
+  font-family: var(--mds-font-action); font-size: var(--mds-text-note); font-weight: 500; line-height: 1.4; white-space: nowrap;
+}
+.mds-tabs > [role="tab"]:hover:not(:disabled) { color: var(--mds-ink); }
+.mds-tabs > [role="tab"][aria-selected="true"] { background: var(--mds-selected); color: var(--mds-ink-strong); font-weight: 600; }
+.mds-tabs > [role="tab"]:disabled { cursor: not-allowed; opacity: .45; }
+.mds-tabs .mds-icon { width: 14px; height: 14px; }
+.mds-tabs--fill { display: flex; width: 100%; }
+.mds-tabs--fill > [role="tab"] { flex: 1; }
+
+/* ---- Settings groups ------------------------------------------------- */
+.mds-section-heading { display: grid; gap: 4px; min-width: 0; margin: 0 2px 16px; }
+.mds-section-heading h2 { font-family: var(--mds-font-heading); font-size: var(--mds-text-heading); font-weight: 400; line-height: 1.5; text-wrap: balance; }
+.mds-section-heading p { max-width: 65ch; color: var(--mds-muted); font-size: var(--mds-text-note); line-height: 1.55; overflow-wrap: anywhere; }
+.mds-note { max-width: 75ch; margin: 12px 2px 4px; color: var(--mds-muted); font-size: var(--mds-text-note); line-height: 1.6; overflow-wrap: anywhere; }
+
+.mds-group { container: mds-group / inline-size; overflow: hidden; border: 1px solid var(--mds-line); border-radius: var(--mds-radius-lg); background: var(--mds-surface); }
+.mds-row { display: grid; grid-template-columns: minmax(150px, 190px) minmax(0, 1fr); gap: var(--mds-gap); align-items: start; padding: 12px 16px; border-top: 1px solid var(--mds-line); }
+.mds-row:first-child { border-top: 0; }
+.mds-row-label { min-width: 0; padding-top: 6px; }
+.mds-row-label :is(label, h3) { display: block; color: var(--mds-ink); font-size: var(--mds-text-body); font-weight: 400; line-height: 1.5; }
+.mds-row-label label { font-family: var(--mds-font); }
+.mds-row-label h3 { font-family: var(--mds-font-heading); }
+.mds-row-label p { max-width: 60ch; margin-top: 4px; color: var(--mds-muted); font-size: var(--mds-text-note); line-height: 1.55; overflow-wrap: anywhere; }
+.mds-row-control { min-width: 0; }
+.mds-row--toggle { align-items: center; }
+.mds-row--toggle .mds-row-label { padding-top: 0; }
+.mds-row--toggle .mds-row-control { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
+.mds-optional { margin-left: 8px; color: var(--mds-faint); font-size: var(--mds-text-caption); font-weight: 400; }
+.mds-hint { display: block; margin-top: 6px; color: var(--mds-muted); font-size: var(--mds-text-note); line-height: 1.55; overflow-wrap: anywhere; }
+.mds-hint[data-tone="error"] { color: var(--mds-error); }
+/* Rows stack when the group itself is narrow, whatever the viewport. */
+@container mds-group (max-width: 560px) {
+  .mds-row { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  .mds-row-label { padding-top: 0; }
+  .mds-row--toggle { grid-template-columns: minmax(0, 1fr) auto; }
+}
+
+.mds-card { min-width: 0; padding: 16px; border: 1px solid var(--mds-line); border-radius: var(--mds-radius-lg); background: var(--mds-surface); }
+.mds-card-title { display: block; font-family: var(--mds-font-heading); font-size: var(--mds-text-body); font-weight: 400; }
+.mds-card-hint { max-width: 65ch; margin-top: 4px; color: var(--mds-muted); font-size: var(--mds-text-note); line-height: 1.55; overflow-wrap: anywhere; }
+.mds-card-footer { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--mds-line); }
+
+/* ---- Feedback -------------------------------------------------------- */
+/* Notice: default tone is warn. <div class="mds-notice" role="alert"><div><strong>…</strong><p>…</p></div>[action]</div> */
+.mds-notice {
+  --mds-notice-ink: var(--mds-warn); --mds-notice-detail: var(--mds-warn-detail);
+  --mds-notice-line: var(--mds-warn-line); --mds-notice-bg: var(--mds-warn-bg);
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  padding: 12px 16px; border: 1px solid var(--mds-notice-line); border-radius: var(--mds-radius-md);
+  background: var(--mds-notice-bg); color: var(--mds-notice-ink); font-size: var(--mds-text-note); line-height: 1.6;
+}
+.mds-notice strong { font-family: var(--mds-font-heading); font-weight: 400; }
+.mds-notice p { max-width: 75ch; margin-top: 4px; color: var(--mds-notice-detail); overflow-wrap: anywhere; }
+.mds-notice[data-tone="error"] { --mds-notice-ink: var(--mds-error); --mds-notice-detail: var(--mds-error-detail); --mds-notice-line: var(--mds-error-line); --mds-notice-bg: var(--mds-error-bg); }
+.mds-notice[data-tone="accent"] { --mds-notice-ink: var(--mds-accent-ink); --mds-notice-detail: var(--mds-ink-secondary); --mds-notice-line: var(--mds-info-line); --mds-notice-bg: var(--mds-info-bg); }
+
+/* Dot and status line: <span class="mds-status" data-tone="good"><i class="mds-dot"></i><span>Connected</span></span> */
+.mds-dot { display: inline-block; flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; background: var(--mds-tone, var(--mds-faint)); }
+.mds-status { display: inline-flex; align-items: center; gap: 7px; min-width: 0; color: var(--mds-tone-ink, var(--mds-ink-soft)); font-size: var(--mds-text-caption); white-space: nowrap; }
+.mds-status > span { overflow: hidden; text-overflow: ellipsis; }
+.mds-status--note { gap: 8px; color: var(--mds-tone-ink, var(--mds-muted)); font-size: var(--mds-text-note); }
+
+/* Pill button for a pending action such as an update. Default tone is accent. */
+.mds-pill {
+  --mds-pill-ink: var(--mds-accent-ink); --mds-pill-line: var(--mds-info-line);
+  --mds-pill-bg: var(--mds-info-bg); --mds-pill-hover: var(--mds-info-hover);
+  display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; gap: 5px;
+  min-height: 28px; padding: 3px 10px 3px 8px;
+  border: 1px solid var(--mds-pill-line); border-radius: var(--mds-radius-pill);
+  background: var(--mds-pill-bg); color: var(--mds-pill-ink);
+  font-size: var(--mds-text-caption); font-weight: 500; font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.mds-pill:hover:not(:disabled) { background: var(--mds-pill-hover); }
+.mds-pill:disabled { cursor: default; }
+.mds-pill[data-tone="error"] { --mds-pill-ink: var(--mds-error); --mds-pill-line: var(--mds-error-line); --mds-pill-bg: var(--mds-error-bg); --mds-pill-hover: var(--mds-error-hover); }
+.mds-pill .mds-icon { width: 13px; height: 13px; }
+.mds-pill[aria-busy="true"] .mds-icon { animation: mds-spin 1s linear infinite; }
+
+.mds-spinner {
+  display: inline-block; flex: 0 0 auto; width: 15px; height: 15px;
+  background: var(--mds-accent-ink);
+  -webkit-mask: url("../icons/spinner.svg") center / contain no-repeat;
+  mask: url("../icons/spinner.svg") center / contain no-repeat;
+  animation: mds-spin .8s linear infinite;
+}
+.mds-loading { display: flex; align-items: center; justify-content: center; gap: 10px; min-height: 280px; color: var(--mds-muted); }
+
+.mds-toast {
+  position: fixed; bottom: 76px; left: 50%; z-index: 10; max-width: min(80vw, 520px);
+  padding: 10px 16px; border: 1px solid var(--mds-line-strong); border-radius: var(--mds-radius-md);
+  background: var(--mds-raised); color: var(--mds-ink-strong);
+  font-size: var(--mds-text-note); line-height: 1.5; overflow-wrap: anywhere;
+  box-shadow: 0 10px 30px var(--mds-toast-shadow);
+  transform: translateX(-50%);
+  transition: opacity var(--mds-duration) var(--mds-ease), translate var(--mds-duration) var(--mds-ease);
+}
+@starting-style { .mds-toast { opacity: 0; translate: 0 6px; } }
+
+/* ---- Dialog ---------------------------------------------------------- */
+.mds-dialog {
+  width: min(440px, calc(100vw - 32px)); padding: 24px;
+  border: 1px solid var(--mds-line-strong); border-radius: var(--mds-radius-xl);
+  background: var(--mds-surface); color: var(--mds-ink);
+  box-shadow: 0 20px 60px var(--mds-dialog-shadow);
+}
+.mds-dialog--wide { width: min(920px, 90vw); max-height: 85vh; }
+.mds-dialog h2 { font-family: var(--mds-font-display); font-size: var(--mds-text-title); font-weight: 600; line-height: 1.4; text-wrap: balance; }
+.mds-dialog p { margin-top: 8px; color: var(--mds-muted); font-size: var(--mds-text-body); line-height: 1.6; }
+.mds-dialog-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+/* ::backdrop does not inherit custom properties in Chromium 120 (WebView2), so values stay literal. */
+.mds-dialog::backdrop { background: #0005; backdrop-filter: blur(2px); }
+[data-theme="dark"] .mds-dialog::backdrop, .mds-dialog[data-theme="dark"]::backdrop { background: #0009; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .mds-dialog::backdrop { background: #0009; } }
+
+/* ---- Code ------------------------------------------------------------ */
+.mds-pre { overflow: auto; padding: 14px; border-radius: var(--mds-radius-md); background: var(--mds-code); color: var(--mds-ink-secondary); font: var(--mds-text-code)/1.65 var(--mds-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* Code panel with header, file bar, numbered body and footer. */
+.mds-code { min-width: 0; overflow: hidden; border: 1px solid var(--mds-line); border-radius: var(--mds-radius-lg); background: var(--mds-code); color: var(--mds-ink-soft); }
+.mds-code-header { display: flex; align-items: center; justify-content: space-between; padding: 10px 10px 10px 14px; }
+.mds-code-title { display: flex; align-items: center; gap: 8px; color: var(--mds-ink-secondary); font-family: var(--mds-font-heading); font-size: var(--mds-text-note); font-weight: 400; }
+.mds-code-title .mds-icon { width: 14px; height: 14px; color: var(--mds-muted); }
+.mds-code-meta { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 14px; border-block: 1px solid var(--mds-line); font-size: var(--mds-text-caption); }
+.mds-code-meta > :first-child { color: var(--mds-muted); font-family: var(--mds-mono); }
+.mds-code-body { overflow: auto; min-height: 160px; padding: 12px 14px 14px 0; font: var(--mds-text-code)/1.65 var(--mds-mono); counter-reset: mds-line; tab-size: 2; }
+.mds-code-line { display: block; min-height: 1.65em; white-space: pre; }
+.mds-code-line::before { display: inline-block; width: 40px; padding-right: 14px; color: var(--mds-faint); text-align: right; content: counter(mds-line); counter-increment: mds-line; user-select: none; }
+.mds-code-key { color: var(--mds-code-key); }
+.mds-code-value { color: var(--mds-code-value); }
+.mds-code-comment { color: var(--mds-muted); }
+.mds-code-footer { display: flex; justify-content: space-between; padding: 8px 14px; border-top: 1px solid var(--mds-line); color: var(--mds-faint); font: var(--mds-text-caption)/1.5 var(--mds-mono); }
+
+@keyframes mds-spin { to { transform: rotate(360deg); } }
+
+/* ---- Touch targets --------------------------------------------------- */
+@media (pointer: coarse) {
+  .mds-button, .mds-link-button, .mds-icon-button, .mds-tabs > [role="tab"] { min-height: 44px; }
+  .mds-icon-button { min-width: 44px; }
+  .mds-pill { min-height: 40px; }
+  .mds-check { min-height: 44px; }
+  .mds-input, .mds-select, .mds-textarea { min-height: 44px; font-size: 16px; }
+  .mds-switch { width: 44px; height: 44px; align-items: center; justify-content: center; }
+}

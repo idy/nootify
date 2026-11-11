@@ -21,7 +21,10 @@ async function fixture(t: TestContext, slowDirectory = false) {
   const token = 'synthetic-owner-secret-not-transmitted'; let reads = 0; let writes = 0;
   const logs = await EventLog.open(directory);
   const page = { node_id: 'synthetic-node', providers: [], remote: { enabled: false, listen: '127.0.0.1:9418', status: 'disabled', tls: false, token_set: true, peers: [] } };
-  const providers = { async page() { return page; }, async action() { writes++; return page; }, async remoteSecret() { reads++; return { token: 'synthetic-remote-secret' }; } } as unknown as ProvidersService;
+  const providers = { async page() { return page; }, async action() { writes++; return page; }, async remoteSecret() { reads++; return { token: 'synthetic-remote-secret' }; },
+    async registration() { writes++; return { status: 'waiting', registration_id: 'synthetic-registration', url: 'https://open.feishu.cn/page/cli?user_code=SYNTHETIC' }; },
+    async setup() { reads++; return { app_id: 'cli_synthetic', status: 'ready', missing: [], mention_only: false }; },
+  } as unknown as ProvidersService;
   const settings = { async larkRecipients(send?: (value: unknown) => void, signal?: AbortSignal) { send?.({ users: [{ name: 'private-directory-entry' }] }); if (slowDirectory && !signal?.aborted) await new Promise<void>(done => signal?.addEventListener('abort', () => done(), { once: true })); return { users: [{ name: 'private-directory-entry' }] }; } } as unknown as SettingsSource;
   const server = createServiceHost([], token, logs, { providers, settings }); server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const port = (server.address() as { port: number }).port;
@@ -38,18 +41,46 @@ async function gateway(t: TestContext, f: Awaited<ReturnType<typeof fixture>>) {
   const gateway = await startOwnerUiGateway(f.base, f.token, '#/providers'); t.after(() => gateway.close()); return gateway;
 }
 
-test('forged UI headers, old cross-port cookies and unauthenticated browser POSTs cannot authorize settings', async t => {
+test('direct local UI edits without a capsule while cross-origin and headerless writes are rejected', async t => {
   const f = await fixture(t);
-  const attempts: Record<string, string>[] = [{}, { authorization: 'Bearer incorrect' }, { cookie: 'nootify_owner=stolen-from-another-port' }];
-  for (const headers of attempts) {
-    for (const path of ['/ui/api/providers', '/ui/api/settings/remote/secret']) {
-      assert.equal((await fetch(new URL(path, f.base), { method: 'POST', headers: { 'x-nootify-ui': '1', ...headers }, body: '{}' })).status, 403);
+  const local = new UiTransport(new URL(f.base).origin);
+  assert.equal((await (await local.fetch('/ui/api/providers')).json()).editable, true);
+  assert.equal((await local.fetch('/ui/api/providers', { method: 'POST', body: '{}' })).status, 200);
+  assert.equal((await (await local.fetch('/ui/api/settings/remote/secret', { method: 'POST' })).json()).token, 'synthetic-remote-secret');
+  assert.equal(f.writes(), 1); assert.equal(f.reads(), 1);
+  for (const headers of [{}, { 'x-nootify-ui': '1', origin: 'https://attacker.test' },
+    { 'x-nootify-ui': '1', origin: 'http://localhost:1' }, { 'x-nootify-ui': '1', 'sec-fetch-site': 'same-site' },
+    { 'x-nootify-ui': '1', 'sec-fetch-site': 'cross-site' }, { 'x-nootify-ui': '1', host: 'attacker.test' }] as Record<string, string>[]) {
+    const status = await new Promise<number | undefined>((resolve, reject) => {
+      const request = httpRequest(new URL('/ui/api/providers', f.base), { method: 'POST', headers }, response => {
+        response.resume(); response.once('end', () => resolve(response.statusCode));
+      });
+      request.once('error', reject); request.end('{}');
+    });
+    assert.equal(status, 403, JSON.stringify(headers));
+  }
+  assert.equal((await fetch(new URL('/v1/services', f.base))).status, 401, 'Control API still requires its bearer');
+  assert.equal(f.writes(), 1); assert.equal(f.reads(), 1);
+  const reloaded = new UiTransport(new URL(f.base).origin);
+  assert.equal((await reloaded.fetch('/ui/api/providers', { method: 'POST', body: '{}' })).status, 200, 'A reload does not restore the old UI lock');
+});
+
+test('personal channel authorization and permissions accept local POST without a capsule, never GET', async t => {
+  const f = await fixture(t);
+  for (const path of ['/ui/api/providers/registration', '/ui/api/providers/setup']) {
+    for (const method of ['GET', 'POST']) {
+      const response = await fetch(new URL(path, f.base), { method, headers: { 'x-nootify-ui': '1' }, ...(method === 'POST' ? { body: '{"action":"status","id":"synthetic"}' } : {}) });
+      assert.equal(response.status, method === 'GET' ? 405 : 200); await response.text();
     }
   }
-  assert.equal(f.reads(), 0); assert.equal(f.writes(), 0);
-  const readOnly = new UiTransport(new URL(f.base).origin);
-  await assert.rejects(readOnly.fetch('/ui/api/providers', { method: 'POST', body: 'private' }), /authorization/);
-  assert.equal((await (await readOnly.fetch('/ui/api/providers')).json()).editable, false);
+  assert.equal(f.reads(), 1); assert.equal(f.writes(), 1);
+  const g = await gateway(t, f); const client = transportFor(g.url);
+  assert.equal((await client.fetch('/ui/api/providers/registration')).status, 405);
+  assert.equal((await client.fetch('/ui/api/providers/setup')).status, 405);
+  const registration = await client.fetch('/ui/api/providers/registration', { method: 'POST', body: '{"action":"start","name":"Personal","enabled":true}' });
+  assert.equal(registration.status, 200); assert.match(await registration.text(), /synthetic-registration/);
+  const setup = await client.fetch('/ui/api/providers/setup', { method: 'POST', body: '{"id":"synthetic"}' });
+  assert.equal(setup.status, 200); assert.equal(f.reads(), 2); assert.equal(f.writes(), 2);
 });
 
 test('owned gateway serves trusted code and encrypts settings, reads and directory stream frames without cookies', async t => {
@@ -229,7 +260,7 @@ test('authenticated invalid methods and wrapped import sizes return encrypted er
   assert.equal(f.writes(), 0);
 });
 
-test('Tailnet repository actions reach their authorized listener while anonymous local settings remain protected', async t => {
+test('Tailnet settings remain read-only even through a loopback proxy while repository actions still work', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'nootify-tailnet-ui-'));
   const logs = await EventLog.open(directory); let refreshed = 0; let followed = 0;
   const tailnet = { authorize: async () => undefined, url: () => 'http://100.64.0.7/' } as unknown as TailnetAccess;
@@ -246,10 +277,12 @@ test('Tailnet repository actions reach their authorized listener while anonymous
   assert.equal((await client.fetch('/ui/api/pulls/refresh', { method: 'POST' })).status, 202);
   assert.equal((await client.fetch('/ui/api/repos', { method: 'POST', body: JSON.stringify({ repository: 'owner/repo', follow: true }) })).status, 200);
   assert.deepEqual([refreshed, followed, requests], [1, 1, 2]);
-  await assert.rejects(client.fetch('/ui/api/settings/remote', { method: 'POST', body: '{}' }), /authorization/);
+  await assert.rejects(client.fetch('/ui/api/settings/remote', { method: 'POST', body: '{}' }), /Local access/);
   assert.equal(requests, 2);
-  const local = new UiTransport(base, undefined, () => { throw new Error('Unprivileged local POST must not reach network'); });
-  await assert.rejects(local.fetch('/ui/api/repos', { method: 'POST', body: '{}' }), /authorization/);
+  const local = new UiTransport(base);
+  for (const path of ['/ui/api/providers', '/ui/api/agents', '/ui/api/settings/remote', '/ui/api/settings/remote/secret', '/ui/api/providers/registration', '/ui/api/providers/setup']) {
+    assert.equal((await local.fetch(path, { method: 'POST', body: '{}' })).status, 403, path);
+  }
 });
 
 test('concurrent gateway reconnects share one bootstrap and revoke every issued session', { timeout: 15000 }, async t => {

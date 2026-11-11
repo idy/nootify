@@ -38,6 +38,14 @@ func validateProvider(p ProviderConfig) error {
 	if p.ID == "" || len(p.ID) > 128 || strings.TrimSpace(p.Name) == "" || len(p.Name) > 256 {
 		return fault("invalid_argument", "provider ID and name are required")
 	}
+	if p.ConnectionType != "" {
+		if p.Type != "feishu" {
+			return fault("invalid_argument", "connection_type is only supported for Feishu providers")
+		}
+		if !p.ConnectionType.valid() {
+			return fault("invalid_argument", "connection_type must be bot or personal-app")
+		}
+	}
 	switch p.Type {
 	case "feishu":
 		if p.AppID == "" || p.AppSecret == "" {
@@ -138,6 +146,9 @@ func (c *Core) SaveProvider(raw json.RawMessage) (ProviderSummary, error) {
 	}
 	if _, ok := fields["enabled"]; !ok {
 		p.Enabled = true
+	}
+	if _, ok := fields["connection_type"]; !ok {
+		p.ConnectionType = old.ConnectionType
 	}
 	if strings.TrimSpace(p.AppSecret) == "" {
 		p.AppSecret = old.AppSecret
@@ -337,11 +348,12 @@ func (c *Core) ImportConfig(raw json.RawMessage) error {
 }
 
 type migration struct {
-	AppID      string `json:"app_id"`
-	AppSecret  string `json:"app_secret"`
-	Recipient  string `json:"recipient_open_id"`
-	LegacyHost string `json:"legacy_host"`
-	Bindings   []struct {
+	AppID          string               `json:"app_id"`
+	AppSecret      string               `json:"app_secret"`
+	Recipient      string               `json:"recipient_open_id"`
+	ConnectionType FeishuConnectionType `json:"connection_type,omitempty"`
+	LegacyHost     string               `json:"legacy_host"`
+	Bindings       []struct {
 		ChatID                string `json:"chat_id"`
 		AppID                 string `json:"app_id"`
 		SessionID             string `json:"session_id"`
@@ -356,6 +368,24 @@ type migration struct {
 	} `json:"bindings"`
 }
 
+// The private migration source can identify older Feishu configurations that
+// predate connection_type. Fill only missing metadata for the same application;
+// never replay migration state or override an explicit user choice.
+func backfillLegacyConnectionType(d *State, m migration) bool {
+	if m.ConnectionType == "" {
+		return false
+	}
+	changed := false
+	for id, p := range d.Providers {
+		if p.Type == "feishu" && p.AppID == m.AppID && p.ConnectionType == "" && !d.ProviderTombstones[id] {
+			p.ConnectionType = m.ConnectionType
+			d.Providers[id] = p
+			changed = true
+		}
+	}
+	return changed
+}
+
 func (c *Core) Migrate(raw json.RawMessage) (map[string]any, error) {
 	var m migration
 	if err := json.Unmarshal(raw, &m); err != nil {
@@ -367,13 +397,18 @@ func (c *Core) Migrate(raw json.RawMessage) (map[string]any, error) {
 	c.ops.Lock()
 	defer c.ops.Unlock()
 	d := c.store.Snapshot()
-	if d.Migrated || d.ProviderTombstones["legacy-feishu"] {
-		return map[string]any{"imported": false}, nil
+	_, exists := d.Providers["legacy-feishu"]
+	if d.Migrated || d.ProviderTombstones["legacy-feishu"] || exists {
+		if !backfillLegacyConnectionType(&d, m) {
+			return map[string]any{"imported": false}, nil
+		}
+		err := c.store.Update(func(d *State) error {
+			backfillLegacyConnectionType(d, m)
+			return nil
+		})
+		return map[string]any{"imported": false}, err
 	}
-	if _, ok := d.Providers["legacy-feishu"]; ok {
-		return map[string]any{"imported": false}, nil
-	}
-	p := ProviderConfig{ID: "legacy-feishu", Name: "Feishu", Type: "feishu", Enabled: true, AppID: m.AppID, AppSecret: m.AppSecret, Recipient: m.Recipient}
+	p := ProviderConfig{ID: "legacy-feishu", Name: "Feishu", Type: "feishu", ConnectionType: m.ConnectionType, Enabled: true, AppID: m.AppID, AppSecret: m.AppSecret, Recipient: m.Recipient}
 	owner := p.ID
 	for _, existing := range d.Providers {
 		if existing.Type == "feishu" && existing.Enabled && existing.AppID == p.AppID {
@@ -382,6 +417,7 @@ func (c *Core) Migrate(raw json.RawMessage) (map[string]any, error) {
 		}
 	}
 	err := c.store.Update(func(d *State) error {
+		backfillLegacyConnectionType(d, m)
 		d.Migrated = true
 		d.Providers[p.ID] = p
 		if d.DefaultProvider == "" {

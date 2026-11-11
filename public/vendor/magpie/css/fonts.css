@@ -1,0 +1,29 @@
+/* Shared idy.dev Latin typefaces, self-hosted. Licenses: ../fonts/*-OFL.txt. */
+@font-face {
+  font-family: Montserrat;
+  font-style: normal;
+  font-weight: 400 800;
+  font-display: swap;
+  src: url("../fonts/montserrat-latin.woff2") format("woff2");
+}
+@font-face {
+  font-family: Monda;
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("../fonts/monda-latin.woff2") format("woff2");
+}
+@font-face {
+  font-family: Lato;
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("../fonts/lato-regular-latin.woff2") format("woff2");
+}
+@font-face {
+  font-family: Lato;
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("../fonts/lato-bold-latin.woff2") format("woff2");
+}

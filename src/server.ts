@@ -83,9 +83,12 @@ export function createServiceHost(modules: ServiceModule[], token: string, logs?
         encryptedOwner = true;
       }
       if (await owner.handle(request, response, url, options.via !== 'tailnet')) return;
+      // A local browser can edit directly; it does not need an owner-link capsule.
+      // Check the socket as well as the listener so proxy headers cannot grant access.
+      const localAccess = options.via !== 'tailnet' && /^(127\.\d+\.\d+\.\d+|::1|::ffff:127\.\d+\.\d+\.\d+)$/.test(request.socket.remoteAddress ?? '');
       const ownerAuthenticated = options.via !== 'tailnet' && (encryptedOwner || owner.authenticated(request));
       if (logs && await serveUi(request, response, url.pathname, { modules, logs, pulls: options.pulls, tailnetUrl: () => options.tailnet?.url(),
-        agents: options.agents, channel: options.channel, settings: options.settings, providers: options.providers, ownerAuthenticated, ownerUiCommand: options.ownerUiCommand, via: options.via ?? 'loopback' })) return;
+        agents: options.agents, channel: options.channel, settings: options.settings, providers: options.providers, ownerAuthenticated, localAccess, ownerUiCommand: options.ownerUiCommand, via: options.via ?? 'loopback' })) return;
       if (request.headers.origin) throw new HttpError(403, 'Browser-origin requests are not accepted for control APIs');
       const statuses = () => modules.map(module => ({ name: module.name, status: module.status() }));
       if (request.method === 'GET' && url.pathname === '/health') { send(200, { ok: true, service: 'nootify', ui_transport: 1, modules: statuses() }); return; }

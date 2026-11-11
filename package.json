@@ -19,6 +19,7 @@
     "test": "npm run build && node scripts/test.mjs",
     "test:integration": "npm run build && node scripts/integration.mjs",
     "start": "node dist/src/server.js",
+    "preview:ui": "npm run build && node scripts/preview-ui.mjs",
     "cli": "node dist/src/cli.js",
     "tailscale:build": "node scripts/build-tsnet.mjs",
     "core:build": "node scripts/build-core.mjs",

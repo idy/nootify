@@ -1,11 +1,13 @@
 import { hostname } from 'node:os';
 import { isIP } from 'node:net';
 import { join } from 'node:path';
-import { createHash } from 'node:crypto';
-import type { State } from './state.js';
+import { createHash, randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
+import type { State, LarkConnectionType } from './state.js';
 import type { SessionsService } from './sessions.js';
 import { CoreError, ProviderCore, coreErrorCode, provenCoreRejection, type CoreEvent, type CoreTransport } from './provider-core.js';
-import { createLarkApi, type Credentials, type LarkApi } from './lark-metadata.js';
+import { createLarkApi, verifyCredentials, type Credentials, type LarkApi } from './lark-metadata.js';
+import { inspectLarkSetup, LarkRegistration, type LarkRegistrationOptions, type LarkRegistrationPage, type LarkRegistrationResult, type LarkSetup } from './lark-registration.js';
 import { LarkReplies } from './lark-replies.js';
 import { HttpError, RetryableDeliveryError, SessionUnavailable, identifier, isAdapter, isPolledAdapter, object, text, type RouteRequest, type RouteResponse, type ServiceModule } from './types.js';
 import { discardCanceledInbox, registerPolledSession, type ProviderInboxSnapshot } from './polled-sessions.js';
@@ -18,7 +20,7 @@ import type { ThreadDiscovery } from './lark-thread-sync.js';
 export interface ProviderSummary {
   id: string; name: string; type: 'feishu' | 'remote'; enabled: boolean; status: string; error?: string;
   app_id?: string; recipient_open_id?: string; address?: string; tls?: boolean; server_name?: string;
-  secret_set?: boolean; token_set?: boolean;
+  secret_set?: boolean; token_set?: boolean; connection_type?: LarkConnectionType;
 }
 export interface RemoteSummary {
   enabled: boolean; listen: string; status: string; tls: boolean; token_set: boolean;
@@ -30,9 +32,22 @@ export interface ProviderPage {
   network?: { status: 'retrying' | 'unconfirmed'; error: string };
   compatibility?: { status: 'conflict'; error: string };
 }
+export interface ProviderRegistrationPage extends LarkRegistrationPage { registration_id?: string; provider_id?: string }
+export interface ProvidersOptions {
+  registration?: LarkRegistrationOptions;
+  verify?: (credentials: Credentials) => Promise<void>;
+  setup?: (api: LarkApi, signal?: AbortSignal) => Promise<LarkSetup>;
+}
+interface ProviderRegistration {
+  id: string; providerId: string; name: string; enabled: boolean; previous?: Record<string, unknown>;
+  flow: LarkRegistration; committed?: ProviderRegistrationPage;
+  failure?: 'save_unconfirmed' | 'app_mismatch' | 'target_changed' | 'missing_recipient';
+}
 export interface ProvidersSource {
   page(): Promise<ProviderPage>;
   action(body: Record<string, unknown>): Promise<ProviderPage>;
+  registration?(body: Record<string, unknown>): Promise<ProviderRegistrationPage>;
+  setup?(id: string): Promise<LarkSetup>;
   remote(): Promise<RemoteSummary & { node_id: string }>;
   configureRemote(body: Record<string, unknown>): Promise<RemoteSummary & { node_id: string }>;
   remoteSecret(): Promise<{ token: string }>;
@@ -94,10 +109,12 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
   private compatibilityProblem?: string;
   private compatibilityUnconfirmed = false;
   private providerChanges: Promise<unknown> = Promise.resolve();
+  private providerRegistration?: ProviderRegistration;
   private recipientSync?: (openId: string) => Promise<void>;
   constructor(readonly state: State, private readonly sessions: SessionsService,
     credentials: Credentials | undefined, private readonly report: (record: Record<string, unknown>) => void = () => {},
-    private readonly port = 9417, private readonly tsnet?: TsnetClient, core?: CoreTransport, private readonly discover?: ThreadDiscovery) {
+    private readonly port = 9417, private readonly tsnet?: TsnetClient, core?: CoreTransport, private readonly discover?: ThreadDiscovery,
+    private readonly options: ProvidersOptions = {}) {
     this.credentials = credentials; this.api = credentials ? createLarkApi(credentials) : undefined;
     this.core = core ?? new ProviderCore(join(state.directory, 'provider-core'), event => this.event(event), undefined, undefined,
       () => { this.connection = 'failed'; this.report({ source: 'providers', status: 'core_stopped' }); });
@@ -131,6 +148,7 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
         const recipient = this.state.settings.lark_recipient_open_id ?? (migrationCredentials.appId === this.credentials?.appId ? process.env.LARK_NOTIFY_OPEN_ID : undefined)
           ?? (senders.size === 1 ? [...senders][0] : undefined);
         await this.rpc('migration.import', { app_id: migrationCredentials.appId, app_secret: migrationCredentials.appSecret,
+          ...(saved.lark_app_id === migrationCredentials.appId && saved.lark_connection_type ? { connection_type: saved.lark_connection_type } : {}),
           recipient_open_id: recipient, legacy_host: hostname(), bindings });
       }
       if (this.compatibilityStartup) {
@@ -154,6 +172,9 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
   private async shutdown(): Promise<void> {
     this.draining = true; this.connection = 'stopped';
     clearInterval(this.discoveryTimer); clearInterval(this.inboxTimer); clearTimeout(this.networkRetry); this.discoveryController?.abort();
+    // Registration may already be queued behind provider changes; never await it from inside that queue.
+    if (this.providerRegistration && ['starting', 'waiting'].includes(this.providerRegistration.flow.page().status)) this.providerRegistration.flow.cancel();
+    await this.providerRegistration?.flow.stop();
     await this.providerChanges.catch(() => {});
     await this.networkQueue.catch(() => {});
     if (this.discovery) await this.discovery;
@@ -231,22 +252,131 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
     try { await this.rpc(method, params); }
     catch (error) { if (coreErrorCode(error) !== 'committed_not_durable') throw error; return error as HttpError; }
   }
-  action(body: Record<string, unknown>): Promise<ProviderPage> {
+  private changeProvider<T>(operation: () => Promise<T>): Promise<T> {
     if (this.draining) return Promise.reject(new HttpError(503, 'Notification providers are stopping'));
-    const pending = this.providerChanges.catch(() => {}).then(() => this.applyAction(body));
+    const pending = this.providerChanges.catch(() => {}).then(operation);
     this.providerChanges = pending; return pending;
   }
-  private async applyAction(body: Record<string, unknown>): Promise<ProviderPage> {
+  action(body: Record<string, unknown>): Promise<ProviderPage> {
+    return this.changeProvider(() => this.applyAction(body));
+  }
+  private registrationPage(registration: ProviderRegistration): ProviderRegistrationPage {
+    const page = registration.committed ?? registration.flow.page();
+    return { ...structuredClone(page), registration_id: registration.id,
+      ...(page.status === 'complete' || registration.failure === 'save_unconfirmed' ? { provider_id: registration.providerId } : {}),
+      ...(page.status === 'failed' && registration.failure ? { error: registration.failure } : {}) };
+  }
+  async registration(body: Record<string, unknown>): Promise<ProviderRegistrationPage> {
+    const assertAvailable = () => {
+      if (this.providerRegistration && ['starting', 'waiting', 'connecting'].includes(this.providerRegistration.flow.page().status)) {
+        throw new HttpError(409, 'A personal app registration is already active; finish or cancel it in its original tab');
+      }
+    };
+    if (body.action === 'start') {
+      if (this.draining) throw new HttpError(503, 'Notification providers are stopping');
+      assertAvailable();
+    }
+    if (body.action === 'start') return this.changeProvider(async () => {
+      if (this.draining) throw new HttpError(503, 'Notification providers are stopping');
+      assertAvailable();
+      const name = text(body.name, 'name').trim();
+      if (name.length > 80) throw new HttpError(400, 'Provider name must be at most 80 characters');
+      if (typeof body.enabled !== 'boolean') throw new HttpError(400, 'Invalid enabled flag');
+      const providerId = body.id === undefined ? `personal-feishu-${randomUUID()}` : identifier(body.id, 'id');
+      const previous = await this.providerConfig(providerId);
+      if (body.id !== undefined && (!previous || previous.type !== 'feishu' || previous.connection_type !== 'personal-app')) {
+        throw new HttpError(409, 'Select an existing Feishu personal app channel to reauthorize');
+      }
+      if (body.id === undefined && previous) throw new HttpError(409, 'The new provider ID is already in use');
+      if (this.draining) throw new HttpError(503, 'Notification providers are stopping');
+      const registration: ProviderRegistration = { id: randomUUID(), providerId, name, enabled: body.enabled,
+        ...(previous ? { previous: structuredClone(previous) } : {}),
+        flow: new LarkRegistration((result, signal) => this.acceptRegistration(registration, result, signal), this.report, this.options.registration) };
+      this.providerRegistration = registration;
+      registration.flow.start(); return this.registrationPage(registration);
+    });
+    if (body.action !== 'status' && body.action !== 'cancel') throw new HttpError(400, 'Expected a registration action: start, status or cancel');
+    const id = identifier(body.registration_id, 'registration_id');
+    const registration = this.providerRegistration;
+    if (!registration || registration.id !== id) throw new HttpError(409, 'This registration is no longer active in this tab');
+    // A committed result stays queryable, including when a tab dismisses a QR before observing completion.
+    if (body.action === 'cancel' && !registration.committed && registration.failure !== 'save_unconfirmed') registration.flow.cancel();
+    return this.registrationPage(registration);
+  }
+  private async providerConfig(id: string): Promise<Record<string, unknown> | undefined> {
+    const config = await this.exportConfig();
+    return (config.providers as Record<string, unknown>[]).find(provider => provider.id === id);
+  }
+  async setup(id: string): Promise<LarkSetup> {
+    const provider = await this.providerConfig(identifier(id, 'id'));
+    if (!provider) throw new HttpError(404, 'Notification provider not found');
+    if (provider.type !== 'feishu') throw new HttpError(400, 'Permission setup requires a Feishu provider');
+    const before = structuredClone(provider);
+    const setup = await (this.options.setup ?? inspectLarkSetup)(createLarkApi({ appId: String(provider.app_id), appSecret: String(provider.app_secret) }));
+    const current = await this.providerConfig(id);
+    if (!current || current.type !== 'feishu' || current.app_id !== before.app_id || current.app_secret !== before.app_secret) {
+      throw new HttpError(409, 'Feishu credentials changed; check permissions again');
+    }
+    return setup;
+  }
+  private async acceptRegistration(registration: ProviderRegistration, result: LarkRegistrationResult, signal: AbortSignal): Promise<LarkSetup> {
+    if (!result.recipient || !/^ou_[A-Za-z0-9]+$/.test(result.recipient)) {
+      registration.failure = 'missing_recipient'; throw new HttpError(400, 'Registration requires the scanning user recipient');
+    }
+    if (registration.previous && registration.previous.app_id !== result.credentials.appId) {
+      registration.failure = 'app_mismatch'; throw new HttpError(409, 'The scanned app does not match this channel');
+    }
+    signal.throwIfAborted();
+    await (this.options.verify ?? verifyCredentials)(result.credentials);
+    signal.throwIfAborted();
+    let setup: LarkSetup;
+    try { setup = await (this.options.setup ?? inspectLarkSetup)(createLarkApi(result.credentials), signal); }
+    catch { signal.throwIfAborted(); setup = { app_id: result.credentials.appId, status: 'unavailable', missing: [], mention_only: false }; }
+    signal.throwIfAborted();
+    return this.changeProvider(async () => {
+      const beforeCommit = async () => {
+        signal.throwIfAborted();
+        const current = await this.providerConfig(registration.providerId);
+        if (this.providerRegistration !== registration || !isDeepStrictEqual(current, registration.previous)) {
+          registration.failure = 'target_changed';
+          throw new HttpError(409, 'The registration channel changed or was deleted; start again');
+        }
+        signal.throwIfAborted();
+      };
+      let saved = false; let warning: string | undefined;
+      try {
+        await this.applyAction({ action: 'save', provider: { id: registration.providerId, type: 'feishu', connection_type: 'personal-app',
+          name: registration.name, enabled: registration.enabled, app_id: result.credentials.appId,
+          app_secret: result.credentials.appSecret, recipient_open_id: result.recipient } }, { scoped: true, beforeCommit, committed: () => { saved = true; } });
+      } catch (error) {
+        if (!saved) {
+          if (coreErrorCode(error) === 'unconfirmed') registration.failure = 'save_unconfirmed';
+          throw error;
+        }
+        // A mirror/status/durability failure after provider.save cannot turn a committed channel into a failed scan.
+        const code = coreErrorCode(error);
+        warning = code === 'committed_not_durable' || code === 'committed_not_mirrored' ? code : 'provider_status_unavailable';
+        this.report({ source: 'providers', status: 'personal_app_committed_warning', reason: warning });
+      }
+      registration.committed = { status: 'complete', app_id: result.credentials.appId, setup, ...(warning ? { error: warning } : {}) };
+      return setup;
+    });
+  }
+  private async applyAction(body: Record<string, unknown>, options: { scoped?: boolean; beforeCommit?: () => Promise<void>; committed?: () => void } = {}): Promise<ProviderPage> {
     let legacyChanged = false; let mutate: () => Promise<HttpError | undefined>; let warning: HttpError | undefined;
+    const scoped = options.scoped || body.action === 'reconnect';
     let provider: Record<string, unknown> | undefined;
-    if (body.action === 'save') {
-      provider = object(body.provider);
+    if (body.action === 'save' || body.action === 'reconnect') {
+      provider = body.action === 'save' ? object(body.provider) : await this.providerConfig(identifier(body.id, 'id'));
+      if (!provider) throw new HttpError(404, 'Notification provider not found');
       const config = provider;
       mutate = () => this.commit('provider.save', config); legacyChanged = provider.id === this.compatibilityId;
     } else if (body.action === 'delete' || body.action === 'default') {
       const id = identifier(body.id, 'id'); const method = `provider.${body.action}`;
       mutate = () => this.commit(method, { id }); legacyChanged = body.action === 'delete' && id === this.compatibilityId;
-    } else throw new HttpError(400, 'Expected a provider action: save, delete or default');
+    } else throw new HttpError(400, 'Expected a provider action: save, delete, default or reconnect');
+    const mutation = mutate;
+    mutate = async () => { await options.beforeCommit?.(); const result = await mutation(); options.committed?.(); return result; };
     if (legacyChanged) {
       let previous: Record<string, unknown> | undefined;
       let candidate: Record<string, unknown> | undefined; let prepared = false;
@@ -254,6 +384,7 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
         if (!prepared) {
           previous = await this.compatibilityProviderConfig();
           candidate = provider ? { ...provider, enabled: provider.enabled ?? true,
+            ...(provider.connection_type === undefined && previous?.connection_type ? { connection_type: previous.connection_type } : {}),
             app_secret: typeof provider.app_secret === 'string' && provider.app_secret.trim() ? provider.app_secret : previous?.app_secret } : undefined;
           prepared = true;
         }
@@ -261,19 +392,20 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
       };
       const update = async () => {
         await prepare();
-        const unchanged = candidate ? previous && ['id', 'name', 'type', 'enabled', 'app_id', 'app_secret', 'recipient_open_id']
+        const unchanged = candidate ? previous && ['id', 'name', 'type', 'enabled', 'app_id', 'app_secret', 'recipient_open_id', 'connection_type']
           .every(key => (candidate![key] ?? '') === (previous![key] ?? '')) : !previous;
-        if (!unchanged) warning = await mutate();
+        if (!unchanged || body.action === 'reconnect') warning = await mutate();
+        else { await options.beforeCommit?.(); options.committed?.(); }
         return this.compatibilityConfig();
       };
       if (this.compatibilitySync) await this.compatibilitySync(update, prepare);
       else this.refreshCompatibilityCredentials((await update()).credentials);
-      if (this.compatibilityProblem && this.compatibilityStartup) await this.reconcileCompatibility();
-    } else if (this.compatibilityProblem && this.compatibilityStartup) {
+      if (!scoped && this.compatibilityProblem && this.compatibilityStartup) await this.reconcileCompatibility();
+    } else if (!scoped && this.compatibilityProblem && this.compatibilityStartup) {
       // Commit and reconcile in the Settings queue; concurrent provider actions cannot bypass the new active provider's preflight.
       await this.reconcileCompatibility(async () => { warning = await mutate(); });
     } else warning = await mutate();
-    await this.syncNetwork();
+    if (!scoped || provider?.type !== 'feishu') await this.syncNetwork();
     if (warning) throw warning;
     return this.page();
   }
@@ -369,6 +501,8 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
   async configure(credentials?: Credentials): Promise<void> {
     let warning: HttpError | undefined;
     if (credentials) warning = await this.commit('provider.save', { id: this.compatibilityId, type: 'feishu', name: 'Feishu', enabled: true,
+      ...(this.state.settings.lark_app_id === credentials.appId && this.state.settings.lark_connection_type
+        ? { connection_type: this.state.settings.lark_connection_type } : {}),
       app_id: credentials.appId, app_secret: credentials.appSecret, recipient_open_id: this.state.settings.lark_recipient_open_id });
     else if ((await this.page()).providers.some(provider => provider.id === this.compatibilityId)) warning = await this.commit('provider.delete', { id: this.compatibilityId });
     this.refreshCompatibilityCredentials(credentials);

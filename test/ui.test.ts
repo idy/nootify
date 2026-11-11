@@ -10,6 +10,37 @@ import { EventLog } from '../src/events.js';
 import { createServiceHost } from '../src/server.js';
 import { assertMode } from './platform-fixtures.js';
 
+// Follow the served stylesheet graph, including relative fonts and SVG masks.
+// A missing allowlist entry otherwise ships an unstyled or partially styled UI.
+test('the pinned design system and all CSS dependencies load through the trusted same-origin asset routes', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'nootify-design-assets-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const server = createServiceHost([], 'synthetic-assets-token', await EventLog.open(directory));
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const visited = new Set<string>();
+  async function visit(url: URL): Promise<void> {
+    assert.equal(url.origin, origin, 'UI assets must remain local and usable offline');
+    if (visited.has(url.pathname)) return;
+    visited.add(url.pathname);
+    const response = await fetch(url);
+    assert.equal(response.status, 200, url.pathname);
+    assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
+    const body = await response.arrayBuffer(); assert.ok(body.byteLength > 0, url.pathname);
+    if (url.pathname.endsWith('.css')) {
+      assert.match(response.headers.get('content-type')!, /^text\/css/);
+      for (const match of new TextDecoder().decode(body).matchAll(/url\(["']?([^\s"')]+)["']?\)/g)) await visit(new URL(match[1]!, url));
+    } else if (url.pathname.endsWith('.woff2')) assert.equal(response.headers.get('content-type'), 'font/woff2');
+    else if (url.pathname.endsWith('.svg')) assert.equal(response.headers.get('content-type'), 'image/svg+xml');
+  }
+  await visit(new URL('/ui/styles.css', origin));
+  assert.ok(visited.has('/ui/vendor/magpie/css/components.css'));
+  assert.ok(visited.has('/ui/vendor/magpie/fonts/monda-latin.woff2'));
+  assert.ok(visited.has('/ui/vendor/magpie/icons/check.svg'));
+  assert.notEqual((await fetch(origin + '/ui/vendor/magpie/README.md')).status, 200, 'Do not expose arbitrary vendor files');
+});
+
 test('logs persist bounded public fields and discard unknown credential fields', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'ws-logs-')); t.after(() => rm(dir, { recursive: true, force: true }));
   const log = await EventLog.open(dir);

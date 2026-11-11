@@ -253,12 +253,21 @@ test('Logs separates event purpose from delivery outcome and keeps its controls 
   await t.test('Agents summarizes the default provider and keeps every agent adapter editable', async () => {
     location.hash = '#/agents'; window.dispatchEvent(new window.Event('hashchange'));
     await until(() => document.querySelectorAll('#agent-rows .check').length === 5 && element('channel-state').textContent === 'Connected', 'Agent fixtures did not render');
-    assert.equal(element('channel-title').textContent, 'Message providers');
+    assert.equal(element('channel-title').textContent, 'Message channels');
     assert.equal(element('channel-state').textContent, 'Connected');
     assert.equal(element('channel-sub').textContent, 'Default: Home Nootify · Remote Nootify');
     assert.equal(element('channel-settings').getAttribute('href'), '#/providers');
-    assert.equal(element('channel-settings').textContent, 'Manage Providers');
+    assert.equal(element('channel-settings').textContent, 'Manage channels');
     assert.equal(document.querySelector('#notification-channel, #channel-save, #agents-view select'), null);
+    assert.ok([...document.querySelectorAll<HTMLElement>('#agent-rows .agent-extra')].every(panel => panel.hidden), 'Agent details start collapsed');
+    const first = agents[0].agent;
+    const expand = () => document.querySelector<HTMLButtonElement>(`[data-key="agent-expand-${first}"]`)!;
+    const writesBeforeExpand = agentWrites.length;
+    expand().click();
+    assert.equal(expand().getAttribute('aria-expanded'), 'true');
+    assert.equal(element(`agent-details-${first}`).hidden, false);
+    assert.equal(agentWrites.length, writesBeforeExpand, 'Expanding a row never enables the agent');
+    assert.ok(element(`agent-details-${first}`).querySelector('pre'));
     for (const agent of agents) {
       const before = agentReads;
       const checkbox = document.querySelector<HTMLInputElement>(`#agent-rows [data-key="${agent.agent}"]`)!;
@@ -270,12 +279,16 @@ test('Logs separates event purpose from delivery outcome and keeps its controls 
       assert.deepEqual(agentWrites.at(-1), { agent: agent.agent, enabled: true });
       assert.equal(document.querySelector<HTMLInputElement>(`#agent-rows [data-key="${agent.agent}"]`)!.checked, true);
     }
+    assert.equal(expand().getAttribute('aria-expanded'), 'true', 'Data refresh preserves the expanded row');
+    assert.equal(element(`agent-details-${first}`).hidden, false);
+    assert.ok([...document.querySelectorAll<HTMLElement>('#agent-rows .agent-extra')].filter(panel => panel.id !== `agent-details-${first}`).every(panel => panel.hidden), 'Enabling other agents does not expand their rows');
+    expand().click(); assert.equal(element(`agent-details-${first}`).hidden, true);
     assert.match(element('agent-rows').textContent!, /The conversation must check for replies/);
     field('language').value = 'zh-CN'; field('language').dispatchEvent(new window.Event('change'));
-    assert.equal(element('channel-title').textContent, '消息接入');
+    assert.equal(element('channel-title').textContent, '消息通道');
     assert.equal(element('channel-state').textContent, '已连接');
     assert.equal(element('channel-sub').textContent, '默认：Home Nootify · 远程 Nootify');
-    assert.equal(element('channel-settings').textContent, '管理 Providers');
+    assert.equal(element('channel-settings').textContent, '管理通道');
     field('language').value = 'en'; field('language').dispatchEvent(new window.Event('change'));
   });
 
@@ -287,11 +300,11 @@ test('Logs separates event purpose from delivery outcome and keeps its controls 
     };
     defaultProvider = undefined; await refresh();
     assert.equal(element('channel-state').textContent, 'Not configured');
-    assert.equal(element('channel-sub').textContent, 'Add a provider and set it as default in Providers.');
+    assert.equal(element('channel-sub').textContent, 'Add a channel and set it as default in Channels.');
     defaultProvider = 'remote-1'; providers[0].enabled = false; await refresh();
     assert.equal(element('channel-state').textContent, 'Disabled');
     providers = []; await refresh();
-    assert.equal(element('channel-title').textContent, 'Message providers');
+    assert.equal(element('channel-title').textContent, 'Message channels');
     assert.equal(element('channel-state').textContent, 'Not configured');
     assert.equal(element('channel-settings').getAttribute('href'), '#/providers');
     editable = false; await refresh();

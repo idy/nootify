@@ -52,6 +52,9 @@ test('provider and remote-access UI performs real mutations, preserves secrets a
   let remoteToken = 'synthetic-listener-token';
   const providerWrites: Record<string, unknown>[] = [];
   const remoteWrites: Record<string, unknown>[] = [];
+  let registration: Record<string, unknown> = { status: 'idle' };
+  const registrationWrites: Record<string, unknown>[] = [];
+  let cancelCompletes = false; let setupReads = 0;
   let providerReads = 0; let remoteReads = 0; let secretReads = 0;
   let failProvider = false; let failRemote = false; let failProviderRead = false;
   let holdProvider: Promise<void> | undefined; let releaseProvider: (() => void) | undefined;
@@ -65,6 +68,16 @@ test('provider and remote-access UI performs real mutations, preserves secrets a
       assert.equal(new Headers(init.headers).get('x-nootify-ui'), '1');
       if (!editable) return Response.json({ error: 'Local access required' }, { status: 403 });
     }
+    if (path === '/ui/api/providers/registration') {
+      const body = JSON.parse(String(init?.body)); registrationWrites.push(body);
+      if (body.action === 'start') registration = { status: 'waiting', registration_id: 'synthetic-scan', url: 'https://open.feishu.cn/page/cli?user_code=TEST', qr: 'data:image/png;base64,c3ludGhldGlj', expires_at: new Date(Date.now() + 60000).toISOString() };
+      else {
+        assert.equal(body.registration_id, 'synthetic-scan');
+        if (body.action === 'cancel' && !cancelCompletes) registration = { status: 'idle', registration_id: 'synthetic-scan' };
+      }
+      return Response.json(registration);
+    }
+    if (path === '/ui/api/providers/setup') { setupReads++; return Response.json({ app_id: 'cli_personal', status: 'ready', missing: [], mention_only: false }); }
     if (path === '/ui/api/providers') {
       if (init?.method !== 'POST') {
         providerReads++;
@@ -84,7 +97,8 @@ test('provider and remote-access UI performs real mutations, preserves secrets a
         const summary = { ...safe, id, status: 'connected', ...(config.type === 'feishu' ? { secret_set: true } : { token_set: true }) };
         providers = [...providers.filter(provider => provider.id !== id), summary];
         defaultProvider ??= id;
-      } else if (body.action === 'default') defaultProvider = body.id as string;
+      } else if (body.action === 'reconnect') { assert.ok(providers.some(provider => provider.id === body.id)); }
+      else if (body.action === 'default') defaultProvider = body.id as string;
       else if (body.action === 'delete') {
         providers = providers.filter(provider => provider.id !== body.id);
         if (defaultProvider === body.id) defaultProvider = undefined;
@@ -120,7 +134,11 @@ test('provider and remote-access UI performs real mutations, preserves secrets a
 
   await t.test('empty state is actionable and navigation uses Providers, Repos and Remote access', () => {
     assert.equal(element('providers-empty').hidden, false);
-    assert.equal(element('providers-summary').textContent, 'No default provider selected');
+    assert.equal(element('crumb-page').textContent, 'Channels');
+    assert.equal(button('provider-add').textContent, 'Add channel');
+    assert.equal(element('provider-add').closest('.titlebar'), null);
+    assert.ok(element('provider-add').closest('#providers-view .providers-toolbar'));
+    assert.equal(element('providers-summary').textContent, 'No default channel selected');
     assert.equal(document.querySelector('[data-view="settings-remote"]')!.textContent, 'Remote access');
     assert.equal(document.querySelector('#settings-subnav [data-view="settings-lark"]'), null);
     assert.equal(document.querySelectorAll('.nav-label')[1].textContent, 'Repos');
@@ -131,17 +149,18 @@ test('provider and remote-access UI performs real mutations, preserves secrets a
     const event = new window.Event('keydown', { bubbles: true, cancelable: true });
     Object.defineProperty(event, 'key', { value }); element(id).dispatchEvent(event);
   };
-  await t.test('Add opens only two provider choices with search, keyboard navigation, Back and cancellable drafts', () => {
-    assert.equal(element('provider-add').parentElement!.firstElementChild, element('provider-add'), 'Add is the first action at the upper left');
+  await t.test('Add opens three channel choices with search, keyboard navigation, Back and cancellable drafts', () => {
+    assert.equal(element('provider-add').parentElement!.firstElementChild, element('provider-add'), 'Add is the first action above the list');
     button('provider-add').click();
     assert.equal(providerDialog.open, true); assert.equal(element('provider-chooser').hidden, false);
     assert.equal(element('provider-editor').hidden, true); assert.equal(document.activeElement, element('provider-type-search'));
-    assert.equal(document.querySelectorAll('#provider-type-options button').length, 2);
-    assert.equal(element('provider-choose-feishu').querySelector('strong')!.textContent, 'Feishu bot');
+    assert.equal(document.querySelectorAll('#provider-type-options button').length, 3);
+    assert.equal(element('provider-choose-feishu').querySelector('strong')!.textContent, 'Feishu Bot');
     assert.equal(element('provider-choose-remote').querySelector('strong')!.textContent, 'Remote Nootify gRPC');
     submit('provider-editor'); assert.equal(providerWrites.length, 0, 'Choosing a type does not save anything');
     key('provider-type-search', 'ArrowDown'); assert.equal(document.activeElement, element('provider-choose-feishu'));
-    key('provider-choose-feishu', 'ArrowDown'); assert.equal(document.activeElement, element('provider-choose-remote'));
+    key('provider-choose-feishu', 'ArrowDown'); assert.equal(document.activeElement, element('provider-choose-personal-app'));
+    key('provider-choose-personal-app', 'ArrowDown'); assert.equal(document.activeElement, element('provider-choose-remote'));
     key('provider-choose-remote', 'Home'); assert.equal(document.activeElement, element('provider-choose-feishu'));
     change('provider-type-search', 'unavailable'); assert.equal(element('provider-type-empty').hidden, false);
     change('provider-type-search', 'grpc'); assert.equal(element('provider-choose-feishu').hidden, true);
@@ -167,8 +186,10 @@ test('provider and remote-access UI performs real mutations, preserves secrets a
     await until(() => element('provider-editor').hidden, 'Feishu provider did not save');
     assert.equal(providers.length, 1); assert.equal(providers[0].type, 'feishu');
     assert.equal(providerDialog.open, false);
-    assert.equal(providerRow('provider-1').classList.contains('provider-card'), true);
-    assert.equal(providerRow('provider-1').closest('.group'), null, 'Instance cards are not nested in a group card');
+    assert.equal(providerButton('provider-1', 'default').hidden, true, 'Do not repeat an unavailable action on the default channel');
+    assert.equal(element('providers-summary').hidden, true, 'The default badge is enough when a default exists');
+    assert.equal(providerRow('provider-1').classList.contains('channel-entry'), true);
+    assert.ok(providerRow('provider-1').closest('.channel-list'), 'Channels share one compact list group');
     assert.equal(secrets.get('provider-1'), 'synthetic-feishu-secret');
     assert.equal(providerRow('provider-1').querySelector('.setting-title')!.textContent, '<img src=x onerror=alert(1)>');
     assert.equal(providerRow('provider-1').querySelector('img'), null);
@@ -181,7 +202,7 @@ test('provider and remote-access UI performs real mutations, preserves secrets a
     assert.equal(field('provider-app-secret').value, '');
     assert.equal(field('provider-recipient').value, 'ou_synthetic');
     assert.equal(providerDialog.open, true); assert.equal(element('provider-chooser').hidden, true);
-    assert.equal(element('provider-back').hidden, true); assert.equal(element('provider-type-name').textContent, 'Feishu');
+    assert.equal(element('provider-back').hidden, true); assert.equal(element('provider-type-name').textContent, 'Feishu Bot');
     assert.equal(document.querySelector('#provider-editor select'), null);
     assert.match(element('provider-secret-hint').textContent!, /leave blank to keep/i);
     change('provider-name', 'Work Feishu'); submit('provider-editor');
@@ -333,21 +354,89 @@ test('provider and remote-access UI performs real mutations, preserves secrets a
     assert.equal(remoteWrites.length, before); assert.equal(secretReads, reveals);
   });
 
+  await t.test('personal App authorization creates a scoped channel and preserves draft/cancel semantics', async () => {
+    editable = true; navigate('#/providers'); await until(() => !button('provider-add').disabled, 'Channels unavailable');
+    button('provider-add').click(); change('provider-type-search', 'oauth');
+    assert.equal(button('provider-choose-personal-app').hidden, false); assert.equal(button('provider-choose-feishu').hidden, true);
+    key('provider-type-search', 'Enter');
+    assert.equal(element('provider-personal-fields').hidden, false); assert.equal(element('provider-feishu-fields').hidden, true);
+    assert.equal(button('provider-save').textContent, 'Authorize with QR code');
+    change('provider-name', 'Personal messages'); submit('provider-editor');
+    await until(() => registrationWrites.length > 0 && !button('provider-cancel').disabled, 'Scan did not start');
+    assert.deepEqual(registrationWrites.at(-1), { action: 'start', name: 'Personal messages', enabled: true });
+    assert.equal(element('provider-registration').hidden, false);
+    assert.equal(element('provider-registration-open').getAttribute('href'), 'https://open.feishu.cn/page/cli?user_code=TEST');
+    assert.equal(button('provider-save').hidden, true);
+    button('provider-cancel').click(); await until(() => !providerDialog.open, 'Cancel did not close');
+    assert.equal(registrationWrites.at(-1)!.action, 'cancel'); assert.equal(document.activeElement, element('provider-add'));
+
+    button('provider-add').click(); button('provider-choose-personal-app').click(); change('provider-name', 'Personal messages'); submit('provider-editor');
+    await until(() => registration.status === 'waiting' && !button('provider-cancel').disabled, 'Second scan did not start');
+    const previousDefault = defaultProvider;
+    providers.push({ id: 'personal-1', name: 'Personal messages', type: 'feishu', connection_type: 'personal-app', enabled: true,
+      status: 'connected', app_id: 'cli_personal', recipient_open_id: 'ou_personal', secret_set: true });
+    secrets.set('personal-1', 'synthetic-personal-secret');
+    registration = { status: 'complete', registration_id: 'synthetic-scan', provider_id: 'personal-1', app_id: 'cli_personal', setup: { app_id: 'cli_personal', status: 'ready', missing: [], mention_only: false } };
+    poll(); await until(() => button('provider-save').textContent === 'Save' && !button('provider-save').disabled, 'Completion did not reconcile');
+    assert.equal(defaultProvider, previousDefault); assert.match(providerRow('personal-1').textContent!, /Feishu personal app/);
+    assert.equal(element('provider-personal-actions').hidden, false); assert.equal(field('provider-app-secret').value, '');
+    change('provider-name', 'Renamed personal'); submit('provider-editor'); await until(() => !providerDialog.open, 'Rename did not save');
+    assert.equal((providerWrites.at(-1)!.provider as ProviderSummary).connection_type, 'personal-app');
+    assert.equal(Object.hasOwn(providerWrites.at(-1)!.provider as object, 'app_secret'), false);
+    providerButton('personal-1', 'edit').click(); button('provider-reconnect').click(); await until(() => !button('provider-reconnect').disabled, 'Reconnect did not finish');
+    assert.deepEqual(providerWrites.at(-1), { action: 'reconnect', id: 'personal-1' });
+    button('provider-permissions-check').click(); await until(() => setupReads > 0 && !button('provider-permissions-check').disabled, 'Permission check did not finish');
+    assert.match(element('provider-permissions-status').textContent!, /permissions are enabled/);
+    button('provider-reauthorize').click(); await until(() => registration.status === 'waiting' && !button('provider-cancel').disabled, 'Reauthorization did not start');
+    assert.equal(registrationWrites.at(-1)!.id, 'personal-1');
+    registration = { ...registration, expires_at: new Date(Date.now() - 1000).toISOString() }; poll();
+    await until(() => !button('provider-registration-retry').hidden, 'Expired QR did not offer retry');
+    assert.equal(element('provider-registration-qr').hidden, true);
+    const starts = registrationWrites.filter(write => write.action === 'start').length;
+    button('provider-registration-retry').click();
+    await until(() => registrationWrites.filter(write => write.action === 'start').length > starts && !button('provider-cancel').disabled, 'Retry did not start a new scoped scan');
+    assert.equal(registrationWrites.at(-1)!.id, 'personal-1');
+    registration = { status: 'failed', registration_id: 'synthetic-scan', error: 'app_mismatch' }; poll();
+    await until(() => element('provider-registration-detail').textContent!.includes('does not match'), 'Scoped failure did not render');
+    assert.equal(providers.find(p => p.id === 'personal-1')!.app_id, 'cli_personal'); button('provider-cancel').click();
+  });
+
+  await t.test('closing a waiting scan reconciles a completion that raced cancel', async () => {
+    await settleUiFixture();
+    const previousDefault = defaultProvider;
+    const previousCount = providers.length;
+    button('provider-add').click(); button('provider-choose-personal-app').click(); change('provider-name', 'Cancel race'); submit('provider-editor');
+    await until(() => registration.status === 'waiting' && !button('provider-cancel').disabled, 'Scan did not start');
+    providers.push({ id: 'personal-2', name: 'Cancel race', type: 'feishu', connection_type: 'personal-app', enabled: true,
+      status: 'connected', app_id: 'cli_personal_2', recipient_open_id: 'ou_personal_2', secret_set: true });
+    secrets.set('personal-2', 'synthetic-personal-2-secret');
+    registration = { status: 'complete', registration_id: 'synthetic-scan', provider_id: 'personal-2', app_id: 'cli_personal_2' }; cancelCompletes = true;
+    button('provider-cancel').click(); await until(() => !providerDialog.open, 'Completed cancellation did not close');
+    cancelCompletes = false;
+    assert.equal(providers.length, previousCount + 1); assert.equal(defaultProvider, previousDefault);
+    assert.ok(providerRow('personal-1')); assert.ok(providerRow('personal-2'));
+    assert.equal(providers.find(provider => provider.id === 'personal-1')!.name, 'Renamed personal');
+    // A completed registration focuses its saved channel. Compare a scalar so a
+    // failure does not synchronously inspect LinkeDOM's entire linked document.
+    assert.equal(document.activeElement?.getAttribute('data-key'), 'provider-edit-personal-2');
+  });
+
   await t.test('new provider and remote labels translate without changing user data', async () => {
+    navigate('#/settings/remote');
     select('language', 'zh-CN');
     assert.equal(element('crumb-page').textContent, '远程接入'); assert.equal(element('remote-title').textContent, '远程接入');
     assert.equal(element('remote-peer-rows').querySelector('.row-title')!.textContent, '<b>Desktop A</b>');
     assert.match(element('remote-peer-rows').textContent!, /2 条待确认/);
-    navigate('#/providers'); assert.equal(element('provider-add').textContent, '添加 Provider');
+    navigate('#/providers'); assert.equal(element('provider-add').textContent, '添加通道');
     assert.equal(providerRow('provider-1').querySelector('.setting-title')!.textContent, 'Retry this name');
     editable = true; poll(); await until(() => !button('provider-add').disabled, 'Provider chooser did not regain local access');
     button('provider-add').click();
-    assert.equal(element('provider-editor-title').textContent, '添加 Provider');
-    assert.equal(element('provider-choose-feishu').querySelector('strong')!.textContent, '飞书机器人');
+    assert.equal(element('provider-editor-title').textContent, '添加通道');
+    assert.equal(element('provider-choose-feishu').querySelector('strong')!.textContent, '飞书 Bot');
     assert.equal(element('provider-choose-remote').querySelector('strong')!.textContent, '远程 Nootify gRPC');
     change('provider-type-search', '飞书'); assert.equal(element('provider-choose-remote').hidden, true);
-    button('provider-choose-feishu').click(); assert.equal(element('provider-editor-title').textContent, '配置飞书');
-    select('language', 'en'); assert.equal(element('provider-editor-title').textContent, 'Configure Feishu');
+    button('provider-choose-feishu').click(); assert.equal(element('provider-editor-title').textContent, '配置飞书 Bot');
+    select('language', 'en'); assert.equal(element('provider-editor-title').textContent, 'Configure Feishu Bot');
     button('provider-cancel').click(); assert.equal(providerDialog.open, false);
   });
 });

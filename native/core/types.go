@@ -135,33 +135,55 @@ type SendResult struct {
 	ChatID    string     `json:"chat_id,omitempty"`
 	MessageID string     `json:"message_id"`
 }
+type FeishuConnectionType string
+
+const (
+	FeishuConnectionBot         FeishuConnectionType = "bot"
+	FeishuConnectionPersonalApp FeishuConnectionType = "personal-app"
+)
+
+func (t FeishuConnectionType) valid() bool {
+	return t == FeishuConnectionBot || t == FeishuConnectionPersonalApp
+}
+
+func (t *FeishuConnectionType) UnmarshalJSON(raw []byte) error {
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil || !FeishuConnectionType(value).valid() {
+		return fault("invalid_argument", "connection_type must be bot or personal-app")
+	}
+	*t = FeishuConnectionType(value)
+	return nil
+}
+
 type ProviderConfig struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	Type       string `json:"type"`
-	Enabled    bool   `json:"enabled"`
-	AppID      string `json:"app_id,omitempty"`
-	AppSecret  string `json:"app_secret,omitempty"`
-	Recipient  string `json:"recipient_open_id,omitempty"`
-	Address    string `json:"address,omitempty"`
-	Token      string `json:"token,omitempty"`
-	TLS        bool   `json:"tls,omitempty"`
-	ServerName string `json:"server_name,omitempty"`
+	ID             string               `json:"id"`
+	Name           string               `json:"name"`
+	Type           string               `json:"type"`
+	ConnectionType FeishuConnectionType `json:"connection_type,omitempty"`
+	Enabled        bool                 `json:"enabled"`
+	AppID          string               `json:"app_id,omitempty"`
+	AppSecret      string               `json:"app_secret,omitempty"`
+	Recipient      string               `json:"recipient_open_id,omitempty"`
+	Address        string               `json:"address,omitempty"`
+	Token          string               `json:"token,omitempty"`
+	TLS            bool                 `json:"tls,omitempty"`
+	ServerName     string               `json:"server_name,omitempty"`
 }
 type ProviderSummary struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	Type       string `json:"type"`
-	Enabled    bool   `json:"enabled"`
-	Status     string `json:"status"`
-	Error      string `json:"error,omitempty"`
-	AppID      string `json:"app_id,omitempty"`
-	Recipient  string `json:"recipient_open_id,omitempty"`
-	Address    string `json:"address,omitempty"`
-	TLS        bool   `json:"tls,omitempty"`
-	ServerName string `json:"server_name,omitempty"`
-	SecretSet  bool   `json:"secret_set"`
-	TokenSet   bool   `json:"token_set"`
+	ID             string               `json:"id"`
+	Name           string               `json:"name"`
+	Type           string               `json:"type"`
+	ConnectionType FeishuConnectionType `json:"connection_type,omitempty"`
+	Enabled        bool                 `json:"enabled"`
+	Status         string               `json:"status"`
+	Error          string               `json:"error,omitempty"`
+	AppID          string               `json:"app_id,omitempty"`
+	Recipient      string               `json:"recipient_open_id,omitempty"`
+	Address        string               `json:"address,omitempty"`
+	TLS            bool                 `json:"tls,omitempty"`
+	ServerName     string               `json:"server_name,omitempty"`
+	SecretSet      bool                 `json:"secret_set"`
+	TokenSet       bool                 `json:"token_set"`
 }
 type RemoteConfig struct {
 	Enabled  bool   `json:"enabled"`

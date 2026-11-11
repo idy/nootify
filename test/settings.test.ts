@@ -311,10 +311,9 @@ test('recipient directory reads are local-only and selections refuse a changed a
   const remote = await serve(t, logs, { settings, via: 'tailnet', tailnet: { authorize: async () => undefined, url: () => undefined } as unknown as TailnetAccess });
   const path = '/ui/api/settings/lark/recipients';
   assert.equal((await action(local, path, undefined, { authorization: ownerHeaders.authorization })).status, 403);
-  assert.equal((await action(local, path, undefined, { 'x-nootify-ui': '1' })).status, 403);
   assert.equal((await action(remote, path)).status, 403);
   assert.equal(reads, 0);
-  const result = await action(local, path);
+  const result = await action(local, path, undefined, { 'x-nootify-ui': '1' });
   assert.equal(result.status, 200);
   const body = await result.text();
   assert.equal(result.headers.get('cache-control'), 'no-store');
@@ -682,7 +681,7 @@ test('settings pages never carry secrets, and only this Mac can change anything'
   const save = { app_id: appId, app_secret: 'page-secret' };
 
   assert.equal((await action(local, '/ui/api/settings/lark', save, { authorization: ownerHeaders.authorization })).status, 403, 'needs the UI header');
-  assert.equal((await action(local, '/ui/api/settings/lark', save, { 'x-nootify-ui': '1' })).status, 403, 'needs owner authentication');
+  assert.equal((await action(local, '/ui/api/settings/lark', save, { 'x-nootify-ui': '1', origin: 'http://attacker.test' })).status, 403, 'cross-origin writes stay blocked');
   assert.equal((await action(remote, '/ui/api/settings/lark', save)).status, 403, 'refused on the Tailscale listener');
   assert.equal((await action(remote, '/ui/api/settings/export')).status, 403);
   assert.equal((await action(remote, '/ui/api/settings/github/login', { action: 'start' })).status, 403);
@@ -690,7 +689,7 @@ test('settings pages never carry secrets, and only this Mac can change anything'
   assert.equal((await action(remote, '/ui/api/settings/import', { document: {}, apply: true })).status, 403);
   assert.equal(state.settings.lark_app_id, undefined);
 
-  assert.equal((await action(local, '/ui/api/settings/lark', save)).status, 200);
+  assert.equal((await action(local, '/ui/api/settings/lark', save, { 'x-nootify-ui': '1' })).status, 200, 'direct local edits need no owner link');
   assert.equal(configured.length, 1);
   const revealPath = '/ui/api/settings/lark/secret';
   assert.equal((await action(local, revealPath, undefined, { authorization: ownerHeaders.authorization })).status, 403, 'revealing needs the UI header');

@@ -169,6 +169,142 @@ func TestImportAllowsSameProviderTypeAndNewIDs(t *testing.T) {
 	}
 }
 
+func TestProviderConnectionTypeSaveRetention(t *testing.T) {
+	for _, connectionType := range []FeishuConnectionType{"", FeishuConnectionBot, FeishuConnectionPersonalApp} {
+		t.Run("subtype="+string(connectionType), func(t *testing.T) {
+			c := testCore(t, nil)
+			p := ProviderConfig{ID: "feishu", Name: "Original", Type: "feishu", ConnectionType: connectionType, AppID: "app", AppSecret: "synthetic", Recipient: "recipient"}
+			raw, err := json.Marshal(p)
+			must(t, err)
+			initial, err := c.SaveProvider(raw)
+			must(t, err)
+			wantSummary := connectionType
+			if wantSummary == "" {
+				wantSummary = FeishuConnectionBot
+			}
+			if initial.Type != "feishu" || initial.ConnectionType != wantSummary {
+				t.Fatalf("unexpected initial summary: %+v", initial)
+			}
+			updated, err := c.SaveProvider(json.RawMessage(`{"id":"feishu","name":"Renamed","type":"feishu","enabled":false,"app_id":"app","app_secret":"","recipient_open_id":"recipient"}`))
+			must(t, err)
+			p.Name = "Renamed"
+			if got := c.store.Snapshot().Providers[p.ID]; got != p {
+				t.Fatalf("masked update changed stored subtype or credentials: %+v", got)
+			}
+			if updated.ConnectionType != wantSummary || c.Status()["providers"].([]ProviderSummary)[0].ConnectionType != wantSummary {
+				t.Fatal("public summaries lost the Feishu connection type")
+			}
+			// Explicit edits remain possible after an older client omits the field.
+			p.ConnectionType = FeishuConnectionPersonalApp
+			if connectionType == FeishuConnectionPersonalApp {
+				p.ConnectionType = FeishuConnectionBot
+			}
+			raw, err = json.Marshal(p)
+			must(t, err)
+			updated, err = c.SaveProvider(raw)
+			must(t, err)
+			if updated.ConnectionType != p.ConnectionType || c.store.Snapshot().Providers[p.ID] != p {
+				t.Fatal("explicit connection type update was not persisted")
+			}
+		})
+	}
+}
+
+func TestProviderConnectionTypeBackupRoundTrip(t *testing.T) {
+	source := testCore(t, nil)
+	providers := []ProviderConfig{
+		{ID: "old", Name: "Older Feishu", Type: "feishu", AppID: "old", AppSecret: "synthetic-old"},
+		{ID: "bot", Name: "Bot", Type: "feishu", ConnectionType: FeishuConnectionBot, AppID: "bot", AppSecret: "synthetic-bot"},
+		{ID: "personal", Name: "Personal", Type: "feishu", ConnectionType: FeishuConnectionPersonalApp, AppID: "personal", AppSecret: "synthetic-personal"},
+		{ID: "remote", Name: "Remote", Type: "remote", Address: "127.0.0.1:1", Token: "synthetic-remote"},
+	}
+	for _, p := range providers {
+		raw, err := json.Marshal(p)
+		must(t, err)
+		_, err = source.SaveProvider(raw)
+		must(t, err)
+	}
+	raw, err := json.Marshal(source.ExportConfig())
+	must(t, err)
+	target := testCore(t, nil)
+	must(t, target.ImportConfig(raw))
+	before, after := source.store.Snapshot(), target.store.Snapshot()
+	if !reflect.DeepEqual(before.Providers, after.Providers) || before.DefaultProvider != after.DefaultProvider {
+		t.Fatal("config export/import did not retain optional connection types")
+	}
+	for _, p := range target.ExportConfig().Providers {
+		raw, err := json.Marshal(p)
+		must(t, err)
+		var fields map[string]any
+		must(t, json.Unmarshal(raw, &fields))
+		if _, present := fields["connection_type"]; present != (p.ConnectionType != "") {
+			t.Fatal("backup filled in a missing connection type")
+		}
+	}
+	for _, p := range target.Status()["providers"].([]ProviderSummary) {
+		raw, err := json.Marshal(p)
+		must(t, err)
+		var fields map[string]any
+		must(t, json.Unmarshal(raw, &fields))
+		if p.Type == "remote" {
+			if _, present := fields["connection_type"]; present {
+				t.Fatal("remote summary exposed a Feishu connection type")
+			}
+		} else if p.ConnectionType != FeishuConnectionBot && p.ConnectionType != FeishuConnectionPersonalApp {
+			t.Fatal("Feishu summary omitted its connection type")
+		}
+	}
+}
+
+func TestProviderConnectionTypeRejectsInvalidValues(t *testing.T) {
+	cases := []struct {
+		name         string
+		providerType string
+		value        any
+	}{
+		{"unknown", "feishu", "personal"},
+		{"case", "feishu", "BOT"},
+		{"empty", "feishu", ""},
+		{"null", "feishu", nil},
+		{"number", "feishu", 1},
+		{"boolean", "feishu", false},
+		{"object", "feishu", map[string]any{"type": "bot"}},
+		{"remote-bot", "remote", "bot"},
+		{"remote-personal", "remote", "personal-app"},
+	}
+	for _, tc := range cases {
+		for _, method := range []string{"provider.save", "config.import", "migration.import"} {
+			if method == "migration.import" && tc.providerType != "feishu" {
+				continue
+			}
+			t.Run(tc.name+"/"+method, func(t *testing.T) {
+				c := testCore(t, nil)
+				c.cancel() // Invalid migrations must never contact real Feishu, even on regression.
+				before := c.store.Snapshot()
+				statePath := filepath.Join(c.store.dir, "state.json")
+				fileBefore, err := os.ReadFile(statePath)
+				must(t, err)
+				p := map[string]any{"id": "invalid", "name": "Invalid", "type": tc.providerType, "connection_type": tc.value, "enabled": false, "app_id": "app", "app_secret": "synthetic", "address": "127.0.0.1:1", "token": "synthetic"}
+				var input any = p
+				if method == "config.import" {
+					input = map[string]any{"version": 1, "providers": []any{p}, "remote": before.Remote}
+				}
+				raw, err := json.Marshal(input)
+				must(t, err)
+				_, err = c.Handle(context.Background(), method, raw, true)
+				if publicError(err).Code != "invalid_argument" {
+					t.Fatalf("invalid connection type returned %v", err)
+				}
+				fileAfter, err := os.ReadFile(statePath)
+				must(t, err)
+				if !reflect.DeepEqual(before, c.store.Snapshot()) || !bytes.Equal(fileBefore, fileAfter) {
+					t.Fatal("invalid connection type changed durable state")
+				}
+			})
+		}
+	}
+}
+
 func TestPeerConnectedStatusTracksSubscriptionLifetime(t *testing.T) {
 	c := testCore(t, nil)
 	sub, err := c.Subscribe(context.Background(), "peer", "downstream")
@@ -221,6 +357,173 @@ func TestTombstoneSuppressesQueuedReplayAndPreviousActivationRetry(t *testing.T)
 	must(t, c.Ingest(context.Background(), local, ""))
 	if count != 1 {
 		t.Fatal("old source replay delivered after reactivation")
+	}
+}
+
+func TestMigrationConnectionTypeInitialImport(t *testing.T) {
+	for _, connectionType := range []FeishuConnectionType{"", FeishuConnectionBot, FeishuConnectionPersonalApp} {
+		t.Run("subtype="+string(connectionType), func(t *testing.T) {
+			c := testCore(t, nil)
+			c.cancel()
+			raw, err := json.Marshal(migration{AppID: "app", AppSecret: "synthetic", ConnectionType: connectionType})
+			must(t, err)
+			result, err := c.Handle(context.Background(), "migration.import", raw, true)
+			must(t, err)
+			p := c.store.Snapshot().Providers["legacy-feishu"]
+			if result.(map[string]any)["imported"] != true || p.Type != "feishu" || p.ConnectionType != connectionType {
+				t.Fatalf("initial migration did not persist the optional subtype: %+v", p)
+			}
+		})
+	}
+}
+
+func TestMigrationConnectionTypeInitialImportPreservesEnabledOwner(t *testing.T) {
+	c := testCore(t, nil)
+	bot := &importTestBot{Bot: installFake(t, c, "active")}
+	installRoutingBot(c, "active", bot)
+	c.setStatus("active", "connected")
+	_, err := c.Ensure(context.Background(), "active", Session{Adapter: "codex", SessionID: "retained"})
+	must(t, err)
+	must(t, c.store.Update(func(d *State) error {
+		p := d.Providers["active"]
+		p.Name, p.Recipient, p.Enabled = "Current owner", "current-recipient", true
+		d.Providers[p.ID] = p
+		return nil
+	}))
+	before := c.store.Snapshot()
+	if before.Migrated || before.Providers["legacy-feishu"].ID != "" || before.Providers["active"].ConnectionType != "" {
+		t.Fatal("fixture must start before migration with an untyped enabled owner")
+	}
+	c.cancel() // A regression must never connect to real Feishu.
+	raw := json.RawMessage(`{"app_id":"app","app_secret":"legacy-secret","recipient_open_id":"legacy-recipient","connection_type":"personal-app","bindings":[{"chat_id":"imported-chat","session_id":"imported","adapter":"codex"}]}`)
+	result, err := c.Migrate(raw)
+	must(t, err)
+	after := c.store.Snapshot()
+	wantOwner := before.Providers["active"]
+	wantOwner.ConnectionType = FeishuConnectionPersonalApp
+	if result["imported"] != true || !after.Migrated || after.Providers["active"] != wantOwner {
+		t.Fatal("initial migration lost the existing owner's subtype backfill or changed its config")
+	}
+	legacy := after.Providers["legacy-feishu"]
+	if legacy.ID != "legacy-feishu" || legacy.Type != "feishu" || legacy.Enabled || legacy.ConnectionType != FeishuConnectionPersonalApp {
+		t.Fatal("initial migration did not retain a separate disabled legacy provider with its subtype")
+	}
+	if after.DefaultProvider != before.DefaultProvider || c.providers["active"] != bot || bot.closes != 0 || c.statuses["active"] != "connected" {
+		t.Fatal("initial migration replaced or restarted the enabled owner")
+	}
+	for key, binding := range before.Bindings {
+		if !reflect.DeepEqual(binding, after.Bindings[key]) {
+			t.Fatal("initial migration changed an existing binding")
+		}
+	}
+	key := (Session{NodeID: c.node(), Adapter: "codex", SessionID: "imported"}).key()
+	if binding := after.Bindings[key]; binding.ProviderID != "active" || binding.ChatID != "imported-chat" {
+		t.Fatal("initial migration did not route the imported binding through its enabled owner")
+	}
+	raw, err = os.ReadFile(filepath.Join(c.store.dir, "state.json"))
+	must(t, err)
+	var persisted State
+	must(t, json.Unmarshal(raw, &persisted))
+	if persisted.Providers["active"] != wantOwner || persisted.Providers["legacy-feishu"] != legacy {
+		t.Fatal("initial migration overwrote a connection type while persisting the providers")
+	}
+}
+
+func TestMigrationConnectionTypeBackfillPreservesExistingState(t *testing.T) {
+	cases := []struct {
+		name      string
+		id        string
+		migrated  bool
+		tombstone bool
+	}{
+		{"migrated-legacy", "legacy-feishu", true, false},
+		{"existing-legacy", "legacy-feishu", false, false},
+		{"migrated-other-id", "current", true, false},
+		{"deleted-legacy", "current", false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := testCore(t, nil)
+			bot := &importTestBot{Bot: installFake(t, c, tc.id)}
+			installRoutingBot(c, tc.id, bot)
+			c.setStatus(tc.id, "connected")
+			_, err := c.Ensure(context.Background(), tc.id, Session{Adapter: "codex", SessionID: "retained"})
+			must(t, err)
+			must(t, c.store.Update(func(d *State) error {
+				d.Migrated = tc.migrated
+				d.ProviderTombstones["legacy-feishu"] = tc.tombstone
+				d.DefaultProvider = "" // The user deliberately cleared their default.
+				p := d.Providers[tc.id]
+				p.Name, p.Recipient = "User-chosen name", "current-recipient"
+				p.Enabled = tc.migrated
+				d.Providers[p.ID] = p
+				for _, explicit := range []FeishuConnectionType{FeishuConnectionBot, FeishuConnectionPersonalApp} {
+					p.ID, p.ConnectionType = string(explicit), explicit
+					d.Providers[p.ID] = p
+				}
+				p.ID, p.AppID, p.ConnectionType = "other-app", "different-app", ""
+				d.Providers[p.ID] = p
+				p.ID, p.Type, p.AppID = "remote", "remote", "app"
+				d.Providers[p.ID] = p
+				p.ID, p.Type = "tombstoned", "feishu"
+				d.Providers[p.ID] = p
+				d.ProviderTombstones[p.ID] = true
+				s := Session{NodeID: d.NodeID, Adapter: "codex", SessionID: "deleted"}
+				d.Bindings[s.key()] = Binding{ProviderID: tc.id, Session: s, ChatID: "deleted-chat", Deleted: true}
+				d.FeishuCursors[feishuCursorKey("app", "deleted-chat")] = 1700000000000
+				return nil
+			}))
+			before := c.store.Snapshot()
+			raw := json.RawMessage(`{"app_id":"app","app_secret":"stale-secret","recipient_open_id":"stale-recipient","connection_type":"personal-app","legacy_host":"old","bindings":[{"chat_id":"deleted-chat","session_id":"deleted","adapter":"codex"},{"chat_id":"unexpected-chat","session_id":"unexpected"}]}`)
+			_, err = c.Handle(context.Background(), "migration.import", raw, false)
+			if publicError(err).Code != "permission_denied" || !reflect.DeepEqual(before, c.store.Snapshot()) {
+				t.Fatal("remote migration was allowed to change provider metadata")
+			}
+			result, err := c.Handle(context.Background(), "migration.import", raw, true)
+			must(t, err)
+			if result.(map[string]any)["imported"] != false {
+				t.Fatal("metadata backfill reported a new legacy import")
+			}
+			p := before.Providers[tc.id]
+			p.ConnectionType = FeishuConnectionPersonalApp
+			before.Providers[p.ID] = p
+			if !reflect.DeepEqual(before, c.store.Snapshot()) {
+				t.Fatal("backfill changed state other than the missing same-app subtype")
+			}
+			if c.providers[tc.id] != bot || bot.closes != 0 || c.statuses[tc.id] != "connected" {
+				t.Fatal("metadata backfill restarted the provider")
+			}
+			statePath := filepath.Join(c.store.dir, "state.json")
+			fileBefore, err := os.ReadFile(statePath)
+			must(t, err)
+			var persisted State
+			must(t, json.Unmarshal(fileBefore, &persisted))
+			if persisted.Providers[tc.id].ConnectionType != FeishuConnectionPersonalApp {
+				t.Fatal("metadata backfill was not persisted to disk")
+			}
+			// A later migration cannot override the newly explicit personal-app choice.
+			_, err = c.Migrate(json.RawMessage(`{"app_id":"app","app_secret":"stale-secret","connection_type":"bot"}`))
+			must(t, err)
+			fileAfter, err := os.ReadFile(statePath)
+			must(t, err)
+			if !reflect.DeepEqual(before, c.store.Snapshot()) || !bytes.Equal(fileBefore, fileAfter) {
+				t.Fatal("repeat migration overwrote an explicit subtype or rewrote unchanged state")
+			}
+		})
+	}
+}
+
+func TestMigrationConnectionTypeDoesNotResurrectDeletedProvider(t *testing.T) {
+	c := testCore(t, nil)
+	c.cancel()
+	_, err := c.Migrate(json.RawMessage(`{"app_id":"app","app_secret":"synthetic"}`))
+	must(t, err)
+	must(t, c.DeleteProvider("legacy-feishu"))
+	before := c.store.Snapshot()
+	_, err = c.Migrate(json.RawMessage(`{"app_id":"app","app_secret":"synthetic","connection_type":"personal-app"}`))
+	must(t, err)
+	if !reflect.DeepEqual(before, c.store.Snapshot()) || before.DefaultProvider != "" {
+		t.Fatal("subtype backfill resurrected a deleted provider or its default")
 	}
 }
 

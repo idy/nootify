@@ -1334,7 +1334,7 @@ test('tailnet browser clients cannot mutate providers or retrieve the remote acc
   assert.ok(!core.calls.some(call => ['provider.save', 'remote.configure', 'remote.secret'].includes(call.method)));
 });
 
-test('provider UI mutations and remote token reveal require owner authentication, local origin and the UI header', async t => {
+test('provider UI mutations and remote token reveal require local access and the UI header', async t => {
   const { providers, state, directory } = await fixture(t, { sessionName: id => id });
   const logs = await EventLog.open(directory);
   const server = createServiceHost([], state.token, logs, { providers });
@@ -1343,11 +1343,12 @@ test('provider UI mutations and remote token reveal require owner authentication
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   const owner = { authorization: `Bearer ${state.token}` };
   const read = await fetch(`${base}/ui/api/providers`, { headers: owner }); assert.equal(read.status, 200); assert.equal((await read.json() as { editable: boolean }).editable, true);
-  assert.equal((await (await fetch(`${base}/ui/api/providers`)).json() as { editable: boolean }).editable, false);
+  assert.equal((await (await fetch(`${base}/ui/api/providers`)).json() as { editable: boolean }).editable, true);
   const denied = await fetch(`${base}/ui/api/providers`, { method: 'POST', headers: owner, body: JSON.stringify({ action: 'delete', id: 'bot-a' }) });
   assert.equal(denied.status, 403);
-  const unauthenticated = await fetch(`${base}/ui/api/settings/remote/secret`, { method: 'POST', headers: { 'x-nootify-ui': '1' } });
-  assert.equal(unauthenticated.status, 403);
+  const directLocal = await fetch(`${base}/ui/api/settings/remote/secret`, { method: 'POST', headers: { 'x-nootify-ui': '1' } });
+  assert.equal(directLocal.status, 200);
+  assert.deepEqual(await directLocal.json(), { token: 'private-peer-token' });
   const secretGet = await fetch(`${base}/ui/api/settings/remote/secret`); assert.equal(secretGet.status, 405);
   const secret = await fetch(`${base}/ui/api/settings/remote/secret`, { method: 'POST', headers: { 'x-nootify-ui': '1', authorization: `Bearer ${state.token}` } });
   assert.deepEqual(await secret.json(), { token: 'private-peer-token' });

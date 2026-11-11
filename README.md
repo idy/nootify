@@ -40,9 +40,11 @@ Windows installers are not code-signed.
 
 ## Get started
 
-1. Open **Providers** and add a **Feishu bot** with its App ID, App Secret, and
-   trusted recipient's `open_id`, or a **Remote Nootify** with its server address,
-   token, and TLS settings. Enable the instance and choose your default provider.
+1. Open **Channels** and choose **Feishu Bot** (enter App ID, App Secret, and
+   trusted recipient's `open_id`), **Feishu personal app** (scan to authorize), or
+   **Remote Nootify** (server address, token, and TLS settings). Personal-app
+   authorization saves a separate channel without replacing existing channels.
+   Enable the connection and choose your default channel.
 2. On the **Agents** page, enable the clients you use. Codex Desktop connects
    automatically on macOS; configure an existing Codex app-server or OpenCode
    connection when needed.
@@ -50,8 +52,9 @@ Windows installers are not code-signed.
    notification session and post progress; reply there to continue the conversation.
 
 To serve other Nootify nodes, configure the listener under **Settings → Remote
-access** (`远程接入`). The legacy personal-app QR setup remains linked from the
-Feishu provider editor for migration.
+access** (`远程接入`). Personal apps can be reconnected, reauthorized for the same App ID, and checked
+for required permissions from their channel editor. The legacy settings route
+remains available for older integrations.
 
 Your computer, local service, and target session must remain available. A delivered
 reply does not automatically approve a permission request.
@@ -90,6 +93,29 @@ state and ephemeral loopback ports. The external bot is synthetic; no Feishu,
 Tailscale enrollment, system-service management, or production credentials are
 used. All owned processes and temporary state are cleaned up after the run.
 The JUnit report is `.cache/headless-integration.xml`.
+
+For an isolated browser preview of the application UI:
+
+```bash
+npm run preview:ui
+```
+
+Open `http://127.0.0.1:9427/#/providers` directly. No authorization link is
+required for local editing. The preview uses synthetic providers, sessions,
+logs, repositories, and contacts through the same local UI APIs. Edits stay in memory and reset
+on restart. The personal-channel scan is synthetic and completes after fifteen
+status reads; its QR points to a nonfunctional demo URL, not a real Feishu grant.
+Real OAuth, provider connections, and filesystem actions are unavailable.
+Use `npm run preview:ui -- --hold-registration` to keep the synthetic QR state
+open while inspecting its responsive layout; Cancel remains available.
+Refreshing a direct local page preserves access without a new capability.
+The optional encrypted desktop/gateway path remains supported.
+
+The frontend uses [Magpie Design System v0.4.1](https://github.com/idy/magpie-design-system/tree/v0.4.1),
+vendored in `public/vendor/magpie/` with its fonts, icons, and licenses. Resources
+are served locally for offline use and strict CSP. `public/styles.css` owns
+Nootify's route layouts and domain-specific list/dialog composition; shared
+controls use the upstream `mds-*` classes. See [shared UI controls](docs/ui-components.md).
 
 The Go core owns provider connections, notification-session mappings, and durable
 delivery/replay state. The Node service starts it through private stdio RPC and

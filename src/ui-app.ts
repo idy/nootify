@@ -15,7 +15,7 @@ import { Dropdown } from './dropdown.js';
 import { browserUiTransport } from './ui-transport.js';
 
 const ownerTransport = browserUiTransport(location, history);
-// Every API path, including streamed directories and reads, uses the same protected transport.
+// Desktop sessions keep their encrypted transport; direct local pages use same-origin APIs.
 const fetch = ownerTransport.fetch;
 
 interface PullSummary { internal: number; upstream: number; followed: number; running: boolean; lastSuccessAt?: string; error?: string; signedOut?: boolean }
@@ -28,15 +28,17 @@ interface AgentsPage { agents: AgentPrompt[]; editable: boolean }
 /** Redacted UI summaries from docs/provider-protocol.md; secrets are write-only except the local listener reveal action. */
 interface ProviderSummary {
   id: string; name: string; type: 'feishu' | 'remote'; enabled: boolean; status: string; error?: string;
-  app_id?: string; recipient_open_id?: string; address?: string; tls?: boolean; server_name?: string; secret_set?: boolean; token_set?: boolean;
+  connection_type?: LarkConnectionType; app_id?: string; recipient_open_id?: string; address?: string; tls?: boolean; server_name?: string; secret_set?: boolean; token_set?: boolean;
 }
+type ProviderChoice = 'feishu' | 'personal-app' | 'remote';
+interface ProviderRegistrationPage extends LarkRegistrationPage { registration_id?: string; provider_id?: string }
 interface RemoteSummary {
   enabled: boolean; listen: string; status: string; tls: boolean; token_set: boolean; tls_cert_file?: string; tls_key_file?: string;
   peers: { node_id: string; name?: string; connected_at: string; connected?: boolean; pending: number; last_ack?: string }[];
 }
 interface ProvidersPage { node_id: string; providers: ProviderSummary[]; default_provider_id?: string; remote: RemoteSummary; editable: boolean }
 interface RemotePage extends RemoteSummary { node_id: string; editable: boolean }
-type ProviderConfig = Pick<ProviderSummary, 'name' | 'type' | 'enabled'> & Partial<Pick<ProviderSummary, 'id' | 'app_id' | 'recipient_open_id' | 'address' | 'tls' | 'server_name'>> & { app_secret?: string; token?: string };
+type ProviderConfig = Pick<ProviderSummary, 'name' | 'type' | 'enabled' | 'connection_type'> & Partial<Pick<ProviderSummary, 'id' | 'app_id' | 'recipient_open_id' | 'address' | 'tls' | 'server_name'>> & { app_secret?: string; token?: string };
 interface Tone { label: string; tone: string }
 type TranslatedText = string | (() => string);
 const resolveText = (value?: TranslatedText): string => typeof value === 'function' ? value() : value ?? '';
@@ -51,7 +53,7 @@ function translatedLabels() {
     logs: { hash: '#/logs', group: t('消息桥接'), title: t('运行日志'), section: 'logs-view' },
     sessions: { hash: '#/sessions', group: t('消息桥接'), title: t('路由会话'), section: 'sessions-view' },
     agents: { hash: '#/agents', group: t('消息桥接'), title: 'Agents', section: 'agents-view' },
-    providers: { hash: '#/providers', group: t('消息桥接'), title: 'Providers', section: 'providers-view' },
+    providers: { hash: '#/providers', group: t('消息桥接'), title: t('通道'), section: 'providers-view' },
     'pulls-internal': { hash: '#/pulls/internal', group: 'Repos', title: t('我们仓库的 PR'), section: 'pulls-view' },
     'pulls-upstream': { hash: '#/pulls/upstream', group: 'Repos', title: t('提交上游的 PR'), section: 'pulls-view' },
     repos: { hash: '#/repos', group: 'Repos', title: t('PR 订阅'), section: 'repos-view' },
@@ -85,7 +87,7 @@ function translatedLabels() {
     app_mismatch: t('该群属于另一个飞书应用'), sender_not_allowed: t('发送者不在允许名单'), duplicate: t('重复消息'), unsupported_message: t('暂不处理此消息类型'),
     host_mismatch: t('会话位于另一台机器'), invalid_content: t('消息内容无效'), delivery_failed: t('投递失败'), input_rejected: t('客户端拒绝此输入'),
   };
-  const sourceNames: Record<string, string> = { host: t('服务'), sessions: t('会话'), lark: t('飞书'), providers: 'Providers', pulls: 'GitHub', agents: 'Agents' };
+  const sourceNames: Record<string, string> = { host: t('服务'), sessions: t('会话'), lark: t('飞书'), providers: t('通道'), pulls: 'GitHub', agents: 'Agents' };
   const categories: Record<string, Tone> = {
     incoming: { label: t('用户消息'), tone: 'muted' }, progress: { label: t('会话进度'), tone: 'muted' }, reply: { label: t('会话回复'), tone: 'muted' },
     system: { label: t('连接与系统'), tone: 'muted' }, ignored: { label: t('已忽略'), tone: 'muted' }, error: { label: t('异常'), tone: 'error' },
@@ -106,7 +108,7 @@ function translatedLabels() {
   const reviews: Record<string, Tone> = {
     APPROVED: { label: t('已批准'), tone: 'ok' }, CHANGES_REQUESTED: { label: t('需要修改'), tone: 'error' }, REVIEW_REQUIRED: { label: t('待审查'), tone: 'warn' },
   };
-  const moduleNames: Record<string, string> = { sessions: t('会话'), lark: t('飞书'), providers: 'Providers', pulls: 'GitHub' };
+  const moduleNames: Record<string, string> = { sessions: t('会话'), lark: t('飞书'), providers: t('通道'), pulls: 'GitHub' };
   const moduleStates: Record<string, Tone> = {
     ready: { label: t('就绪'), tone: 'ok' }, idle: { label: t('等待刷新'), tone: 'warn' }, refreshing: { label: t('刷新中'), tone: 'warn' },
     stale: { label: t('刷新失败'), tone: 'error' }, error: { label: t('异常'), tone: 'error' }, failed: { label: t('异常'), tone: 'error' },
@@ -158,7 +160,6 @@ const isPullView = (view: View): view is 'pulls-internal' | 'pulls-upstream' => 
 /** Views backed by the GitHub module's snapshot, loaded separately from the two-second page snapshot. */
 const usesPulls = (view: View): boolean => isPullView(view) || view === 'repos';
 const isSettingsView = (view: View): boolean => view.startsWith('settings-');
-const localOwnerLocked = (): boolean => /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname) && !ownerTransport.authorized;
 
 const state = {
   view: viewFromHash(),
@@ -169,7 +170,9 @@ const state = {
   pendingRepos: new Set<string>(), repoError: '' as TranslatedText, openRepoSources: new Set<string>(),
   agents: undefined as AgentsPage | undefined, agentsError: '' as TranslatedText, pendingAgents: new Set<string>(), openPreviews: new Set<string>(),
   providers: undefined as ProvidersPage | undefined, loadingProviders: false, providersBusy: false, providersError: '' as TranslatedText, providersReadError: false,
-  providerEditor: undefined as { id?: string; step: 'choose' | 'configure'; type: ProviderSummary['type']; secretSet: boolean; tokenSet: boolean } | undefined, providerEditorError: '' as TranslatedText,
+  providerRegistration: undefined as ProviderRegistrationPage | undefined, providerRegistrationBusy: false, providerRegistrationPolling: false, providerRegistrationPending: false,
+  providerCloseRequested: undefined as boolean | undefined, providerSetup: undefined as LarkSetup | undefined, providerSetupBusy: false,
+  providerEditor: undefined as { id?: string; step: 'choose' | 'configure'; type: ProviderSummary['type']; connectionType: LarkConnectionType; secretSet: boolean; tokenSet: boolean } | undefined, providerEditorError: '' as TranslatedText,
   providerDelete: undefined as ProviderSummary | undefined, providerDeleteError: '' as TranslatedText, providerDeleteOpener: undefined as HTMLElement | undefined,
   remote: undefined as RemotePage | undefined, loadingRemote: false, remoteBusy: false, remoteError: '' as TranslatedText, remoteReadError: false,
   remoteEdited: false, remoteNote: '' as TranslatedText, remoteSecretLoading: false, remoteSecretRevealed: false, remoteRevision: 0,
@@ -528,7 +531,7 @@ function renderRepos(): void {
   replaceRows($('repo-rows'), visible.flatMap(entry => {
     const row = node('tr', undefined, 'repo-row');
     const follow = node('td', undefined, 'repo-follow-cell');
-    const label = node('label', undefined, 'repo-follow');
+    const label = node('label', undefined, 'repo-follow mds-check');
     label.title = entry.choice === 'follow' ? t('手动关注') : entry.choice === 'mute' ? t('手动取消') : entry.followed ? t('自动关注') : t('未关注');
     const box = node('input', undefined, 'check'); box.type = 'checkbox'; box.checked = entry.followed;
     box.disabled = state.pendingRepos.has(entry.repository); box.dataset.key = entry.repository;
@@ -592,7 +595,9 @@ function providerStatus(status: string, enabled = true, error?: string): Tone {
   };
   return labels[status] ?? { label: status || t('未确认'), tone: 'muted' };
 }
-const providerTypeName = (type: ProviderSummary['type']): string => type === 'feishu' ? t('飞书') : t('远程 Nootify');
+const providerTypeName = (type: ProviderSummary['type'], connectionType?: LarkConnectionType): string => type === 'feishu' ? connectionType === 'personal-app' ? t('飞书个人 App') : t('飞书 Bot') : t('远程 Nootify');
+const personalEditor = (): boolean => state.providerEditor?.type === 'feishu' && state.providerEditor.connectionType === 'personal-app';
+const providerRegistrationActive = (): boolean => !!state.providerRegistration && ['starting', 'waiting', 'connecting'].includes(state.providerRegistration.status);
 const addressValid = (address: string): boolean => {
   const match = /^(\[[^\]\s]+\]|[^:\s/]+):(\d{1,5})$/.exec(address);
   return !!match && Number(match[2]) > 0 && Number(match[2]) <= 65535;
@@ -606,14 +611,13 @@ async function loadProviders(): Promise<void> {
     const response = await fetch('/ui/api/providers', { cache: 'no-store', signal: AbortSignal.timeout(8000) });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const page = await response.json() as ProvidersPage;
-    page.editable = page.editable && !localOwnerLocked();
     if (revision === providersRevision) {
       state.providers = page;
       if (state.providersReadError) { state.providersError = ''; state.providersReadError = false; }
     }
   } catch (error) {
     if (revision === providersRevision && (!state.providersError || state.providersReadError)) {
-      state.providersReadError = true; state.providersError = () => t('无法读取 Providers：{p0}', { p0: (error as Error).message });
+      state.providersReadError = true; state.providersError = () => t('无法读取通道：{p0}', { p0: (error as Error).message });
     }
   } finally { state.loadingProviders = false; renderProviders(); renderAgents(); }
 }
@@ -628,44 +632,53 @@ function renderProviders(): void {
   $('providers-retry').hidden = !state.providersError;
   $<HTMLButtonElement>('providers-retry').disabled = state.loadingProviders || busy;
   const selected = page?.providers.find(provider => provider.id === page.default_provider_id);
-  setText('providers-summary', !page ? t('正在读取 Providers…') : selected ? t('默认：{p0}', { p0: selected.name }) : t('尚未选择默认 Provider'));
+  setText('providers-summary', !page ? t('正在读取通道…') : selected ? t('默认：{p0}', { p0: selected.name }) : t('尚未选择默认通道'));
   $('providers-empty').hidden = !page || page.providers.length > 0;
+  $('providers-summary').hidden = !!selected || page?.providers.length === 0;
   if (changed('provider-rows', [page?.providers, page?.default_provider_id, editable, busy])) replaceRows($('provider-rows'), (page?.providers ?? []).map(provider => {
-    const item = node('div', undefined, 'provider-card'); item.setAttribute('role', 'listitem'); item.dataset.providerId = provider.id;
-    const row = node('div', undefined, 'setting provider-row');
+    const item = node('div', undefined, 'channel-entry'); item.setAttribute('role', 'listitem'); item.dataset.providerId = provider.id;
+    const row = node('div', undefined, 'provider-row');
     const main = node('div', undefined, 'setting-main');
-    const title = node('div', undefined, 'provider-row-title'); title.append(node('span', provider.name, 'setting-title'));
+    const title = node('div', undefined, 'provider-row-title'); const name = node('span', provider.name, 'setting-title'); name.title = provider.name; title.append(name);
     if (provider.id === page?.default_provider_id) title.append(node('span', t('默认'), 'tag'));
-    const details = node('div', undefined, 'setting-sub provider-identity');
-    details.append(node('span', providerTypeName(provider.type)), node('span', provider.type === 'feishu' ? provider.app_id : provider.address, 'mono'));
-    main.append(title, details);
-    if (provider.error) main.append(node('div', provider.error, 'setting-sub tone-error provider-error'));
+    const details = node('div', undefined, 'provider-identity');
     const tone = providerStatus(provider.status, provider.enabled, provider.error);
-    row.append(main, node('span', tone.label, `provider-status tone-${tone.tone}`));
-    const actions = node('div', undefined, 'setting-actions');
+    const status = node('span', tone.label, `provider-status tone-${tone.tone}`);
+    status.title = provider.error || tone.label;
+    if (provider.error) status.setAttribute('aria-label', `${tone.label}: ${provider.error}`);
+    details.append(node('span', providerTypeName(provider.type, provider.connection_type)), status);
+    main.append(title, details);
+    row.append(main);
+    const actions = node('div', undefined, 'channel-actions');
     const enabledLabel = node('label', undefined, 'provider-enable-label');
     const enabled = node('input', undefined, 'switch'); enabled.type = 'checkbox'; enabled.setAttribute('role', 'switch'); enabled.checked = provider.enabled;
     enabled.disabled = !editable || busy; enabled.dataset.key = `provider-enabled-${provider.id}`;
     enabled.setAttribute('aria-label', t('启用 {p0}', { p0: provider.name }));
     enabled.addEventListener('change', () => {
-      const { id, name, type, app_id, recipient_open_id, address, tls, server_name } = provider;
-      void mutateProvider({ action: 'save', provider: { id, name, type, app_id, recipient_open_id, address, tls, server_name, enabled: enabled.checked } });
+      const { id, name, type, connection_type, app_id, recipient_open_id, address, tls, server_name } = provider;
+      void mutateProvider({ action: 'save', provider: { id, name, type, connection_type, app_id, recipient_open_id, address, tls, server_name, enabled: enabled.checked } });
     });
-    enabledLabel.append(node('span', t('启用'), 'setting-sub'), enabled); actions.append(enabledLabel);
-    const edit = node('button', t('编辑'), 'text-button'); edit.type = 'button'; edit.disabled = !editable || busy; edit.dataset.key = `provider-edit-${provider.id}`;
+    const toggle = node('span', undefined, 'mds-switch');
+    const track = node('span', undefined, 'mds-switch-track'); track.setAttribute('aria-hidden', 'true');
+    toggle.append(enabled, track);
+    enabledLabel.title = t('启用 {p0}', { p0: provider.name });
+    enabledLabel.append(toggle); row.append(enabledLabel);
+    const edit = node('button', t('编辑'), 'mds-link-button'); edit.type = 'button'; edit.disabled = !editable || busy; edit.dataset.key = `provider-edit-${provider.id}`;
     edit.setAttribute('aria-label', t('编辑 {p0}', { p0: provider.name })); edit.addEventListener('click', () => openProviderEditor(provider)); actions.append(edit);
-    const makeDefault = node('button', t('设为默认'), 'text-button'); makeDefault.type = 'button'; makeDefault.disabled = !editable || busy || !provider.enabled || provider.id === page?.default_provider_id;
+    const makeDefault = node('button', t('设为默认'), 'mds-link-button'); makeDefault.type = 'button'; makeDefault.disabled = !editable || busy || !provider.enabled || provider.id === page?.default_provider_id;
+    makeDefault.hidden = provider.id === page?.default_provider_id;
     makeDefault.dataset.key = `provider-default-${provider.id}`; makeDefault.setAttribute('aria-label', t('将 {p0} 设为默认', { p0: provider.name }));
     makeDefault.addEventListener('click', () => { void mutateProvider({ action: 'default', id: provider.id }); }); actions.append(makeDefault);
-    const remove = node('button', t('删除'), 'text-button danger'); remove.type = 'button'; remove.disabled = !editable || busy; remove.dataset.key = `provider-delete-${provider.id}`;
+    const remove = node('button', t('删除'), 'mds-link-button channel-delete'); remove.type = 'button'; remove.disabled = !editable || busy; remove.dataset.key = `provider-delete-${provider.id}`;
     remove.setAttribute('aria-label', t('删除 {p0}', { p0: provider.name })); remove.addEventListener('click', () => openProviderDelete(provider, remove)); actions.append(remove);
     row.append(actions); item.append(row); return item;
   }));
   renderProviderEditor(); renderProviderDelete();
 }
-function openProviderEditor(provider?: ProviderSummary, type?: ProviderSummary['type']): void {
-  if (state.providers?.editable !== true || state.providersBusy) return;
-  state.providerEditor = { id: provider?.id, step: provider || type ? 'configure' : 'choose', type: provider?.type ?? type ?? 'feishu', secretSet: provider?.secret_set === true, tokenSet: provider?.token_set === true };
+function openProviderEditor(provider?: ProviderSummary, type?: ProviderChoice): void {
+  if (state.providers?.editable !== true || state.providersBusy || state.providerRegistrationBusy || providerRegistrationActive()) return;
+  state.providerRegistration = undefined; state.providerRegistrationPending = false; state.providerSetup = undefined; state.providerCloseRequested = undefined;
+  state.providerEditor = { id: provider?.id, step: provider || type ? 'configure' : 'choose', type: provider?.type ?? (type === 'remote' ? 'remote' : 'feishu'), connectionType: provider?.connection_type ?? (type === 'personal-app' ? 'personal-app' : 'bot'), secretSet: provider?.secret_set === true, tokenSet: provider?.token_set === true };
   state.providerEditorError = ''; state.providersError = '';
   field('provider-type-search').value = '';
   field('provider-name').value = provider?.name ?? '';
@@ -682,7 +695,8 @@ function openProviderEditor(provider?: ProviderSummary, type?: ProviderSummary['
 function backToProviderTypes(): void {
   const editor = state.providerEditor;
   if (!editor || editor.id || state.providersBusy || state.providers?.editable !== true) return;
-  const type = editor.type;
+  if (state.providerRegistrationBusy || providerRegistrationActive()) return;
+  const type = personalEditor() ? 'personal-app' : editor.type;
   openProviderEditor(); $('provider-choose-' + type).focus();
 }
 function renderProviderTypes(): void {
@@ -690,7 +704,7 @@ function renderProviderTypes(): void {
   let visible = 0;
   for (const option of document.querySelectorAll<HTMLButtonElement>('#provider-type-options button')) {
     const type = option.dataset.providerType!;
-    const terms = `${option.textContent} ${type === 'feishu' ? 'feishu lark 飞书 机器人 bot' : 'remote nootify grpc 远程'}`.toLocaleLowerCase();
+    const terms = `${option.textContent} ${type === 'feishu' ? 'feishu lark 飞书 机器人 bot' : type === 'personal-app' ? 'feishu lark personal oauth 个人 扫码 授权' : 'remote nootify grpc 远程'}`.toLocaleLowerCase();
     option.hidden = !!query && !terms.includes(query);
     option.disabled = state.providers?.editable !== true || state.providersBusy;
     if (!option.hidden) visible++;
@@ -700,7 +714,10 @@ function renderProviderTypes(): void {
 }
 function closeProviderEditor(restore = true): void {
   if (state.providersBusy && restore) return;
+  if (state.providerRegistrationBusy) { state.providerCloseRequested = restore; return; }
+  if (providerRegistrationActive()) { void providerRegistrationAction('cancel').then(ok => { if (ok) closeProviderEditor(restore); }); return; }
   const id = state.providerEditor?.id;
+  state.providerRegistration = undefined; state.providerRegistrationPending = false; state.providerSetup = undefined; state.providerCloseRequested = undefined;
   state.providerEditor = undefined; state.providerEditorError = '';
   field('provider-app-secret').value = ''; field('provider-token').value = ''; field('provider-type-search').value = '';
   const dialog = $<HTMLDialogElement>('provider-dialog');
@@ -714,34 +731,172 @@ function renderProviderEditor(): void {
   $('provider-chooser').hidden = !editor || editor.step !== 'choose';
   if (!editor) return;
   const editable = state.providers?.editable === true;
-  const busy = state.providersBusy;
+  const busy = state.providersBusy || state.providerRegistrationBusy;
+  const registering = providerRegistrationActive();
+  const savingAuthorization = state.providerRegistration?.status === 'connecting';
+  const personal = personalEditor();
   const type = editor.type;
   const choosing = editor.step === 'choose';
   const current = state.providers?.providers.find(provider => provider.id === editor.id);
-  setText('provider-editor-title', choosing ? t('添加 Provider') : editor.id ? t('编辑 Provider') : t('配置{p0}', { p0: providerTypeName(type) }));
-  setText('provider-editor-status', choosing ? t('选择接入类型，然后填写连接信息。') : current ? [providerStatus(current.status, current.enabled, current.error).label, current.error].filter(Boolean).join(' · ') : t('保存后连接此接入。'));
-  setText('provider-type-name', providerTypeName(type));
-  $('provider-back').hidden = choosing || !!editor.id;
+  setText('provider-editor-title', choosing ? t('添加通道') : editor.id ? t('编辑通道') : t('配置{p0}', { p0: providerTypeName(type, editor.connectionType) }));
+  setText('provider-editor-status', choosing ? t('选择接入类型，然后填写连接信息。') : registering ? field('provider-name').value : state.providerRegistration?.status === 'complete' && !state.providerRegistration.error ? t('授权完成，通道已保存。') : current ? [providerStatus(current.status, current.enabled, current.error).label, current.error].filter(Boolean).join(' · ') : personal ? t('准备好后点击扫码授权，完成后会保存为独立通道。') : t('保存后连接此接入。'));
+  setText('provider-type-name', providerTypeName(type, editor.connectionType));
+  $('provider-back').hidden = choosing || !!editor.id || registering;
   $<HTMLButtonElement>('provider-back').disabled = !editable || busy;
-  $<HTMLButtonElement>('provider-dialog-close').disabled = busy;
+  $<HTMLButtonElement>('provider-dialog-close').disabled = busy || savingAuthorization;
   $<HTMLButtonElement>('provider-chooser-cancel').disabled = busy;
-  $<HTMLFieldSetElement>('provider-fields').disabled = choosing || !editable || busy;
+  $('provider-fields').hidden = personal && registering;
+  field('provider-name').maxLength = personal ? 80 : 120;
+  $<HTMLFieldSetElement>('provider-fields').disabled = choosing || !editable || busy || registering;
   renderProviderTypes();
-  $('provider-feishu-fields').hidden = type !== 'feishu'; $<HTMLFieldSetElement>('provider-feishu-fields').disabled = type !== 'feishu';
+  $('provider-feishu-fields').hidden = type !== 'feishu' || personal; $<HTMLFieldSetElement>('provider-feishu-fields').disabled = type !== 'feishu' || personal;
+  $('provider-personal-fields').hidden = !personal; $<HTMLFieldSetElement>('provider-personal-fields').disabled = !personal;
+  $('provider-personal-actions').hidden = !editor.id;
+  setText('provider-personal-account', current?.app_id ?? '');
   $('provider-remote-fields').hidden = type !== 'remote'; $<HTMLFieldSetElement>('provider-remote-fields').disabled = type !== 'remote';
-  field('provider-app-id').required = type === 'feishu'; field('provider-app-secret').required = type === 'feishu' && !editor.secretSet;
+  field('provider-app-id').readOnly = !!editor.id;
+  field('provider-app-id').required = type === 'feishu' && !personal; field('provider-app-secret').required = type === 'feishu' && !personal && !editor.secretSet;
   field('provider-address').required = type === 'remote'; field('provider-token').required = type === 'remote' && !editor.tokenSet;
   field('provider-server-name').disabled = !field('provider-tls').checked;
   setText('provider-secret-hint', editor.secretSet ? t('已保存，留空则不修改') : t('填写此应用的 App Secret。'));
   setText('provider-token-hint', editor.tokenSet ? t('已保存，留空则不修改') : t('填写远程节点提供的访问令牌。'));
   $('provider-editor-error').hidden = !state.providerEditorError; setText('provider-editor-error', resolveText(state.providerEditorError));
   setText('provider-editor-local', editable ? '' : t('请在本机修改。'));
-  $<HTMLButtonElement>('provider-save').disabled = choosing || !editable || busy;
-  $<HTMLButtonElement>('provider-cancel').disabled = busy;
-  setText('provider-save', busy ? t('保存中…') : t('保存'));
+  $<HTMLButtonElement>('provider-save').disabled = choosing || !editable || busy || registering || state.providerRegistrationPending || state.providerRegistration?.error === 'save_unconfirmed';
+  $('provider-save').hidden = registering;
+  $<HTMLButtonElement>('provider-cancel').disabled = busy || savingAuthorization;
+  setText('provider-save', busy ? t('保存中…') : personal && !editor.id ? t('扫码授权') : t('保存'));
+  renderProviderAuthorization();
   $('provider-dialog').setAttribute('aria-busy', String(busy));
 }
-type ProviderAction = { action: 'save'; provider: ProviderConfig } | { action: 'delete' | 'default'; id: string };
+function renderProviderAuthorization(): void {
+  const editor = state.providerEditor;
+  const flow = state.providerRegistration;
+  const personal = personalEditor();
+  const active = providerRegistrationActive();
+  const expired = flow?.status === 'waiting' && !!flow.expires_at && Date.now() >= Date.parse(flow.expires_at);
+  const waiting = personal && flow?.status === 'waiting' && !expired;
+  const failed = expired || flow?.status === 'failed';
+  $('provider-registration').hidden = !personal || !flow || flow.status === 'idle' || flow.status === 'complete' && !flow.error;
+  renderLarkQr('provider-registration-qr', waiting ? flow.qr : undefined, t('飞书个人 App 认证二维码'));
+  const errors: Record<string, string> = {
+    expired_token: t('二维码已过期，请重新获取。'), access_denied: t('已在飞书取消配置，可重新扫码。'),
+    unsupported_brand: t('此入口支持飞书账号，暂不支持 Lark 国际版账号。'),
+    invalid_credentials: t('飞书返回的应用凭据无效，请重新扫码。'),
+    save_failed: t('无法验证或保存应用，请检查连接状态后重试。'),
+    app_mismatch: t('授权应用与此通道不一致，请为新应用添加通道。'),
+    target_changed: t('通道在授权期间已改变，请重新打开后再试。'),
+    missing_recipient: t('未收到有效接收人，请重新扫码授权。'),
+    save_unconfirmed: t('通道可能已保存，请检查列表后再操作。'),
+  };
+  setText('provider-registration-title', failed ? t('扫码配置未完成') : waiting ? t('用飞书扫码认证个人 App')
+    : flow?.status === 'complete' ? flow.error ? t('通道已保存，仍需确认状态。') : t('授权完成，通道已保存。') : flow?.status === 'connecting' ? t('正在验证并保存应用…') : t('正在准备个人 App 认证…'));
+  setText('provider-registration-detail', failed ? errors[expired ? 'expired_token' : flow?.error ?? ''] ?? t('暂时无法获取应用配置，请检查网络后重试。')
+    : flow?.status === 'complete' && flow.error ? t('请检查通道连接状态；不要重复创建通道。') : editor?.id && flow?.status !== 'complete' ? t('请选择同一个个人 App；如需更换应用，请添加新通道。') : t('扫码完成后仅保存此通道，不会替换其他通道。'));
+  $('provider-registration-detail').classList.toggle('tone-error', !!failed);
+  setText('provider-registration-expiry', waiting && flow.expires_at ? t('二维码在 {p0} 前有效，确认后自动连接。', { p0: clock(flow.expires_at) }) : '');
+  $('provider-registration-retry').hidden = !failed || flow?.error === 'save_unconfirmed';
+  $<HTMLButtonElement>('provider-registration-retry').disabled = state.providers?.editable !== true || state.providerRegistrationBusy;
+  const open = $<HTMLAnchorElement>('provider-registration-open'); open.hidden = !waiting;
+  if (waiting && flow.url) open.href = flow.url; else open.removeAttribute('href');
+  const disabled = state.providers?.editable !== true || state.providersBusy || state.providerRegistrationBusy || state.providerRegistrationPending || state.providerRegistration?.error === 'save_unconfirmed' || active;
+  $<HTMLButtonElement>('provider-reauthorize').disabled = disabled;
+  $<HTMLButtonElement>('provider-reconnect').disabled = disabled || !field('provider-enabled').checked;
+  const canInspect = editor?.type === 'feishu' && !!editor.id;
+  $('provider-permissions').hidden = !canInspect || active;
+  $<HTMLButtonElement>('provider-permissions-check').disabled = disabled || state.providerSetupBusy;
+  const setup = state.providerSetup;
+  setText('provider-permissions-status', state.providerSetupBusy ? t('正在检查权限…') : !setup ? t('尚未检查此应用的权限。')
+    : setup.status === 'ready' ? t('所需群与消息权限已开通。') : setup.status === 'permissions-required' ? t('应用已连接，但仍有权限需要开通。') : t('暂时无法确认权限，请重试。'));
+  $('provider-permissions-help').hidden = !setup?.permission || setup.status === 'ready';
+  $('provider-permissions-scopes').replaceChildren(...(setup?.missing ?? []).map(scope => node('li', scope)));
+  const consoleLink = $<HTMLAnchorElement>('provider-permissions-open');
+  if (setup?.permission) consoleLink.href = setup.permission.url; else consoleLink.removeAttribute('href');
+}
+async function loadProviderSetup(): Promise<void> {
+  const editor = state.providerEditor;
+  if (!editor?.id || editor.type !== 'feishu' || state.providers?.editable !== true || state.providerSetupBusy) return;
+  state.providerSetupBusy = true; state.providerEditorError = ''; renderProviderEditor();
+  try {
+    const setup = await post<LarkSetup>('/ui/api/providers/setup', { id: editor.id });
+    if (state.providerEditor === editor) state.providerSetup = setup;
+  } catch (error) {
+    if (state.providerEditor === editor) state.providerEditorError = () => t('无法检查权限：{p0}', { p0: (error as Error).message });
+  } finally { state.providerSetupBusy = false; renderProviderEditor(); }
+}
+async function reconcileProviderRegistration(flow: ProviderRegistrationPage): Promise<void> {
+  state.providerRegistration = flow;
+  if (flow.status !== 'complete') { state.providerRegistrationPending = false; return; }
+  state.providerRegistrationPending = true;
+  const editor = state.providerEditor;
+  if (!editor || !personalEditor()) return;
+  // Read the persisted channel after completion, including a cancel response that
+  // raced the commit. Never claim that cancellation undid a completed registration.
+  const page = await readProvidersPage();
+  if (state.providerEditor !== editor || state.providerRegistration?.registration_id !== flow.registration_id) return;
+  const current = page.providers.find(provider => provider.id === flow.provider_id);
+  if (!current) throw new Error(t('通道可能已保存，请检查列表后再操作。'));
+  state.providers = page;
+  editor.id = current.id; editor.secretSet = current.secret_set === true;
+  field('provider-app-id').value = current.app_id ?? ''; field('provider-recipient').value = current.recipient_open_id ?? '';
+  state.providerSetup = flow.setup; state.providerRegistrationPending = false;
+}
+async function readProvidersPage(): Promise<ProvidersPage> {
+  const response = await fetch('/ui/api/providers', { cache: 'no-store', signal: AbortSignal.timeout(8000) });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const page = await response.json() as ProvidersPage;
+  return page;
+}
+async function providerRegistrationAction(action: 'start' | 'cancel'): Promise<boolean> {
+  const editor = state.providerEditor;
+  if (!editor || !personalEditor() || state.providers?.editable !== true || state.providerRegistrationBusy) return false;
+  if (action === 'start' && (state.providerRegistrationPending || state.providerRegistration?.error === 'save_unconfirmed')) return false;
+  if (action === 'start' && !field('provider-name').value.trim()) {
+    state.providerEditorError = () => t('请填写必填字段。'); renderProviderEditor(); field('provider-name').focus(); return false;
+  }
+  const id = state.providerRegistration?.registration_id;
+  if (action === 'cancel' && !id) return true;
+  state.providerRegistrationBusy = true; state.providerEditorError = ''; renderProviderEditor();
+  try {
+    // Retire an expired/failed flow before beginning another. A commit racing the
+    // cancel is reconciled instead of silently starting a duplicate channel.
+    if (action === 'start' && id && state.providerRegistration?.status !== 'complete' && state.providerRegistration?.status !== 'idle') {
+      const previous = await post<ProviderRegistrationPage>('/ui/api/providers/registration', { action: 'cancel', registration_id: id });
+      await reconcileProviderRegistration(previous);
+      if (previous.status === 'complete') return true;
+    }
+    const body = action === 'start'
+      ? { action, name: field('provider-name').value.trim(), enabled: field('provider-enabled').checked, ...(editor.id ? { id: editor.id } : {}) }
+      : { action, registration_id: id };
+    const flow = await post<ProviderRegistrationPage>('/ui/api/providers/registration', body);
+    await reconcileProviderRegistration(flow);
+    if (action === 'cancel') state.providerRegistration = undefined;
+    return true;
+  } catch (error) {
+    state.providerEditorError = () => t('无法完成通道授权：{p0}', { p0: (error as Error).message });
+    return false;
+  } finally {
+    state.providerRegistrationBusy = false; renderProviders();
+    const requested = state.providerCloseRequested; state.providerCloseRequested = undefined;
+    if (requested !== undefined) closeProviderEditor(requested);
+  }
+}
+async function pollProviderRegistration(): Promise<void> {
+  const editor = state.providerEditor;
+  const id = state.providerRegistration?.registration_id;
+  if (!editor || !id || state.providerRegistrationBusy || state.providerRegistrationPolling || state.providers?.editable !== true) return;
+  state.providerRegistrationPolling = true;
+  try {
+    const flow = await post<ProviderRegistrationPage>('/ui/api/providers/registration', { action: 'status', registration_id: id });
+    if (state.providerEditor !== editor || state.providerRegistration?.registration_id !== id || state.providerRegistrationBusy) return;
+    await reconcileProviderRegistration(flow);
+    state.providerEditorError = '';
+  } catch (error) {
+    if (state.providerEditor === editor) state.providerEditorError = () => t('无法完成通道授权：{p0}', { p0: (error as Error).message });
+  } finally { state.providerRegistrationPolling = false; renderProviders(); }
+}
+
+type ProviderAction = { action: 'save'; provider: ProviderConfig } | { action: 'delete' | 'default' | 'reconnect'; id: string };
 async function mutateProvider(body: ProviderAction, target: 'page' | 'editor' | 'delete' = 'page'): Promise<void> {
   if (state.providers?.editable !== true || state.providersBusy) return;
   state.providersBusy = true; providersRevision++; state.providersError = ''; state.providersReadError = false; state.providerEditorError = ''; state.providerDeleteError = '';
@@ -752,7 +907,7 @@ async function mutateProvider(body: ProviderAction, target: 'page' | 'editor' | 
     if (target === 'editor' || (body.action === 'delete' && state.providerEditor?.id === body.id)) closeProviderEditor(target === 'editor');
     if (target === 'delete') closeProviderDelete();
   } catch (error) {
-    const message = () => t('无法更新 Provider：{p0}', { p0: (error as Error).message });
+    const message = () => t('无法更新通道：{p0}', { p0: (error as Error).message });
     if (target === 'editor') state.providerEditorError = message;
     else if (target === 'delete') state.providerDeleteError = message;
     else state.providersError = message;
@@ -760,12 +915,14 @@ async function mutateProvider(body: ProviderAction, target: 'page' | 'editor' | 
 }
 async function saveProvider(): Promise<void> {
   const editor = state.providerEditor;
-  if (!editor || editor.step !== 'configure' || state.providers?.editable !== true || state.providersBusy) return;
+  if (!editor || editor.step !== 'configure' || state.providers?.editable !== true || state.providersBusy || state.providerRegistrationBusy || providerRegistrationActive()) return;
+  if (personalEditor() && !editor.id) { await providerRegistrationAction('start'); return; }
   const type = editor.type;
   const provider: ProviderConfig = { ...(editor.id ? { id: editor.id } : {}), name: field('provider-name').value.trim(), type, enabled: field('provider-enabled').checked };
   let invalid: string | undefined;
   if (!provider.name) invalid = 'provider-name';
   else if (type === 'feishu') {
+    provider.connection_type = editor.connectionType;
     provider.app_id = field('provider-app-id').value.trim(); provider.recipient_open_id = field('provider-recipient').value.trim();
     const secret = field('provider-app-secret').value;
     if (secret) provider.app_secret = secret;
@@ -828,7 +985,6 @@ async function loadRemote(): Promise<void> {
     const response = await fetch('/ui/api/settings/remote', { cache: 'no-store', signal: AbortSignal.timeout(8000) });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const page = await response.json() as RemotePage;
-    page.editable = page.editable && !localOwnerLocked();
     if (revision !== state.remoteRevision) return;
     state.remote = page;
     if (state.remoteReadError) { state.remoteError = ''; state.remoteReadError = false; }
@@ -912,7 +1068,7 @@ function agentDetail(agent: AgentPrompt): string {
   if (agent.status === 'conflict') return t('文件里的 nootify 标记不成对，请先手动修正');
   if (agent.status === 'error') return agent.error ?? t('无法读取文件');
   if (agent.status === 'outdated') return t('写入内容与当前版本不同');
-  return agent.injected ? t('新对话会按说明使用消息接入') : t('勾选后写入通知说明');
+  return agent.injected ? t('新对话会按说明使用消息通道') : t('勾选后写入通知说明');
 }
 let agentsRevision = 0;
 async function loadAgents(): Promise<void> {
@@ -923,7 +1079,6 @@ async function loadAgents(): Promise<void> {
     const page = await response.json() as AgentsPage;
     if (revision !== agentsRevision) return;
     state.agents = page;
-    state.agents.editable = state.agents.editable && !localOwnerLocked();
     state.agentsError = '';
   } catch (error) { if (revision === agentsRevision) state.agentsError = () => t('无法读取 agent 状态：{p0}', { p0: (error as Error).message }); }
   if (revision === agentsRevision) { renderChrome(); renderAgents(); }
@@ -945,37 +1100,46 @@ function renderAgents(): void {
   $('agents-card').hidden = !page?.agents.length;
   $('agents-count').textContent = page ? (page.agents.some(agent => agent.injected) ? number(page.agents.filter(agent => agent.injected).length) : '') : '';
   const remote = page?.editable !== true;
-  const banner = resolveText(state.agentsError) || (page && remote ? localOwnerLocked() ? t('当前窗口未获授权。请从本机 Nootify 桌面端打开设置。') : t('通过 Tailscale 访问时只能查看；请在这台 Mac 上修改 agent 提示词。') : '');
+  const banner = resolveText(state.agentsError) || (page && remote ? t('通过 Tailscale 访问时只能查看；请在这台 Mac 上修改 agent 提示词。') : '');
   $('agents-banner').hidden = !banner; $('agents-banner').textContent = banner;
   const providers = state.providers;
   const selected = providers?.providers.find(provider => provider.id === providers.default_provider_id);
-  setText('channel-title', t('消息接入'));
+  setText('channel-title', t('消息通道'));
   setTone('channel-state', selected ? providerStatus(selected.status, selected.enabled, selected.error) : { label: providers ? t('未配置') : t('读取中'), tone: 'muted' });
-  setText('channel-sub', state.providersError ? resolveText(state.providersError) : !providers ? t('正在读取 Providers…') : !selected ? t('在 Providers 中添加接入并设为默认。')
-    : t('默认：{p0} · {p1}', { p0: selected.name, p1: providerTypeName(selected.type) }));
+  setText('channel-sub', state.providersError ? resolveText(state.providersError) : !providers ? t('正在读取通道…') : !selected ? t('在通道中添加接入并设为默认。')
+    : t('默认：{p0} · {p1}', { p0: selected.name, p1: providerTypeName(selected.type, selected.connection_type) }));
   if (state.view !== 'agents' || !page) return;
   if (!changed('agent-rows', [page, [...state.pendingAgents]])) return;
   replaceRows($('agent-rows'), page.agents.map(agent => {
     const item = node('div', undefined, 'entry'); item.setAttribute('role', 'listitem');
-    const row = node('label', undefined, 'row');
+    const row = node('div', undefined, 'agent-row');
+    const enable = node('label', undefined, 'agent-enable mds-check');
     const box = node('input', undefined, 'check'); box.type = 'checkbox'; box.checked = agent.injected; box.dataset.key = agent.agent;
     box.disabled = remote || state.pendingAgents.has(agent.agent) || ['conflict', 'error'].includes(agent.status);
     box.setAttribute('aria-label', t('向 {p0} 写入通知说明', { p0: agent.name }));
     box.addEventListener('change', () => { void setAgent(agent, box.checked); });
-    row.append(box, rowMain(agent.name, `${(agent.files ?? [agent.file]).map(home).join(' · ')} · ${agentDetail(agent)}`), sideBlock(promptStates[agent.status] ?? promptStates.error));
-    const extra = node('div', undefined, 'agent-extra');
-    if (agent.agent === 'trae' || agent.agent === 'workbuddy') extra.append(node('p', t('回复需由会话主动检查'), 'hint'));
+    enable.append(box);
+    const expanded = state.openPreviews.has(agent.agent);
+    const extra = node('div', undefined, 'agent-extra'); extra.id = `agent-details-${agent.agent}`; extra.hidden = !expanded;
+    const toggle = node('button', undefined, 'agent-expand'); toggle.type = 'button'; toggle.dataset.key = `agent-expand-${agent.agent}`;
+    toggle.setAttribute('aria-expanded', String(expanded)); toggle.setAttribute('aria-controls', extra.id);
+    const tone = promptStates[agent.status] ?? promptStates.error;
+    toggle.append(node('span', agent.name, 'agent-name'), node('span', tone.label, `agent-state tone-${tone.tone}`), chevron());
+    toggle.addEventListener('click', () => {
+      const open = !state.openPreviews.has(agent.agent);
+      if (open) state.openPreviews.add(agent.agent); else state.openPreviews.delete(agent.agent);
+      toggle.setAttribute('aria-expanded', String(open)); extra.hidden = !open;
+    });
+    row.append(enable, toggle);
+    extra.append(node('p', (agent.files ?? [agent.file]).map(home).join(' · '), 'agent-path mono'), node('p', agentDetail(agent), 'mds-hint'));
+    if (agent.agent === 'trae' || agent.agent === 'workbuddy') extra.append(node('p', t('回复需由会话主动检查'), 'mds-hint'));
     if (agent.status === 'outdated' && !remote) {
-      const update = node('button', t('更新为当前内容'), 'text-button'); update.type = 'button';
+      const update = node('button', t('更新为当前内容'), 'mds-link-button'); update.type = 'button'; update.dataset.key = `agent-update-${agent.agent}`;
       update.disabled = state.pendingAgents.has(agent.agent);
       update.addEventListener('click', () => { void setAgent(agent, true); });
       extra.append(update);
     }
-    const details = node('details');
-    details.open = state.openPreviews.has(agent.agent);
-    details.addEventListener('toggle', () => { if (details.open) state.openPreviews.add(agent.agent); else state.openPreviews.delete(agent.agent); });
-    details.append(node('summary', agent.injected ? t('查看写入的内容') : t('查看将写入的内容')), node('pre', agent.block, 'mono'));
-    extra.append(details);
+    extra.append(node('div', agent.injected ? t('查看写入的内容') : t('查看将写入的内容'), 'mds-hint'), node('pre', agent.block, 'mono'));
     item.append(row, extra); return item;
   }));
 }
@@ -1007,7 +1171,6 @@ async function loadSettings(): Promise<boolean> {
     const response = await fetch('/ui/api/settings', { cache: 'no-store', signal: AbortSignal.timeout(8000) });
     if (!response.ok) throw new Error(response.status === 404 ? t('设置模块未启用') : `HTTP ${response.status}`);
     state.settings = await response.json() as SettingsPage & { editable: boolean };
-    state.settings.editable = state.settings.editable && !localOwnerLocked();
     state.larkConnectionType ??= state.settings.lark.connection_type ?? 'bot';
     if (state.recipientDirectory && state.recipientDirectory.app_id !== state.settings.lark.app_id) invalidateRecipientDirectory();
     if (!state.larkEdited) fillLark();
@@ -1471,7 +1634,7 @@ function renderSettings(): void {
   const note = state.settingsNote ?? (state.view === 'settings-github' && login?.status === 'failed' ? { text: t('GitHub 登录失败：{p0}', { p0: githubErrors[login.error ?? ''] ?? login.error }), error: true }
     : state.view === 'settings-tailscale' && state.tailscaleError ? { text: state.tailscaleError, error: true }
     : state.view === 'settings-tailscale' && state.tailscale?.login.status === 'failed' ? { text: t('Tailscale 登录失败：{p0}', { p0: tailscaleErrors[state.tailscale.login.error ?? ''] ?? t('请重试。') }), error: true }
-    : remote ? { text: localOwnerLocked() ? t('当前窗口未获授权。请从本机 Nootify 桌面端打开设置。') : t('通过 Tailscale 访问时只能查看；请在这台 Mac 上修改设置。'), error: false } : undefined);
+    : remote ? { text: t('通过 Tailscale 访问时只能查看；请在这台 Mac 上修改设置。'), error: false } : undefined);
   const banner = $('settings-banner');
   banner.hidden = !note; banner.className = note && !note.error ? 'banner note' : 'banner';
   setText('settings-banner', resolveText(note?.text));
@@ -1635,12 +1798,6 @@ function renderChrome(): void {
   }
   const local = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
   $('access-label').textContent = local ? location.host : t('经 Tailscale');
-  $('owner-access').hidden = !localOwnerLocked();
-  $('owner-authorize').hidden = !(window as Window & { __NOOTIFY_PLATFORM__?: string }).__NOOTIFY_PLATFORM__;
-  // Never recommend executable commands obtained from an unverified local listener.
-  const ownerCommand = ownerTransport.authorized ? state.snapshot.access?.owner_ui_command : undefined;
-  $('owner-auth-command').hidden = !ownerCommand;
-  $('owner-auth-command').textContent = ownerCommand ?? '';
   const tailnet = state.snapshot.access?.tailnet_url;
   $('tailnet-line').hidden = !local || !tailnet;
   $('tailnet-url').textContent = tailnet ? tailnet.replace(/^https?:\/\//, '').replace(/\/$/, '') : '';
@@ -1697,14 +1854,17 @@ async function refreshNow(): Promise<void> {
   await loadPulls();
 }
 
-$('owner-authorize').addEventListener('click', () => { location.href = 'nootify://settings/authorize'; });
 $('provider-add').addEventListener('click', () => openProviderEditor());
 $('providers-retry').addEventListener('click', () => { state.providersError = ''; state.providersReadError = false; void loadProviders(); });
 $('provider-tls').addEventListener('change', renderProviderEditor);
+$('provider-reauthorize').addEventListener('click', () => { void providerRegistrationAction('start'); });
+$('provider-registration-retry').addEventListener('click', () => { void providerRegistrationAction('start'); });
+$('provider-reconnect').addEventListener('click', () => { if (state.providerEditor?.id) void mutateProvider({ action: 'reconnect', id: state.providerEditor.id }); });
+$('provider-permissions-check').addEventListener('click', () => { void loadProviderSetup(); });
 for (const id of ['provider-cancel', 'provider-chooser-cancel', 'provider-dialog-close']) $(id).addEventListener('click', () => closeProviderEditor());
 $('provider-back').addEventListener('click', backToProviderTypes);
 $('provider-type-search').addEventListener('input', renderProviderTypes);
-for (const type of ['feishu', 'remote'] as const) $('provider-choose-' + type).addEventListener('click', () => openProviderEditor(undefined, type));
+for (const type of ['feishu', 'personal-app', 'remote'] as const) $('provider-choose-' + type).addEventListener('click', () => openProviderEditor(undefined, type));
 $('provider-type-search').addEventListener('keydown', event => {
   const options = [...document.querySelectorAll<HTMLButtonElement>('#provider-type-options button')].filter(option => !option.hidden && !option.disabled);
   if (event.key === 'ArrowDown') { event.preventDefault(); options[0]?.focus(); }
@@ -1737,6 +1897,9 @@ $('remote-retry').addEventListener('click', () => { state.remoteError = ''; stat
 $('remote-token-toggle').addEventListener('click', () => { void toggleRemoteToken(); });
 
 window.addEventListener('hashchange', () => {
+  if (viewFromHash() !== 'providers' && (providerRegistrationActive() || state.providerRegistrationBusy)) {
+    location.hash = views.providers.hash; closeProviderEditor(); return;
+  }
   closeTitlebarSearches();
   state.view = viewFromHash();
   if (state.view !== 'settings-remote') hideRemoteToken();
@@ -2082,5 +2245,6 @@ setInterval(() => {
   if (state.view === 'settings-tailscale') void loadTailscale();
   if (state.view === 'providers' || state.view === 'agents') void loadProviders();
   if (state.view === 'settings-remote') void loadRemote();
+  if (state.providerEditor && (providerRegistrationActive() || state.providerRegistrationPending)) void pollProviderRegistration();
 }, 2000);
 setInterval(() => { if (usesPulls(state.view)) void loadPulls(); }, 10000);
