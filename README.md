@@ -51,7 +51,7 @@ Windows installers are not code-signed.
    notification session and post progress; reply there to continue the conversation.
 
 For browser access from another device, use the sidebar LAN link, normally
-`http://<LAN-IP>:9417/`; see [LAN access](docs/guide.md#lan-access).
+`http://<LAN-IPv4>:9417/`; see [LAN access](docs/guide.md#lan-access).
 
 To serve other Nootify nodes, configure the listener under **Settings → Remote
 access** (`远程接入`). The legacy personal-app QR setup remains linked from the

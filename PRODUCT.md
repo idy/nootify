@@ -40,7 +40,7 @@ PR subscriptions come from structured session associations, repository anchors, 
 
 ### Local authority
 
-Provider mutations, settings, agent-prompt edits, secret reveal, and contact directories require local access from an actual loopback peer. The HTTP service listens on all interfaces, accepts loopback and private LAN peers, and checks the Host against its own interface addresses or system hostname and service port. Origin/fetch-site checks remain enforced. LAN browser access is read-only except repository follow choices and PR refresh; bearer-authenticated `/v1/` APIs allow private LAN callers, with remote identity management restricted to loopback. Desktop gateway API traffic uses authenticated encryption; direct LAN HTTP is plaintext. Nootify does not manage a VPN device or alter the operating system's Tailscale installation.
+Provider mutations, settings, agent-prompt edits, secret reveal, and contact directories require local access from an actual loopback peer. The HTTP service listens on all IPv4 interfaces (`0.0.0.0:9417` by default), accepts loopback and private LAN peers, and checks the Host against its own interface addresses or system hostname and service port. Origin/fetch-site checks remain enforced. LAN browser access is read-only except repository follow choices and PR refresh; bearer-authenticated `/v1/` APIs allow private LAN callers, with remote identity management restricted to loopback. Desktop gateway API traffic uses authenticated encryption; direct LAN HTTP is plaintext. Nootify does not manage a VPN device or alter the operating system's Tailscale installation.
 
 ### Application workflows
 
