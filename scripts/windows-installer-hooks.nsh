@@ -48,6 +48,7 @@
     ${EndIf}
     ; Current Go controls inspect legacy registrations without executing old
     ; installed Node/GUI binaries. The helper remains outside exchanged payload.
+    !insertmacro NootifyInstallerTrace "manage ${COMMAND}: invoking helper"
     nsExec::ExecToLog /TIMEOUT=900000 '"$PLUGINSDIR\nootify-installer-stage.exe" --action ${COMMAND} --target "$INSTDIR"'
     Pop $0
     SetOutPath "$R8"

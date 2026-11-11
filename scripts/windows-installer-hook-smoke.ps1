@@ -16,7 +16,9 @@ $fixture = Join-Path $runnerTemp 'Nootify installer hook smoke'
 $outputDir = Join-Path $repository '.cache\windows-installer-hook-smoke'
 # Get-Command may return several PATH matches. Select one scalar executable explicitly.
 $node = @(Get-Command node.exe -CommandType Application -ErrorAction Stop)[0].Source
-$startupVariables = @('NODE_OPTIONS', 'NODE_PATH', 'NODE_EXTRA_CA_CERTS', 'NODE_ICU_DATA')
+# Keep legacy Node overrides in poisoned cases: the Go helper must remain usable
+# without loading any Node runtime or evaluating those startup values.
+$legacyNodeVariables = @('NODE_OPTIONS', 'NODE_PATH', 'NODE_EXTRA_CA_CERTS', 'NODE_ICU_DATA')
 $phase = 'preflight'
 $failure = $null
 $results = New-Object 'Collections.Generic.List[object]'
@@ -45,7 +47,7 @@ function Run-Native([string]$File, [string]$Arguments, [string]$Label, [hashtabl
     $start.CreateNoWindow = $true
     $start.RedirectStandardOutput = $true
     $start.RedirectStandardError = $true
-    foreach ($name in $startupVariables) { $start.EnvironmentVariables.Remove($name) }
+    foreach ($name in $legacyNodeVariables) { $start.EnvironmentVariables.Remove($name) }
     foreach ($name in $EnvironmentValues.Keys) { $start.EnvironmentVariables[$name] = $EnvironmentValues[$name] }
     $process = New-Object Diagnostics.Process
     $process.StartInfo = $start
@@ -94,12 +96,11 @@ function Invoke-Hook([string]$Executable, [string]$Arguments, [string]$Directory
         if ($trace) { throw "$Label unexpectedly enabled production diagnostics" }
         return
     }
-    foreach ($name in $startupVariables) {
-        if (!$trace.Contains("clear ${name}: result=")) { throw "$Label lost an environment API diagnostic" }
-    }
+    # The current hook invokes a Go transaction helper, not Node. Verify its
+    # actual invocation/result; the legacy environment-clear API no longer runs.
     $command = $(if ($Hook -eq 'NSIS_HOOK_PREINSTALL' -or $Mode -eq 1) { 'service-stop' } else { 'service-uninstall' })
-    if (!$trace.Contains("manage ${command}: invoking CLI") -or !$trace.Contains("manage ${command}: result=0")) {
-        throw "$Label lost CLI invocation or result diagnostics"
+    if (!$trace.Contains("manage ${command}: invoking helper") -or !$trace.Contains("manage ${command}: result=0")) {
+        throw "$Label lost helper invocation or result diagnostics"
     }
 }
 

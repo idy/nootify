@@ -179,6 +179,25 @@ test('incomplete receipt cleanup precedes destination lock and shares headless n
   assert.match(smoke, /Complete or unreadable pending authority was changed/);
 });
 
+test('native hook probe follows Go helper diagnostics and retains poisoned-environment coverage', async () => {
+  const hooks = await readFile(join(root, 'scripts/windows-installer-hooks.nsh'), 'utf8');
+  const smoke = await readFile(join(root, 'scripts/windows-installer-hook-smoke.ps1'), 'utf8');
+  const invoke = hooks.indexOf('NootifyInstallerTrace "manage ${COMMAND}: invoking helper"');
+  const execute = hooks.indexOf('nsExec::ExecToLog');
+  const result = hooks.indexOf('NootifyInstallerTrace "manage ${COMMAND}: result=$0"');
+  assert.ok(invoke >= 0 && invoke < execute && execute < result);
+  assert.ok(smoke.includes('$trace.Contains("manage ${command}: invoking helper")'));
+  assert.ok(smoke.includes('$trace.Contains("manage ${command}: result=0")'));
+  assert.doesNotMatch(smoke, /lost an environment API diagnostic|invoking CLI/);
+  for (const variable of ['NODE_OPTIONS', 'NODE_PATH', 'NODE_EXTRA_CA_CERTS', 'NODE_ICU_DATA']) {
+    assert.ok(smoke.includes(variable));
+  }
+  assert.match(smoke, /foreach \(\$poisoned in @\(\$false, \$true\)\)/);
+  assert.match(smoke, /go build -o \$helper \$helperSource/);
+  assert.match(smoke, /safe_working_directory -ne \$true/);
+  assert.match(smoke, /did not preserve registers\/stack/);
+});
+
 test('Windows payload manifest verifies exact extracted bytes and excludes generated uninstaller', async t => {
   const work = await temporary(t);
   await put(join(work, 'Nootify.exe'), 'desktop');
