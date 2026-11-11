@@ -365,6 +365,7 @@ func (s *shell) createWindow() {
 	})
 	page.OnDidFinishLoad(func() {
 		s.noteSmokeLoad("finished", 0)
+		s.markSmokeOfflineLoaded(page.URL())
 		if documentAt(page.URL(), s.offline.URL) {
 			s.guiDocumentLoaded = true
 			s.confirmGUIReady()
