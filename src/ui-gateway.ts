@@ -48,30 +48,51 @@ export async function startOwnerUiGateway(baseUrl: string, token: string, target
     response.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify({ error }));
   };
   const proxy = async (request: IncomingMessage, response: ServerResponse) => {
-    // This is a new authenticated session after a daemon restart, never a plaintext fallback.
-    const active = await connection();
-    const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(Buffer.from(chunk));
-    const body = Buffer.concat(chunks).toString('utf8');
     const cancelled = new AbortController();
     const disconnected = () => cancelled.abort();
     response.once('close', disconnected);
-    let forwarded = false;
+    if (response.destroyed || request.socket.destroyed) cancelled.abort();
+    // One deadline covers both attempts, including time spent awaiting shared proof.
+    const signal = AbortSignal.any([cancelled.signal, AbortSignal.timeout(185000)]);
+    let active: UiTransport | undefined;
+    let accepted = false;
     try {
-      const result = await active.fetch(request.url!, { method: request.method, ...(body ? { body } : {}), signal: AbortSignal.any([cancelled.signal, AbortSignal.timeout(185000)]) });
+      const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(Buffer.from(chunk));
+      const body = Buffer.concat(chunks).toString('utf8');
+      let result: Response;
+      for (let attempt = 0; ; attempt++) {
+        signal.throwIfAborted();
+        active = await connection();
+        // One cancelled waiter must neither cancel shared proof nor replay on its result.
+        signal.throwIfAborted();
+        try {
+          result = await active.fetch(request.url!, { method: request.method, ...(body ? { body } : {}), signal });
+          break;
+        } catch (error) {
+          // fetch resolves only after authenticated headers. Retry a read once on a
+          // fresh verified session; mutations may already have taken effect.
+          if (signal.aborted || request.method !== 'GET' || attempt !== 0) throw error;
+          if (upstream === active) upstream = undefined;
+          void retire(active);
+          active = undefined;
+        }
+      }
+      accepted = true;
       response.writeHead(result.status, Object.fromEntries(result.headers));
       if (result.body) {
         const reader = result.body.getReader();
-        try { for (;;) { const value = await reader.read(); if (value.done || response.destroyed) break; forwarded = true; response.write(value.value); } }
+        try { for (;;) { const value = await reader.read(); if (value.done || response.destroyed) break; response.write(value.value); } }
         finally { await reader.cancel(); }
       }
       response.end();
     } catch {
       if (cancelled.signal.aborted) return;
-      if (upstream === active) upstream = undefined;
-      void retire(active);
-      // Do not retry a mutation whose result may be unknown. Polling can establish a
-      // new verified session; the user decides whether to retry an interrupted action.
-      if (forwarded) response.destroy();
+      if (active) {
+        if (upstream === active) upstream = undefined;
+        void retire(active);
+      }
+      // Authenticated headers (including error statuses) and partial streams are final.
+      if (accepted) response.destroy();
       else send(response, 502, 'The authenticated background service connection was interrupted');
     } finally { response.off('close', disconnected); }
   };
