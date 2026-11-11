@@ -94,10 +94,15 @@ jobs:
       contents: write
     env:
       RELEASE_NOTES: >-
-        Apple Silicon macOS 13.5+ DMG and Windows x64 per-user NSIS installer.
-        The macOS app is ad-hoc signed and not notarized; allow it under System
-        Settings > Privacy & Security on first launch. Installed copies update
-        from this signed manifest. The Windows installer is not Authenticode signed.
+        The MyGo desktop, background service and CLI now share one Go executable;
+        TypeScript is used only for the browser UI. Direct LAN access replaces
+        embedded Tailscale. Existing identity, settings and conversation state are retained.
+        Upgrading from Node-era 0.2.1 requires manually replacing the application;
+        its old updater cannot complete this transition. Later Go-to-Go updates use
+        the signed manifest. Apple Silicon macOS 13.5+ DMG and Windows x64 per-user
+        NSIS installer. The macOS app is ad-hoc signed and not notarized; allow it
+        under System Settings > Privacy & Security on first launch. The Windows
+        installer is not Authenticode signed.
     steps:
       - uses: actions/checkout@v7
         with:
