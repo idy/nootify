@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
-import { createServer } from 'node:net';
+import { createServer, Socket } from 'node:net';
 import { createServer as createHttpServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { hostname, tmpdir } from 'node:os';
@@ -185,6 +185,11 @@ test('HTTP host protects APIs, serves health, supports unrelated modules and typ
 });
 
 test('installation rejects occupied ports before changing any launchd job', async t => {
+  if (typeof Socket.prototype.setTypeOfService === 'function') {
+    t.mock.method(Socket.prototype, 'setTypeOfService', () => {
+      throw Object.assign(new Error('setTypeOfService EINVAL'), { code: 'EINVAL' });
+    });
+  }
   let service = 'workspace-service';
   const server = createHttpServer((_request, response) => {
     response.setHeader('content-type', 'application/json'); response.end(JSON.stringify({ service }));
@@ -198,7 +203,30 @@ test('installation rejects occupied ports before changing any launchd job', asyn
   await assert.rejects(assertInstallPort(port, false), /stop the existing service/, 'an unmanaged Nootify must be stopped first too');
   await assertInstallPort(port, true);
   server.closeAllConnections(); await new Promise<void>(resolveClose => server.close(() => resolveClose()));
-  await assertInstallPort(port, false);
+  for (let attempt = 0; attempt < 10; attempt++) await assertInstallPort(port, false);
+});
+
+test('installation probes fail closed for invalid or oversized health replies', async t => {
+  let status = 200; let body = '';
+  const server = createHttpServer((_request, response) => {
+    response.writeHead(status, { 'content-type': 'application/json', location: '/health' });
+    response.end(body);
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const port = (server.address() as AddressInfo).port;
+  for (const [name, code, content] of [
+    ['malformed JSON', 200, '{'],
+    ['null JSON', 200, 'null'],
+    ['unsuccessful status', 503, '{"service":"nootify"}'],
+    ['redirect', 302, '{"service":"nootify"}'],
+    ['oversized body', 200, JSON.stringify({ service: 'nootify', padding: 'x'.repeat(65 * 1024) })],
+  ] as const) {
+    await t.test(name, async () => {
+      status = code; body = content;
+      await assert.rejects(assertInstallPort(port, true), /stop the existing service/);
+    });
+  }
 });
 
 test('launchd plist uses an absolute executable and escapes paths', () => {

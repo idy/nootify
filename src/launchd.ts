@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { chmod, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { get } from 'node:http';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -24,14 +25,36 @@ export function launchdPlist(options: { node: string; server: string; stateDir: 
 <key>StandardErrorPath</key><string>${xml(join(options.stateDir, 'stderr.log'))}</string>
 </dict></plist>\n`;
 }
+// Use one-shot HTTP requests: Node's fetch can throw an uncaught setTypeOfService
+// EINVAL while a macOS listener is shutting down. Only ECONNREFUSED proves a free port.
+function nootifyHealthy(port: number, timeout: number): Promise<boolean> {
+  return new Promise((resolveHealth, reject) => {
+    const request = get(`http://127.0.0.1:${port}/health`, {
+      agent: false, signal: AbortSignal.timeout(timeout), headers: { connection: 'close' },
+    }, response => {
+      const chunks: Buffer[] = []; let bytes = 0;
+      response.on('error', reject);
+      response.on('data', (chunk: Buffer) => {
+        bytes += chunk.length;
+        if (bytes > 64 * 1024) request.destroy(new Error('Health response is too large'));
+        else chunks.push(chunk);
+      });
+      response.on('end', () => {
+        try {
+          resolveHealth(response.statusCode! >= 200 && response.statusCode! < 300
+            && JSON.parse(Buffer.concat(chunks).toString('utf8')).service === 'nootify');
+        } catch { resolveHealth(false); }
+      });
+    });
+    request.on('error', reject);
+  });
+}
 /** Refuse an occupied port before changing launchd, including a manually started Nootify outside this job. */
 export async function assertInstallPort(port: number, replacingLoadedJob: boolean): Promise<void> {
   try {
-    const response = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1000), redirect: 'error', headers: { connection: 'close' } });
-    if (response.ok && replacingLoadedJob && (await response.json() as { service?: string }).service === 'nootify') return;
-    await response.body?.cancel();
+    if (await nootifyHealthy(port, 1000) && replacingLoadedJob) return;
   } catch (error) {
-    if ((error as { cause?: { code?: string } }).cause?.code === 'ECONNREFUSED') return;
+    if ((error as NodeJS.ErrnoException).code === 'ECONNREFUSED') return;
   }
   throw new Error(`Port ${port} is already occupied or did not answer a Nootify health check; stop the existing service before installing Nootify`);
 }
@@ -87,9 +110,7 @@ export async function installLaunchd(options: { stateDir?: string; port: number;
   await execute('launchctl', ['bootstrap', `gui/${process.getuid()}`, path]);
   for (let attempt = 0; attempt < 30; attempt++) {
     try {
-      const response = await fetch(`http://127.0.0.1:${options.port}/health`, { signal: AbortSignal.timeout(500) });
-      const body = await response.json() as { service?: string };
-      if (response.ok && body.service === 'nootify') return path;
+      if (await nootifyHealthy(options.port, 500)) return path;
     } catch { /* launchd is still starting the process */ }
     await new Promise(resolveWait => setTimeout(resolveWait, 200));
   }
