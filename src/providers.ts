@@ -32,7 +32,10 @@ export interface ProviderPage {
   network?: { status: 'retrying' | 'unconfirmed'; error: string };
   compatibility?: { status: 'conflict'; error: string };
 }
-export interface ProviderRegistrationPage extends LarkRegistrationPage { registration_id?: string; provider_id?: string }
+export interface ProviderRegistrationPage extends LarkRegistrationPage {
+  registration_id?: string; provider_id?: string;
+  recovery?: { id?: string; name: string; enabled: boolean };
+}
 export interface ProvidersOptions {
   registration?: LarkRegistrationOptions;
   verify?: (credentials: Credentials) => Promise<void>;
@@ -267,9 +270,19 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
       ...(page.status === 'failed' && registration.failure ? { error: registration.failure } : {}) };
   }
   async registration(body: Record<string, unknown>): Promise<ProviderRegistrationPage> {
+    // Explicit local recovery is read-only: a reload or lost start response must
+    // not strand a scan, retarget it, or retry a possibly committed save.
+    if (body.action === 'recover') {
+      const registration = this.providerRegistration;
+      if (!registration) return { status: 'idle' };
+      const page = this.registrationPage(registration);
+      if (page.status === 'idle') return { status: 'idle' };
+      return { ...page, recovery: { name: registration.name, enabled: registration.enabled,
+        ...(registration.previous ? { id: registration.providerId } : {}) } };
+    }
     const assertAvailable = () => {
       if (this.providerRegistration && ['starting', 'waiting', 'connecting'].includes(this.providerRegistration.flow.page().status)) {
-        throw new HttpError(409, 'A personal app registration is already active; finish or cancel it in its original tab');
+        throw new HttpError(409, 'A personal app registration is already active; use Recover previous authorization to continue or cancel it');
       }
     };
     if (body.action === 'start') {
@@ -295,7 +308,7 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
       this.providerRegistration = registration;
       registration.flow.start(); return this.registrationPage(registration);
     });
-    if (body.action !== 'status' && body.action !== 'cancel') throw new HttpError(400, 'Expected a registration action: start, status or cancel');
+    if (body.action !== 'status' && body.action !== 'cancel') throw new HttpError(400, 'Expected a registration action: start, status, cancel or recover');
     const id = identifier(body.registration_id, 'registration_id');
     const registration = this.providerRegistration;
     if (!registration || registration.id !== id) throw new HttpError(409, 'This registration is no longer active in this tab');
@@ -523,7 +536,10 @@ export class ProvidersService implements ServiceModule, ProvidersSource {
     const legacy = page.providers.find(provider => provider.id === this.compatibilityId && provider.type === 'feishu');
     if (!legacy) throw new HttpError(404, 'No active compatibility Feishu provider; configure the recipient in Providers');
     let warning: unknown;
-    try { await this.rpc('provider.save', { ...legacy, recipient_open_id: open_id }); }
+    // The public summary may present an unknown legacy subtype as Bot. Omit it
+    // from a recipient-only update so the core preserves the actual stored value.
+    const { connection_type: _summaryType, ...config } = legacy;
+    try { await this.rpc('provider.save', { ...config, recipient_open_id: open_id }); }
     catch (error) { if (coreErrorCode(error) !== 'committed_not_durable') throw error; warning = error; }
     // The save response already confirms the change. A later status read cannot invalidate it.
     this.cached = { ...page, providers: page.providers.map(provider => provider.id === legacy.id ? { ...provider, recipient_open_id: open_id } : provider) };

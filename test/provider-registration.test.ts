@@ -118,6 +118,68 @@ test('new personal registration preserves the existing/default channel and expos
   for (const privateValue of [secret, bot.app_secret, 'private-device-code', 'client_secret', 'device_code']) assert.ok(!publicData.includes(privateValue));
 });
 
+test('local recovery resumes and cancels an orphaned scan without its lost registration ID', async t => {
+  const h = await fixture(t, { providers: [bot] });
+  assert.deepEqual(await h.providers.registration({ action: 'recover' }), { status: 'idle' });
+  // Discard the start response, as a closed/reloaded tab or failed response would.
+  await start(h.providers, { name: 'Original draft', enabled: false });
+  let recovered!: ProviderRegistrationPage;
+  await until(async () => { recovered = await h.providers.registration({ action: 'recover' }); return recovered.status === 'waiting'; });
+  assert.ok(recovered.registration_id); assert.match(recovered.qr!, /^data:image\/png;base64,/);
+  assert.deepEqual(recovered.recovery, { name: 'Original draft', enabled: false });
+  await assert.rejects(start(h.providers, { name: 'Do not replace original' }), isStatus(409));
+  const same = await h.providers.registration({ action: 'recover' });
+  assert.equal(same.registration_id, recovered.registration_id); assert.deepEqual(same.recovery, recovered.recovery);
+  assert.equal(h.requests.filter(action => action === 'begin').length, 1);
+  for (const value of [secret, bot.app_secret, 'private-device-code', 'client_secret', 'device_code']) assert.ok(!JSON.stringify(recovered).includes(value));
+  assert.equal((await h.providers.registration({ action: 'cancel', registration_id: recovered.registration_id })).status, 'idle');
+  assert.deepEqual(await h.providers.registration({ action: 'recover' }), { status: 'idle' });
+  const next = await start(h.providers); assert.notEqual(next.registration_id, recovered.registration_id);
+  assert.equal(h.core.calls.filter(call => call.method === 'provider.save').length, 0);
+  assert.equal(h.core.defaultId, bot.id);
+});
+
+test('recovery observes a saving or committed reauthorization without replaying it', async t => {
+  const saving = gate(); let verifying = false;
+  t.after(() => saving.release());
+  const h = await fixture(t, { providers: [bot, personal], dependencies: { verify: async () => { verifying = true; await saving.promise; } } });
+  h.replies.push(() => success);
+  await start(h.providers, { id: personal.id, name: 'Reconnect personal', enabled: false });
+  await until(() => verifying);
+  const recovering = await h.providers.registration({ action: 'recover' });
+  assert.equal(recovering.status, 'connecting');
+  assert.deepEqual(recovering.recovery, { id: personal.id, name: 'Reconnect personal', enabled: false });
+  await assert.rejects(h.providers.registration({ action: 'cancel', registration_id: recovering.registration_id }), isStatus(409));
+  saving.release();
+  let completed!: ProviderRegistrationPage;
+  await until(async () => { completed = await h.providers.registration({ action: 'recover' }); return completed.status === 'complete'; });
+  assert.equal(completed.registration_id, recovering.registration_id); assert.equal(completed.provider_id, personal.id);
+  assert.equal((await h.providers.registration({ action: 'cancel', registration_id: completed.registration_id })).status, 'complete');
+  assert.deepEqual(await h.providers.registration({ action: 'recover' }), completed);
+  assert.equal(h.core.calls.filter(call => call.method === 'provider.save').length, 1);
+  assert.equal(h.core.configs.get(personal.id)!.app_secret, secret); assert.equal(h.core.defaultId, bot.id);
+});
+
+for (const subtype of [undefined, 'bot', 'personal-app']) test(`recipient-only save preserves stored subtype ${subtype ?? '(missing)'}`, async t => {
+  const legacy: Record<string, unknown> = { ...bot };
+  if (subtype) legacy.connection_type = subtype; else delete legacy.connection_type;
+  const h = await fixture(t, { providers: [legacy] });
+  const request = h.core.request.bind(h.core);
+  t.mock.method(h.core, 'request', async <T>(method: string, params?: Record<string, unknown>): Promise<T> => {
+    const result = await request<T>(method, params);
+    if (method === 'status') for (const provider of (result as { providers: Record<string, unknown>[] }).providers) {
+      if (provider.type === 'feishu') provider.connection_type ??= 'bot';
+    }
+    return result;
+  });
+  await h.providers.setRecipient('ou_updated');
+  const saved = h.core.calls.filter(call => call.method === 'provider.save').at(-1)!;
+  assert.equal(Object.hasOwn(saved.params, 'connection_type'), false, 'A presentation default must not become stored metadata');
+  assert.equal(h.core.configs.get(bot.id)!.connection_type, subtype);
+  assert.equal(h.core.configs.get(bot.id)!.recipient_open_id, 'ou_updated');
+  assert.equal(h.core.configs.get(bot.id)!.app_secret, bot.app_secret);
+});
+
 test('cancel is scoped and a late scan cannot save or retarget a new registration', async t => {
   const h = await fixture(t, { providers: [bot] }); const poll = gate<unknown>(); let polling = false;
   h.replies.push(() => { polling = true; return poll.promise; });

@@ -1,5 +1,8 @@
 /** Chinese source messages are the catalog keys, following the gettext convention. */
 export const english = {
+  '恢复上次授权': 'Recover previous authorization',
+  '页面刷新或中断后，可继续上次授权或取消。': 'Resume or cancel your previous authorization after a page reload or interruption.',
+  '没有可恢复的授权，可以开始新的扫码授权。': 'No previous authorization to recover. You can start a new scan.',
   '通道已保存，仍需确认状态。': 'Channel saved. Its status still needs confirmation.',
   '请检查通道连接状态；不要重复创建通道。': 'Check this channel’s connection status before creating another channel.',
   '飞书 Bot': 'Feishu Bot',

@@ -99,11 +99,15 @@ export function createPreviewFixture() {
   const providers = {
     async page() { return providerPage(); },
     async registration(body) {
+      if (body.action === 'recover') {
+        if (!scan || scan.page.status === 'idle') return { status: 'idle' };
+        return copy({ ...scan.page, recovery: { name: scan.name, enabled: scan.enabled, ...(scan.targetId ? { id: scan.targetId } : {}) } });
+      }
       if (body.action === 'start') {
         if (scan && ['waiting', 'starting', 'connecting'].includes(scan.page.status)) throw new HttpError(409, 'Preview: a demo authorization is already active');
         const previous = body.id ? findProvider(body.id) : undefined;
         if (previous && previous.connection_type !== 'personal-app') throw new HttpError(400, 'Preview: select a personal app');
-        scan = { name: required(body.name, 'name'), enabled: boolean(body.enabled, 'enabled'), id: previous?.id ?? `preview-personal-${++sequence}`, polls: 0,
+        scan = { name: required(body.name, 'name'), enabled: boolean(body.enabled, 'enabled'), targetId: previous?.id, id: previous?.id ?? `preview-personal-${++sequence}`, polls: 0,
           page: { status: 'waiting', registration_id: `preview-scan-${sequence}`, url: 'https://example.invalid/nootify-demo-authorization',
             qr: await QRCode.toDataURL('https://example.invalid/nootify-demo-authorization'), expires_at: new Date(Date.now() + 600000).toISOString() } };
       } else {

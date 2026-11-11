@@ -54,6 +54,7 @@ test('provider and remote-access UI performs real mutations, preserves secrets a
   const remoteWrites: Record<string, unknown>[] = [];
   let registration: Record<string, unknown> = { status: 'idle' };
   const registrationWrites: Record<string, unknown>[] = [];
+  let registrationRecovery: { id?: string; name: string; enabled: boolean } | undefined;
   let cancelCompletes = false; let setupReads = 0;
   let providerReads = 0; let remoteReads = 0; let secretReads = 0;
   let failProvider = false; let failRemote = false; let failProviderRead = false;
@@ -70,6 +71,7 @@ test('provider and remote-access UI performs real mutations, preserves secrets a
     }
     if (path === '/ui/api/providers/registration') {
       const body = JSON.parse(String(init?.body)); registrationWrites.push(body);
+      if (body.action === 'recover') return Response.json(registration.status === 'idle' ? { status: 'idle' } : { ...registration, recovery: registrationRecovery });
       if (body.action === 'start') registration = { status: 'waiting', registration_id: 'synthetic-scan', url: 'https://open.feishu.cn/page/cli?user_code=TEST', qr: 'data:image/png;base64,c3ludGhldGlj', expires_at: new Date(Date.now() + 60000).toISOString() };
       else {
         assert.equal(body.registration_id, 'synthetic-scan');
@@ -419,6 +421,43 @@ test('provider and remote-access UI performs real mutations, preserves secrets a
     // A completed registration focuses its saved channel. Compare a scalar so a
     // failure does not synchronously inspect LinkeDOM's entire linked document.
     assert.equal(document.activeElement?.getAttribute('data-key'), 'provider-edit-personal-2');
+  });
+
+  await t.test('a new editor can recover an orphaned scan and cancel it without starting or writing another channel', async () => {
+    await settleUiFixture(); navigate('#/providers');
+    registration = { status: 'waiting', registration_id: 'synthetic-scan', url: 'https://open.feishu.cn/page/cli?user_code=RECOVER', expires_at: new Date(Date.now() + 60000).toISOString() };
+    registrationRecovery = { id: 'personal-1', name: 'Recovered personal draft', enabled: false };
+    const starts = registrationWrites.filter(write => write.action === 'start').length;
+    const writes = providerWrites.length;
+    button('provider-add').click(); button('provider-choose-personal-app').click();
+    assert.equal(field('provider-name').value, '');
+    button('provider-registration-recover').click();
+    await until(() => !element('provider-registration').hidden && !button('provider-cancel').disabled, 'Orphaned scan was not recovered');
+    assert.equal(field('provider-name').value, 'Recovered personal draft'); assert.equal(field('provider-enabled').checked, false);
+    assert.equal(button('provider-save').hidden, true);
+    assert.equal(element('provider-registration-open').getAttribute('href'), 'https://open.feishu.cn/page/cli?user_code=RECOVER');
+    assert.equal(registrationWrites.filter(write => write.action === 'start').length, starts);
+    button('provider-cancel').click(); await until(() => !providerDialog.open, 'Recovered scan could not be canceled');
+    assert.equal(registrationWrites.at(-1)!.action, 'cancel'); assert.equal(registrationWrites.at(-1)!.registration_id, 'synthetic-scan');
+    assert.equal(providerWrites.length, writes);
+    assert.equal((document.activeElement as HTMLElement).dataset.key, 'provider-edit-personal-1');
+
+    button('provider-add').click(); button('provider-choose-personal-app').click(); button('provider-registration-recover').click();
+    await until(() => element('provider-editor-error').textContent!.includes('No previous authorization'), 'No-flow recovery was not explained');
+    assert.equal(button('provider-save').hidden, false); button('provider-cancel').click();
+  });
+
+  await t.test('recovering a completion after a lost response adopts the saved channel without replaying its save', async () => {
+    await settleUiFixture();
+    registration = { status: 'complete', registration_id: 'synthetic-scan', provider_id: 'personal-2', app_id: 'cli_personal_2' };
+    registrationRecovery = { name: 'Original draft before completion', enabled: false };
+    const writes = providerWrites.length; const defaultBefore = defaultProvider;
+    button('provider-add').click(); button('provider-choose-personal-app').click(); button('provider-registration-recover').click();
+    await until(() => !element('provider-personal-actions').hidden && !button('provider-save').disabled, 'Saved authorization did not recover');
+    assert.equal(field('provider-name').value, providers.find(provider => provider.id === 'personal-2')!.name);
+    assert.equal(field('provider-app-id').value, 'cli_personal_2'); assert.equal(field('provider-app-secret').value, '');
+    assert.equal(providerWrites.length, writes); assert.equal(defaultProvider, defaultBefore);
+    button('provider-cancel').click(); assert.equal((document.activeElement as HTMLElement).dataset.key, 'provider-edit-personal-2');
   });
 
   await t.test('new provider and remote labels translate without changing user data', async () => {

@@ -50,6 +50,8 @@ The chooser offers Feishu Bot (manual credentials), Feishu personal app (scoped 
 
 Channel dialogs retain the upstream 440px bounded width, 24px padding, and standard action row with 20px top spacing. Their form fields use a vertical flow; long forms scroll as native dialogs rather than introducing a separate footer surface. Local CSS only groups fields, aligns header icons, and sizes the functional QR.
 
+The personal-app editor includes **Recover previous authorization** for a refreshed/closed page or a lost start response. It restores the original name, enabled state, target channel and scan, so the owner can resume or cancel without waiting for expiry. A completed scan restores the persisted channel instead of creating another one. Recovery uses a local-only POST and never puts credentials in browser storage.
+
 A personal scan records the channel name and enabled state before starting. The standard editor then hides the configuration fields and shows only the QR, official authorization link, expiry, and Cancel. Cancellation while saving is refused; a completion racing Cancel is reconciled before closing, with focus returning to the saved entry. Failed and uncertain save outcomes do not silently retry. Completion restores the personal editor, which exposes Reconnect (stored credentials), same-app reauthorization, and permission checks without revealing an App Secret. Missing scopes are linked to the official app console; scanning alone does not grant them.
 
 ## Verification

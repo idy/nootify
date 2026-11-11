@@ -31,7 +31,10 @@ interface ProviderSummary {
   connection_type?: LarkConnectionType; app_id?: string; recipient_open_id?: string; address?: string; tls?: boolean; server_name?: string; secret_set?: boolean; token_set?: boolean;
 }
 type ProviderChoice = 'feishu' | 'personal-app' | 'remote';
-interface ProviderRegistrationPage extends LarkRegistrationPage { registration_id?: string; provider_id?: string }
+interface ProviderRegistrationPage extends LarkRegistrationPage {
+  registration_id?: string; provider_id?: string;
+  recovery?: { id?: string; name: string; enabled: boolean };
+}
 interface RemoteSummary {
   enabled: boolean; listen: string; status: string; tls: boolean; token_set: boolean; tls_cert_file?: string; tls_key_file?: string;
   peers: { node_id: string; name?: string; connected_at: string; connected?: boolean; pending: number; last_ack?: string }[];
@@ -801,6 +804,7 @@ function renderProviderAuthorization(): void {
   if (waiting && flow.url) open.href = flow.url; else open.removeAttribute('href');
   const disabled = state.providers?.editable !== true || state.providersBusy || state.providerRegistrationBusy || state.providerRegistrationPending || state.providerRegistration?.error === 'save_unconfirmed' || active;
   $<HTMLButtonElement>('provider-reauthorize').disabled = disabled;
+  $<HTMLButtonElement>('provider-registration-recover').disabled = state.providers?.editable !== true || state.providersBusy || state.providerRegistrationBusy || active;
   $<HTMLButtonElement>('provider-reconnect').disabled = disabled || !field('provider-enabled').checked;
   const canInspect = editor?.type === 'feishu' && !!editor.id;
   $('provider-permissions').hidden = !canInspect || active;
@@ -838,6 +842,7 @@ async function reconcileProviderRegistration(flow: ProviderRegistrationPage): Pr
   if (!current) throw new Error(t('通道可能已保存，请检查列表后再操作。'));
   state.providers = page;
   editor.id = current.id; editor.secretSet = current.secret_set === true;
+  field('provider-name').value = current.name; field('provider-enabled').checked = current.enabled;
   field('provider-app-id').value = current.app_id ?? ''; field('provider-recipient').value = current.recipient_open_id ?? '';
   state.providerSetup = flow.setup; state.providerRegistrationPending = false;
 }
@@ -847,7 +852,7 @@ async function readProvidersPage(): Promise<ProvidersPage> {
   const page = await response.json() as ProvidersPage;
   return page;
 }
-async function providerRegistrationAction(action: 'start' | 'cancel'): Promise<boolean> {
+async function providerRegistrationAction(action: 'start' | 'cancel' | 'recover'): Promise<boolean> {
   const editor = state.providerEditor;
   if (!editor || !personalEditor() || state.providers?.editable !== true || state.providerRegistrationBusy) return false;
   if (action === 'start' && (state.providerRegistrationPending || state.providerRegistration?.error === 'save_unconfirmed')) return false;
@@ -867,8 +872,22 @@ async function providerRegistrationAction(action: 'start' | 'cancel'): Promise<b
     }
     const body = action === 'start'
       ? { action, name: field('provider-name').value.trim(), enabled: field('provider-enabled').checked, ...(editor.id ? { id: editor.id } : {}) }
-      : { action, registration_id: id };
+      : action === 'recover' ? { action } : { action, registration_id: id };
     const flow = await post<ProviderRegistrationPage>('/ui/api/providers/registration', body);
+    if (action === 'recover') {
+      if (flow.status === 'idle') {
+        state.providerRegistration = undefined; state.providerRegistrationPending = false;
+        state.providerEditorError = () => t('没有可恢复的授权，可以开始新的扫码授权。');
+        return false;
+      }
+      if (!flow.registration_id || !flow.recovery) throw new Error(t('暂时无法获取应用配置，请检查网络后重试。'));
+      const target = flow.recovery;
+      const current = state.providers?.providers.find(provider => provider.id === target.id);
+      editor.id = target.id; editor.secretSet = current?.secret_set === true;
+      field('provider-name').value = target.name; field('provider-enabled').checked = target.enabled;
+      field('provider-app-id').value = current?.app_id ?? ''; field('provider-recipient').value = current?.recipient_open_id ?? '';
+      state.providerSetup = undefined;
+    }
     await reconcileProviderRegistration(flow);
     if (action === 'cancel') state.providerRegistration = undefined;
     return true;
@@ -1859,6 +1878,7 @@ $('providers-retry').addEventListener('click', () => { state.providersError = ''
 $('provider-tls').addEventListener('change', renderProviderEditor);
 $('provider-reauthorize').addEventListener('click', () => { void providerRegistrationAction('start'); });
 $('provider-registration-retry').addEventListener('click', () => { void providerRegistrationAction('start'); });
+$('provider-registration-recover').addEventListener('click', () => { void providerRegistrationAction('recover'); });
 $('provider-reconnect').addEventListener('click', () => { if (state.providerEditor?.id) void mutateProvider({ action: 'reconnect', id: state.providerEditor.id }); });
 $('provider-permissions-check').addEventListener('click', () => { void loadProviderSetup(); });
 for (const id of ['provider-cancel', 'provider-chooser-cancel', 'provider-dialog-close']) $(id).addEventListener('click', () => closeProviderEditor());
