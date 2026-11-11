@@ -224,30 +224,42 @@ func TestInboxRoutesSlowFirstRouteDoesNotStarveHealthyRelease(t *testing.T) {
 func TestInboxRoutesAttemptRotationAndProgressSurviveRestart(t *testing.T) {
 	origin, leaf := testCore(t, nil), testCore(t, nil)
 	slow := installInboxTestRoute(leaf, "a-slow", origin)
-	slow.release = func(ctx context.Context, _ MessageRef) error { <-ctx.Done(); return ctx.Err() }
 	m := MessageRef{OriginNodeID: origin.node(), ProviderID: "synthetic", MessageID: "restart-fairness"}
 	must(t, leaf.store.Update(func(d *State) error {
 		d.References[m.key()] = ReferenceRecord{Message: m, Routes: []string{"a-slow", "b-healthy", "c-healthy"}, InboxState: "releasing", InboxNodeID: d.NodeID, InboxUpdatedAt: inboxTimestamp(d)}
 		return nil
 	}))
-	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
-	if err := leaf.ReleaseInbox(ctx, m); err == nil {
-		t.Fatal("fixture hanging release unexpectedly succeeded")
+	// Interrupt when the hanging route is entered, not after a wall-clock
+	// deadline that also races unrelated durable writes on a slow filesystem.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	slow.release = func(request context.Context, _ MessageRef) error {
+		cancel()
+		<-request.Done()
+		return request.Err()
 	}
-	cancel()
-	if leaf.store.Snapshot().References[m.key()].InboxReleaseCursor != "a-slow" {
+	if err := leaf.ReleaseInbox(ctx, m); !errors.Is(err, context.Canceled) {
+		t.Fatalf("fixture release did not observe cancellation: %v", err)
+	}
+	if slow.releases.Load() != 1 || leaf.store.Snapshot().References[m.key()].InboxReleaseCursor != "a-slow" {
 		t.Fatal("attempt rotation was not persisted before hanging network I/O")
 	}
 	leaf = reopenCore(t, leaf, nil)
 	slow = installInboxTestRoute(leaf, "a-slow", origin)
-	slow.release = func(ctx context.Context, _ MessageRef) error { <-ctx.Done(); return ctx.Err() }
 	first := installInboxTestRoute(leaf, "b-healthy", origin)
 	second := installInboxTestRoute(leaf, "c-healthy", origin)
-	ctx, cancel = context.WithTimeout(context.Background(), 200*time.Millisecond)
-	_ = leaf.ReleaseInbox(ctx, m)
-	cancel()
+	ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+	slow.release = func(request context.Context, _ MessageRef) error {
+		cancel()
+		<-request.Done()
+		return request.Err()
+	}
+	if err := leaf.ReleaseInbox(ctx, m); !errors.Is(err, context.Canceled) {
+		t.Fatalf("restarted release did not reach the hanging route: %v", err)
+	}
 	r := leaf.store.Snapshot().References[m.key()]
-	if first.releases.Load() != 1 || second.releases.Load() != 1 || !contains(r.InboxReleasedRoutes, "b-healthy") || !contains(r.InboxReleasedRoutes, "c-healthy") {
+	if slow.releases.Load() != 1 || first.releases.Load() != 1 || second.releases.Load() != 1 || !contains(r.InboxReleasedRoutes, "b-healthy") || !contains(r.InboxReleasedRoutes, "c-healthy") {
 		t.Fatal("restart repeated the hanging route before progressing healthy branches")
 	}
 	slow.release = nil
