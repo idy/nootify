@@ -346,7 +346,7 @@ try {
             if ($watch.Elapsed.TotalSeconds -gt 15) { throw 'Normal installation did not abort promptly for a locked desktop' }
             $watch.Restart()
             $null = Run-Native $Installer "/S /UPDATE /R /D=$installDir" 'locked-updater-install' 1
-            if ($watch.Elapsed.TotalSeconds -lt 15 -or $watch.Elapsed.TotalSeconds -gt 45) { throw 'Updater lock wait was not bounded near the 20-second handoff deadline' }
+            if ($watch.Elapsed.TotalSeconds -lt 15 -or $watch.Elapsed.TotalSeconds -gt 45) { throw "Updater lock wait was not bounded near the 20-second handoff deadline: $($watch.Elapsed.TotalSeconds) seconds" }
             foreach ($path in $before.Keys) {
                 if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -cne $before[$path]) { throw 'A locked upgrade changed installed files' }
             }

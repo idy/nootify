@@ -150,6 +150,12 @@ func (s installedService) legacySnapshot() (state serviceState, result error) {
 }
 
 func (s installedService) powerShell(phase, script string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 170*time.Second)
+	defer cancel()
+	return s.powerShellContext(ctx, phase, script)
+}
+
+func (s installedService) powerShellContext(ctx context.Context, phase, script string) ([]byte, error) {
 	encoded := utf16.Encode([]rune(script))
 	buffer := make([]byte, 2*len(encoded))
 	for i, unit := range encoded {
@@ -159,7 +165,7 @@ func (s installedService) powerShell(phase, script string) ([]byte, error) {
 	if !filepath.IsAbs(powerShell) {
 		return nil, errors.New("missing absolute system PowerShell path")
 	}
-	return runHidden(s.diagnostics, phase, powerShell, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", base64.StdEncoding.EncodeToString(buffer))
+	return runHiddenContext(ctx, s.diagnostics, phase, powerShell, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", base64.StdEncoding.EncodeToString(buffer))
 }
 
 func (s installedService) enable(enabled bool) error {
@@ -183,7 +189,14 @@ func (s installedService) stop() error {
 }
 func (s installedService) start() error { _, err := s.command("start"); return err }
 
-func (s installedService) preflightDesktop() error {
+func (s installedService) preflightDesktop(wait bool) error {
+	budget := 10 * time.Second
+	if wait {
+		budget = 20 * time.Second
+	}
+	// Include process startup, inspection and retry delays in one deadline.
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
 	target := powershellPathLiteral(filepath.Join(s.target, "Nootify.exe"))
 	script := `$ErrorActionPreference='Stop'; $env:PSModulePath=[IO.Path]::Combine($PSHOME,'Modules'); $target=` + target + `
 foreach($p in @(Get-CimInstance Win32_Process -Filter "Name = 'Nootify.exe'")) {
@@ -191,8 +204,32 @@ foreach($p in @(Get-CimInstance Win32_Process -Filter "Name = 'Nootify.exe'")) {
   if(!$p.CommandLine -or $p.CommandLine -notmatch '^\s*(?:"[^"]+"|\S+)\s+(?:serve|service-(?:install|start|restart|stop|uninstall|status|enable|disable))(?=\s|$)') { throw 'Close Nootify and retry; an installed desktop process is still running' }
  }
 }`
-	_, err := s.powerShell("preflight", script)
-	return err
+	return inspectDesktop(ctx, wait, func(ctx context.Context) error {
+		_, err := s.powerShellContext(ctx, "preflight", script)
+		return err
+	})
+}
+
+func inspectDesktop(ctx context.Context, wait bool, probe func(context.Context) error) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := probe(ctx)
+		if canceled := ctx.Err(); canceled != nil {
+			return canceled
+		}
+		if err == nil || !wait {
+			return err
+		}
+		timer := time.NewTimer(250 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 func powershellPathLiteral(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
@@ -203,6 +240,7 @@ func main() {
 	target := flag.String("target", "", "absolute registered installation directory")
 	manifest := flag.String("manifest", "", "trusted staged payload manifest")
 	freshToken := flag.String("fresh-token", "", "pending fresh-install ownership receipt")
+	waitDesktop := flag.Bool("wait-desktop", false, "allow up to 20 seconds for an updater desktop handoff")
 	flag.Parse()
 	d := newDiagnostics(os.Getenv(diagnosticsVariable), *action)
 	d.begin("helper", "")
@@ -235,7 +273,7 @@ func main() {
 	case "service-uninstall":
 		_, err = t.service.(installedService).command("uninstall")
 	case "preflight":
-		err = t.service.(installedService).preflightDesktop()
+		err = t.service.(installedService).preflightDesktop(*waitDesktop)
 	case "prepare":
 		err = t.prepare()
 	case "apply":

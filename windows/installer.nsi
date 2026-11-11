@@ -339,33 +339,25 @@ FunctionEnd
   Push $1
   ; Read-only process inspection distinguishes the desktop from the same executable
   ; running the background service. Exchange checks writeability after the job drains.
-  StrCpy $1 0
+  StrCpy $1 ""
   ${If} $UpdateMode = 1
-    ; The updater starts this installer before its own process has exited.
-    ; Allow at most 20 seconds for that handoff; never kill a process by name.
-    StrCpy $1 80
+    ; One helper owns the 20-second deadline, including inspection/startup time.
+    ; Never kill a process by name or extend the deadline with repeated helpers.
+    StrCpy $1 "--wait-desktop"
   ${EndIf}
-  ${Do}
-    ${IfNot} ${FileExists} "$INSTDIR\Nootify.exe"
-      ${ExitDo}
-    ${EndIf}
+  ${If} ${FileExists} "$INSTDIR\Nootify.exe"
     ; Both GUI and daemon map Nootify.exe. Inspect the exact command line
     ; before mutation; only the owned service may keep the shared image mapped.
-    nsExec::ExecToLog /TIMEOUT=30000 '"$PLUGINSDIR\nootify-installer-stage.exe" --action preflight --target "$INSTDIR"'
+    nsExec::ExecToLog /TIMEOUT=30000 '"$PLUGINSDIR\nootify-installer-stage.exe" --action preflight --target "$INSTDIR" $1'
     Pop $0
-    ${If} $0 = 0
-      ${ExitDo}
-    ${EndIf}
-    ${If} $1 = 0
+    ${If} $0 != 0
       Pop $1
       Pop $0
       SetErrorLevel 1
       MessageBox MB_OK|MB_ICONSTOP "Close Nootify and retry the ${OPERATION}. Its desktop process is still running or cannot be verified. The existing files and service have not been changed." /SD IDOK
       Abort "Nootify desktop is still running; existing files and service are unchanged."
     ${EndIf}
-    Sleep 250
-    IntOp $1 $1 - 1
-  ${Loop}
+  ${EndIf}
   Pop $1
   Pop $0
 !macroend

@@ -125,9 +125,10 @@ test('install and uninstall share a nondestructive desktop preflight with bounde
   const guard = installer.slice(start, installer.indexOf('!macroend', start));
   assert.match(installer, /Function NootifyPreflightDesktop\s+!insertmacro NootifyPreflightDesktop "installation"\s+FunctionEnd/);
   assert.match(installer, /Function un\.NootifyPreflightDesktop\s+!insertmacro NootifyPreflightDesktop "uninstallation"\s+FunctionEnd/);
-  assert.match(guard, /\$UpdateMode = 1[\s\S]*StrCpy \$1 80/);
-  assert.match(guard, /nootify-installer-stage\.exe.*--action preflight --target/);
-  assert.match(guard, /Sleep 250\s+IntOp \$1 \$1 - 1/);
+  assert.match(guard, /\$UpdateMode = 1[\s\S]*StrCpy \$1 "--wait-desktop"/);
+  assert.match(guard, /nootify-installer-stage\.exe.*--action preflight --target.*\$1/);
+  assert.equal(guard.match(/nsExec::ExecToLog/g)?.length, 1);
+  assert.doesNotMatch(guard, /\$\{Do\}|\$\{Loop\}|Sleep|IntOp/);
   assert.match(guard, /SetErrorLevel 1[\s\S]*Close Nootify and retry[\s\S]*\/SD IDOK[\s\S]*Abort/);
   assert.doesNotMatch(guard, /service-stop|RMDir|Delete|taskkill|TerminateProcess|FileOpen/i);
 });
