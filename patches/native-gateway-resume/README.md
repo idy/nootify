@@ -56,8 +56,9 @@ a late failure from an old session cannot invalidate it. POSTs are never replaye
 even when a mutation committed before its response was lost. Authenticated
 business errors and started streams are never replayed. Request cancellation
 and gateway shutdown stop recovery; an intentionally cancelled healthy request
-does not retire its session. Existing origin/Host checks and encrypted framing
-remain in place.
+does not retire its session. A gateway deadline instead retires the stalled
+session without replaying the timed-out request; the next read establishes fresh
+proof. Existing origin/Host checks and encrypted framing remain in place.
 
 Validated on macOS arm64 with Go 1.27.3:
 
@@ -74,7 +75,9 @@ Validated on macOS arm64 with Go 1.27.3:
 Tests cover idle expiry, a real daemon HTTP server restart on the same port,
 concurrent recovery, failed proof/failed retry, a mutation with a lost response,
 expired POSTs, authenticated error statuses, partially received streams, request
-cancellation, cancelled connection waiters, and gateway shutdown during proof.
+cancellation, cancelled connection waiters, gateway shutdown during proof, and
+gateway deadline expiry before headers and during a stream (without immediate
+replay, with fresh proof on the next read).
 
 The browser fixture uses synthetic credentials and does not run the installed
 application. Installing a rebuilt native app is a separate step; no installation

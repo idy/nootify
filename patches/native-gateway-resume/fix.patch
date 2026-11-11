@@ -10,7 +10,7 @@
  	if g.upstream != nil && g.upstream.Healthy() {
  		return g.upstream, nil
  	}
-@@ -129,11 +132,30 @@
+@@ -129,12 +132,38 @@
  	if err != nil {
  		return nil, err
  	}
@@ -39,9 +39,17 @@
 +	stop := context.AfterFunc(g.ctx, cancel)
 +	defer stop()
  	defer cancel()
++	g.proxyRequest(ctx, w, r)
++}
++
++func (g *Gateway) proxyRequest(ctx context.Context, w http.ResponseWriter, r *http.Request) {
++	// A gateway deadline indicates a stalled upstream. Only a caller disconnect
++	// or gateway shutdown should preserve the session without reporting failure.
++	cancelled := func() bool { return r.Context().Err() != nil || g.ctx.Err() != nil }
  	active, err := g.connection(ctx)
  	if err != nil {
-@@ -145,14 +167,29 @@
+ 		httpx.WriteError(w, httpx.Fail(502, "The authenticated background service connection is unavailable"))
+@@ -145,15 +174,30 @@
  		httpx.WriteError(w, httpx.Fail(413, "UI request body is too large"))
  		return
  	}
@@ -53,6 +61,7 @@
 -		}
 -		g.connMu.Unlock()
 -		_ = active.Close()
+-		if ctx.Err() == nil {
 +	op := Operation{Method: r.Method, Path: r.URL.Path, Body: string(body)}
 +	var result *http.Response
 +	for attempt := 0; attempt < 2; attempt++ {
@@ -60,7 +69,7 @@
 +		if err == nil {
 +			break
 +		}
-+		if ctx.Err() != nil {
++		if cancelled() {
 +			return
 +		}
 +		g.retire(active)
@@ -76,10 +85,11 @@
 +		}
 +	}
 +	if err != nil {
- 		if ctx.Err() == nil {
++		if !cancelled() {
  			httpx.WriteError(w, httpx.Fail(502, "The authenticated background service connection was interrupted"))
  		}
-@@ -177,13 +214,8 @@
+ 		return
+@@ -177,13 +221,8 @@
  			}
  		}
  		if readErr != nil {
@@ -90,7 +100,7 @@
 -				}
 -				g.connMu.Unlock()
 -				_ = active.Close()
-+			if readErr != io.EOF && ctx.Err() == nil {
++			if readErr != io.EOF && !cancelled() {
 +				g.retire(active)
  			}
  			return
@@ -110,11 +120,12 @@
  		t.Fatal("upstream expiry revoked browser transport")
 --- /dev/null
 +++ b/internal/webui/gateway_recovery_test.go
-@@ -0,0 +1,361 @@
+@@ -0,0 +1,431 @@
 +package webui
 +
 +import (
 +	"context"
++	"encoding/json"
 +	"errors"
 +	"io"
 +	"net"
@@ -371,6 +382,75 @@
 +	readRecoveryResponse(t, browser, "GET", 200)
 +	if d.grants.Load() != 2 {
 +		t.Fatal("next request did not retire the broken stream connection")
++	}
++}
++
++func TestGatewayDeadlineRetiresStalledSessionWithoutReplay(t *testing.T) {
++	for _, headers := range []bool{false, true} {
++		t.Run(map[bool]string{false: "before headers", true: "during stream"}[headers], func(t *testing.T) {
++			d := newRecoveryDaemon(t, "", nil, nil)
++			g, browser := recoveryGateway(t, d.server.URL)
++			active := g.upstream
++			transport := active.http.Transport
++			t.Cleanup(active.http.CloseIdleConnections)
++			var stall atomic.Bool
++			stall.Store(true)
++			active.http.Transport = recoveryRoundTripper(func(r *http.Request) (*http.Response, error) {
++				if !stall.Swap(false) {
++					return transport.RoundTrip(r)
++				}
++				if !headers {
++					<-r.Context().Done()
++					return nil, r.Context().Err()
++				}
++				var request Envelope
++				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
++					return nil, err
++				}
++				_ = r.Body.Close()
++				first, err := active.codec.seal(Frame{Type: "headers", Status: 200}, request.Request, responseDirection(0))
++				if err != nil {
++					return nil, err
++				}
++				data, err := active.codec.seal(Frame{Type: "data", Data: b64.EncodeToString([]byte("partial"))}, request.Request, responseDirection(1))
++				if err != nil {
++					return nil, err
++				}
++				reader, writer := io.Pipe()
++				go func() {
++					_ = json.NewEncoder(writer).Encode(first)
++					_ = json.NewEncoder(writer).Encode(data)
++					<-r.Context().Done()
++					_ = writer.CloseWithError(r.Context().Err())
++				}()
++				return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {encryptedType}}, Body: reader}, nil
++			})
++			// The request itself stays live; only the gateway's budget expires.
++			ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
++			defer cancel()
++			response := httptest.NewRecorder()
++			g.proxyRequest(ctx, response, httptest.NewRequest("GET", "/ui/api/providers", nil))
++			active.http.Transport = transport
++			if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
++				t.Fatal("gateway deadline did not expire")
++			}
++			if g.upstream != nil || active.Healthy() {
++				t.Fatal("deadline kept the stalled session")
++			}
++			if d.grants.Load() != 1 {
++				t.Fatal("deadline replayed the timed-out request")
++			}
++			if !headers && response.Code != 502 {
++				t.Fatalf("deadline status=%d, want 502", response.Code)
++			}
++			if headers && (response.Code != 200 || response.Body.String() != "partial") {
++				t.Fatal("started stream was replaced or replayed")
++			}
++			readRecoveryResponse(t, browser, "GET", 200)
++			if d.grants.Load() != 2 {
++				t.Fatal("next read did not establish fresh proof")
++			}
++		})
 +	}
 +}
 +
