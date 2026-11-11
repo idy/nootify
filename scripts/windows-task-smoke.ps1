@@ -35,6 +35,8 @@ function Invoke-Service([string]$Action,[int]$Expected = 0) {
     $stderr = Join-Path $output ($Action + '.stderr.log')
     $arguments = 'service-' + $Action + ' --state-dir "' + $state + '" --port ' + $port
     $process = Start-Process -FilePath $executable -ArgumentList $arguments -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+    # Windows PowerShell needs a retained native handle to preserve ExitCode.
+    $null = $process.Handle
     if (!$process.WaitForExit(170000)) { $process.Kill(); throw "$Action timed out" }
     $process.WaitForExit()
     if ($process.ExitCode -ne $Expected) { throw "$Action exited $($process.ExitCode), expected $Expected" }
