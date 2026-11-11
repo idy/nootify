@@ -55,18 +55,25 @@ function Get-Task {
 }
 function Get-TaskInstanceCount {
     # GetInstances(0) can omit this hidden task even while Scheduler reports Running.
-    # Use the API with an explicit TASK_ENUM_HIDDEN flag, then select the exact root path.
-    $running = $scheduler.GetRunningTasks(1)
-    $total = $running.Count
-    if ($null -eq $total -or $total -lt 0) { throw 'Cannot verify running Scheduled Task instances' }
+    # Use TASK_ENUM_HIDDEN and the exact root path. Scheduler entries can lose their
+    # Path while a task exits; discard that entire snapshot and briefly re-query.
+    # Never skip an unknown entry or use a partial count to certify shutdown.
     $expectedPath = '\' + $taskName
-    $count = 0
-    for ($index = 1; $index -le $total; $index++) {
-        $path = [string]$running.Item($index).Path
-        if (!$path) { throw 'Cannot verify a running Scheduled Task path' }
-        if ([string]::Equals($path, $expectedPath, [StringComparison]::OrdinalIgnoreCase)) { $count++ }
+    for ($attempt = 0; $attempt -lt 4; $attempt++) {
+        $running = $scheduler.GetRunningTasks(1)
+        $total = $running.Count
+        if ($null -eq $total -or $total -lt 0) { throw 'Cannot verify running Scheduled Task instances' }
+        $count = 0
+        $complete = $true
+        for ($index = 1; $index -le $total; $index++) {
+            $path = [string]$running.Item($index).Path
+            if (!$path) { $complete = $false; break }
+            if ([string]::Equals($path, $expectedPath, [StringComparison]::OrdinalIgnoreCase)) { $count++ }
+        }
+        if ($complete) { return $count }
+        if ($attempt -lt 3) { Start-Sleep -Milliseconds 50 }
     }
-    return $count
+    throw 'Cannot verify a running Scheduled Task path after refreshing the instance snapshot'
 }
 function Test-OwnedTaskRunning($Task) {
     if (!$Task) { return $false }

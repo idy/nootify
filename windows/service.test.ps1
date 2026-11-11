@@ -244,8 +244,36 @@ Assert ($task.GetInstances(0).Count -eq 0 -and (Get-TaskInstanceCount) -eq 1) 'T
 Start-OwnedTask $task
 Assert ($task.Starts -eq 0) 'Repeated starts must not create another process'
 $task.LegacyInstancesOmitted = $false
-$scheduler | Add-Member ScriptMethod GetRunningTasks { param($Flags); throw [UnauthorizedAccessException]::new('Fixture hidden enumeration denial') } -Force
+# A task can exit between collection creation and reading Path. An incomplete
+# collection must be discarded, including any owned instances already counted.
+$incomplete = [pscustomobject]@{ Count = 2; TaskPath = ('\' + $taskName) }
+$incomplete | Add-Member ScriptMethod Item {
+    param($Index)
+    if ($Index -eq 1) { return [pscustomobject]@{ Path = $this.TaskPath } }
+    return [pscustomobject]@{ Path = '' }
+}
+$scheduler | Add-Member NoteProperty SnapshotReads 0
+$scheduler | Add-Member NoteProperty Snapshots @($incomplete, (New-FixtureRunningTasks))
+$scheduler | Add-Member ScriptMethod GetRunningTasks {
+    param($Flags)
+    Assert ($Flags -eq 1) 'Refreshed snapshots must still include hidden tasks'
+    $index = [Math]::Min($this.SnapshotReads, $this.Snapshots.Count - 1)
+    $this.SnapshotReads++
+    return $this.Snapshots[$index]
+} -Force
+Assert ((Get-TaskInstanceCount) -eq 1 -and $scheduler.SnapshotReads -eq 2) 'A fresh complete snapshot must replace, not add to, its partial predecessor'
+$task.Instances = 0
+$scheduler.SnapshotReads = 0; $scheduler.Snapshots = @($incomplete, (New-FixtureRunningTasks))
+Assert ((Get-TaskInstanceCount) -eq 0 -and $scheduler.SnapshotReads -eq 2) 'Only a complete refreshed snapshot may confirm the task has stopped'
+$task.Instances = 1
+$scheduler.SnapshotReads = 0; $scheduler.Snapshots = @($incomplete)
+Must-Fail { Get-TaskInstanceCount } 'Persistently unknown paths must never be treated as zero or a partial running count'
+Assert ($scheduler.SnapshotReads -eq 4) 'Incomplete snapshot retries must be bounded'
+Assert ($task.Starts -eq 0 -and $task.Stops -eq 0) 'Snapshot recovery must not start or stop the task'
+$scheduler.SnapshotReads = 0
+$scheduler | Add-Member ScriptMethod GetRunningTasks { param($Flags); $this.SnapshotReads++; throw [UnauthorizedAccessException]::new('Fixture hidden enumeration denial') } -Force
 Must-Fail { Get-TaskInstanceCount } 'Denied instance enumeration must not be treated as zero running tasks'
+Assert ($scheduler.SnapshotReads -eq 1) 'Permission failures must propagate without retrying'
 $scheduler | Add-Member ScriptMethod GetRunningTasks $runningTasksBoundary -Force
 ${function:Assert-PortFree} = $realPortCheck
 $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
