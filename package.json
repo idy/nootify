@@ -4,35 +4,18 @@
   "private": true,
   "type": "module",
   "description": "Routes Feishu replies to local coding-agent sessions and tracks pull requests, with a Windows and macOS tray app",
-  "exports": {
-    ".": {
-      "types": "./dist/src/client.d.ts",
-      "import": "./dist/src/client.js"
-    }
-  },
-  "engines": {
-    "node": ">=22.13.0"
-  },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "node scripts/build-ui.mjs",
     "check": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node scripts/test.mjs",
+    "test": "npm run build && tsc -p tsconfig.test.json && node scripts/test.mjs && go test ./internal/... ./desktop/...",
     "test:integration": "npm run build && node scripts/integration.mjs",
-    "start": "node dist/src/server.js",
-    "cli": "node dist/src/cli.js",
-    "tailscale:build": "node scripts/build-tsnet.mjs",
-    "core:build": "node scripts/build-core.mjs",
-    "core:test": "go -C native/core test ./...",
+    "start": "go run ./desktop serve",
+    "cli": "go run ./desktop",
+    "core:test": "go test ./native/core/...",
     "desktop:dev": "node scripts/desktop.mjs dev",
-    "desktop:test": "go -C desktop test ./...",
+    "desktop:test": "npm run build && go test ./desktop/...",
     "desktop:stage": "npm run build && node scripts/stage-service.mjs",
     "desktop:build": "node scripts/desktop.mjs build"
-  },
-  "dependencies": {
-    "@larksuiteoapi/node-sdk": "1.76.0",
-    "@opencode-ai/sdk": "1.19.5",
-    "qrcode": "1.5.4",
-    "ws": "8.22.1"
   },
   "devDependencies": {
     "@types/node": "24.19.2",

@@ -1,4 +1,4 @@
-package main
+package core
 
 import (
 	"context"
@@ -26,13 +26,11 @@ type Core struct {
 	subs             map[string]map[*Subscription]struct{}
 	emit             func(string, any) error
 	server           *remoteServer
-	dialMu           sync.Mutex
-	dials            map[string]chan dialResult
 }
 
 func NewCore(parent context.Context, s *Store, emit func(string, any) error) (*Core, error) {
 	ctx, cancel := context.WithCancel(parent)
-	c := &Core{store: s, ctx: ctx, cancel: cancel, ops: newOperationGate(), providers: map[string]Provider{}, statuses: map[string]string{}, subs: map[string]map[*Subscription]struct{}{}, emit: emit, dials: map[string]chan dialResult{}}
+	c := &Core{store: s, ctx: ctx, cancel: cancel, ops: newOperationGate(), providers: map[string]Provider{}, statuses: map[string]string{}, subs: map[string]map[*Subscription]struct{}{}, emit: emit}
 	err := s.Update(func(d *State) error {
 		// Upgrade deleted bindings written before resource tombstones existed.
 		for key, binding := range d.Bindings {

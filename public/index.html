@@ -29,14 +29,13 @@
     <a class="nav-item" href="#/settings/general" data-view="settings-general"><span data-i18n="通用">通用</span></a>
     <a class="nav-item" href="#/settings/github" data-view="settings-github"><span>GitHub</span></a>
     <a class="nav-item" href="#/settings/remote" data-view="settings-remote"><span data-i18n="远程接入">远程接入</span></a>
-    <a class="nav-item" href="#/settings/tailscale" data-view="settings-tailscale"><span>Tailscale</span></a>
     <a class="nav-item" href="#/settings/backup" data-view="settings-backup"><span data-i18n="导入导出">导入导出</span></a>
     <a class="nav-item" href="#/settings/about" data-view="settings-about"><span data-i18n="关于">关于</span><span class="update-dot" title="有新版本" data-i18n-title="有新版本" hidden></span></a>
   </nav>
   <div class="sidebar-foot">
     <div id="modules" class="module-list" aria-label="模块状态" data-i18n-aria-label="模块状态"></div>
     <div class="status-line"><span id="connection-dot" class="dot"></span><span id="connection" data-i18n="正在连接">正在连接</span><span id="access-label" class="value mono"></span></div>
-    <div class="status-line" id="tailnet-line" hidden><span class="dot ok"></span><span>Tailscale</span><span id="tailnet-url" class="value mono selectable"></span></div>
+    <div class="status-line" id="lan-line" hidden><span class="dot ok"></span><span>LAN</span><span id="lan-url" class="value mono selectable"></span></div>
   </div>
 </aside>
 <main class="content">
@@ -62,7 +61,6 @@
       <button type="button" id="refresh" class="icon-button" title="立即刷新" data-i18n-title="立即刷新" aria-label="立即刷新" data-i18n-aria-label="立即刷新"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13.2 8A5.2 5.2 0 1 1 11.7 4.3M13.2 2.6v3.1h-3.1"/></svg></button>
     </div>
   </header>
-  <div id="owner-access" class="banner note" role="status" hidden><span data-i18n="此窗口尚未连接到已验证的本机服务。请从 Nootify 桌面端打开，或在终端运行已安装的 ui-url 命令。">此窗口尚未连接到已验证的本机服务。请从 Nootify 桌面端打开，或在终端运行已安装的 ui-url 命令。</span><button type="button" id="owner-authorize" class="text-button primary" hidden data-i18n="授权当前窗口">授权当前窗口</button><code id="owner-auth-command" class="mono" hidden></code></div>
   <div id="error" class="banner" role="alert" hidden></div>
   <div id="github-signin" class="banner note" role="status" hidden><span data-i18n="还没有登录 GitHub，PR 数据不会更新。">还没有登录 GitHub，PR 数据不会更新。</span><a class="inline-link" href="#/settings/github" data-i18n="去登录">去登录</a></div>
   <section id="logs-view" class="view" aria-label="运行日志" data-i18n-aria-label="运行日志">
@@ -243,15 +241,6 @@
       </div>
       <p class="hint" id="lark-manual-hint" data-i18n="App ID 和 App Secret 在飞书开放平台应用的「凭证与基础信息」页。优先级：环境变量、这里保存的凭据、MCP 配置文件。保存后机器人会用新凭据重新连接；密钥保存在状态目录的 state.sqlite（权限 0600）。">App ID 和 App Secret 在飞书开放平台应用的「凭证与基础信息」页。优先级：环境变量、这里保存的凭据、MCP 配置文件。保存后机器人会用新凭据重新连接；密钥保存在状态目录的 state.sqlite（权限 0600）。</p>
       <p class="hint" id="lark-reuse-hint" data-i18n="个人 App 认证后会自动保存到本机，后续启动继续复用。">个人 App 认证后会自动保存到本机，后续启动继续复用。</p>
-    </div>
-    <div data-panel="settings-tailscale" hidden>
-      <div class="group">
-        <div class="setting setting-with-switch"><div class="setting-main"><label class="setting-title" for="tailscale-enabled" data-i18n="接入 Tailscale 网络">接入 Tailscale 网络</label><div class="setting-sub" id="tailscale-sharing" data-i18n="正在读取设置…">正在读取设置…</div></div><input id="tailscale-enabled" class="switch" type="checkbox" role="switch" aria-describedby="tailscale-sharing" disabled></div>
-        <div class="setting"><div class="setting-main"><div class="setting-title" data-i18n="Nootify 设备">Nootify 设备</div><div class="setting-sub" id="tailscale-status"></div></div><span id="tailscale-state"></span><div class="setting-actions"><button type="button" id="tailscale-login" class="text-button primary" hidden data-i18n="登录 Tailscale">登录 Tailscale</button><button type="button" id="tailscale-logout" class="text-button" hidden data-i18n="退出登录">退出登录</button></div></div>
-        <div class="setting" id="tailscale-flow" hidden><div class="setting-main"><div class="setting-title" id="tailscale-flow-title"></div><div class="setting-sub" data-i18n="在浏览器中完成授权，连接状态会自动更新。">在浏览器中完成授权，连接状态会自动更新。</div></div><div class="setting-actions"><button type="button" id="tailscale-cancel" class="text-button" data-i18n="取消">取消</button><a id="tailscale-open" class="text-button primary" target="_blank" rel="noopener noreferrer" hidden data-i18n="继续登录">继续登录</a></div></div>
-        <div class="setting" id="tailscale-address-row" hidden><div class="setting-main"><div class="setting-title" data-i18n="访问地址">访问地址</div><div id="tailscale-address" class="setting-sub mono selectable"></div><div id="tailscale-dns" class="setting-sub"></div></div><div class="setting-actions"><button type="button" id="tailscale-copy" class="text-button" data-i18n="复制地址">复制地址</button></div></div>
-      </div>
-      <p class="hint" data-i18n="Nootify 内置 Tailscale 客户端，登录后会作为独立设备加入你的网络，无需安装系统客户端。其他设备可通过这个节点的 80 端口访问，无需填写端口号。默认仅允许同一账号的设备访问；设置只能在本机修改。">Nootify 内置 Tailscale 客户端，登录后会作为独立设备加入你的网络，无需安装系统客户端。其他设备可通过这个节点的 80 端口访问，无需填写端口号。默认仅允许同一账号的设备访问；设置只能在本机修改。</p>
     </div>
     <div data-panel="settings-backup" hidden>
       <div class="group">

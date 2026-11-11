@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { parseHTML } from 'linkedom';
 import { authorizeUiFixture, settleUiFixture } from './ui-transport-fixture.js';
-import type { LogEntry } from '../src/events.js';
+import type { LogEntry } from '../src/ui-types.js';
 
 async function until(check: () => boolean, message: string): Promise<void> {
   for (let attempt = 0; attempt < 1000; attempt++) { if (check()) return; await new Promise(resolve => setTimeout(resolve, 1)); }
@@ -66,6 +66,7 @@ test('Logs separates event purpose from delivery outcome and keeps its controls 
   let editable = true;
   const agentWrites: { agent: string; enabled: boolean }[] = [];
   let reads = 0; let agentReads = 0;
+  let lanURL: string | undefined = 'http://192.168.1.20:9417/';
   let releaseAgentReads!: () => void;
   const agentsReady = new Promise<void>(resolve => { releaseAgentReads = resolve; });
   let agentsUnavailable = false; let agentsEmpty = false;
@@ -73,7 +74,7 @@ test('Logs separates event purpose from delivery outcome and keeps its controls 
     const path = new URL(String(input), 'http://127.0.0.1:9417').pathname;
     if (path === '/ui/api/snapshot') {
       reads++;
-      return Response.json({ time: '2026-11-08T10:31:00.000Z', modules: [], logs,
+      return Response.json({ time: '2026-11-08T10:31:00.000Z', modules: [], logs, access: { lan_url: lanURL },
         sessions: [{ session_id: 'session-1', session_name: 'SQLite recovery', adapter: 'codex', host_id: 'fixture-host' }] });
     }
     if (path === '/ui/api/agents') {
@@ -102,6 +103,36 @@ test('Logs separates event purpose from delivery outcome and keeps its controls 
   authorizeUiFixture(t);
   await import('../src/ui-app.js');
   await until(() => ids().length === 15, 'Initial Logs fixture did not render');
+
+  await t.test('the sidebar displays the LAN address locally and clears it when unavailable or accessed over LAN', async () => {
+    const refresh = async () => {
+      const before = reads; element('refresh').click();
+      await until(() => reads > before, 'LAN snapshot did not refresh');
+      await settleUiFixture();
+    };
+    assert.equal(element('lan-line').hidden, false);
+    assert.equal(element('lan-url').textContent, '192.168.1.20:9417');
+    assert.equal(element('lan-url').title, 'Address for other devices on your LAN: http://192.168.1.20:9417/');
+    assert.equal(element('access-label').textContent, '127.0.0.1:9417');
+    lanURL = undefined; await refresh();
+    assert.equal(element('lan-line').hidden, true);
+    assert.equal(element('lan-url').textContent, '');
+    assert.equal(element('lan-url').title, '');
+    lanURL = 'http://192.168.1.20:9417/'; location.hostname = '192.168.1.20'; await refresh();
+    assert.equal(element('access-label').textContent, 'LAN');
+    assert.equal(element('lan-line').hidden, true);
+    location.hostname = '127.0.0.1'; await refresh();
+    assert.equal(element('lan-line').hidden, false);
+  });
+
+  await t.test('the removed Tailscale settings route falls back to Logs without loading a settings page', async () => {
+    location.hash = '#/settings/tailscale'; window.dispatchEvent(new window.Event('hashchange'));
+    await settleUiFixture();
+    assert.equal(element('crumb-page').textContent, 'Logs');
+    assert.equal(element('logs-view').hidden, false);
+    assert.equal(element('settings-subnav').hidden, true);
+    location.hash = '#/logs'; window.dispatchEvent(new window.Event('hashchange'));
+  });
 
   await t.test('Agents hides its card while loading, unavailable or empty, then restores it on retry', async () => {
     location.hash = '#/agents'; window.dispatchEvent(new window.Event('hashchange'));
@@ -295,7 +326,7 @@ test('Logs separates event purpose from delivery outcome and keeps its controls 
     assert.equal(element('channel-state').textContent, 'Not configured');
     assert.equal(element('channel-settings').getAttribute('href'), '#/providers');
     editable = false; await refresh();
-    assert.equal(element('agents-banner').textContent, 'Agent instructions are read-only over Tailscale. Edit them on this Mac.');
+    assert.equal(element('agents-banner').textContent, 'Agent instructions are read-only over LAN. Edit them on the computer running Nootify.');
     assert.ok([...document.querySelectorAll<HTMLInputElement>('#agent-rows .check')].every(checkbox => checkbox.disabled));
   });
 });

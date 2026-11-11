@@ -1,21 +1,81 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-11-06T00:00:00Z",
+  "generatedAt": "2026-11-10T23:08:17Z",
   "title": "Design System: Nootify",
   "extensions": {
     "shadows": [
-      { "name": "recipient-dialog", "value": "0 20px 64px rgb(0 0 0 / .24)", "purpose": "Lift the modal above neutral settings groups." }
+      {
+        "name": "recipient-dialog",
+        "value": "0 20px 64px rgb(0 0 0 / .24)",
+        "purpose": "Lift the modal above neutral settings groups."
+      },
+      {
+        "name": "dropdown-light",
+        "value": "0 8px 24px rgb(0 0 0 / .12)",
+        "purpose": "Authored web dropdown elevation in light appearance."
+      },
+      {
+        "name": "dropdown-dark",
+        "value": "0 8px 24px rgb(0 0 0 / .32)",
+        "purpose": "Authored web dropdown elevation in dark appearance."
+      }
     ],
     "motion": [
-      { "name": "disclosure", "value": "transform .15s", "purpose": "Existing chevrons and switches; removed for reduced motion." },
-      { "name": "busy", "value": "spin 1s linear infinite", "purpose": "Existing refresh icon; removed for reduced motion." }
+      {
+        "name": "disclosure",
+        "value": "transform .15s",
+        "purpose": "Existing chevrons and switches; removed for reduced motion."
+      },
+      {
+        "name": "busy",
+        "value": "spin 1s linear infinite",
+        "purpose": "Existing refresh icon; removed for reduced motion."
+      }
     ],
     "breakpoints": [
-      { "name": "recipient-mobile", "value": "480px" },
-      { "name": "browser-navigation", "value": "760px" },
-      { "name": "workspace-settings-container", "value": "640px" },
-      { "name": "workspace-logs-container", "value": "880px" }
-    ]
+      {
+        "name": "recipient-mobile",
+        "value": "480px"
+      },
+      {
+        "name": "browser-navigation",
+        "value": "760px"
+      },
+      {
+        "name": "workspace-settings-container",
+        "value": "640px"
+      },
+      {
+        "name": "shell-search-container",
+        "value": "880px"
+      }
+    ],
+    "typographyMeta": {
+      "navigation": {
+        "displayName": "Web navigation",
+        "purpose": "Montserrat for navigation, section labels, counts, and brand; native menus use platform typography."
+      },
+      "heading": {
+        "displayName": "Content headings",
+        "purpose": "Lato for content headings and page hierarchy, with system Chinese fallbacks."
+      },
+      "primary": {
+        "displayName": "Primary row text",
+        "purpose": "Established row names and primary control text."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Lato for web body text and controls, with system Chinese fallbacks."
+      },
+      "meta": {
+        "displayName": "Metadata",
+        "purpose": "Secondary names, statuses, hints, and subtitles."
+      },
+      "code": {
+        "displayName": "Identifiers",
+        "purpose": "Existing monospace role for identifiers and code."
+      }
+    }
   },
   "components": [
     {
@@ -63,7 +123,7 @@
       "kind": "nav",
       "description": "Neutral current-page treatment, inherited by settings navigation.",
       "html": "<nav aria-label=\"Settings\"><a class=\"ds-nav\" href=\"#feishu\" aria-current=\"page\">Feishu</a></nav>",
-      "css": ".ds-nav{display:flex;align-items:center;gap:10px;height:32px;padding:0 9px;border-radius:7px;color:var(--text);font:14px var(--font-ui);text-decoration:none}.ds-nav:hover{background:var(--hover)}.ds-nav[aria-current=page]{background:var(--selected)}.ds-nav:focus-visible{outline:2px solid var(--blue);outline-offset:1px}"
+      "css": ".ds-nav{display:flex;align-items:center;gap:10px;height:32px;padding:0 9px;border-radius:7px;color:var(--text);font:14px var(--font-navigation);text-decoration:none}.ds-nav:hover{background:var(--hover)}.ds-nav[aria-current=page]{background:var(--selected)}.ds-nav:focus-visible{outline:2px solid var(--blue);outline-offset:1px}"
     },
     {
       "name": "Metadata tag",
@@ -99,18 +159,28 @@
       "Blue interactive states and explicit confirmation."
     ],
     "rules": [
-      { "name": "The Role Continuity Rule", "body": "Preserve color roles across appearances. Recipient selection mixes blue (10%) with panel; partial-access notice mixes amber (9%) with panel.", "section": "colors" },
-      { "name": "The Names First Rule", "body": "Lead contact rows with nickname plus default name, preserving already formatted aliases; show English names or short ID suffixes only as secondary disambiguation.", "section": "typography" }
+      {
+        "name": "The Role Continuity Rule",
+        "body": "Preserve color roles across appearances. Recipient selection mixes blue (10%) with panel; partial-access notice mixes amber (9%) with panel.",
+        "section": "colors"
+      },
+      {
+        "name": "The Names First Rule",
+        "body": "Lead contact rows with nickname plus default name, preserving already formatted aliases; show English names or short ID suffixes only as secondary disambiguation.",
+        "section": "typography"
+      }
     ],
     "dos": [
-      "Do use Montserrat headings, Monda body text, and Lato metadata with system Chinese fallbacks; preserve semantic colors and automatic appearance.",
+      "Do use the bundled application font roles with system Chinese fallbacks, preserving semantic colors and automatic appearance.",
       "Do preserve useful loaded contacts and a reachable footer while loading or explaining access.",
-      "Do keep portraits as runtime provider data and the permission QR as locally generated functional imagery."
+      "Do keep portraits as runtime provider data and the permission QR as locally generated functional imagery.",
+      "Do use the operating system's native menu appearance and shortcuts for the tray."
     ],
     "donts": [
       "Don't persist a recipient from a row click; use explicit confirmation.",
       "Don't let full IDs outrank human names or duplicate an alias already supplied by the provider.",
-      "Don't describe a QR scan as automatic application authorization."
+      "Don't describe a QR scan as automatic application authorization.",
+      "Don't expose background-service, module, or start/restart/install controls in the everyday tray menu."
     ]
   }
 }

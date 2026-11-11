@@ -17,7 +17,7 @@ const transactionName = ".nootify-installer"
 
 // Only these package-owned roots can ever be exchanged or removed. Private
 // state and other files in the installation directory are never transaction data.
-var payloadRoots = []string{"Nootify.exe", "node.exe", "nootify-core.exe", "nootify-tsnet.exe", "service", "uninstall.exe"}
+var payloadRoots = []string{"Nootify.exe", "node.exe", "nootify-core.exe", "nootify-tsnet.exe", "service", "licenses", "uninstall.exe"}
 
 type journal struct {
 	Version    int      `json:"version"`
@@ -27,6 +27,7 @@ type journal struct {
 	Running    bool     `json:"running"`
 	Enabled    *bool    `json:"enabled,omitempty"`
 	FreshToken string   `json:"fresh_token,omitempty"`
+	LegacyTask string   `json:"legacy_task,omitempty"`
 }
 
 type serviceState struct{ Running, Enabled bool }
@@ -35,6 +36,13 @@ type serviceControl interface {
 	stop() error
 	start() error
 	enable(bool) error
+}
+
+// Implemented by the Windows installer control; receipts contain registration
+// data only and are independently ownership-checked again during restoration.
+type legacyTaskControl interface {
+	captureRegistration() (string, error)
+	restoreRegistration(string, serviceState) error
 }
 
 type transaction struct {
@@ -148,7 +156,7 @@ func (t transaction) read() (j journal, result error) {
 	if err != nil {
 		return j, err
 	}
-	if len(data) > 4096 {
+	if len(data) > 65536 {
 		return j, errors.New("invalid installer journal size")
 	}
 	if err = json.Unmarshal(data, &j); err != nil {
@@ -156,6 +164,9 @@ func (t transaction) read() (j journal, result error) {
 	}
 	if j.Version != 1 || !strings.EqualFold(j.Target, t.target) || !contains([]string{"staging", "exchanging", "starting", "ready", "rolling-back", "restored", "committed", "quarantining", "removing"}, j.Phase) {
 		return j, errors.New("refusing an unrecognized installer journal")
+	}
+	if len(j.LegacyTask) > 16384 || j.LegacyTask != "" && (j.Enabled == nil || j.FreshToken != "" || j.Phase == "staging" || j.Phase == "quarantining" || j.Phase == "removing") {
+		return j, errors.New("invalid legacy task rollback receipt")
 	}
 	seen := map[string]bool{}
 	for _, root := range j.Previous {
@@ -303,7 +314,7 @@ func (t transaction) validate(manifestPath string) (result error) {
 	if !reflect.DeepEqual(actual, expected) {
 		return errors.New("staged payload does not match the installer SHA-256 manifest")
 	}
-	for _, path := range []string{"Nootify.exe", "node.exe", "nootify-core.exe", "nootify-tsnet.exe", "service/dist/src/cli.js", "service/dist/src/server.js", "uninstall.exe"} {
+	for _, path := range []string{"Nootify.exe", "licenses/third-party-notices.txt", "uninstall.exe"} {
 		info, err := os.Lstat(filepath.Join(t.dir("new"), filepath.FromSlash(path)))
 		if err != nil {
 			return err
@@ -349,6 +360,12 @@ func (t transaction) apply(manifestPath string) (result error) {
 		if err != nil {
 			return err
 		}
+		if legacy, ok := t.service.(legacyTaskControl); ok {
+			j.LegacyTask, err = legacy.captureRegistration()
+			if err != nil {
+				return err
+			}
+		}
 	}
 	j.Phase = "exchanging"
 	if err := t.write(j); err != nil {
@@ -386,6 +403,9 @@ func (t transaction) apply(manifestPath string) (result error) {
 				return err
 			}
 		}
+		if !exists(t.dir("new", root)) {
+			continue
+		} // Legacy roots are cleanup-only in current payloads.
 		if err := t.observe("install", root, func() error { return renamePayload(t.dir("new", root), filepath.Join(t.target, root)) }); err != nil {
 			return err
 		}
@@ -519,6 +539,18 @@ func (t transaction) recover() (result error) {
 		if err := t.write(j); err != nil {
 			return err
 		}
+	}
+	if j.LegacyTask != "" {
+		legacy, ok := t.service.(legacyTaskControl)
+		if !ok || j.Enabled == nil {
+			return errors.New("missing owned legacy task recovery control")
+		}
+		if err := t.observe("restore", "", func() error {
+			return legacy.restoreRegistration(j.LegacyTask, serviceState{Running: j.Running, Enabled: *j.Enabled})
+		}); err != nil {
+			return err
+		}
+		return t.cleanup()
 	}
 	if j.Running {
 		if t.service == nil {

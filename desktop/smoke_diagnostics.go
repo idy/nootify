@@ -17,6 +17,7 @@ type smokeLoadDiagnostics struct {
 	counts                    map[string]int
 	firstFailure, lastFailure int
 	hasFailure                bool
+	offlineLoaded             bool
 }
 
 func (s *shell) noteSmokeLoad(event string, code int) {
@@ -41,6 +42,23 @@ func (s *shell) noteSmokeLoad(event string, code int) {
 		s.smokeLoads.hasFailure = true
 		s.smokeLoads.lastFailure = code
 	}
+}
+
+// Only completion of the intended document can admit startup evaluations. A
+// new native window's empty document may already report readyState=complete.
+func (s *shell) markSmokeOfflineLoaded(raw string) {
+	if !s.smoke || s.offline == nil || !documentAt(raw, s.offline.URL) {
+		return
+	}
+	s.smokeLoads.mu.Lock()
+	s.smokeLoads.offlineLoaded = true
+	s.smokeLoads.mu.Unlock()
+}
+
+func (s *shell) smokeOfflineLoaded() bool {
+	s.smokeLoads.mu.Lock()
+	defer s.smokeLoads.mu.Unlock()
+	return s.smokeLoads.offlineLoaded
 }
 
 func (s *shell) smokeLoadSnapshot() map[string]any {

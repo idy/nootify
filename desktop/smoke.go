@@ -48,7 +48,11 @@ func (s *shell) runSmoke() {
 	mygo.App.Quit()
 }
 func smokeWait(description string, predicate func() bool) error {
-	deadline := time.Now().Add(8 * time.Second)
+	return smokeWaitFor(description, 8*time.Second, predicate)
+}
+
+func smokeWaitFor(description string, budget time.Duration, predicate func() bool) error {
+	deadline := time.Now().Add(budget)
 	for time.Now().Before(deadline) {
 		if predicate() {
 			return nil
@@ -66,26 +70,32 @@ func (s *shell) smokeEval(expression string) bool {
 func (s *shell) exerciseSmoke(report map[string]any) error {
 	started := time.Now()
 	observations := map[string]int{}
-	if err := smokeWait("bundled offline document and icon", func() bool {
-		ctx, cancel := context.WithTimeout(s.ctx, 2*time.Second)
-		defer cancel()
-		value, err := s.window.Page().EvalContext(ctx, "!!document.querySelector('h1') && document.querySelector('.mark')?.naturalWidth > 0 && window.__NOOTIFY_LANGUAGE__?.locale === document.documentElement.lang")
-		category := smokeEvalCategory(err)
-		if err == nil {
-			if value == true {
-				category = "true"
-			} else {
-				category = "false"
+	// A cold WebView2 controller can take over ten seconds to start. Do not
+	// submit evaluations into the empty/previous document while it navigates.
+	err := smokeWaitFor("initial offline navigation", 30*time.Second, s.smokeOfflineLoaded)
+	if err == nil {
+		err = smokeWait("bundled offline document and icon", func() bool {
+			ctx, cancel := context.WithTimeout(s.ctx, 2*time.Second)
+			defer cancel()
+			value, err := s.window.Page().EvalContext(ctx, "!!document.querySelector('h1') && document.querySelector('.mark')?.naturalWidth > 0 && window.__NOOTIFY_LANGUAGE__?.locale === document.documentElement.lang")
+			category := smokeEvalCategory(err)
+			if err == nil {
+				if value == true {
+					category = "true"
+				} else {
+					category = "false"
+				}
 			}
-		}
-		observations[category]++
-		return err == nil && value == true
-	}); err != nil {
+			observations[category]++
+			return err == nil && value == true
+		})
+	}
+	if err != nil {
 		report["startup_eval"] = observations
 		report["startup_elapsed_ms"] = time.Since(started).Milliseconds()
 		report["startup_load"] = s.smokeLoadSnapshot()
-		// Failure-only diagnostics share a separate bounded budget. The original
-		// assertion, eight-second wait and two-second eval limits are unchanged.
+		// Failure-only diagnostics share a separate bounded budget. Navigation
+		// gets its own cold-start allowance; DOM and eval limits remain 8s/2s.
 		ctx, cancel := context.WithTimeout(s.ctx, 1500*time.Millisecond)
 		defer cancel()
 		for key, value := range collectSmokeStartup(ctx, smokeStartupHooks{
@@ -102,6 +112,12 @@ func (s *shell) exerciseSmoke(report map[string]any) error {
 		return err
 	}
 	report["tray_present"] = true
+	for _, id := range []string{"service", "modules", "refresh", "start", "restart", "install_service", "action"} {
+		if s.menu.ItemByID(id) != nil {
+			return fmt.Errorf("tray exposes removed service control %q", id)
+		}
+	}
+	report["tray_application_actions_only"] = true
 	s.window.Close()
 	if err := smokeWait("close hides without destroying", func() bool { return !s.window.IsVisible() && !s.window.IsDestroyed() }); err != nil {
 		return err

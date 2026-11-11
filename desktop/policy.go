@@ -28,7 +28,6 @@ func previewURL(raw string) string {
 }
 
 var permissionPath = regexp.MustCompile(`^/app/cli_[a-fA-F0-9]{16}/auth$`)
-var authPath = regexp.MustCompile(`^/a/[a-zA-Z0-9]+$`)
 var registrationQuery = regexp.MustCompile(`^user_code=[a-zA-Z0-9-]{4,64}$`)
 
 func externalURL(raw string) bool {
@@ -39,8 +38,6 @@ func externalURL(raw string) bool {
 	switch u.Host {
 	case "github.com":
 		return true
-	case "login.tailscale.com":
-		return authPath.MatchString(u.EscapedPath()) && !u.ForceQuery && u.RawQuery == "" && !strings.Contains(raw, "#")
 	case "open.feishu.cn":
 		if strings.Contains(raw, "#") {
 			return false

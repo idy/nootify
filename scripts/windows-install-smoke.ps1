@@ -20,9 +20,7 @@ $OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
 $installDir = Join-Path $env:RUNNER_TEMP 'Nootify install smoke'
 $stateDir = Join-Path $env:LOCALAPPDATA 'Nootify\state'
 $app = Join-Path $installDir 'Nootify.exe'
-$node = Join-Path $installDir 'node.exe'
-$cli = Join-Path $installDir 'service\dist\src\cli.js'
-$server = Join-Path $installDir 'service\dist\src\server.js'
+$license = Join-Path $installDir 'licenses\third-party-notices.txt'
 $uninstaller = Join-Path $installDir 'uninstall.exe'
 $registryKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Nootify'
 $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
@@ -51,21 +49,29 @@ function Get-TestTask {
     }
 }
 function Get-TestInstanceCount {
-    $running = $scheduler.GetRunningTasks(1) # TASK_ENUM_HIDDEN
-    $total = $running.Count
-    if ($null -eq $total -or $total -lt 0) { throw 'Cannot query hidden running task instances' }
-    $count = 0
+    $watch = [Diagnostics.Stopwatch]::StartNew()
     $expectedPath = '\' + $taskName
-    for ($index = 1; $index -le $total; $index++) {
-        $path = [string]$running.Item($index).Path
-        if (!$path) { throw 'Running task path is unavailable' }
-        if ([string]::Equals($path, $expectedPath, [StringComparison]::OrdinalIgnoreCase)) { $count++ }
+    while ($true) {
+        $running = $scheduler.GetRunningTasks(1) # TASK_ENUM_HIDDEN
+        $total = $running.Count
+        if ($null -eq $total -or $total -lt 0) { throw 'Cannot query hidden running task instances' }
+        $count = 0
+        $complete = $true
+        for ($index = 1; $index -le $total; $index++) {
+            $path = [string]$running.Item($index).Path
+            if (!$path) { $complete = $false; break }
+            if ([string]::Equals($path, $expectedPath, [StringComparison]::OrdinalIgnoreCase)) { $count++ }
+        }
+        if ($complete) { return $count }
+        # Observe a fresh complete snapshot; never accept a partial count as zero.
+        if ($watch.Elapsed.TotalSeconds -ge 2) { throw 'Running task path is unavailable' }
+        Start-Sleep -Milliseconds 50
     }
-    return $count
 }
 function Get-TestApps {
     return @(Get-CimInstance Win32_Process -Filter "Name = 'Nootify.exe'" | Where-Object {
-        $_.ExecutablePath -and (Same-Path $_.ExecutablePath $app)
+        $_.ExecutablePath -and (Same-Path $_.ExecutablePath $app) -and $_.CommandLine -and
+        $_.CommandLine -notmatch '^\s*(?:"[^"]+"|\S+)\s+(?:serve|service-[a-z-]+)(?=\s|$)'
     })
 }
 function Get-InstallProcesses {
@@ -81,9 +87,9 @@ function Stop-TestApps {
     }
 }
 function Get-ServiceProcess {
-    $processes = @(Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" | Where-Object {
-        $_.ExecutablePath -and (Same-Path $_.ExecutablePath $node) -and $_.CommandLine -and
-        $_.CommandLine.IndexOf($server, [StringComparison]::OrdinalIgnoreCase) -ge 0
+    $processes = @(Get-CimInstance Win32_Process -Filter "Name = 'Nootify.exe'" | Where-Object {
+        $_.ExecutablePath -and (Same-Path $_.ExecutablePath $app) -and $_.CommandLine -and
+        $_.CommandLine -match '^\s*(?:"[^"]+"|\S+)\s+serve(?=\s|$)'
     })
     if ($processes.Count -ne 1) { throw "Expected one installed daemon, found $($processes.Count)" }
     $process = Get-Process -Id $processes[0].ProcessId
@@ -175,8 +181,8 @@ function With-NodeStartupOptions([scriptblock]$Check) {
     }
 }
 function Invoke-Service([string]$Action) {
-    $arguments = '"' + $cli + '" service-' + $Action
-    $path = Run-Native $node $arguments "service-$Action"
+    $arguments = 'service-' + $Action
+    $path = Run-Native $app $arguments "service-$Action"
     return (Get-Content -LiteralPath $path -Raw | ConvertFrom-Json)
 }
 function Start-TestApp {
@@ -186,7 +192,7 @@ function Start-TestApp {
     return $process
 }
 function Assert-Installation([string]$ExpectedVersion) {
-    foreach ($path in @($app, $node, $cli, $server, $uninstaller, (Join-Path $installDir 'nootify-tsnet.exe'), (Join-Path $installDir 'nootify-core.exe'), (Join-Path $installDir 'service\windows\service-runner.cs'), (Join-Path $installDir 'service\windows\inbox-auth.ps1'), (Join-Path $installDir 'service\windows\inbox-auth.cs'))) {
+    foreach ($path in @($app, $license, $uninstaller)) {
         if (!(Test-Path -LiteralPath $path -PathType Leaf)) { throw "Installed payload is missing $path" }
     }
     if ([Diagnostics.FileVersionInfo]::GetVersionInfo($app).ProductVersion -cne $ExpectedVersion) {
@@ -220,7 +226,7 @@ function Uninstall-TestApp([string]$Label) {
     $null = Run-Native $uninstaller '/S' $Label
     # NSIS normally copies its uninstaller to TEMP; wait for the actual removal too.
     Wait-Until 'uninstaller removes payload, registration, task and listener' {
-        !(Test-Path -LiteralPath $app) -and !(Test-Path -LiteralPath $node) -and
+        !(Test-Path -LiteralPath $app) -and !(Test-Path -LiteralPath $license) -and
         !(Test-Path -LiteralPath $registryKey) -and !(Get-TestTask) -and (Test-PortFree)
     }
     Wait-Until 'uninstaller and installed process tree exit' { @(Get-InstallProcesses).Count -eq 0 }
@@ -335,7 +341,7 @@ try {
     }
     Test-Step 'Locked desktop aborts normal and updater installs before changing files or service' {
         $before = @{}
-        foreach ($path in @($app, $node, $cli, $server, (Join-Path $installDir 'nootify-core.exe'), (Join-Path $installDir 'nootify-tsnet.exe'))) {
+        foreach ($path in @($app, $license)) {
             $before[$path] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
         }
         # A real Windows sharing lock guarantees GENERIC_WRITE is rejected even
@@ -347,7 +353,7 @@ try {
             if ($watch.Elapsed.TotalSeconds -gt 15) { throw 'Normal installation did not abort promptly for a locked desktop' }
             $watch.Restart()
             $null = Run-Native $Installer "/S /UPDATE /R /D=$installDir" 'locked-updater-install' 1
-            if ($watch.Elapsed.TotalSeconds -lt 15 -or $watch.Elapsed.TotalSeconds -gt 45) { throw 'Updater lock wait was not bounded near the 20-second handoff deadline' }
+            if ($watch.Elapsed.TotalSeconds -lt 15 -or $watch.Elapsed.TotalSeconds -gt 45) { throw "Updater lock wait was not bounded near the 20-second handoff deadline: $($watch.Elapsed.TotalSeconds) seconds" }
             foreach ($path in $before.Keys) {
                 if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -cne $before[$path]) { throw 'A locked upgrade changed installed files' }
             }
@@ -368,14 +374,8 @@ try {
         if ((Get-ServiceProcess).Id -ne $daemon.Id) { throw 'Reopening restarted the healthy daemon' }
         Stop-TestApps
     }
-    Test-Step 'Installed Node rejects the inherited preload without installer sanitization' {
-        With-NodeStartupOptions {
-            $null = Run-Native $node '-e "process.exit(0)"' 'node-options-control' 1
-            $errorText = Get-Content -LiteralPath (Join-Path $OutputDirectory 'node-options-control.stderr.log') -Raw
-            if ($errorText -notmatch 'MODULE_NOT_FOUND' -or $errorText -notmatch 'nootify-smoke-missing-preload\.cjs') {
-                throw 'The Node startup control did not reject the missing preload fixture'
-            }
-        }
+    Test-Step 'Installed Go CLI ignores inherited Node startup options' {
+        With-NodeStartupOptions { $null = Invoke-Service 'status' }
     }
     Test-Step 'Changed installation destination refuses before touching the registered installation' {
         $other = Join-Path $env:RUNNER_TEMP 'Nootify refused destination'
@@ -390,21 +390,7 @@ try {
         Assert-Installation $BaselineVersion
         Assert-RunningTask
     }
-    Test-Step 'Normal silent upgrade restores a legacy-status service without relaunching the desktop' {
-        # Match published older CLIs whose Status JSON contains only installed.
-        # Keep real service management and its ownership checks for every action.
-        $legacyCLI = Join-Path (Split-Path -Parent $cli) 'cli-smoke-original.js'
-        if (Test-Path -LiteralPath $legacyCLI) { throw 'Refusing an existing legacy CLI fixture path' }
-        Copy-Item -LiteralPath $cli -Destination $legacyCLI
-        [IO.File]::WriteAllText($cli, @'
-import { main } from './cli-smoke-original.js';
-import { manageService } from './service.js';
-await main(process.argv.slice(2), async (action, options) => {
-  const result = await manageService(action, options);
-  if (action === 'status') delete result.running;
-  return result;
-});
-'@)
+    Test-Step 'Normal silent upgrade restores the running service without relaunching the desktop' {
         $previous = Get-ServiceProcess
         With-NodeStartupOptions { $null = Run-Native $Installer "/S /D=$installDir" 'upgrade-normal-no-relaunch' }
         Wait-Until 'normal upgrade restores daemon without desktop' { (Test-Health) -and @(Get-TestApps).Count -eq 0 }
@@ -420,9 +406,9 @@ await main(process.argv.slice(2), async (action, options) => {
             $before[$file.FullName] = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
         }
         $registrationBefore = Get-ItemProperty -LiteralPath $registryKey | ConvertTo-Json -Compress
-        # Deny FILE_SHARE_DELETE on node.exe. Extraction can still succeed in
-        # staging, but moving this old root fails after Nootify.exe was exchanged.
-        $lock = [IO.File]::Open($node, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        # Deny FILE_SHARE_DELETE on the notices file. The separate license root
+        # fails after Nootify.exe was exchanged, exercising transactional rollback.
+        $lock = [IO.File]::Open($license, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
         try { $null = Run-Native $Installer "/S /D=$installDir" 'rollback-locked-runtime' 1 }
         finally { $lock.Dispose() }
         Wait-Until 'rollback restores old daemon without desktop' { (Test-Health) -and @(Get-TestApps).Count -eq 0 }
@@ -545,15 +531,15 @@ await main(process.argv.slice(2), async (action, options) => {
             throw 'Refused uninstall changed private state'
         }
     }
-    Test-Step 'Locked independent runtime preserves uninstaller registration and management payload for retry' {
+    Test-Step 'Locked notices preserve uninstaller registration and management payload for retry' {
         Stop-TestApps
         $before = @{}
         foreach ($file in @(Get-ChildItem -LiteralPath $installDir -Recurse -File)) {
             $before[$file.FullName] = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
         }
         $registrationBefore = Get-ItemProperty -LiteralPath $registryKey | ConvertTo-Json -Compress
-        $lock = [IO.File]::Open($node, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
-        try { $null = Run-Native $uninstaller "/S _?=$installDir" 'locked-runtime-uninstall' 1 }
+        $lock = [IO.File]::Open($license, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        try { $null = Run-Native $uninstaller "/S _?=$installDir" 'locked-notices-uninstall' 1 }
         finally { $lock.Dispose() }
         foreach ($path in $before.Keys) {
             if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -cne $before[$path]) { throw 'Failed uninstall did not restore the retryable payload layout' }
@@ -586,7 +572,7 @@ await main(process.argv.slice(2), async (action, options) => {
         try { Capture-Diagnostics } catch { Write-Warning "Could not capture diagnostics: $($_.Exception.Message)" }
         try {
             Stop-TestApps
-            if ((Test-Path -LiteralPath $node) -and (Test-Path -LiteralPath $cli)) { $null = Invoke-Service 'uninstall' }
+            if (Test-Path -LiteralPath $app) { $null = Invoke-Service 'uninstall' }
             if (Test-Path -LiteralPath $uninstaller) { Uninstall-TestApp 'cleanup-uninstall' }
         } catch {
             if (!$failure) { $failure = "Smoke cleanup failed: $($_.Exception.Message)" }

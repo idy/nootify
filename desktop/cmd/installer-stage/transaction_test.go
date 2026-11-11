@@ -62,7 +62,7 @@ func put(t *testing.T, path, value string) {
 
 func payload(t *testing.T, root, version string) {
 	t.Helper()
-	for _, name := range []string{"Nootify.exe", "node.exe", "nootify-core.exe", "nootify-tsnet.exe", "service/dist/src/cli.js", "service/dist/src/server.js", "service/windows/service.ps1", "uninstall.exe"} {
+	for _, name := range []string{"Nootify.exe", "node.exe", "nootify-core.exe", "nootify-tsnet.exe", "service/dist/src/cli.js", "service/dist/src/server.js", "service/windows/service.ps1", "licenses/third-party-notices.txt", "uninstall.exe"} {
 		put(t, filepath.Join(root, filepath.FromSlash(name)), version+":"+name)
 	}
 }

@@ -4,22 +4,17 @@ import (
 	"fmt"
 	"log"
 	"runtime"
-	"slices"
 
 	"github.com/egoist/mygo"
 	"github.com/idy/nootify/desktop/internal/language"
-	"github.com/idy/nootify/desktop/internal/service"
+	"github.com/idy/nootify/internal/service"
 )
 
 func (s *shell) item(id string, key language.Text) *mygo.MenuItem {
 	return &mygo.MenuItem{ID: id, Label: s.language.View().Locale.Text(key), Click: func(*mygo.MenuItem, *mygo.Window) { s.handle(id, false) }}
 }
-func (s *shell) trayMenu(labels []string) *mygo.Menu {
+func (s *shell) trayMenu() *mygo.Menu {
 	l := s.language.View().Locale
-	modules := make([]*mygo.MenuItem, 0, len(labels))
-	for i, label := range labels {
-		modules = append(modules, &mygo.MenuItem{ID: fmt.Sprintf("module-%d", i), Label: label, Disabled: true})
-	}
 	settings := s.item("settings", language.Settings)
 	settings.Accelerator = "CmdOrCtrl+,"
 	quit := s.item("quit", language.Quit)
@@ -28,16 +23,12 @@ func (s *shell) trayMenu(labels []string) *mygo.Menu {
 	install.Hidden = true
 	return mygo.NewMenu([]*mygo.MenuItem{
 		s.item("open", language.Open), mygo.Separator(), {ID: "status", Label: l.Text(language.CheckingHealth), Disabled: true}, install,
-		{ID: "service", Label: l.Text(language.BackgroundService), Submenu: []*mygo.MenuItem{
-			{ID: "modules", Label: l.Text(language.Modules), Submenu: modules}, s.item("refresh", language.Refresh), mygo.Separator(), s.item("start", language.RetryStart), s.item("restart", language.Restart), s.item("install_service", language.InstallService), mygo.Separator(), {ID: "action", Label: l.Text(language.ServiceKeepsRunning), Disabled: true},
-		}},
 		{ID: "updates", Label: l.Text(language.SoftwareUpdates), Submenu: []*mygo.MenuItem{{ID: "update_status", Disabled: true}, s.item("check_update", language.CheckUpdate), s.item("about", language.UpdateDetails)}},
 		settings, mygo.Separator(), quit,
 	})
 }
 func (s *shell) createMenus() {
-	s.moduleLabels = []string{s.language.View().Locale.Text(language.CheckingModules)}
-	s.menu = s.trayMenu(s.moduleLabels)
+	s.menu = s.trayMenu()
 	s.createAppMenu()
 	s.renderHealth()
 	s.renderUpdate()
@@ -74,9 +65,8 @@ func (s *shell) createAppMenu() {
 }
 func (s *shell) relocalize() {
 	s.createAppMenu()
-	s.moduleLabels = nil
 	s.renderHealth()
-	for id, key := range map[string]language.Text{"open": language.Open, "refresh": language.Refresh, "start": language.RetryStart, "restart": language.Restart, "install_service": language.InstallService, "settings": language.Settings, "quit": language.Quit, "service": language.BackgroundService, "modules": language.Modules, "updates": language.SoftwareUpdates, "check_update": language.CheckUpdate, "about": language.UpdateDetails} {
+	for id, key := range map[string]language.Text{"open": language.Open, "settings": language.Settings, "quit": language.Quit, "updates": language.SoftwareUpdates, "check_update": language.CheckUpdate, "about": language.UpdateDetails} {
 		s.menu.ItemByID(id).SetLabel(s.language.View().Locale.Text(key))
 	}
 	s.renderUpdate()
@@ -109,28 +99,14 @@ func (s *shell) renderHealth() {
 		status = l.Text(language.Offline)
 		labels = []string{service.MenuText(s.healthError.Error())}
 	}
-	if !slices.Equal(labels, s.moduleLabels) {
-		s.moduleLabels = labels
-		s.menu = s.trayMenu(labels)
-		if s.tray != nil {
-			s.tray.SetMenu(s.menu)
-		}
-		s.renderUpdate()
-	}
 	s.menu.ItemByID("status").SetLabel(status)
-	s.menu.ItemByID("start").SetEnabled(s.health == nil && !s.actionPending && s.service != nil && s.service.Bundle != nil)
-	s.menu.ItemByID("restart").SetEnabled(!s.actionPending && s.service != nil && s.service.Bundle != nil)
-	s.menu.ItemByID("install_service").SetEnabled(!s.installed && !s.actionPending && s.service != nil && s.service.Bundle != nil)
 	s.menu.ItemByID("settings").SetEnabled(s.health != nil)
 	s.menu.ItemByID("about").SetEnabled(s.health != nil)
-	text := l.Text(s.action)
 	if s.actionError != nil {
-		text = l.Format(language.ActionFailed, map[string]string{"action": text, "error": s.actionError.Error()})
+		labels = append(labels, l.Format(language.ActionFailed, map[string]string{"action": l.Text(s.action), "error": s.actionError.Error()}))
 	}
-	s.menu.ItemByID("action").SetLabel(service.MenuText(text))
 	if s.tray != nil {
-		detail := slices.Clone(labels)
-		s.tray.SetToolTip(status + "\n" + service.MenuText(fmt.Sprint(detail)))
+		s.tray.SetToolTip(status + "\n" + service.MenuText(fmt.Sprint(labels)))
 	}
 }
 func (s *shell) renderUpdate() {

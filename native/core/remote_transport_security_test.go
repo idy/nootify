@@ -1,9 +1,10 @@
-package main
+package core
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"reflect"
 	"sync/atomic"
@@ -17,7 +18,7 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-func TestRemotePlaintextTransportRequiresNumericLoopbackOrVerifiedBridge(t *testing.T) {
+func TestRemotePlaintextTransportRequiresNumericLoopbackOrPrivateLAN(t *testing.T) {
 	for _, tc := range []struct {
 		address string
 		tls     bool
@@ -29,10 +30,25 @@ func TestRemotePlaintextTransportRequiresNumericLoopbackOrVerifiedBridge(t *test
 		{"localhost:9418", false, false},
 		{"example.invalid:9418", false, false},
 		{"192.0.2.42:9418", false, false},
-		{"10.0.0.1:9418", false, false},
+		{"10.0.0.1:9418", false, true},
+		{"192.168.1.42:9418", false, true},
+		{"172.16.0.1:9418", false, true},
+		{"172.31.255.255:9418", false, true},
+		{"172.15.255.255:9418", false, false},
+		{"172.32.0.1:9418", false, false},
+		{"[::ffff:192.168.1.42]:9418", false, true},
+		{"[fc00::1]:9418", false, true},
+		{"[fdff:ffff::1]:9418", false, true},
+		{"[fe80::1]:9418", false, false},
+		{"[fc00::1%en0]:9418", false, false},
+		{"[2001:db8::1]:9418", false, false},
+		{"0.0.0.0:9418", false, false},
+		{"[::]:9418", false, false},
 		{"192.0.2.42:9418", true, true},
-		{"peer.example.ts.net:9418", false, true}, // Eligible only; runtime proof required.
-		{"100.64.0.1:9418", false, true},
+		{"localhost:9418", true, true},
+		{"example.invalid:9418", true, true},
+		{"peer.example.ts.net:9418", false, false},
+		{"100.64.0.1:9418", false, false},
 	} {
 		t.Run(tc.address, func(t *testing.T) {
 			err := validateRemoteTransport(ProviderConfig{Address: tc.address, TLS: tc.tls})
@@ -69,62 +85,153 @@ func TestRemotePlaintextTransportRequiresNumericLoopbackOrVerifiedBridge(t *test
 	}
 }
 
-func TestRemotePlaintextCredentialsRejectGenericLoopbackForward(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	must(t, err)
-	defer listener.Close()
-	client, err := net.Dial("tcp", listener.Addr().String())
-	must(t, err)
-	server, err := listener.Accept()
-	must(t, err)
-	defer server.Close()
-	guard := guardedRemoteCredentials{TransportCredentials: insecure.NewCredentials(), loopback: false}
-	_, _, err = guard.ClientHandshake(context.Background(), "peer.example.ts.net:9418", client)
-	if err == nil {
-		t.Fatal("generic local forward was mistaken for a verified encrypted bridge")
+type remotePeerConn struct {
+	net.Conn
+	address net.Addr
+	reads   int
+}
+
+func (c *remotePeerConn) RemoteAddr() net.Addr { return c.address }
+func (c *remotePeerConn) Read(data []byte) (int, error) {
+	c.reads++
+	return c.Conn.Read(data)
+}
+
+func TestRemotePlaintextCredentialsCheckActualPeerBeforeMetadata(t *testing.T) {
+	for address, allowed := range map[string]bool{
+		"127.0.0.1": true, "::1": true, "::ffff:127.0.0.1": true,
+		"10.1.2.3": true, "172.16.0.1": true, "192.168.1.2": true,
+		"::ffff:192.168.1.2": true, "fc00::1": true, "fdff::1": true,
+		"172.32.0.1": false, "100.64.0.1": false, "192.0.2.42": false,
+		"fe80::1": false, "2001:db8::1": false, "0.0.0.0": false, "::": false,
+	} {
+		t.Run(address, func(t *testing.T) {
+			client, peer := net.Pipe()
+			defer client.Close()
+			defer peer.Close()
+			conn := &remotePeerConn{Conn: client, address: &net.TCPAddr{IP: net.ParseIP(address), Port: 9418}}
+			must(t, peer.SetReadDeadline(time.Now().Add(time.Second)))
+			guard := guardedRemoteCredentials{TransportCredentials: insecure.NewCredentials()}
+			_, _, err := guard.Clone().ClientHandshake(context.Background(), "192.168.1.2:9418", conn)
+			if (err == nil) != allowed {
+				t.Fatalf("peer accepted = %v, want %v: %v", err == nil, allowed, err)
+			}
+			if !allowed {
+				var data [1]byte
+				if n, err := peer.Read(data[:]); n != 0 || err != io.EOF {
+					t.Fatalf("public peer was not closed before metadata: %d, %v", n, err)
+				}
+			}
+		})
 	}
-	must(t, server.SetReadDeadline(time.Now().Add(time.Second)))
-	var b [1024]byte
-	if n, err := server.Read(b[:]); n != 0 || err == nil {
-		t.Fatal("unverified forwarding socket received HTTP/2 bytes")
+	if privateTCPPeer(&net.UnixAddr{Name: "192.168.1.2:9418", Net: "unix"}) || privateTCPPeer((*net.TCPAddr)(nil)) {
+		t.Fatal("non-TCP or missing peer authorized plaintext")
 	}
 }
 
-func TestRemotePlaintextUsesMatchingPrivateEmbeddedBridge(t *testing.T) {
-	upstream := testCore(t, nil)
-	address, token := testServer(t, upstream)
-	bridge := testAuthenticatedTunnelBridge(t, address)
-	var downstream *Core
-	var requests atomic.Int32
-	downstream = testCore(t, func(name string, data any) error {
-		if name != "dial" {
-			return nil
-		}
-		requests.Add(1)
-		request := data.(map[string]any)
-		if request["address"] != "peer.example.ts.net:9418" {
-			t.Error("bridge target was not preserved")
-			return errors.New("wrong synthetic bridge target")
-		}
-		return downstream.completeDial(request["request_id"].(string), bridge, "", fixtureTunnelToken, localTunnelNetwork)
-	})
-	must(t, downstream.store.Update(func(d *State) error { d.Tailnet = true; return nil }))
-	p := newRemoteProvider(downstream, ProviderConfig{ID: "bridge", Name: "Bridge", Address: "peer.example.ts.net:9418", Token: token})
-	defer p.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	// A private-method Result proves the verified transport delivered auth
-	// metadata, while the method itself is still forbidden over remote RPC.
-	err := p.call(ctx, "status", map[string]any{}, nil)
-	if publicError(err).Code != "permission_denied" || requests.Load() != 1 {
-		t.Fatalf("verified bridge did not reach authenticated RPC: %v, dials %d", err, requests.Load())
+type queuedRemoteListener struct {
+	net.Listener
+	connections []net.Conn
+}
+
+func (l *queuedRemoteListener) Accept() (net.Conn, error) {
+	if len(l.connections) == 0 {
+		return nil, io.EOF
 	}
-	inactive := newRemoteProvider(testCore(t, nil), ProviderConfig{ID: "inactive", Address: "peer.example.ts.net:9418", Token: "must-not-cross-wire"})
-	defer inactive.Close()
-	ctx, cancel = context.WithTimeout(context.Background(), 100*time.Millisecond)
+	conn := l.connections[0]
+	l.connections = l.connections[1:]
+	return conn, nil
+}
+
+func TestPlaintextListenerRejectsPublicPeersBeforeReadingCredentials(t *testing.T) {
+	public, publicPeer := net.Pipe()
+	private, privatePeer := net.Pipe()
+	defer public.Close()
+	defer publicPeer.Close()
+	defer private.Close()
+	defer privatePeer.Close()
+	rejected := &remotePeerConn{Conn: public, address: &net.TCPAddr{IP: net.ParseIP("192.0.2.42"), Port: 12345}}
+	accepted := &remotePeerConn{Conn: private, address: &net.TCPAddr{IP: net.ParseIP("192.168.1.42"), Port: 12345}}
+	listener := privateRemoteListener{Listener: &queuedRemoteListener{connections: []net.Conn{rejected, accepted}}}
+	must(t, publicPeer.SetReadDeadline(time.Now().Add(time.Second)))
+	conn, err := listener.Accept()
+	must(t, err)
+	if conn != accepted || rejected.reads != 0 {
+		t.Fatal("listener exposed public peer or read credentials before rejecting it")
+	}
+	var data [1]byte
+	if n, err := publicPeer.Read(data[:]); n != 0 || err != io.EOF {
+		t.Fatalf("rejected connection was not closed: %d, %v", n, err)
+	}
+	if conn, err := listener.Accept(); conn != nil || err != io.EOF {
+		t.Fatal("listener did not preserve underlying accept error")
+	}
+}
+
+func TestPlaintextListenerAddressBoundaries(t *testing.T) {
+	for address, allowed := range map[string]bool{
+		"127.0.0.1:0": true, "[::1]:0": true, "[::ffff:127.0.0.1]:0": true,
+		"10.0.0.1:9418": true, "172.16.0.1:9418": true, "172.31.255.255:9418": true,
+		"192.168.1.42:9418": true, "[::ffff:192.168.1.42]:9418": true,
+		"[fc00::1]:9418": true, "[fdff::1]:9418": true,
+		":9418": true, "0.0.0.0:9418": true, "[::]:9418": true,
+		"localhost:9418": false, "lan.example:9418": false, "100.64.0.1:9418": false,
+		"172.15.255.255:9418": false, "172.32.0.1:9418": false, "192.0.2.42:9418": false,
+		"[fe80::1]:9418": false, "[2001:db8::1]:9418": false,
+	} {
+		t.Run(address, func(t *testing.T) {
+			err := validateRemote(RemoteConfig{Enabled: true, Listen: address, Token: "test-token"})
+			if (err == nil) != allowed {
+				t.Fatalf("listener accepted = %v, want %v: %v", err == nil, allowed, err)
+			}
+		})
+	}
+}
+
+func TestPrivateLANConnectionAuthenticatesAndRetainsDurableBroadcast(t *testing.T) {
+	addresses, err := net.InterfaceAddrs()
+	must(t, err)
+	var host, wildcard string
+	for _, address := range addresses {
+		network, ok := address.(*net.IPNet)
+		if ok && network.IP.IsPrivate() && !network.IP.IsLoopback() {
+			host, wildcard = network.IP.String(), "[::]:0"
+			if network.IP.To4() != nil {
+				wildcard = "0.0.0.0:0"
+				break
+			}
+		}
+	}
+	if host == "" {
+		t.Skip("no private LAN interface available")
+	}
+	upstream := testCore(t, nil)
+	config := RemoteConfig{Enabled: true, Listen: wildcard, Token: "lan-test-token"}
+	must(t, upstream.store.Update(func(d *State) error { d.Remote = config; return nil }))
+	must(t, upstream.startServer(config))
+	if _, filtered := upstream.server.listener.(privateRemoteListener); !filtered {
+		t.Fatal("plaintext wildcard listener has no peer filter")
+	}
+	_, port, err := net.SplitHostPort(upstream.server.listener.Addr().String())
+	must(t, err)
+	address := net.JoinHostPort(host, port)
+	p := newRemoteProvider(testCore(t, nil), ProviderConfig{ID: "lan", Address: address, Token: config.Token})
+	defer p.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if err := inactive.call(ctx, "status", map[string]any{}, nil); err == nil {
-		t.Fatal("Tailnet hostname alone authorized plaintext transport")
+	if err := p.call(ctx, "status", map[string]any{}, nil); publicError(err).Code != "permission_denied" {
+		t.Fatalf("LAN RPC did not authenticate: %v", err)
+	}
+	if status.Code(probeListener(t, address, "wrong-token", nil)) != codes.Unauthenticated {
+		t.Fatal("LAN listener accepted an incorrect token")
+	}
+	stream, _, stop := authenticatedStreamClient(t, address, config.Token, "lan-peer")
+	defer stop()
+	must(t, upstream.Ingest(ctx, eventFor("elsewhere", "lan-durable-event"), ""))
+	frame, err := stream.Recv()
+	must(t, err)
+	if frame.GetEvent().GetEventId() != "lan-durable-event" || len(upstream.store.Snapshot().Peers["lan-peer"].Pending) != 1 {
+		t.Fatal("LAN identity proof or durable broadcast was lost")
 	}
 }
 

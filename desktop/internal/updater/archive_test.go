@@ -21,12 +21,9 @@ type tarEntry struct {
 }
 
 func bundleEntries() []tarEntry {
-	entries := []tarEntry{}
-	for _, name := range []string{"Nootify", "node", "nootify-core", "nootify-tsnet"} {
+	entries := []tarEntry{{name: "Nootify.app/Contents/Resources/licenses/third-party-notices.txt", body: "Go dependency notices", mode: 0644}}
+	for _, name := range []string{"Nootify"} {
 		entries = append(entries, tarEntry{name: "Nootify.app/Contents/MacOS/" + name, body: "new-" + name, mode: 0755})
-	}
-	for _, name := range []string{"cli.js", "server.js"} {
-		entries = append(entries, tarEntry{name: "Nootify.app/Contents/Resources/service/dist/src/" + name, body: "// fake service", mode: 0644})
 	}
 	return append(entries, tarEntry{name: "Nootify.app/Contents/Info.plist", body: `<?xml version="1.0"?><plist><dict><key>CFBundleIdentifier</key><string>dev.idy.nootify</string><key>CFBundleExecutable</key><string>Nootify</string></dict></plist>`, mode: 0644})
 }
@@ -76,7 +73,7 @@ func TestArchiveValidation(t *testing.T) {
 		{name: "absolute", extra: []tarEntry{{name: "/tmp/outside", body: "escape"}}},
 		{name: "backslash", extra: []tarEntry{{name: `Nootify.app/..\outside`, body: "escape"}}},
 		{name: "other app", extra: []tarEntry{{name: "Other.app/file", body: "escape"}}},
-		{name: "duplicate", extra: []tarEntry{valid[0]}},
+		{name: "duplicate", extra: []tarEntry{valid[1]}},
 		{name: "case collision", extra: []tarEntry{{name: "Nootify.app/Contents/MacOS/nootify", body: "duplicate"}}},
 		{name: "absolute symlink", extra: []tarEntry{{name: "Nootify.app/link", kind: tar.TypeSymlink, link: "/tmp"}}},
 		{name: "escaping symlink", extra: []tarEntry{{name: "Nootify.app/link", kind: tar.TypeSymlink, link: "../../outside"}}},
@@ -86,7 +83,7 @@ func TestArchiveValidation(t *testing.T) {
 		{name: "fifo", extra: []tarEntry{{name: "Nootify.app/fifo", kind: tar.TypeFifo}}},
 		{name: "setuid", extra: []tarEntry{{name: "Nootify.app/privileged", body: "x", mode: 04755}}},
 		{name: "size limit", limits: archiveLimits{bytes: 8, entries: 100}},
-		{name: "entry limit", limits: archiveLimits{bytes: maxExpanded, entries: 2}},
+		{name: "entry limit", limits: archiveLimits{bytes: maxExpanded, entries: 1}},
 		{name: "symlink ancestor", extra: []tarEntry{{name: "Nootify.app/folder", kind: tar.TypeSymlink, link: "Contents"}, {name: "Nootify.app/folder/child", kind: tar.TypeSymlink, link: "MacOS"}}},
 	}
 	for _, tt := range tests {
@@ -108,7 +105,7 @@ func TestArchiveValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	if runtime.GOOS != "windows" {
-		entries := append(valid, tarEntry{name: "Nootify.app/Contents/Resources/cli-link", kind: tar.TypeSymlink, link: "service/dist/src/cli.js"})
+		entries := append(valid, tarEntry{name: "Nootify.app/Contents/Resources/cli-link", kind: tar.TypeSymlink, link: "../MacOS/Nootify"})
 		if err := extractApp(context.Background(), appArchive(t, entries), t.TempDir(), defaultArchiveLimits); err != nil {
 			t.Fatal("safe internal symlink", err)
 		}

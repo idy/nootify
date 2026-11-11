@@ -1,6 +1,5 @@
-// License texts of the Go modules actually linked into the desktop/core/tsnet
-// and the production npm packages in service/node_modules. License-less npm
-// packages fall back to their declared SPDX license in scripts/spdx-licenses/.
+// License texts of Go modules linked into the single Nootify executable.
+// npm is used only to compile the browser UI; no npm runtime packages ship.
 import { execFile } from 'node:child_process';
 import { readdir, readFile } from 'node:fs/promises';
 import { isAbsolute, join, normalize, sep } from 'node:path';
@@ -18,7 +17,7 @@ const LICENSE_FILE = /^(?:LICEN[CS]E|COPYING|COPYRIGHT|NOTICE|PATENTS|UNLICENSE)
 const collator = new Intl.Collator('en', { numeric: true });
 
 export async function thirdPartyNotices(triple, modules) {
-  return renderNotices(triple, await goModules(buildTarget(triple)), await npmPackages(modules));
+  return renderNotices(triple, await goModules(buildTarget(triple)), modules ? await npmPackages(modules) : []);
 }
 
 /** go list -deps selects only linked packages for this platform, excluding tests
@@ -26,7 +25,7 @@ export async function thirdPartyNotices(triple, modules) {
 export async function goModules(target, execute = run) {
   const env = { ...process.env, GOOS: target.goos, GOARCH: target.goarch, CGO_ENABLED: '0' };
   const builds = await Promise.all([
-    ['desktop', 'Nootify'], ['native/core', 'nootify-core'], ['native/tailscale', 'nootify-tsnet'],
+    ['desktop', 'Nootify'],
     ...(target.goos === 'windows' ? [['desktop/cmd/installer-stage', 'nootify-installer-stage']] : []),
   ].map(async ([directory, executable]) => {
     const options = { cwd: join(root, directory), env, maxBuffer: 16 << 20 };
@@ -112,16 +111,16 @@ function header(target, modules, packages) {
 Nootify is available under the MIT License. The desktop app includes the
 third-party software listed below, each under its own license:
 
-- ${modules} Go runtime/modules linked into the desktop app, notification core
-  and embedded Tailscale client (${target})
-- ${packages} npm packages in service/node_modules
+- ${modules} Go runtime/modules linked into Nootify (${target})
+- ${packages} additional browser dependency packages
 
 Each entry reproduces the license files that come with the module or package.
 For one that comes without any, the entry reproduces its declared license
 from the SPDX License List ${SPDX_LICENSE_LIST}.
 
-The Node.js runtime's license is in node-LICENSE. Additional attribution for
-sidecars is in core-licenses/ and tailscale-licenses/, next to this file.
+Nootify includes its LAN service and notification core in one
+Go executable. Browser fonts and their OFL licenses are embedded and also
+reproduced beside this file. Node.js is a build tool and is not distributed.
 `;
 }
 
