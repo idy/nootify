@@ -3,6 +3,7 @@ package webui
 import (
 	"context"
 	"io"
+	"mime"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -152,15 +153,29 @@ func TestGatewayRecoversExpiredDaemonLeaseWithoutBreakingBrowser(t *testing.T) {
 	}
 }
 func TestMagpieAssetsUseVendoredRootAndPreserveSecurityHeaders(t *testing.T) {
+	// Model Windows machines without the browser MIME registrations, even on a
+	// development host that knows them. The packaged UI must ignore host overrides.
+	for _, extension := range []string{".css", ".js", ".svg", ".woff2", ".ttf"} {
+		previous := mime.TypeByExtension(extension)
+		if previous == "" {
+			previous = "application/octet-stream"
+		}
+		if err := mime.AddExtensionType(extension, "application/octet-stream"); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = mime.AddExtensionType(extension, previous) })
+	}
 	assets := Assets(fstest.MapFS{
 		"vendor/magpie/magpie.css":       {Data: []byte("body { color: black; }")},
 		"vendor/magpie/fonts/font.woff2": {Data: []byte("font-data")},
+		"ui/fonts/font.ttf":              {Data: []byte("font-data")},
 		"vendor/magpie/icons/check.svg":  {Data: []byte("<svg></svg>")},
 		"ui/ui-app.js":                   {Data: []byte("console.log('ready')")},
 	})
 	for _, test := range []struct{ path, contentType string }{
 		{"/ui/vendor/magpie/magpie.css", "text/css"},
 		{"/ui/vendor/magpie/fonts/font.woff2", "font/woff2"},
+		{"/ui/fonts/font.ttf", "font/ttf"},
 		{"/ui/vendor/magpie/icons/check.svg", "image/svg+xml"},
 		{"/ui/ui-app.js", "javascript"},
 	} {
