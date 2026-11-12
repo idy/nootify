@@ -58,7 +58,7 @@ svg { flex: none; }
 .mono { font-family: var(--font-code); font-size: var(--type-code); font-variant-numeric: tabular-nums; font-variant-ligatures: none; }
 
 /* Shell: navigation column and working area, as in the desktop tools this service sits beside. */
-.app { grid-template-columns: var(--mds-sidebar-width) minmax(0, 1fr); height: 100dvh; min-height: 0; }
+.app { display: grid; grid-template-columns: var(--mds-sidebar-width) minmax(0, 1fr); height: 100dvh; min-height: 0; }
 .sidebar { position: static; height: auto; min-height: 0; padding-bottom: 16px; }
 .sidebar, .view, .list-filters { scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
 .sidebar > .nav, .sidebar > .subnav, .sidebar-foot { flex: none; }
@@ -79,6 +79,13 @@ svg { flex: none; }
 .subnav { margin: 6px 0 0 14px; }
 .subnav .nav-item { min-height: 34px; padding: 7px 12px; font-size: var(--mds-text-note); }
 .subnav .nav-item[aria-current="page"] { background: var(--hover); color: var(--text); }
+/* Native windows keep their vertical sidebar at the supported 640px minimum. */
+@media (max-width: 640px) {
+  :root[data-nootify-desktop] .sidebar { padding-inline: 10px; border-right: 1px solid var(--line); border-bottom: 0; }
+  :root[data-nootify-desktop] .nav { flex-direction: column; align-items: stretch; padding-bottom: 0; overflow-x: visible; }
+  :root[data-nootify-desktop] .nav-label { display: block; }
+  :root[data-nootify-desktop] .subnav { flex-direction: column; gap: 2px; padding-inline-start: 10px; }
+}
 .update-dot { width: 7px; height: 7px; margin-left: auto; border-radius: 50%; background: var(--blue); }
 /* Module lines live in their own container; it uses the same gap so every footer line is evenly spaced. */
 .sidebar-foot, .module-list { display: grid; gap: 6px; }
