@@ -12,18 +12,22 @@ import (
 	"time"
 
 	"github.com/idy/nootify/internal/bridge"
+	"github.com/idy/nootify/internal/settings"
 	"github.com/idy/nootify/internal/storage"
 	core "github.com/idy/nootify/native/core"
 )
 
 type Options struct {
-	Store      *storage.Store
-	Sessions   *bridge.Service
-	Port       int
-	Executable string
-	Report     func(map[string]any)
-	HTTPClient *http.Client
-	APIBaseURL string
+	Store           *storage.Store
+	Sessions        *bridge.Service
+	Port            int
+	Executable      string
+	Report          func(map[string]any)
+	HTTPClient      *http.Client
+	APIBaseURL      string
+	RegistrationURL string
+	Verify          func(context.Context, settings.Credentials) error
+	Setup           func(context.Context, settings.Credentials) (settings.Setup, error)
 }
 type Credentials struct{ AppID, AppSecret, Recipient, Source string }
 type Service struct {
@@ -48,6 +52,11 @@ type Service struct {
 	savedCleared         bool
 	reconcileMu          sync.Mutex
 	legacyMu             sync.Mutex
+	registrationMu       sync.Mutex
+	registration         *providerRegistration
+	registrationClient   *settings.Service
+	// coreHandle normally delegates to the embedded core; tests can inject commit outcomes.
+	coreHandle func(context.Context, string, json.RawMessage, bool) (any, error)
 }
 
 func New(ctx context.Context, o Options) (*Service, error) {
@@ -64,6 +73,12 @@ func New(ctx context.Context, o Options) (*Service, error) {
 	s.store = store
 	s.core, err = core.NewCore(ctx, store, s.emit)
 	if err != nil {
+		store.Close()
+		cancel()
+		return nil, err
+	}
+	if err = s.initRegistration(); err != nil {
+		s.core.Close()
 		store.Close()
 		cancel()
 		return nil, err
@@ -87,7 +102,11 @@ func (s *Service) raw(ctx context.Context, method string, params any) (any, erro
 	if err != nil {
 		return nil, err
 	}
-	result, err := s.core.Handle(ctx, method, raw, true)
+	handle := s.coreHandle
+	if handle == nil {
+		handle = s.core.Handle
+	}
+	result, err := handle(ctx, method, raw, true)
 	if err != nil {
 		return nil, core.PublicError(err)
 	}
@@ -105,7 +124,7 @@ func (s *Service) Call(ctx context.Context, method string, params any) (any, err
 		defer s.ops.Unlock()
 		return s.configureCompatibility(ctx, asMap(params))
 	}
-	mutation := method == "provider.save" || method == "provider.delete" || method == "provider.default" || method == "config.import" || method == "remote.configure"
+	mutation := method == "provider.save" || method == "provider.delete" || method == "provider.default" || method == "provider.reconnect" || method == "config.import" || method == "remote.configure"
 	if !mutation {
 		return s.raw(ctx, method, params)
 	}
@@ -122,6 +141,9 @@ func (s *Service) Call(ctx context.Context, method string, params any) (any, err
 		return nil, err
 	}
 	result, err := s.raw(ctx, method, params)
+	if method == "provider.reconnect" {
+		return result, err
+	}
 	return s.completeCompatibilityMutation(ctx, result, err)
 }
 func (s *Service) Start(credentials Credentials) error {
@@ -175,6 +197,9 @@ func (s *Service) Close() error {
 	s.draining = true
 	s.mu.Unlock()
 	s.cancel()
+	if s.registrationClient != nil {
+		_ = s.registrationClient.Close()
+	}
 	s.wg.Wait()
 	s.core.Close()
 	return s.store.Close()

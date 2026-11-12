@@ -2,7 +2,7 @@
 
 export interface ProviderSummary {
   id: string; name: string; type: 'feishu' | 'remote'; enabled: boolean; status: string; error?: string;
-  app_id?: string; recipient_open_id?: string; address?: string; tls?: boolean; server_name?: string;
+  connection_type?: LarkConnectionType; app_id?: string; recipient_open_id?: string; address?: string; tls?: boolean; server_name?: string;
   secret_set?: boolean; token_set?: boolean;
 }
 export interface RemoteSummary {

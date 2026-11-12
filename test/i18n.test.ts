@@ -59,9 +59,14 @@ test('provider navigation and agent summaries replace the legacy global Feishu e
   ]);
   assert.equal(document.querySelectorAll('[data-panel="settings-lark"]').length, 1);
   assert.equal(document.querySelector('#notification-channel, #channel-save, [id^="slack-"], [id^="telegram-"]'), null);
-  assert.equal(document.querySelector('#channel-title')!.textContent, '消息接入');
+  assert.equal(document.querySelector('#channel-title')!.textContent, '消息通道');
   assert.equal(document.querySelector('#channel-settings')!.getAttribute('href'), '#/providers');
-  assert.ok(document.querySelector('[data-view="providers"]'));
+  const channelName = document.querySelector('[data-view="providers"] [data-i18n]')!;
+  assert.equal(channelName.textContent, '通道');
+  assert.equal(channelName.getAttribute('data-i18n'), '通道');
+  assert.equal(translate('en', '通道'), 'Channels');
+  assert.equal(translate('zh-CN', '通道'), '通道');
+  assert.doesNotMatch(JSON.stringify(english), /\bproviders?\b/i);
   assert.equal(document.querySelector('#settings-subnav [href="#/settings/lark"]'), null);
   assert.ok(document.querySelector('[data-panel="settings-remote"]'));
   assert.equal(document.querySelectorAll('.nav-label')[1].textContent, 'Repos');
@@ -72,9 +77,9 @@ test('provider navigation and agent summaries replace the legacy global Feishu e
   assert.ok(document.querySelector('dialog#provider-dialog #provider-editor'));
   assert.equal(document.querySelector('#provider-editor select'), null);
   assert.equal(document.querySelector('#provider-add')!.parentElement!.firstElementChild!.id, 'provider-add');
-  assert.deepEqual([...document.querySelectorAll('#provider-type-options button strong')].map(item => item.textContent), ['飞书机器人', '远程 Nootify gRPC']);
+  assert.deepEqual([...document.querySelectorAll('#provider-type-options button strong')].map(item => item.textContent), ['飞书 Bot', '飞书个人 App', '远程 Nootify gRPC']);
   assert.equal(translate('en', '远程 Nootify gRPC'), 'Remote Nootify gRPC');
-  assert.equal(translate('en', '搜索接入类型'), 'Search provider types');
+  assert.equal(translate('en', '搜索接入类型'), 'Search channel types');
   assert.doesNotMatch(page, /slack|telegram|tailscale|tailnet/i);
   assert.doesNotMatch(JSON.stringify(english), /slack|telegram|tailscale|tailnet|default notification channel/i);
   assert.ok(document.getElementById('lan-line'));

@@ -112,7 +112,10 @@ func (s *Service) compatibility(ctx context.Context) (map[string]any, error) {
 	if e != nil {
 		return nil, e
 	}
-	kind := s.compatConnectionType
+	kind := str(selected["connection_type"])
+	if kind == "" {
+		kind = s.compatConnectionType
+	}
 	if kind == "" {
 		kind = "bot"
 		if selected != nil && s.options.Store.Setting("lark_app_id") == str(selected["app_id"]) {
@@ -126,7 +129,7 @@ func (s *Service) compatibility(ctx context.Context) (map[string]any, error) {
 		} else if source != "mcp-config" {
 			source = "settings"
 		}
-		if source == "environment" {
+		if source == "environment" && str(selected["connection_type"]) == "" {
 			kind = "bot"
 		}
 	} else {
@@ -298,6 +301,25 @@ func (s *Service) checkEnvironmentMutation(ctx context.Context, method string, b
 	return nil
 }
 func (s *Service) importCompatibility(ctx context.Context, body map[string]any) (any, error) {
+	// Older exports carried subtype only in the legacy account section. Backfill
+	// missing metadata for that App ID, preserving every explicit provider value.
+	lark := asMap(body["lark"])
+	if kind := str(lark["connection_type"]); (kind == "bot" || kind == "personal-app") && str(lark["app_id"]) != "" {
+		doc := body
+		if _, ok := body["config"]; ok {
+			doc = asMap(body["config"])
+		}
+		providers := listMaps(doc["providers"])
+		for _, p := range providers {
+			if p["type"] == "feishu" && p["app_id"] == lark["app_id"] && str(p["connection_type"]) == "" {
+				p["connection_type"] = kind
+			}
+		}
+		doc["providers"] = providers
+		if _, ok := body["config"]; ok {
+			body["config"] = doc
+		}
+	}
 	if e := s.checkEnvironmentMutation(ctx, "config.import", body); e != nil {
 		return nil, e
 	}
@@ -429,10 +451,13 @@ func (s *Service) configureCompatibility(ctx context.Context, body map[string]an
 		}
 		selected["app_secret"] = secret
 		selected["recipient_open_id"] = recipient
+		if kind, ok := body["connection_type"]; ok {
+			selected["connection_type"] = kind
+		}
 		changed := true
 		for _, old := range providers {
 			if old["id"] == selected["id"] {
-				changed = old["app_secret"] != secret || old["recipient_open_id"] != selected["recipient_open_id"] || old["enabled"] != selected["enabled"]
+				changed = old["app_secret"] != secret || old["recipient_open_id"] != selected["recipient_open_id"] || old["enabled"] != selected["enabled"] || old["connection_type"] != selected["connection_type"]
 				break
 			}
 		}

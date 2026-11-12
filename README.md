@@ -10,8 +10,9 @@ directly or use another Nootify node as your notification provider.
 ## What it does
 
 - Gives each agent session its own notification destination, such as a Feishu group.
-- Supports multiple named instances of two provider types: **Feishu bot** over
-  WebSocket and **Remote Nootify** over authenticated gRPC.
+- Supports multiple named channels over two provider types: **Feishu** over
+  WebSocket and **Remote Nootify** over authenticated gRPC. Feishu channels use
+  manually configured bots or personal apps authorized through QR registration.
 - Discovers eligible existing conversations locally and backfills missing
   notification destinations.
 - Routes replies to existing Claude Code, Codex, and OpenCode sessions, preserving
@@ -41,9 +42,11 @@ Windows installers are not code-signed.
 
 ## Get started
 
-1. Open **Providers** and add a **Feishu bot** with its App ID, App Secret, and
-   trusted recipient's `open_id`, or a **Remote Nootify** with its server address,
-   token, and TLS settings. Enable the instance and choose your default provider.
+1. Open **Channels** and choose **Feishu Bot** (enter App ID, App Secret, and
+   trusted recipient's `open_id`), **Feishu personal app** (scan to authorize), or
+   **Remote Nootify** (server address, token, and TLS settings). Personal-app
+   authorization saves a separate channel without replacing existing channels.
+   Enable the connection and choose your default channel.
 2. On the **Agents** page, enable the clients you use. Codex Desktop connects
    automatically on macOS; configure an existing Codex app-server or OpenCode
    connection when needed.
@@ -54,8 +57,9 @@ For browser access from another device, use the sidebar LAN link, normally
 `http://<LAN-IPv4>:9417/`; see [LAN access](docs/guide.md#lan-access).
 
 To serve other Nootify nodes, configure the listener under **Settings → Remote
-access** (`远程接入`). The legacy personal-app QR setup remains linked from the
-Feishu provider editor for migration.
+access** (`远程接入`). Personal apps can be reconnected, reauthorized for the same App ID, and checked
+for required permissions from their channel editor. The legacy settings route
+remains available for older integrations.
 
 Your computer, local service, and target session must remain available. A delivered
 reply does not automatically approve a permission request.
@@ -111,7 +115,31 @@ a separate UI service. Closing the window hides it, and the independently manage
 Go background job continues receiving notifications.
 
 Integration tests use temporary private state, ephemeral listeners, and synthetic
-network boundaries. They do not change system jobs or use production credentials. Native smoke checks are separate.
+network boundaries. They do not change system jobs or use production credentials.
+Native smoke checks are separate.
+
+For an isolated synthetic browser preview of the application UI:
+
+```bash
+npm run preview:ui
+```
+
+The fixture provides synthetic channels, sessions, logs, repositories, and
+contacts. Preview edits are temporary; personal-app QR authorization is simulated
+and never grants a real Feishu app. Real OAuth, provider connections, and filesystem
+actions are unavailable. Use the local URL printed by the preview command.
+The fixture is separate from the installed Go service; preview results do not
+verify native asset embedding, authenticated transport, or desktop behavior.
+
+The frontend uses [Magpie Design System v0.4.1](https://github.com/idy/magpie-design-system/tree/v0.4.1),
+vendored in `public/vendor/magpie/` with its fonts, icons, and licenses. Resources
+are served locally for offline use and strict CSP. `public/styles.css` owns
+Nootify's route layouts and domain-specific list/dialog composition; shared
+controls use the upstream `mds-*` classes. See [shared UI controls](docs/ui-components.md).
+
+The Go core owns provider connections, notification-session mappings, and durable
+delivery/replay state. Production Feishu ingestion uses WebSocket events, with
+finite startup/reconnect history reconciliation rather than scheduled polling.
 
 The desktop shell uses [MyGo](https://github.com/egoist/mygo) with the system
 WebView. Rust and Cargo are not required.

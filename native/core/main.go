@@ -65,6 +65,8 @@ func (c *Core) Handle(ctx context.Context, method string, raw json.RawMessage, l
 		return map[string]any{"active": active}, err
 	case "provider.save":
 		return c.SaveProvider(raw)
+	case "provider.reconnect":
+		return c.ReconnectProvider(p.ID)
 	case "provider.delete":
 		return map[string]any{"deleted": true}, c.DeleteProvider(p.ID)
 	case "provider.default":

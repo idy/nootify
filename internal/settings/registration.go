@@ -67,6 +67,17 @@ func (s *Service) LarkSetup(ctx context.Context, appID any) (Setup, error) {
 	}
 	return result, nil
 }
+
+// InspectSetup checks only the supplied channel's application credentials.
+func (s *Service) InspectSetup(ctx context.Context, credentials Credentials) (Setup, error) {
+	return s.inspectSetup(ctx, s.api(credentials))
+}
+
+// VerifyCredentials does not change the legacy account or provider configuration.
+func (s *Service) VerifyCredentials(ctx context.Context, credentials Credentials) error {
+	return s.verify(ctx, credentials)
+}
+
 func (s *Service) inspectSetup(ctx context.Context, api *larkAPI) (Setup, error) {
 	setup := Setup{AppID: api.credentials.AppID, Missing: []string{}, Status: "unavailable"}
 	data, e := api.request(ctx, "/open-apis/application/v6/applications/"+url.PathEscape(setup.AppID)+"?lang=zh_cn&user_id_type=open_id")
@@ -130,7 +141,16 @@ func cloneRegistration(p RegistrationPage) RegistrationPage {
 	}
 	return p
 }
+
+// StartRegistrationWith runs the shared QR protocol with a caller-owned commit.
+// The callback receives credentials privately; no credential enters a public page.
+func (s *Service) StartRegistrationWith(accept func(context.Context, Credentials, string) (Setup, error)) (RegistrationPage, error) {
+	return s.startRegistration(accept)
+}
 func (s *Service) StartRegistration() (RegistrationPage, error) {
+	return s.startRegistration(nil)
+}
+func (s *Service) startRegistration(accept func(context.Context, Credentials, string) (Setup, error)) (RegistrationPage, error) {
 	if s.environmentOverride() {
 		return RegistrationPage{}, problem(409, "LARK_APP_ID and LARK_APP_SECRET are set for this process and take precedence")
 	}
@@ -152,7 +172,8 @@ func (s *Service) StartRegistration() (RegistrationPage, error) {
 	r.wg.Add(1)
 	go func() {
 		defer r.wg.Done()
-		e := s.runRegistration(ctx, id)
+		defer cancel()
+		e := s.runRegistration(ctx, id, accept)
 		if e != nil && ctx.Err() == nil {
 			reason := "registration_unavailable"
 			var failure registrationFailure
@@ -250,7 +271,10 @@ func (s *Service) registrationPost(ctx context.Context, fields url.Values) (regi
 
 var codePattern = regexp.MustCompile(`^[A-Za-z0-9-]{4,64}$`)
 
-func (s *Service) runRegistration(ctx context.Context, id uint64) error {
+func (s *Service) runRegistration(ctx context.Context, id uint64, accept func(context.Context, Credentials, string) (Setup, error)) error {
+	if accept == nil {
+		accept = s.acceptRegistration
+	}
 	device, e := s.registrationPost(ctx, url.Values{"action": {"begin"}, "archetype": {"PersonalAgent"}, "auth_method": {"client_secret"}, "request_user_info": {"open_id tenant_brand"}})
 	if e != nil {
 		return e
@@ -306,7 +330,7 @@ func (s *Service) runRegistration(ctx context.Context, id uint64) error {
 				if !s.setRegistration(ctx, id, RegistrationPage{Status: "connecting"}) {
 					return ctx.Err()
 				}
-				setup, e := s.acceptRegistration(ctx, Credentials{reply.ClientID, reply.ClientSecret}, reply.UserInfo.OpenID)
+				setup, e := accept(ctx, Credentials{reply.ClientID, reply.ClientSecret}, reply.UserInfo.OpenID)
 				if e != nil {
 					if ctx.Err() != nil {
 						return ctx.Err()

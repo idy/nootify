@@ -4,5 +4,5 @@ package public
 
 import "embed"
 
-//go:embed index.html styles.css ui/**
+//go:embed index.html styles.css ui/** vendor/**
 var FS embed.FS

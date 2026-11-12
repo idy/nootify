@@ -136,7 +136,8 @@ $fixtureScheduler | Add-Member ScriptMethod GetRunningTasks { param($flags) retu
 			// Execute the actual Restore branch with fake Scheduler access. The
 			// production catch still exits nonzero on every ownership refusal.
 			controller := strings.ReplaceAll(source, "New-Object -ComObject 'Schedule.Service'", "$fixtureScheduler")
-			script := fixture + "\n& {\n" + controller + "\n} -Action Restore -Executable $Executable -StateDir $StateDir -Registration $receipt\n" + `
+			script := fixture + "\n[Console]::Error.WriteLine('fixture-ready')\n$restoreWatch=[Diagnostics.Stopwatch]::StartNew()\n& {\n" + controller + "\n} -Action Restore -Executable $Executable -StateDir $StateDir -Registration $receipt\n" + `
+if($restoreWatch.Elapsed.TotalSeconds -ge 20){throw 'Restore controller exceeded its 20-second action budget'}
 if($mutation -eq ''){
  if($global:writes -ne 1 -or $global:fixtureTask.Enabled -or $global:fixtureTask.Definition.XmlText -cne $expected){throw 'Original XML was not restored disabled'}
 }else{throw 'Modified identity was accepted'}
@@ -149,7 +150,10 @@ if($mutation -eq ''){
 			if err != nil {
 				t.Fatal(err)
 			}
-			out := Run(context.Background(), Command{Path: filepath.Join(directory, "WindowsPowerShell", "v1.0", "powershell.exe"), Args: []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded}, Dir: directory, Timeout: 20 * time.Second})
+			// This process also cold-starts PowerShell/COM and builds multiple XML
+			// fixtures. Give setup its own headroom; the actual Restore assertion
+			// above retains the production action's 20-second budget.
+			out := Run(context.Background(), Command{Path: filepath.Join(directory, "WindowsPowerShell", "v1.0", "powershell.exe"), Args: []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded}, Dir: directory, Timeout: time.Minute})
 			if mutation == "" && out.Err != nil {
 				t.Fatalf("restore failed: %v %s", out.Err, out.Stderr)
 			}

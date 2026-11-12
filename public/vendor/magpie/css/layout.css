@@ -1,0 +1,138 @@
+/*
+ * Magpie Design System: app shell.
+ * A desktop-style window: titlebar, sidebar navigation, workspace, toolbar
+ * and a sticky action bar. Works in a browser tab and inside native
+ * WKWebView/WebView2 windows; see initWindowChrome() in js/magpie.js.
+ *
+ *   <header class="mds-titlebar">
+ *     <a class="mds-brand">…</a>
+ *     <div class="mds-titlebar-content">… <div class="mds-window-controls">…</div></div>
+ *   </header>
+ *   <div class="mds-shell">
+ *     <aside class="mds-sidebar"><nav class="mds-nav">…</nav><div class="mds-sidebar-footer">…</div></aside>
+ *     <main class="mds-workspace">… <footer class="mds-actionbar">…</footer></main>
+ *   </div>
+ */
+
+/* Native window chrome adjusts the shell's proportions. */
+[data-window-chrome="macos"] { --mds-sidebar-width: 240px; --mds-titlebar-height: 40px; }
+@media (max-width: 860px) { [data-window-chrome="macos"] { --mds-sidebar-width: 212px; } }
+
+/* ---- Titlebar -------------------------------------------------------- */
+.mds-titlebar {
+  position: sticky; top: 0; z-index: 3;
+  display: grid; grid-template-columns: var(--mds-sidebar-width) minmax(0, 1fr);
+  height: var(--mds-titlebar-height); background: var(--mds-canvas); line-height: 1.25;
+  user-select: none; -webkit-user-select: none;
+}
+[data-window-chrome] .mds-titlebar { cursor: default; }
+.mds-brand {
+  display: flex; align-items: center; gap: 8px; min-width: 0; padding-inline: 18px;
+  border-right: 1px solid var(--mds-line); background: var(--mds-sidebar); color: var(--mds-ink); text-decoration: none;
+}
+[data-window-chrome="macos"] .mds-brand { padding-left: 88px; } /* Clear the traffic lights. */
+.mds-brand-mark { display: grid; place-items: center; }
+.mds-brand-mark svg { display: block; width: 22px; height: 22px; }
+.mds-brand-name { min-width: 0; overflow: hidden; font-family: var(--mds-font-display); font-size: 0.9375rem; font-weight: 650; letter-spacing: -0.013em; text-overflow: ellipsis; white-space: nowrap; }
+/* Fixed-height native chrome centres its text; window controls fill the row. */
+.mds-titlebar-content { display: flex; align-items: center; gap: 16px; min-width: 0; padding-inline: var(--mds-gutter); border-bottom: 1px solid var(--mds-line); }
+.mds-titlebar-actions { display: flex; align-items: center; gap: 10px; min-width: 0; margin-left: auto; }
+.mds-crumbs { display: flex; align-items: baseline; gap: 8px; min-width: 0; font-size: var(--mds-text-body); white-space: nowrap; }
+.mds-crumbs > * { color: var(--mds-muted); font-size: inherit; font-weight: 400; }
+.mds-crumbs > [aria-current] { overflow: hidden; color: var(--mds-ink); font-weight: 600; text-overflow: ellipsis; }
+.mds-crumb-sep { color: var(--mds-faint); }
+
+.mds-window-controls { display: flex; flex: 0 0 auto; align-self: stretch; }
+[data-window-chrome="windows"] .mds-titlebar-content { gap: 12px; padding-right: 0; }
+.mds-window-controls button { display: grid; place-items: center; width: 44px; padding: 0; border: 0; border-radius: 0; background: transparent; color: var(--mds-ink); }
+.mds-window-controls button:hover { background: var(--mds-raised); }
+.mds-window-controls button[data-window-action="close"]:hover { background: var(--mds-danger); color: #fff; }
+.mds-window-controls svg { width: 12px; height: 12px; fill: currentColor; stroke: none; }
+.mds-brand:focus-visible, .mds-window-controls button:focus-visible { outline-offset: -4px; }
+
+/* ---- Shell and sidebar ---------------------------------------------- */
+.mds-shell { display: grid; grid-template-columns: var(--mds-sidebar-width) minmax(0, 1fr); min-height: calc(100vh - var(--mds-titlebar-height)); }
+.mds-sidebar {
+  position: sticky; top: var(--mds-titlebar-height); height: calc(100vh - var(--mds-titlebar-height));
+  display: flex; flex-direction: column; overflow-y: auto; padding: 0 10px 16px;
+  border-right: 1px solid var(--mds-line); background: var(--mds-sidebar);
+}
+.mds-nav { display: flex; flex-direction: column; gap: 4px; margin-top: 12px; }
+.mds-nav-group { margin: 16px 10px 4px; color: var(--mds-muted); font-size: var(--mds-text-caption); }
+.mds-nav-item {
+  display: flex; align-items: center; gap: 10px; min-height: 36px; padding: 8px 10px;
+  border: 0; border-radius: var(--mds-radius-sm); background: transparent; color: var(--mds-ink-soft);
+  font-size: var(--mds-text-body); line-height: 1.4; text-align: left; text-decoration: none;
+}
+.mds-nav-item .mds-icon { color: var(--mds-muted); }
+.mds-nav-item:hover:not(:disabled) { background: var(--mds-hover); }
+.mds-nav-item[aria-current] { background: var(--mds-selected); color: var(--mds-ink-strong); font-weight: 600; }
+.mds-nav-item[aria-current] .mds-icon { color: var(--mds-ink-strong); }
+.mds-nav-item:disabled { cursor: not-allowed; opacity: .45; }
+.mds-sidebar-footer { display: grid; gap: 12px; margin-top: auto; padding: 16px 10px 0; border-top: 1px solid var(--mds-line); color: var(--mds-muted); font-size: var(--mds-text-caption); }
+.mds-sidebar-footer .mds-icon { width: 14px; height: 14px; }
+.mds-sidebar-item { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.mds-sidebar-item > div { min-width: 0; overflow: hidden; }
+.mds-sidebar-item strong { color: var(--mds-ink-secondary); font: 500 var(--mds-text-caption)/1.5 var(--mds-mono); }
+.mds-sidebar-item span { display: block; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---- Workspace ------------------------------------------------------- */
+.mds-workspace { display: flex; flex-direction: column; min-width: 0; min-height: calc(100vh - var(--mds-titlebar-height)); }
+/* Direct children align to the gutter; the action bar spans the full width. */
+.mds-workspace > :not(.mds-actionbar) { margin-inline: var(--mds-gutter); }
+.mds-stack { display: grid; gap: var(--mds-section-gap); align-content: start; min-width: 0; padding-block: var(--mds-section-gap) 24px; }
+
+.mds-toolbar { container: mds-toolbar / inline-size; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
+.mds-toolbar-actions { display: flex; align-items: center; gap: 12px; margin-inline-start: auto; }
+.mds-toolbar-label { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--mds-muted); font-size: var(--mds-text-note); white-space: nowrap; }
+@container mds-toolbar (max-width: 540px) {
+  .mds-toolbar .mds-tabs { display: flex; width: 100%; }
+  .mds-toolbar .mds-tabs > [role="tab"] { flex: 1; }
+  .mds-toolbar-actions { width: 100%; justify-content: space-between; margin-inline-start: 0; }
+}
+
+.mds-actionbar {
+  position: sticky; bottom: 0; z-index: 2;
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px;
+  min-height: 58px; margin-top: auto; padding: 12px var(--mds-gutter);
+  border-top: 1px solid var(--mds-line); background: var(--mds-actionbar); backdrop-filter: blur(12px);
+}
+.mds-actionbar-buttons { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; margin-inline-start: auto; }
+
+/* ---- Typography and nested navigation ------------------------------- */
+.mds-titlebar, .mds-titlebar .mds-status { font-family: var(--mds-font-action); }
+.mds-shell { font-family: var(--mds-font); }
+.mds-nav-item { font-family: var(--mds-font-action); font-weight: 500; }
+.mds-nav-group { font-family: var(--mds-font-heading); font-weight: 400; }
+
+/* A parent keeps its own active surface; only its selected leaf is current. */
+.mds-nav-branch { display: grid; gap: 10px; }
+.mds-nav-parent { border: 1px solid transparent; font-family: var(--mds-font-action); font-weight: 500; }
+.mds-nav-parent[data-active] { border-color: var(--mds-line); background: var(--mds-surface); color: var(--mds-ink); box-shadow: 0 1px 2px var(--mds-toast-shadow); }
+.mds-nav-parent[data-active] .mds-icon { color: var(--mds-ink); }
+.mds-nav-parent[data-active]:hover:not(:disabled) { background: var(--mds-surface); }
+.mds-subnav { display: flex; flex-direction: column; gap: 2px; margin: 0 0 2px 14px; padding-inline-start: 10px; border-inline-start: 1px solid var(--mds-line); }
+.mds-subnav > .mds-nav-item { min-height: 34px; padding: 7px 12px; }
+
+/* ---- Narrow windows -------------------------------------------------- */
+@media (max-width: 860px) {
+  .mds-titlebar-content { gap: 12px; padding-inline: 16px; }
+  .mds-crumbs > :not([aria-current]) { display: none; }
+}
+@media (max-width: 640px) {
+  .mds-titlebar { grid-template-columns: auto minmax(0, 1fr); }
+  .mds-brand { padding-inline: 14px; border-right: 0; }
+  .mds-brand-name { font-size: var(--mds-text-note); }
+  .mds-titlebar-content { gap: 8px; padding-inline: 8px; }
+  .mds-crumbs { display: none; }
+  .mds-shell { display: block; }
+  .mds-sidebar { position: static; height: auto; padding: 0 12px; border-right: 0; border-bottom: 1px solid var(--mds-line); }
+  .mds-nav { flex-direction: row; align-items: flex-start; gap: 4px; margin-top: 8px; padding-bottom: 8px; overflow-x: auto; scrollbar-width: none; }
+  .mds-nav-branch { flex: 0 0 auto; gap: 4px; }
+  .mds-subnav { flex-direction: row; gap: 4px; margin: 0; padding-inline-start: 8px; }
+  .mds-nav-group, .mds-sidebar-footer { display: none; }
+  .mds-nav-item { flex: 0 0 auto; white-space: nowrap; }
+  .mds-actionbar { flex-direction: column; align-items: stretch; }
+}
+@media (max-width: 380px) { .mds-brand-name { display: none; } }
+@media (pointer: coarse) { .mds-nav-item, .mds-subnav > .mds-nav-item { min-height: 44px; } }

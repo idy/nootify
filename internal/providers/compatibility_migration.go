@@ -97,7 +97,11 @@ func (s *Service) legacyMigration(initial Credentials) (map[string]any, error) {
 		}
 	}
 	host, _ := os.Hostname()
-	return map[string]any{"app_id": migration.AppID, "app_secret": migration.AppSecret, "recipient_open_id": migration.Recipient, "legacy_host": host, "bindings": bindings}, nil
+	result := map[string]any{"app_id": migration.AppID, "app_secret": migration.AppSecret, "recipient_open_id": migration.Recipient, "legacy_host": host, "bindings": bindings}
+	if kind := s.options.Store.Setting("lark_connection_type"); savedID == migration.AppID && (kind == "bot" || kind == "personal-app") {
+		result["connection_type"] = kind
+	}
+	return result, nil
 }
 func (s *Service) startupCompatibilityWarning(err error) bool {
 	switch errorCode(err) {

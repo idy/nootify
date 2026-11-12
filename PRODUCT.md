@@ -16,7 +16,7 @@ Nootify connects existing local agent sessions to notification providers and kee
 
 ## Positioning
 
-An agent session is the business identity. Platform groups and topics are private provider implementation details. Multiple named Feishu and Remote Nootify providers share the same session, metadata, sending, reply, acknowledgment, and deletion model. A message retains its original return route across Nootify nodes.
+An agent session is the business identity. Platform groups and topics are private provider implementation details. Multiple named Feishu and Remote Nootify channels share the same session, metadata, sending, reply, acknowledgment, and deletion model. A message retains its original return route across Nootify nodes. Settings are an Operate surface: quick, familiar controls and an accurate explanation of connections, permissions, and routing matter more than visual expression.
 
 ## Operating Context
 
@@ -30,7 +30,7 @@ The everyday tray menu contains Open Nootify, one application status, Software U
 
 ### Provider and session model
 
-The owner adds named providers on their computer: a Feishu bot with a trusted recipient, or a Remote Nootify connection. Feishu credentials belong to each provider instance. Other Nootify nodes can subscribe through authenticated gRPC. Each node first tries the addressed local session and independently broadcasts unmatched events to subscribed downstreams.
+The owner adds named channels on their computer: a Feishu Bot with manually supplied app credentials and trusted recipient, a Feishu personal app authorized through QR-based app registration, or a Remote Nootify connection. These are three setup choices over two provider types, `feishu` and `remote`. Personal apps exchange messages through their application bot; they are not personal user-token messaging sessions. Feishu credentials and the `bot` or `personal-app` connection subtype belong to each provider instance. Other Nootify nodes can subscribe through authenticated gRPC. Each node first tries the addressed local session and independently broadcasts unmatched events to subscribed downstreams.
 
 Providers implement idempotent session creation, metadata access, deletion, rich-text messaging, replies, and event subscription. A remote provider forwards those operations without changing the originating session identity. Locally owned failures are distinct from unmatched events. Each downstream has independent acknowledgment and durable replay state.
 
@@ -40,11 +40,17 @@ PR subscriptions come from structured session associations, repository anchors, 
 
 ### Local authority
 
-Provider mutations, settings, agent-prompt edits, secret reveal, and contact directories require local access from an actual loopback peer. The HTTP service listens on all IPv4 interfaces (`0.0.0.0:9417` by default), accepts loopback and private LAN peers, and checks the Host against its own interface addresses or system hostname and service port. Origin/fetch-site checks remain enforced. LAN browser access is read-only except repository follow choices and PR refresh; bearer-authenticated `/v1/` APIs allow private LAN callers, with remote identity management restricted to loopback. Desktop gateway API traffic uses authenticated encryption; direct LAN HTTP is plaintext. Nootify does not manage a VPN device or alter the operating system's Tailscale installation.
+Provider mutations, settings, agent-prompt edits, secret reveal, and contact directories require local access from an actual loopback peer. Direct local browser pages support editing without an owner authorization link, and reloading does not lock them. Host, Origin, Fetch Metadata, local socket-peer, and UI request-header checks remain enforced; local processes are trusted.
+
+The HTTP service listens on all IPv4 interfaces (`0.0.0.0:9417` by default), accepts loopback and private LAN peers, and checks the Host against its own interface addresses or system hostname and service port. LAN browser access is read-only except repository follow choices and PR refresh; bearer-authenticated `/v1/` APIs allow private LAN callers, with remote identity management restricted to loopback. Forwarded headers cannot grant local authority. Desktop/CLI gateway API traffic uses authenticated encryption; direct LAN HTTP is plaintext. Nootify does not manage a VPN device or alter the operating system's Tailscale installation.
 
 ### Application workflows
 
-The message-bridge navigation includes Logs, Routed sessions, Providers, and Agents. Repository navigation is grouped under Repos. Providers uses a card list with an upper-left Add action; an empty list keeps its explanatory card. Adding opens a provider-type chooser followed by its configuration dialog; editing uses the configuration dialog. Remote access settings configure the listener and show connected Nootify nodes.
+Every page uses a content column capped at 960px and centered within the area to the right of the sidebar, including page titles, actions, logs, routing sessions, and settings. The user-facing name is Channels in English and 通道 in Chinese; internal provider identifiers and API routes keep their existing names. The message-bridge sidebar includes Channels alongside Logs, Routed sessions, and Agents. Repository navigation is grouped under Repos. Remote access settings configure the listener and show nodes connected to this Nootify.
+
+All list Add actions belong at the upper left immediately above their list, using a text button rather than the titlebar. Channels uses one compact grouped list with single-line rows; an empty list retains centered explanatory text. Name/default badge, type, connection state, switch, and text actions share one line, with local horizontal scrolling on narrow screens. Already-default actions are hidden and Delete remains visually secondary. Connection IDs and addresses stay in the editor. Agents also use single-line rows by default. Clicking the row expands paths, status explanations, instruction content, and update actions; its separate checkbox only controls enablement. Expansion survives data refresh, and agent rows have no hover background highlight.
+
+Adding a channel opens a searchable provider-type list in a standard Magpie dialog, then the chosen type's configuration; editing uses the same standard dialog. Personal-app scans hide configuration fields and show the QR, official authorization link, expiry, status, and Cancel. Successful authorization saves a separate channel without replacing existing channels or silently switching the default. Existing personal channels offer reconnect, same-app reauthorization, and permission inspection. Recover previous authorization restores the original target and sanitized flow after a page refresh or lost start response; recovery never starts a replacement flow or resubmits a save. Saving refuses cancellation; completed and uncertain outcomes remain inspectable. Scanning does not automatically grant missing application permissions.
 
 ### Feishu recipient selection
 
@@ -56,17 +62,17 @@ On permission failure, show the provider's specific scopes, an official applicat
 
 ## Brand Commitments
 
-Preserve the penguin identity, compact neutral settings, blue action color, and system light/dark appearance. Support Simplified Chinese and English. Web navigation and the brand use Montserrat; web content uses Lato with the established system Chinese fallbacks. Native menus retain platform typography and behavior. The detailed visual contract belongs in `DESIGN.md`.
+Preserve the penguin identity, compact neutral settings, blue action color, and system light/dark appearance. The application uses the user-selected `idy/magpie-design-system` v0.4.1, pinned locally with its fonts, icons, and licenses. English typography follows Magpie's roles: Montserrat for navigation, actions, page/dialog titles, and the brand; Monda for section labels and headings; Lato for body text, fields, list titles, and metadata. Chinese keeps system-font fallbacks. Support Simplified Chinese and English. Native menus retain platform typography and behavior. The detailed visual contract belongs in `DESIGN.md`.
 
-Web dropdowns use the existing authored component, with keyboard selection, visible selected state, and no operating-system select popup. Preserve the shared content-column alignment and the existing provider/dialog behavior rather than introducing a new visual world.
+Web dropdowns use the existing authored controller with Magpie controls, keyboard selection, visible selected state, and no operating-system select popup. Channel chooser, editor, and deletion dialogs use the unmodified standard Magpie shell and actions; only the recipient picker retains its bounded-list composition and separate results scroller. Preserve the shared content-column alignment and compact rows.
 
 ## Evidence on Hand
 
 The implemented Go runtime lives under `internal/` and `native/core/`; the native shell and tray live under `desktop/`. Browser UI source is in `src/`, with HTML/CSS and embedded assets in `public/`. The penguin mark is `desktop/brand.svg`.
 
-Durable validation includes Go tests under `internal/host/`, `internal/bridge/`, `internal/providers/`, `internal/pulls/`, `internal/settings/` and `native/core/`; browser regressions are under `test/`. `desktop/smoke.go` exercises the actual native tray, language changes, window lifecycle, and update bridge. `integration/headless.test.mjs` exercises real Go CLI/HTTP/gRPC processes with a synthetic upstream bot.
+Durable validation includes Go tests under `internal/host/`, `internal/bridge/`, `internal/providers/`, `internal/pulls/`, `internal/settings/`, `internal/webui/`, and `native/core/`; browser regressions are under `test/`. `desktop/smoke.go` exercises the actual native tray, language changes, window lifecycle, and update bridge. `integration/headless.test.mjs` exercises real Go CLI/HTTP/gRPC processes with a synthetic upstream bot.
 
-Use clearly identified synthetic contacts for general previews. Label read-only live profile checks separately and limit them to the profile needed for verification. Aggregate live diagnostics report counts and timings rather than bulk contact identities or credentials. The recipient component's contract remains `.impeccable/surfaces/feishu-recipient.md`.
+`npm run preview:ui` is an isolated synthetic fixture for browser interaction and visual checks. It does not certify native asset embedding, authenticated transport, or desktop integration. Use clearly identified synthetic contacts for general previews. Label read-only live profile checks separately and limit them to the profile needed for verification. Aggregate live diagnostics report counts and timings rather than bulk contact identities or credentials. The recipient component's contract remains `.impeccable/surfaces/feishu-recipient.md`.
 
 ## Product Principles
 

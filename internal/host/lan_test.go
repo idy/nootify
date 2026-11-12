@@ -68,7 +68,7 @@ func TestLANServiceBoundary(t *testing.T) {
 				}
 			}
 		}
-		for _, path := range []string{"/ui/api/providers", "/ui/api/settings/remote/secret", "/ui/api/settings/lark/secret", "/ui/api/agents", "/ui/api/auth/grant"} {
+		for _, path := range []string{"/ui/api/providers", "/ui/api/providers/registration", "/ui/api/providers/setup", "/ui/api/settings/remote/secret", "/ui/api/settings/lark/secret", "/ui/api/agents", "/ui/api/auth/grant"} {
 			if w := request("POST", path, peer, true); w.Code != 403 {
 				t.Fatalf("LAN could mutate/read local secrets %s: %d", path, w.Code)
 			}

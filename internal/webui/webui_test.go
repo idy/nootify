@@ -3,6 +3,7 @@ package webui
 import (
 	"context"
 	"io"
+	"mime"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -151,6 +152,56 @@ func TestGatewayRecoversExpiredDaemonLeaseWithoutBreakingBrowser(t *testing.T) {
 		t.Fatalf("poll did not reconnect: %d %v", next.StatusCode, err)
 	}
 }
+func TestMagpieAssetsUseVendoredRootAndPreserveSecurityHeaders(t *testing.T) {
+	// Model Windows machines without the browser MIME registrations, even on a
+	// development host that knows them. The packaged UI must ignore host overrides.
+	for _, extension := range []string{".css", ".js", ".svg", ".woff2", ".ttf"} {
+		previous := mime.TypeByExtension(extension)
+		if previous == "" {
+			previous = "application/octet-stream"
+		}
+		if err := mime.AddExtensionType(extension, "application/octet-stream"); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = mime.AddExtensionType(extension, previous) })
+	}
+	assets := Assets(fstest.MapFS{
+		"vendor/magpie/magpie.css":       {Data: []byte("body { color: black; }")},
+		"vendor/magpie/fonts/font.woff2": {Data: []byte("font-data")},
+		"ui/fonts/font.ttf":              {Data: []byte("font-data")},
+		"vendor/magpie/icons/check.svg":  {Data: []byte("<svg></svg>")},
+		"ui/ui-app.js":                   {Data: []byte("console.log('ready')")},
+	})
+	for _, test := range []struct{ path, contentType string }{
+		{"/ui/vendor/magpie/magpie.css", "text/css"},
+		{"/ui/vendor/magpie/fonts/font.woff2", "font/woff2"},
+		{"/ui/fonts/font.ttf", "font/ttf"},
+		{"/ui/vendor/magpie/icons/check.svg", "image/svg+xml"},
+		{"/ui/ui-app.js", "javascript"},
+	} {
+		for _, method := range []string{"GET", "HEAD"} {
+			w := httptest.NewRecorder()
+			assets.ServeHTTP(w, httptest.NewRequest(method, test.path, nil))
+			if w.Code != 200 || !strings.Contains(w.Header().Get("Content-Type"), test.contentType) {
+				t.Fatalf("%s %s: %d %v", method, test.path, w.Code, w.Header())
+			}
+			if w.Header().Get("Content-Security-Policy") != contentPolicy || w.Header().Get("X-Content-Type-Options") != "nosniff" {
+				t.Fatal("asset security headers lost")
+			}
+			if method == "HEAD" && w.Body.Len() != 0 {
+				t.Fatal("HEAD returned body")
+			}
+		}
+	}
+	for _, target := range []string{"/ui/vendor/magpie/../secret", "/ui/vendor/magpie/magpie.css?private=1", "/ui/vendor/magpie/missing.svg"} {
+		w := httptest.NewRecorder()
+		assets.ServeHTTP(w, httptest.NewRequest("GET", target, nil))
+		if w.Code != 404 {
+			t.Fatalf("invalid asset target %s accepted: %d", target, w.Code)
+		}
+	}
+}
+
 func TestReplayRejectedAndNotDispatchedTwice(t *testing.T) {
 	sessions := NewSessions(false)
 	capability, err := sessions.Create(nil)

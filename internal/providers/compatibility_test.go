@@ -58,6 +58,89 @@ func getCompatibility(t *testing.T, s *Service) map[string]any {
 	}
 	return asMap(v)
 }
+func TestLegacyMigrationBackfillsMissingSubtypeWithoutOverridingExplicitMetadata(t *testing.T) {
+	s := compatibilityHarness(t)
+	seedProvider(t, s, "legacy-feishu", appA, "core-secret", false)
+	seedProvider(t, s, "explicit-bot", appA, "another-secret", false)
+	seedProvider(t, s, "other-app", appB, "other-secret", false)
+	if err := s.store.Update(func(d *core.State) error {
+		d.Migrated = true
+		p := d.Providers["explicit-bot"]
+		p.ConnectionType = "bot"
+		d.Providers[p.ID] = p
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.options.Store.SetSettings(map[string]any{"lark_app_id": appA, "lark_app_secret": "stale-secret", "lark_connection_type": "personal-app"}); err != nil {
+		t.Fatal(err)
+	}
+	migration, err := s.legacyMigration(Credentials{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migration["connection_type"] != "personal-app" {
+		t.Fatal("adapter dropped legacy subtype")
+	}
+	if _, err = s.raw(context.Background(), "migration.import", migration); err != nil {
+		t.Fatal(err)
+	}
+	state := s.store.Snapshot()
+	if state.Providers["legacy-feishu"].ConnectionType != "personal-app" || state.Providers["legacy-feishu"].AppSecret != "core-secret" || state.Providers["explicit-bot"].ConnectionType != "bot" || state.Providers["other-app"].ConnectionType != "" {
+		t.Fatal("backfill lost subtype scope or overwritten credentials")
+	}
+	if err = s.reconcileCredentials(context.Background(), Credentials{}); err != nil {
+		t.Fatal(err)
+	}
+	if getCompatibility(t, s)["connection_type"] != "personal-app" {
+		t.Fatal("adapter ignored backfilled subtype")
+	}
+}
+
+func TestCompatibilitySubtypeEditsReachCoreAndMaskedSavesRetainThem(t *testing.T) {
+	s := compatibilityHarness(t)
+	seedProvider(t, s, "legacy-feishu", appA, "core-secret", false)
+	if _, err := s.Call(context.Background(), "compatibility.configure", map[string]any{"connection_type": "personal-app"}); err != nil {
+		t.Fatal(err)
+	}
+	p := s.store.Snapshot().Providers["legacy-feishu"]
+	if p.ConnectionType != "personal-app" || p.Enabled {
+		t.Fatal("subtype-only edit lost subtype or enabled channel")
+	}
+	if _, err := s.Action(context.Background(), map[string]any{"action": "save", "provider": map[string]any{"id": p.ID, "name": p.Name, "type": "feishu", "app_id": p.AppID, "app_secret": "", "recipient_open_id": p.Recipient, "enabled": false}}); err != nil {
+		t.Fatal(err)
+	}
+	if p = s.store.Snapshot().Providers[p.ID]; p.ConnectionType != "personal-app" || p.AppSecret != "core-secret" {
+		t.Fatal("masked save lost subtype or secret")
+	}
+	if _, err := s.Call(context.Background(), "provider.save", map[string]any{"id": p.ID, "name": p.Name, "type": "feishu", "connection_type": "bot", "app_id": p.AppID, "enabled": false}); err != nil {
+		t.Fatal(err)
+	}
+	if getCompatibility(t, s)["connection_type"] != "bot" || s.options.Store.Setting("lark_connection_type") != "bot" {
+		t.Fatal("explicit core subtype did not override stale compatibility metadata")
+	}
+}
+
+func TestImportedLegacySubtypeBackfillPreservesExplicitProviderType(t *testing.T) {
+	for _, explicit := range []string{"", "bot", "personal-app"} {
+		t.Run("type-"+explicit, func(t *testing.T) {
+			s := compatibilityHarness(t)
+			backup := importedBackup("selected", appA, "secret")
+			p := backup["providers"].([]any)[0].(map[string]any)
+			if explicit != "" {
+				p["connection_type"] = explicit
+			}
+			if _, err := s.Call(context.Background(), "config.import", map[string]any{"config": backup, "lark": map[string]any{"app_id": appA, "connection_type": "personal-app"}}); err != nil {
+				t.Fatal(err)
+			}
+			expected := first(explicit, "personal-app")
+			if string(s.store.Snapshot().Providers["selected"].ConnectionType) != expected || getCompatibility(t, s)["connection_type"] != expected {
+				t.Fatal("import backfill overwrote explicit metadata or lost legacy type")
+			}
+		})
+	}
+}
+
 func TestStartupCoreCredentialsBeatStaleSettingsAndMCP(t *testing.T) {
 	for _, source := range []string{"settings", "mcp-config", ""} {
 		t.Run(source, func(t *testing.T) {

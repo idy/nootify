@@ -312,10 +312,13 @@ func validateProviders(p map[string]any) error {
 	for _, v := range list {
 		m := object(v)
 		id, name := text(m["id"]), text(m["name"])
-		if m == nil || id == "" || len(id) > 128 || trim(name) == "" || len(name) > 256 || ids[id] || !stringFields(m, "id", "name", "type", "app_id", "app_secret", "recipient_open_id", "address", "token", "server_name") || !boolFields(m, "enabled", "tls") {
+		if m == nil || id == "" || len(id) > 128 || trim(name) == "" || len(name) > 256 || ids[id] || !stringFields(m, "id", "name", "type", "connection_type", "app_id", "app_secret", "recipient_open_id", "address", "token", "server_name") || !boolFields(m, "enabled", "tls") {
 			return bad()
 		}
 		ids[id] = true
+		if kind, exists := m["connection_type"]; exists && (m["type"] != "feishu" || (kind != "bot" && kind != "personal-app")) {
+			return bad()
+		}
 		switch m["type"] {
 		case "feishu":
 			if text(m["app_id"]) == "" || text(m["app_secret"]) == "" {

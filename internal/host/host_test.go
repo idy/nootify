@@ -167,9 +167,52 @@ func TestOccupiedPortDoesNotTouchState(t *testing.T) {
 	}
 }
 
+func TestProviderAuthorizationRoutesUseLocalPostAndOriginGate(t *testing.T) {
+	s := newFixture(t)
+	for _, path := range []string{"/ui/api/providers/registration", "/ui/api/providers/setup"} {
+		status, _ := call(t, s, "GET", path, nil, false)
+		if status != 405 {
+			t.Fatalf("GET %s exposed private authorization: %d", path, status)
+		}
+		for _, change := range []struct{ header, value string }{{"Host", "attacker.example"}, {"Origin", "http://attacker.example"}, {"Sec-Fetch-Site", "cross-site"}, {"Sec-Fetch-Site", "same-site"}} {
+			request, _ := http.NewRequest("POST", s.URL()+path, strings.NewReader(`{"action":"recover","id":"missing"}`))
+			request.Header.Set("X-Nootify-UI", "1")
+			if change.header == "Host" {
+				request.Host = change.value
+			} else {
+				request.Header.Set(change.header, change.value)
+			}
+			response, err := http.DefaultClient.Do(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response.Body.Close()
+			if response.StatusCode != 403 {
+				t.Fatalf("%s %s accepted: %d", path, change.header, response.StatusCode)
+			}
+		}
+	}
+	status, page := call(t, s, "POST", "/ui/api/providers/registration", map[string]any{"action": "recover"}, false)
+	if status != 200 || page["status"] != "idle" {
+		t.Fatalf("local recovery locked or routed incorrectly: %d %+v", status, page)
+	}
+	status, _ = call(t, s, "POST", "/ui/api/providers/registration", map[string]any{"action": "status", "registration_id": "missing"}, false)
+	if status != 409 {
+		t.Fatalf("unknown registration did not reject: %d", status)
+	}
+	status, _ = call(t, s, "POST", "/ui/api/providers/setup", map[string]any{"id": "missing"}, false)
+	if status != 404 {
+		t.Fatalf("local setup routing failed: %d", status)
+	}
+	status, _ = call(t, s, "POST", "/ui/api/providers", map[string]any{"action": "reconnect", "id": "missing"}, false)
+	if status != 404 {
+		t.Fatalf("local reconnect routing failed: %d", status)
+	}
+}
+
 func TestDirectLocalUIHeadersAndPeerBoundary(t *testing.T) {
 	s := newFixture(t)
-	for _, path := range []string{"/ui/api/providers", "/ui/api/settings/remote/secret", "/ui/api/agents", "/ui/api/settings/import"} {
+	for _, path := range []string{"/ui/api/providers", "/ui/api/providers/registration", "/ui/api/providers/setup", "/ui/api/settings/remote/secret", "/ui/api/agents", "/ui/api/settings/import"} {
 		request, _ := http.NewRequest("POST", s.URL()+path, strings.NewReader("{}"))
 		response, err := http.DefaultClient.Do(request)
 		if err != nil {

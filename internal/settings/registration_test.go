@@ -202,6 +202,22 @@ func TestRegistrationFailureReasonsAndEnvironmentPrecedence(t *testing.T) {
 		t.Fatal("environment override allowed save")
 	}
 }
+func TestProviderBackupConnectionTypeValidation(t *testing.T) {
+	for _, value := range []any{"bot", "personal-app", "invalid", 42, nil, map[string]any{"type": "personal-app"}} {
+		provider := map[string]any{"id": "personal", "name": "Personal", "type": "feishu", "enabled": false, "app_id": testApp, "app_secret": "private", "connection_type": value}
+		backup := map[string]any{"version": 1, "providers": []any{provider}, "remote": map[string]any{"enabled": false, "listen": "127.0.0.1:9418"}}
+		err := validateProviders(backup)
+		valid := value == "bot" || value == "personal-app"
+		if (err == nil) != valid {
+			t.Fatalf("connection type %v accepted=%t", value, err == nil)
+		}
+	}
+	remote := map[string]any{"id": "remote", "name": "Remote", "type": "remote", "enabled": false, "address": "127.0.0.1:9418", "token": "private", "connection_type": "bot"}
+	if err := validateProviders(map[string]any{"version": 1, "providers": []any{remote}, "remote": map[string]any{"enabled": false}}); err == nil {
+		t.Fatal("remote provider accepted Feishu subtype")
+	}
+}
+
 func TestSetupIgnoresUserOnlyGrantsAndReportsBotPermissions(t *testing.T) {
 	upstream := apiServer(t, func(w http.ResponseWriter, r *http.Request) {
 		dataReply(w, map[string]any{"app": map[string]any{"scopes": []any{map[string]any{"scope": "im:chat", "token_types": []string{"user"}}, map[string]any{"scope": "im:message", "token_types": []string{"user"}}}}})

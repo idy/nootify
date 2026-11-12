@@ -94,6 +94,10 @@ jobs:
       contents: write
     env:
       RELEASE_NOTES: >-
+        This patch adopts Magpie UI with compact channel and agent lists and standard dialogs.
+        Feishu Bot and personal App setup are separate; personal-channel authorization can
+        recover after reload, check permissions, and reconnect without changing defaults.
+        Windows delivery state writes tolerate transient file contention.
         The MyGo desktop, background service and CLI now share one Go executable;
         TypeScript is used only for the browser UI. Direct LAN access replaces
         embedded Tailscale. Existing identity, settings and conversation state are retained.

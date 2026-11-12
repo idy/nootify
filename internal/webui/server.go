@@ -242,6 +242,33 @@ func (w *encryptedWriter) end() {
 
 const contentPolicy = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: https://*.feishucdn.com; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
 
+// Browser assets must have the same type on every host. In particular Windows
+// may have no font MIME registration (or registry overrides for scripts/styles).
+func assetContentType(name string) string {
+	switch path.Ext(name) {
+	case ".html":
+		return "text/html; charset=utf-8"
+	case ".css":
+		return "text/css; charset=utf-8"
+	case ".js":
+		return "text/javascript; charset=utf-8"
+	case ".svg":
+		return "image/svg+xml"
+	case ".woff":
+		return "font/woff"
+	case ".woff2":
+		return "font/woff2"
+	case ".ttf":
+		return "font/ttf"
+	case ".otf":
+		return "font/otf"
+	}
+	if kind := mime.TypeByExtension(path.Ext(name)); kind != "" {
+		return kind
+	}
+	return "application/octet-stream"
+}
+
 func Assets(assets fs.FS) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "GET" && r.Method != "HEAD" {
@@ -254,8 +281,13 @@ func Assets(assets fs.FS) http.Handler {
 			name = "index.html"
 		case "/ui/styles.css":
 			name = "styles.css"
+		case "/ui/vendor/magpie":
+			http.NotFound(w, r)
+			return
 		default:
-			if strings.HasPrefix(r.URL.Path, "/ui/") {
+			if strings.HasPrefix(r.URL.Path, "/ui/vendor/magpie/") {
+				name = strings.TrimPrefix(r.URL.Path, "/ui/")
+			} else if strings.HasPrefix(r.URL.Path, "/ui/") {
 				name = strings.TrimPrefix(r.URL.Path, "/")
 			}
 		}
@@ -268,11 +300,7 @@ func Assets(assets fs.FS) http.Handler {
 			http.NotFound(w, r)
 			return
 		}
-		kind := mime.TypeByExtension(path.Ext(name))
-		if kind == "" {
-			kind = "application/octet-stream"
-		}
-		w.Header().Set("content-type", kind)
+		w.Header().Set("content-type", assetContentType(name))
 		w.Header().Set("cache-control", "no-store")
 		w.Header().Set("referrer-policy", "no-referrer")
 		w.Header().Set("x-content-type-options", "nosniff")

@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/idy/nootify/internal/httpx"
+	"github.com/idy/nootify/internal/settings"
 	core "github.com/idy/nootify/native/core"
 )
 
@@ -62,6 +63,10 @@ func Status(err error) int {
 	if errors.As(err, &httpErr) {
 		return httpErr.Status
 	}
+	var settingsErr *settings.Error
+	if errors.As(err, &settingsErr) {
+		return settingsErr.Status
+	}
 	switch errorCode(err) {
 	case "rejection_retryable", "unavailable", "timeout", "busy":
 		return 503
@@ -100,6 +105,12 @@ func (s *Service) Action(ctx context.Context, body map[string]any) (map[string]a
 			return nil, httpx.Fail(400, "Expected a provider configuration")
 		}
 		params = provider
+	case "reconnect":
+		id, err := Identifier(body["id"], "id")
+		if err != nil {
+			return nil, err
+		}
+		return s.reconnect(ctx, id)
 	case "delete", "default":
 		id, err := Identifier(body["id"], "id")
 		if err != nil {
@@ -108,7 +119,7 @@ func (s *Service) Action(ctx context.Context, body map[string]any) (map[string]a
 		method = "provider." + str(body["action"])
 		params = map[string]any{"id": id}
 	default:
-		return nil, httpx.Fail(400, "Expected a provider action: save, delete or default")
+		return nil, httpx.Fail(400, "Expected a provider action: save, delete, default or reconnect")
 	}
 	if _, err := s.Call(ctx, method, params); err != nil {
 		return nil, err

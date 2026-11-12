@@ -310,6 +310,28 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		if path == "/ui/api/providers/registration" || path == "/ui/api/providers/setup" {
+			if r.Method != http.MethodPost {
+				httpx.WriteError(w, httpx.Fail(405, "Provider authorization requires a local POST"))
+				return
+			}
+			body, err := httpx.ReadObject(r, 4096)
+			var result any
+			if err == nil {
+				if path == "/ui/api/providers/registration" {
+					result, err = s.providers.Registration(r.Context(), body)
+				} else {
+					result, err = s.providers.Setup(r.Context(), stringValue(body["id"]))
+				}
+			}
+			w.Header().Set("Cache-Control", "no-store")
+			if err != nil {
+				providers.WriteError(w, err)
+			} else {
+				httpx.JSON(w, 200, result)
+			}
+			return
+		}
 		if path == "/ui/api/providers" {
 			var page map[string]any
 			var err error

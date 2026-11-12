@@ -1,0 +1,49 @@
+/*
+ * Magpie Design System: base.
+ * Document-wide defaults. Optional: skip this file when embedding components
+ * in a page that owns its own reset.
+ */
+*, *::before, *::after { box-sizing: border-box; }
+[hidden] { display: none !important; }
+
+html {
+  background: var(--mds-canvas);
+  color: var(--mds-ink);
+  font: 400 100%/1.5 var(--mds-font);
+  -webkit-font-smoothing: antialiased;
+  scroll-padding-top: calc(var(--mds-titlebar-height) + 16px);
+  scroll-padding-bottom: 80px;
+}
+body { margin: 0; font-size: var(--mds-text-body); }
+[data-theme] { color: var(--mds-ink); }
+h1, h2, h3, p, pre { margin: 0; }
+h1 { font: 600 var(--mds-text-title)/1.4 var(--mds-font-display); text-wrap: balance; }
+h2, h3, h4, h5, h6 { font-family: var(--mds-font-heading); font-weight: 400; line-height: 1.5; text-wrap: balance; }
+p { text-wrap: pretty; }
+a { color: inherit; }
+button, input, select, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; }
+button, a, input, select, textarea { -webkit-tap-highlight-color: transparent; }
+button:disabled { cursor: not-allowed; }
+
+/* Browser surfaces carry the palette. */
+:focus-visible { outline: 2px solid var(--mds-accent-ink); outline-offset: 2px; }
+::selection { color: var(--mds-ink); background: var(--mds-selection); }
+input, textarea { caret-color: var(--mds-accent-ink); }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 10px; background: var(--mds-scroll-thumb) padding-box; }
+::-webkit-scrollbar-thumb:hover { background-color: var(--mds-scroll-thumb-hover); }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+
+code {
+  padding: 1px 5px;
+  border-radius: var(--mds-radius-xs);
+  background: var(--mds-inline-code);
+  color: var(--mds-ink-secondary);
+  font: var(--mds-text-code)/1.5 var(--mds-mono);
+}
+
+@media (max-width: 640px) { html { scroll-padding-bottom: 132px; } }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}

@@ -1,0 +1,251 @@
+/*
+ * Magpie Design System: tokens.
+ *
+ * Theme selection, in order of precedence:
+ *   [data-theme="light"] or [data-theme="dark"] on any element (scoped themes nest);
+ *   otherwise the root follows prefers-color-scheme.
+ *
+ * Colour tokens hold literal values in every theme block, never var() aliases:
+ * a custom property resolves where it is declared, so aliases would not follow
+ * a nested [data-theme]. scripts/check.mjs keeps the two dark blocks identical.
+ */
+
+/* Fonts are registered with the tokens; the browser fetches only used faces. */
+@import url("fonts.css");
+
+/* Theme-independent scales. */
+:root {
+  --mds-font: Lato, "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+  --mds-font-display: Montserrat, "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+  --mds-font-action: Montserrat, "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+  --mds-font-heading: Monda, "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+  --mds-mono: "SF Mono", "SFMono-Regular", "Cascadia Mono", Consolas, "Liberation Mono", monospace;
+
+  /* Type: body copy, section headings, supporting notes, captions and code. */
+  --mds-text-body: 0.875rem;
+  --mds-text-heading: 1rem;
+  --mds-text-title: 1.25rem;
+  --mds-text-note: 0.8125rem;
+  --mds-text-caption: 0.75rem;
+  --mds-text-code: 0.8125rem;
+
+  /* Layout. */
+  --mds-gutter: 24px;
+  --mds-gap: 20px;
+  --mds-section-gap: 20px;
+  --mds-control-height: 34px;
+  --mds-titlebar-height: 48px;
+  --mds-sidebar-width: 200px;
+
+  /* Radii: inline code, controls, segmented/notice/toast, groups and cards, dialogs. */
+  --mds-radius-xs: 4px;
+  --mds-radius-sm: 8px;
+  --mds-radius-md: 10px;
+  --mds-radius-lg: 12px;
+  --mds-radius-xl: 14px;
+  --mds-radius-pill: 999px;
+
+  /* Motion. */
+  --mds-duration-fast: 120ms;
+  --mds-duration: 150ms;
+  --mds-ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* Light theme (default). */
+:root,
+[data-theme="light"] {
+  color-scheme: light;
+
+  /* Surfaces, from back to front. */
+  --mds-canvas: #f5f5f7;
+  --mds-sidebar: #ededf0;
+  --mds-surface: #fff;
+  --mds-raised: #e9e9ee;
+  --mds-field: #fff;
+  --mds-code: #f0f0f4;
+
+  /* Hairlines and control borders. */
+  --mds-line: #00000014;
+  --mds-line-strong: #85858f;
+
+  /* Text, strongest to faintest. */
+  --mds-ink-strong: #1c1c1e;
+  --mds-ink: #1c1c1e;
+  --mds-ink-secondary: #42424a;
+  --mds-ink-soft: #4e4e56;
+  --mds-ink-subtle: #55555f;
+  --mds-muted: #62626c;
+  --mds-faint: #6c6c76;
+
+  /* Accent. --mds-accent fills; --mds-accent-ink is accent-coloured text, rings and carets. */
+  --mds-accent: #2f62d5;
+  --mds-accent-hover: #2856c1;
+  --mds-accent-ink: #2459c4;
+  --mds-on-accent: #fff;
+  --mds-selection: #d7e5ff;
+
+  /* Status tones. */
+  --mds-good: #167536;
+  --mds-good-ink: #16652f;
+  --mds-warn: #855700;
+  --mds-warn-detail: #785216;
+  --mds-warn-line: #85570059;
+  --mds-warn-bg: #8557000d;
+  --mds-error: #b42318;
+  --mds-error-detail: #922b23;
+  --mds-error-line: #b4231859;
+  --mds-error-bg: #b423180a;
+  --mds-error-hover: #b4231814;
+  --mds-info-line: #2459c459;
+  --mds-info-bg: #2f62d50d;
+  --mds-info-hover: #2f62d51a;
+  --mds-danger: #c42b1c;
+
+  /* Interaction overlays. */
+  --mds-hover: #00000006;
+  --mds-selected: #0000000e;
+  --mds-wash: #00000003;
+  --mds-subtle-hover: #00000008;
+  --mds-icon-hover: #0000000c;
+  --mds-button-hover: #dedee6;
+  --mds-field-hover: #62626c;
+
+  /* Component details. */
+  --mds-inline-code: #00000008;
+  --mds-scroll-thumb: #00000030;
+  --mds-scroll-thumb-hover: #00000048;
+  --mds-spinner-line: #00000024;
+  --mds-switch-off: #85858f;
+  --mds-switch-knob: #f5f5f7;
+  --mds-code-key: #2459b8;
+  --mds-code-value: #25673b;
+  --mds-actionbar: #f5f5f7f0;
+  --mds-toast-shadow: #0002;
+  --mds-dialog-shadow: #0003;
+}
+
+/* Dark theme, explicit. Keep identical to the block below. */
+[data-theme="dark"] {
+  color-scheme: dark;
+  --mds-canvas: #1c1c1e;
+  --mds-sidebar: #18181a;
+  --mds-surface: #232326;
+  --mds-raised: #2c2c30;
+  --mds-field: #2a2a2e;
+  --mds-code: #161618;
+  --mds-line: #ffffff12;
+  --mds-line-strong: #ffffff1f;
+  --mds-ink-strong: #fff;
+  --mds-ink: #ececf0;
+  --mds-ink-secondary: #d1d1d6;
+  --mds-ink-soft: #c7c7cc;
+  --mds-ink-subtle: #aeaeb2;
+  --mds-muted: #9a9aa2;
+  --mds-faint: #92929c;
+  --mds-accent: #2f62d5;
+  --mds-accent-hover: #366bdd;
+  --mds-accent-ink: #8ab4ff;
+  --mds-on-accent: #fff;
+  --mds-selection: #294f91;
+  --mds-good: #30d158;
+  --mds-good-ink: #d7f7df;
+  --mds-warn: #f0c46b;
+  --mds-warn-detail: #e8d3a6;
+  --mds-warn-line: #f0c46b40;
+  --mds-warn-bg: #f0c46b12;
+  --mds-error: #ff8a80;
+  --mds-error-detail: #f3c2bd;
+  --mds-error-line: #ff8a8059;
+  --mds-error-bg: #ff8a8012;
+  --mds-error-hover: #ff8a8024;
+  --mds-info-line: #5b8cff59;
+  --mds-info-bg: #3b78f61f;
+  --mds-info-hover: #3b78f633;
+  --mds-danger: #c42b1c;
+  --mds-hover: #ffffff0a;
+  --mds-selected: #ffffff14;
+  --mds-wash: #ffffff06;
+  --mds-subtle-hover: #ffffff0d;
+  --mds-icon-hover: #ffffff12;
+  --mds-button-hover: #34343a;
+  --mds-field-hover: #ffffff33;
+  --mds-inline-code: #ffffff0d;
+  --mds-scroll-thumb: #ffffff1c;
+  --mds-scroll-thumb-hover: #ffffff2e;
+  --mds-spinner-line: #ffffff1f;
+  --mds-switch-off: #3a3a3f;
+  --mds-switch-knob: #f5f5f7;
+  --mds-code-key: #8eb4ff;
+  --mds-code-value: #b8e3c4;
+  --mds-actionbar: #1c1c1ef0;
+  --mds-toast-shadow: #0008;
+  --mds-dialog-shadow: #000a;
+}
+
+/* Dark theme, following the system. Keep identical to the block above. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --mds-canvas: #1c1c1e;
+    --mds-sidebar: #18181a;
+    --mds-surface: #232326;
+    --mds-raised: #2c2c30;
+    --mds-field: #2a2a2e;
+    --mds-code: #161618;
+    --mds-line: #ffffff12;
+    --mds-line-strong: #ffffff1f;
+    --mds-ink-strong: #fff;
+    --mds-ink: #ececf0;
+    --mds-ink-secondary: #d1d1d6;
+    --mds-ink-soft: #c7c7cc;
+    --mds-ink-subtle: #aeaeb2;
+    --mds-muted: #9a9aa2;
+    --mds-faint: #92929c;
+    --mds-accent: #2f62d5;
+    --mds-accent-hover: #366bdd;
+    --mds-accent-ink: #8ab4ff;
+    --mds-on-accent: #fff;
+    --mds-selection: #294f91;
+    --mds-good: #30d158;
+    --mds-good-ink: #d7f7df;
+    --mds-warn: #f0c46b;
+    --mds-warn-detail: #e8d3a6;
+    --mds-warn-line: #f0c46b40;
+    --mds-warn-bg: #f0c46b12;
+    --mds-error: #ff8a80;
+    --mds-error-detail: #f3c2bd;
+    --mds-error-line: #ff8a8059;
+    --mds-error-bg: #ff8a8012;
+    --mds-error-hover: #ff8a8024;
+    --mds-info-line: #5b8cff59;
+    --mds-info-bg: #3b78f61f;
+    --mds-info-hover: #3b78f633;
+    --mds-danger: #c42b1c;
+    --mds-hover: #ffffff0a;
+    --mds-selected: #ffffff14;
+    --mds-wash: #ffffff06;
+    --mds-subtle-hover: #ffffff0d;
+    --mds-icon-hover: #ffffff12;
+    --mds-button-hover: #34343a;
+    --mds-field-hover: #ffffff33;
+    --mds-inline-code: #ffffff0d;
+    --mds-scroll-thumb: #ffffff1c;
+    --mds-scroll-thumb-hover: #ffffff2e;
+    --mds-spinner-line: #ffffff1f;
+    --mds-switch-off: #3a3a3f;
+    --mds-switch-knob: #f5f5f7;
+    --mds-code-key: #8eb4ff;
+    --mds-code-value: #b8e3c4;
+    --mds-actionbar: #1c1c1ef0;
+    --mds-toast-shadow: #0008;
+    --mds-dialog-shadow: #000a;
+  }
+}
+
+/* Responsive layout scale. */
+@media (max-width: 860px) {
+  :root { --mds-sidebar-width: 172px; --mds-gutter: 20px; }
+}
+@media (max-width: 640px) {
+  :root { --mds-gutter: 16px; }
+}
