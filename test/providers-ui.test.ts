@@ -134,7 +134,7 @@ test('provider and remote-access UI performs real mutations, preserves secrets a
   await until(() => !button('provider-add').disabled, 'Provider settings did not load');
   const poll = timers.find(timer => timer.milliseconds === 2000)!.run;
 
-  await t.test('empty state is actionable and navigation uses Providers, Repos and Remote access', () => {
+  await t.test('empty state is actionable and navigation keeps Channels and Remote access', () => {
     assert.equal(element('providers-empty').hidden, false);
     assert.equal(element('crumb-page').textContent, 'Channels');
     assert.equal(button('provider-add').textContent, 'Add channel');
@@ -143,7 +143,8 @@ test('provider and remote-access UI performs real mutations, preserves secrets a
     assert.equal(element('providers-summary').textContent, 'No default channel selected');
     assert.equal(document.querySelector('[data-view="settings-remote"]')!.textContent, 'Remote access');
     assert.equal(document.querySelector('#settings-subnav [data-view="settings-lark"]'), null);
-    assert.equal(document.querySelectorAll('.nav-label')[1].textContent, 'Repos');
+    assert.equal(document.querySelectorAll('.nav-label').length, 1);
+    assert.equal(document.querySelector('[data-view="repos"], [data-view^="pulls-"], [data-view="settings-github"]'), null);
     assert.equal(secretReads, 0);
   });
 

@@ -174,8 +174,6 @@ func TestMalformedImportsNeverMutateSecrets(t *testing.T) {
 		{"backends": map[string]any{"opencode": map[string]any{"url": "http://localhost:5000", "token": 12}}},
 		{"providers": map[string]any{"version": 1, "providers": []any{map[string]any{"id": "bad", "name": "bad", "type": "feishu", "app_id": nextApp}}, "remote": map[string]any{}}},
 		{"providers": map[string]any{"version": 1, "providers": []any{}, "remote": map[string]any{"enabled": true, "listen": "0.0.0.0:9418", "token": "x"}}},
-		{"pulls": map[string]any{"config": map[string]any{"authors": []any{123}}}},
-		{"pulls": map[string]any{"follow": []any{map[string]any{"repository": "owner/repo", "follow": "yes"}}}},
 		{"agents": []any{"codex", "unknown"}},
 	}
 	for i, extra := range invalid {
@@ -285,13 +283,8 @@ func TestCommittedNotDurableDoesNotRollback(t *testing.T) {
 	}
 }
 func TestExportAndImportKeepSecretsOnPrivateDisk(t *testing.T) {
-	var restored any
 	var enabled []string
 	s, c := harness(t, func(o *Options) {
-		o.PullPreferences = func() (any, error) {
-			return map[string]any{"follow": []any{map[string]any{"repository": "owner/repo", "follow": true}}}, nil
-		}
-		o.RestorePulls = func(v any) error { restored = v; return nil }
 		o.Agents = func() (any, error) { return []any{map[string]any{"agent": "codex", "injected": true}}, nil }
 		o.SetAgent = func(id string, on bool) (any, error) { enabled = append(enabled, id); return nil, nil }
 	})
@@ -324,7 +317,7 @@ func TestExportAndImportKeepSecretsOnPrivateDisk(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if restored == nil || len(enabled) != 1 || enabled[0] != "codex" || summary.ProviderCount == nil || *summary.ProviderCount != 1 {
+	if len(enabled) != 1 || enabled[0] != "codex" || summary.ProviderCount == nil || *summary.ProviderCount != 1 {
 		t.Fatalf("callbacks missing: %+v", summary)
 	}
 	if c.creds.AppSecret != "synthetic-old-secret" {
@@ -344,16 +337,79 @@ func TestExportAndImportKeepSecretsOnPrivateDisk(t *testing.T) {
 		t.Fatalf("export retention: %d", len(files))
 	}
 }
-func TestGetPagesNeverExposeSecretsAndSecretsRequirePost(t *testing.T) {
-	s, _ := harness(t, func(o *Options) {
-		o.GitHub = func(context.Context) (any, error) {
-			return map[string]any{"account": map[string]any{"signedIn": false}, "login": map[string]any{"status": "waiting", "code": "PRIVATE-CODE", "url": "https://github.com/login/device"}}, nil
+func TestOldConfigSectionsAreIgnoredWithoutDeletingState(t *testing.T) {
+	s, c := harness(t, nil)
+	if err := s.options.Store.SetSettings(map[string]any{"github_token": "legacy-token"}); err != nil {
+		t.Fatal(err)
+	}
+	legacyFiles := map[string][]byte{
+		"pulls.json":        []byte(`{"repositories":[{"repository":"owner/repo","follow":true}]}`),
+		"pulls.config.json": []byte(`{"authors":["owner"]}`),
+	}
+	for name, body := range legacyFiles {
+		if err := os.WriteFile(filepath.Join(s.options.Store.Directory, name), body, 0600); err != nil {
+			t.Fatal(err)
 		}
-	})
-	for _, path := range []string{"/ui/api/settings", "/ui/api/settings/github", "/ui/api/settings/lark/secret"} {
+	}
+	for _, oldPulls := range []any{
+		map[string]any{"config": map[string]any{"authors": []any{123}}, "follow": []any{map[string]any{"repository": "owner/repo", "follow": "obsolete"}}},
+		"obsolete section",
+	} {
+		imported := document(map[string]any{"app_id": nextApp, "app_secret": "imported-secret"})
+		imported["pulls"] = oldPulls
+		imported["github"] = map[string]any{"token": "must-not-import"}
+		imported["backends"] = map[string]any{"codex": map[string]any{"url": "ws://localhost:1234", "token": "backend-token"}}
+		if _, err := s.PreviewImport(imported); err != nil {
+			t.Fatal("old export could not be previewed", err)
+		}
+		if _, err := s.ImportConfig(context.Background(), imported); err != nil {
+			t.Fatal("old export could not be imported", err)
+		}
+		if c.creds.AppID != nextApp || c.creds.AppSecret != "imported-secret" {
+			t.Fatal("retained Feishu section was not applied", c.creds)
+		}
+		var backend map[string]any
+		ok, err := s.options.Store.Get("backends", "codex", &backend)
+		if err != nil || !ok || backend["token"] != "backend-token" {
+			t.Fatal("retained backend section was not applied", backend, err)
+		}
+	}
+	if s.options.Store.Setting("github_token") != "legacy-token" {
+		t.Fatal("legacy GitHub credential was changed")
+	}
+	for name, body := range legacyFiles {
+		saved, err := os.ReadFile(filepath.Join(s.options.Store.Directory, name))
+		if err != nil || !bytes.Equal(saved, body) {
+			t.Fatal("legacy state was changed", name, string(saved), err)
+		}
+	}
+	out, err := s.ExportConfig(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(text(out["path"]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var exported map[string]any
+	if err := json.Unmarshal(body, &exported); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"pulls", "github", "github_token"} {
+		if _, exists := exported[key]; exists {
+			t.Fatal("removed settings were exported", key)
+		}
+	}
+	if bytes.Contains(body, []byte("legacy-token")) {
+		t.Fatal("legacy GitHub token leaked into export")
+	}
+}
+func TestGetPagesNeverExposeSecretsAndSecretsRequirePost(t *testing.T) {
+	s, _ := harness(t, nil)
+	for _, path := range []string{"/ui/api/settings", "/ui/api/settings/lark/secret"} {
 		r := httptest.NewRecorder()
 		s.Handler().ServeHTTP(r, httptest.NewRequest("GET", path, nil))
-		if strings.Contains(r.Body.String(), "synthetic-old-secret") || strings.Contains(r.Body.String(), "PRIVATE-CODE") {
+		if strings.Contains(r.Body.String(), "synthetic-old-secret") {
 			t.Fatal("public page leaks secret")
 		}
 		if strings.HasSuffix(path, "/secret") && r.Code != 405 {

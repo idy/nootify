@@ -35,15 +35,6 @@ func (s *Service) serveHTTP(w http.ResponseWriter, r *http.Request) {
 				page["editable"] = editable
 				result = page
 			}
-		case "/ui/api/settings/github":
-			if s.options.GitHub == nil {
-				err = problem(404, "GitHub settings are not enabled")
-			} else {
-				result, err = s.options.GitHub(r.Context())
-				if err == nil && !editable {
-					result = redactLogin(result)
-				}
-			}
 		case "/ui/api/settings/lark/secret":
 			err = problem(405, "Secret reveal requires a local POST")
 		default:
@@ -114,20 +105,6 @@ func (s *Service) action(ctx context.Context, path string, body map[string]any) 
 			return s.ImportConfig(ctx, body["document"])
 		}
 		return s.PreviewImport(body["document"])
-	case "/ui/api/settings/github/login":
-		if s.options.GitHubAction == nil {
-			return nil, problem(404, "GitHub settings are not enabled")
-		}
-		action := text(body["action"])
-		switch action {
-		case "start", "cancel", "sign-out":
-			v, e := s.options.GitHubAction(ctx, action)
-			if action == "sign-out" {
-				v = map[string]any{"accepted": true}
-			}
-			return v, e
-		}
-		return nil, problem(400, "Expected a GitHub action: start, cancel or sign-out")
 	}
 	return nil, problem(404, "No such settings action")
 }
@@ -150,15 +127,6 @@ func decodeBody(w http.ResponseWriter, r *http.Request, limit int64) (map[string
 		return nil, problem(400, "Invalid JSON")
 	}
 	return body, nil
-}
-func redactLogin(v any) any {
-	m, e := jsonObject(v)
-	if e != nil || m == nil {
-		return v
-	}
-	login := object(m["login"])
-	m["login"] = map[string]any{"status": login["status"]}
-	return m
 }
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")

@@ -1,7 +1,7 @@
-package pulls
+// Package discovery reads local agent session metadata for notification enrollment.
+package discovery
 
 import (
-	"bufio"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -33,17 +33,16 @@ type Sources struct {
 	OpenCodeData string
 }
 type ConversationSession struct {
-	ID          string          `json:"id"`
-	Agent       string          `json:"agent"`
-	Adapter     string          `json:"adapter"`
-	Title       string          `json:"title"`
-	Directory   string          `json:"directory"`
-	Directories []string        `json:"directories"`
-	Branch      string          `json:"branch,omitempty"`
-	Origin      string          `json:"origin,omitempty"`
-	Archived    *bool           `json:"archived,omitempty"`
-	LastActive  string          `json:"lastActive,omitempty"`
-	Pulls       []PullReference `json:"pulls"`
+	ID          string   `json:"id"`
+	Agent       string   `json:"agent"`
+	Adapter     string   `json:"adapter"`
+	Title       string   `json:"title"`
+	Directory   string   `json:"directory"`
+	Directories []string `json:"directories"`
+	Branch      string   `json:"branch,omitempty"`
+	Origin      string   `json:"origin,omitempty"`
+	Archived    *bool    `json:"archived,omitempty"`
+	LastActive  string   `json:"lastActive,omitempty"`
 }
 type DiscoveryOptions struct {
 	Home               string
@@ -56,7 +55,6 @@ type DiscoveryResult struct {
 }
 type transcriptMeta struct {
 	Directory, Title, Branch string
-	Pulls                    []PullReference
 }
 type transcriptEntry struct {
 	size     int64
@@ -90,8 +88,8 @@ func DefaultSources(home string) Sources {
 	return Sources{ClaudeDir: env("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude")), DesktopRoots: []string{filepath.Join(base, "Claude-3p", "claude-code-sessions"), filepath.Join(base, "Claude", "claude-code-sessions")}, CodexHome: env("CODEX_HOME", filepath.Join(home, ".codex")), OpenCodeData: filepath.Join(env("XDG_DATA_HOME", filepath.Join(home, ".local", "share")), "opencode")}
 }
 
-// DiscoverSources reads structured metadata and standalone pr-link records. Message text is never subscription evidence.
-// IncludeTranscripts=false supports notification enrollment without recovering unverified Desktop aliases.
+// DiscoverSources reads local agent session metadata.
+// IncludeTranscripts=false supports notification enrollment without reading transcript contents.
 func DiscoverSources(ctx context.Context, opts DiscoveryOptions) (DiscoveryResult, error) {
 	d := &discoverer{transcripts: map[string]transcriptEntry{}}
 	return d.discover(ctx, opts)
@@ -243,20 +241,6 @@ func text(v any) string {
 	}
 	return ""
 }
-func truthy(v any) bool {
-	switch value := v.(type) {
-	case nil:
-		return false
-	case bool:
-		return value
-	case string:
-		return value != ""
-	case float64:
-		return value != 0
-	default:
-		return true
-	}
-}
 func object(v any) map[string]any { r, _ := v.(map[string]any); return r }
 func array(v any) []any           { r, _ := v.([]any); return r }
 
@@ -302,53 +286,10 @@ func epoch(v any) string {
 	}
 	return dateISO(time.UnixMilli(int64(n)))
 }
-func linkedPull(value any) (PullReference, bool) {
-	entry := object(value)
-	if entry == nil {
-		return PullReference{}, false
-	}
-	if h := entry["host"]; truthy(h) && h != "github.com" {
-		return PullReference{}, false
-	}
-	if p := entry["provider"]; truthy(p) && p != "github" {
-		return PullReference{}, false
-	}
-	u := entry["url"]
-	if u == nil {
-		u = entry["prUrl"]
-	}
-	if pr, ok := ParseGitHubPull(text(u)); ok {
-		return pr, true
-	}
-	repo := entry["repo"]
-	if repo == nil {
-		repo = entry["prRepository"]
-	}
-	n, ok := entry["prNumber"].(float64)
-	if ok && n == float64(int64(n)) && n > 0 && n <= 9007199254740991 {
-		return ParseGitHubPull(fmt.Sprintf("https://github.com/%s/pull/%d", text(repo), int64(n)))
-	}
-	return PullReference{}, false
-}
-func uniquePulls(values []PullReference) []PullReference {
-	out := []PullReference{}
-	seen := map[string]int{}
-	for _, p := range values {
-		k := pullKey(p.Repository, p.Number)
-		if i, ok := seen[k]; ok {
-			out[i] = p
-		} else {
-			seen[k] = len(out)
-			out = append(out, p)
-		}
-	}
-	return out
-}
 
 type desktopEntry struct {
-	session       ConversationSession
-	cliIDs        []string
-	authoritative bool
+	session ConversationSession
+	cliIDs  []string
 }
 
 var desktopFile = regexp.MustCompile(`^local_[A-Za-z0-9_-]+\.json$`)
@@ -432,13 +373,7 @@ func desktopSessions(ctx context.Context, roots []string, incomplete func()) ([]
 					if title == "" {
 						title = id
 					}
-					pulls := []PullReference{}
-					for _, p := range array(v["prs"]) {
-						if p, ok := linkedPull(p); ok {
-							pulls = append(pulls, p)
-						}
-					}
-					s := ConversationSession{ID: id, Agent: "claude", Adapter: "claude-desktop", Title: title, Directory: directory, Directories: dirs, Branch: text(v["branch"]), Archived: optionalBool(v["isArchived"]), LastActive: dateISO(modified), Pulls: uniquePulls(pulls)}
+					s := ConversationSession{ID: id, Agent: "claude", Adapter: "claude-desktop", Title: title, Directory: directory, Directories: dirs, Branch: text(v["branch"]), Archived: optionalBool(v["isArchived"]), LastActive: dateISO(modified)}
 					if previous := found[id]; previous != nil && previous.session.LastActive > s.LastActive {
 						continue
 					}
@@ -451,11 +386,10 @@ func desktopSessions(ctx context.Context, roots []string, incomplete func()) ([]
 							ids = append(ids, cli)
 						}
 					}
-					_, auth := v["prs"].([]any)
 					if found[id] == nil {
 						order = append(order, id)
 					}
-					found[id] = &desktopEntry{s, ids, auth}
+					found[id] = &desktopEntry{s, ids}
 					if len(found) >= maxSessions {
 						incomplete()
 						return desktopValues(order, found), nil
@@ -487,7 +421,10 @@ func uniqueExact(values []string) []string {
 
 var cwdPattern = regexp.MustCompile(`"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"`)
 
-func (d *discoverer) transcript(ctx context.Context, file, id string) (transcriptMeta, error) {
+func (d *discoverer) transcript(ctx context.Context, file string) (transcriptMeta, error) {
+	if ctx.Err() != nil {
+		return transcriptMeta{}, ctx.Err()
+	}
 	st, e := os.Stat(file)
 	if e != nil {
 		return transcriptMeta{}, e
@@ -504,7 +441,7 @@ func (d *discoverer) transcript(ctx context.Context, file, id string) (transcrip
 	if e != nil {
 		return transcriptMeta{}, e
 	}
-	result := transcriptMeta{Pulls: []PullReference{}}
+	result := transcriptMeta{}
 	if m := cwdPattern.FindSubmatch(head); m != nil {
 		var cwd string
 		if json.Unmarshal(append(append([]byte{'"'}, m[1]...), '"'), &cwd) == nil {
@@ -526,37 +463,6 @@ func (d *discoverer) transcript(ctx context.Context, file, id string) (transcrip
 			}
 		}
 	}
-	if _, e = f.Seek(0, io.SeekStart); e != nil {
-		return result, e
-	}
-	reader := bufio.NewReaderSize(f, 64*1024)
-	var line []byte
-	for {
-		if ctx.Err() != nil {
-			return result, ctx.Err()
-		}
-		part, prefix, err := reader.ReadLine()
-		line = append(line, part...)
-		if !prefix {
-			if strings.Contains(string(line), "pr-link") {
-				var v map[string]any
-				if json.Unmarshal(line, &v) == nil && v["type"] == "pr-link" && (!truthy(v["sessionId"]) || v["sessionId"] == id) {
-					if p, ok := linkedPull(v); ok {
-						result.Pulls = append(result.Pulls, p)
-					}
-				}
-			}
-			line = nil
-
-		}
-		if err != nil {
-			if err != io.EOF {
-				return result, err
-			}
-			break
-		}
-	}
-	result.Pulls = uniquePulls(result.Pulls)
 	d.transcripts[file] = transcriptEntry{st.Size(), st.ModTime(), result}
 	if len(d.transcripts) > maxSessions {
 		for k := range d.transcripts {
@@ -590,24 +496,19 @@ func (d *discoverer) claudeSessions(ctx context.Context, root string, desktop ma
 				continue
 			}
 			id := strings.TrimSuffix(file.Name(), ".jsonl")
-			if !include && strings.HasPrefix(key(id), "agent-") {
+			if !include && strings.HasPrefix(strings.ToLower(id), "agent-") {
 				continue
 			}
-			mapped := desktop[id]
-			if mapped != nil && (mapped.authoritative || !include) {
+			if desktop[id] != nil {
 				continue
 			}
 			source := filepath.Join(dir, file.Name())
-			data := transcriptMeta{Pulls: []PullReference{}}
+			data := transcriptMeta{}
 			if include {
-				data, e = d.transcript(ctx, source, id)
+				data, e = d.transcript(ctx, source)
 				if e != nil {
 					return nil, e
 				}
-			}
-			if mapped != nil {
-				mapped.session.Pulls = uniquePulls(append(mapped.session.Pulls, data.Pulls...))
-				continue
 			}
 			if include && fallback == "" && data.Directory == "" {
 				fallback, _ = DecodeProjectPath(ctx, project.Name(), "")
@@ -628,7 +529,7 @@ func (d *discoverer) claudeSessions(ctx context.Context, root string, desktop ma
 			if title == "" {
 				title = id
 			}
-			result = append(result, ConversationSession{ID: id, Agent: "claude", Adapter: "claude-code", Title: title, Directory: directory, Directories: dirs, Branch: data.Branch, LastActive: dateISO(st.ModTime()), Pulls: data.Pulls})
+			result = append(result, ConversationSession{ID: id, Agent: "claude", Adapter: "claude-code", Title: title, Directory: directory, Directories: dirs, Branch: data.Branch, LastActive: dateISO(st.ModTime())})
 			if len(result) >= maxSessions {
 				return result, nil
 			}
@@ -826,7 +727,7 @@ func codexSessions(ctx context.Context, home string) ([]ConversationSession, err
 		if n, ok := r["archived"].(int64); ok && (n == 0 || n == 1) {
 			archived = boolptr(n == 1)
 		}
-		out = append(out, ConversationSession{ID: id, Agent: "codex", Adapter: "codex", Title: title, Directory: dir, Directories: dirs, Branch: text(r["branch"]), Origin: text(r["origin"]), Archived: archived, LastActive: epoch(r["updated"]), Pulls: []PullReference{}})
+		out = append(out, ConversationSession{ID: id, Agent: "codex", Adapter: "codex", Title: title, Directory: dir, Directories: dirs, Branch: text(r["branch"]), Origin: text(r["origin"]), Archived: archived, LastActive: epoch(r["updated"])})
 	}
 	return out, nil
 }
@@ -878,7 +779,7 @@ func opencodeSessions(ctx context.Context, data string) ([]ConversationSession, 
 			dirs = append(dirs, dir)
 		}
 		archived := r["archived"] != nil && r["archived"] != int64(0)
-		out = append(out, ConversationSession{ID: id, Agent: "opencode", Adapter: "opencode", Title: title, Directory: dir, Directories: dirs, LastActive: epoch(r["updated"]), Archived: boolptr(archived), Pulls: []PullReference{}})
+		out = append(out, ConversationSession{ID: id, Agent: "opencode", Adapter: "opencode", Title: title, Directory: dir, Directories: dirs, LastActive: epoch(r["updated"]), Archived: boolptr(archived)})
 	}
 	return out, nil
 }
@@ -930,7 +831,7 @@ func opencodeJSONSessions(ctx context.Context, root string) ([]ConversationSessi
 				updated = t["created"]
 			}
 			archived := t["archived"] != nil && t["archived"] != float64(0)
-			result = append(result, ConversationSession{ID: id, Agent: "opencode", Adapter: "opencode", Title: title, Directory: dir, Directories: dirs, LastActive: epoch(updated), Archived: boolptr(archived), Pulls: []PullReference{}})
+			result = append(result, ConversationSession{ID: id, Agent: "opencode", Adapter: "opencode", Title: title, Directory: dir, Directories: dirs, LastActive: epoch(updated), Archived: boolptr(archived)})
 			if len(result) >= maxSessions {
 				return result, nil
 			}
@@ -939,7 +840,7 @@ func opencodeJSONSessions(ctx context.Context, root string) ([]ConversationSessi
 	return result, nil
 }
 
-// EligibleThreadSessions applies session-threads.ts's archive/identity rules in recent-first order.
+// EligibleThreadSessions applies archive/identity rules in recent-first order.
 // Enrollment selection and registered cooperative clients remain the caller's responsibility.
 func EligibleThreadSessions(sessions []ConversationSession) []ConversationSession {
 	out := []ConversationSession{}
@@ -952,4 +853,42 @@ func EligibleThreadSessions(sessions []ConversationSession) []ConversationSessio
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].LastActive > out[j].LastActive })
 	return out
+}
+
+func readBounded(path string, maximum int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if st.Size() > maximum {
+		return nil, fmt.Errorf("file exceeds %d bytes", maximum)
+	}
+	body, err := io.ReadAll(io.LimitReader(f, maximum+1))
+	if int64(len(body)) > maximum {
+		return nil, fmt.Errorf("file exceeds %d bytes", maximum)
+	}
+	return body, err
+}
+
+var credentialsURL = regexp.MustCompile(`(?i)https?://[^\s/@]+(?::[^\s/@]*)?@`)
+var credentialsToken = regexp.MustCompile(`(?i)(?:gh[pousr]_[a-z\d_]+|github_pat_[a-z\d_]+)`)
+var bearerToken = regexp.MustCompile(`(?i)Bearer\s+[^\s"']+`)
+
+func safeError(err error) string {
+	if err == nil {
+		return ""
+	}
+	s := credentialsURL.ReplaceAllString(err.Error(), "https://[redacted]@")
+	s = credentialsToken.ReplaceAllString(s, "[redacted]")
+	s = bearerToken.ReplaceAllString(s, "Bearer [redacted]")
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > 700 {
+		s = s[:700]
+	}
+	return s
 }

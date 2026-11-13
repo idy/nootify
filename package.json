@@ -3,7 +3,7 @@
   "version": "0.3.4",
   "private": true,
   "type": "module",
-  "description": "Routes Feishu replies to local coding-agent sessions and tracks pull requests, with a Windows and macOS tray app",
+  "description": "Routes notification replies to existing local coding-agent sessions, with a Windows and macOS tray app",
   "scripts": {
     "build": "node scripts/build-ui.mjs",
     "vendor:magpie": "node scripts/sync-magpie.mjs",

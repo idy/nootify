@@ -44,7 +44,7 @@ test('collapsed titlebar searches handle macOS blur before toggle click and pres
     Object.defineProperty(event, 'relatedTarget', { value: relatedTarget });
     input.dispatchEvent(event);
   };
-  for (const id of ['search', 'pull-search', 'repo-search']) {
+  for (const id of ['search']) {
     await t.test(id, () => {
       const input = document.getElementById(id)! as unknown as HTMLInputElement;
       const group = input.closest<HTMLElement>('.titlebar-search')!;

@@ -1,4 +1,4 @@
-package pulls
+package discovery
 
 import (
 	"context"
@@ -26,60 +26,61 @@ func transcriptFixture(t *testing.T, root, id, cwd string, records ...any) {
 		t.Fatal(e)
 	}
 }
-func prLink(id string, n int) map[string]any {
-	return map[string]any{"type": "pr-link", "sessionId": id, "prRepository": "team/project", "prNumber": n}
+func writeFixture(t *testing.T, path string, value any) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, body, 0600); err != nil {
+		t.Fatal(err)
+	}
 }
-func TestDiscoveryStructuredLinksDesktopAliasesAndUnlink(t *testing.T) {
+func TestDiscoveryDesktopAliasesAndSessionMetadata(t *testing.T) {
 	root := t.TempDir()
 	claude, desktop := filepath.Join(root, "claude"), filepath.Join(root, "desktop")
 	profile := filepath.Join(desktop, "account", "profile")
 	cwd := filepath.Join(root, "deleted-worktree")
-	writeFixture(t, filepath.Join(profile, "local_a.json"), map[string]any{"sessionId": "local_a", "cliSessionId": "current", "priorCliSessionIds": []string{"prior"}, "title": "Desktop title", "cwd": cwd, "originCwd": "/original", "worktreePath": cwd, "gitAnchors": []any{map[string]any{"gitRoot": "/anchor"}}, "isArchived": false, "prs": []any{map[string]any{"url": "https://github.com/team/project/pull/12"}}})
-	transcriptFixture(t, claude, "current", cwd, map[string]any{"cwd": cwd}, prLink("current", 99))
-	transcriptFixture(t, claude, "prior", cwd, map[string]any{"cwd": cwd}, prLink("prior", 98))
-	transcriptFixture(t, claude, "standalone", cwd, map[string]any{"cwd": cwd, "gitBranch": "fix", "message": "https://github.com/unrelated/repo/pull/8"}, prLink("standalone", 7), prLink("other", 88), prLink("standalone", 7))
+	writeFixture(t, filepath.Join(profile, "local_a.json"), map[string]any{"sessionId": "local_a", "cliSessionId": "current", "priorCliSessionIds": []string{"prior"}, "title": "Desktop title", "cwd": cwd, "originCwd": "/original", "worktreePath": cwd, "gitAnchors": []any{map[string]any{"gitRoot": "/anchor"}}, "isArchived": false})
+	transcriptFixture(t, claude, "current", cwd, map[string]any{"cwd": cwd})
+	transcriptFixture(t, claude, "prior", cwd, map[string]any{"cwd": cwd})
+	transcriptFixture(t, claude, "standalone", cwd, map[string]any{"cwd": cwd, "gitBranch": "fix"}, map[string]any{"type": "custom-title", "customTitle": "CLI title"})
 	sources := Sources{ClaudeDir: claude, DesktopRoots: []string{desktop}}
-	opts := DiscoveryOptions{Sources: &sources}
-	result, e := DiscoverSources(context.Background(), opts)
-	if e != nil || len(result.Warnings) != 0 || len(result.Sessions) != 2 {
-		t.Fatalf("%+v %v", result, e)
-	}
-	first, second := result.Sessions[0], result.Sessions[1]
-	if first.ID != "local_a" || len(first.Pulls) != 1 || first.Pulls[0].Number != 12 || !reflect.DeepEqual(first.Directories, []string{cwd, "/original", "/anchor"}) {
-		t.Fatal(first)
-	}
-	if second.ID != "standalone" || len(second.Pulls) != 1 || second.Pulls[0].Number != 7 || second.Branch != "fix" {
-		t.Fatal(second)
-	}
-	writeFixture(t, filepath.Join(profile, "local_a.json"), map[string]any{"sessionId": "local_a", "cliSessionId": "current", "priorCliSessionIds": []string{"prior"}, "cwd": cwd, "prs": []any{}})
-	result, e = DiscoverSources(context.Background(), opts)
-	if e != nil || len(result.Sessions[0].Pulls) != 0 {
-		t.Fatal(result, e)
-	}
-	writeFixture(t, filepath.Join(profile, "local_a.json"), map[string]any{"sessionId": "local_a", "cliSessionId": "current", "priorCliSessionIds": []string{"prior"}, "cwd": cwd})
-	result, e = DiscoverSources(context.Background(), opts)
-	if e != nil || len(result.Sessions[0].Pulls) != 2 {
-		t.Fatal(result, e)
+	for _, include := range []bool{true, false} {
+		result, err := DiscoverSources(context.Background(), DiscoveryOptions{Sources: &sources, IncludeTranscripts: &include})
+		if err != nil || len(result.Warnings) != 0 || len(result.Sessions) != 2 {
+			t.Fatalf("%+v %v", result, err)
+		}
+		first, second := result.Sessions[0], result.Sessions[1]
+		if first.ID != "local_a" || first.Title != "Desktop title" || !reflect.DeepEqual(first.Directories, []string{cwd, "/original", "/anchor"}) {
+			t.Fatal(first)
+		}
+		if second.ID != "standalone" || (include && (second.Branch != "fix" || second.Title != "CLI title")) {
+			t.Fatal(second)
+		}
 	}
 }
 func TestDiscoveryCacheRefreshAndTranscriptOptOut(t *testing.T) {
 	root := t.TempDir()
 	d := &discoverer{}
-	transcriptFixture(t, root, "s", "/gone", map[string]any{"cwd": "/gone"}, prLink("s", 1))
+	transcriptFixture(t, root, "s", "/gone", map[string]any{"cwd": "/gone", "gitBranch": "old"})
 	sources := Sources{ClaudeDir: root}
 	opts := DiscoveryOptions{Sources: &sources}
 	first, e := d.discover(context.Background(), opts)
-	if e != nil || len(first.Sessions[0].Pulls) != 1 {
+	if e != nil || len(first.Sessions) != 1 || first.Sessions[0].Branch != "old" {
 		t.Fatal(first, e)
 	}
-	transcriptFixture(t, root, "s", "/gone", map[string]any{"cwd": "/gone"}, prLink("s", 22))
+	transcriptFixture(t, root, "s", "/gone", map[string]any{"cwd": "/gone", "gitBranch": "updated"})
 	second, e := d.discover(context.Background(), opts)
-	if e != nil || second.Sessions[0].Pulls[0].Number != 22 {
+	if e != nil || second.Sessions[0].Branch != "updated" {
 		t.Fatal(second, e)
 	}
 	opts.IncludeTranscripts = boolptr(false)
 	result, e := d.discover(context.Background(), opts)
-	if e != nil || len(result.Sessions) != 1 || result.Sessions[0].Directory != "" || len(result.Sessions[0].Pulls) != 0 {
+	if e != nil || len(result.Sessions) != 1 || result.Sessions[0].Directory != "" || result.Sessions[0].Branch != "" {
 		t.Fatal(result, e)
 	}
 	// An unreadable Desktop catalog must not turn its unknown aliases into standalone CLI enrollment.
@@ -136,24 +137,7 @@ func TestDatabaseDiscoveryAndOpenCodeJSON(t *testing.T) {
 		t.Fatal(result, e)
 	}
 }
-func TestPullReferencesRemoteParsingAndThreadFilters(t *testing.T) {
-	for _, bad := range []string{"https://github.com.evil.test/a/b/pull/1", "https://user:pass@github.com/a/b/pull/1", "http://github.com/a/b/pull/1", "https://github.com/a/b/pull/0", "https://github.com/a/b/pull/9007199254740992"} {
-		if p, ok := ParseGitHubPull(bad); ok {
-			t.Fatal(p)
-		}
-	}
-	p, ok := ParseGitHubPull("https://github.com/Owner/repo/pull/12/files?diff=split#L1")
-	if !ok || p.URL != "https://github.com/Owner/repo/pull/12" {
-		t.Fatal(p)
-	}
-	for _, remote := range []string{"https://user:pass@github.com/Owner/repo.git", "git@github.com:Owner/repo.git", "ssh://git@github.com/Owner/repo.git"} {
-		if repo := ParseGitHubRemote(remote); repo != "Owner/repo" {
-			t.Fatal(repo)
-		}
-	}
-	if ParseGitHubRemote("https://github.com.evil.test/a/b") != "" {
-		t.Fatal("external remote")
-	}
+func TestThreadFiltersCancellationAndProjectPaths(t *testing.T) {
 	out := EligibleThreadSessions([]ConversationSession{{ID: "a", Adapter: "claude-desktop"}, {ID: "b", Adapter: "codex", Archived: boolptr(false), LastActive: "2"}, {ID: "c", Adapter: "codex", Archived: boolptr(true)}, {ID: "d", Adapter: "claude-code", LastActive: "3"}, {ID: "../e", Adapter: "opencode"}})
 	if len(out) != 2 || out[0].ID != "d" || out[1].ID != "b" {
 		t.Fatal(out)

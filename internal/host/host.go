@@ -18,10 +18,10 @@ import (
 	"time"
 
 	"github.com/idy/nootify/internal/bridge"
+	"github.com/idy/nootify/internal/discovery"
 	"github.com/idy/nootify/internal/events"
 	"github.com/idy/nootify/internal/httpx"
 	"github.com/idy/nootify/internal/providers"
-	"github.com/idy/nootify/internal/pulls"
 	"github.com/idy/nootify/internal/settings"
 	"github.com/idy/nootify/internal/storage"
 	"github.com/idy/nootify/internal/webui"
@@ -45,8 +45,6 @@ type Server struct {
 	logs        *events.Log
 	bridge      *bridge.Service
 	providers   *providers.Service
-	pulls       *pulls.Service
-	auth        *pulls.Auth
 	settings    *settings.Service
 	done        chan struct{}
 	once        sync.Once
@@ -105,39 +103,8 @@ func New(parent context.Context, o Options) (server *Server, err error) {
 	if err != nil {
 		return nil, err
 	}
-	s.pulls, err = pulls.New(pulls.Options{StateDir: s.store.Directory, Home: o.Home, Token: func() string { return s.store.Setting("github_token") }, Report: s.logs.Report})
-	if err != nil {
-		return nil, err
-	}
-	s.auth = pulls.NewAuth(pulls.AuthOptions{GetToken: func() string { return s.store.Setting("github_token") }, SetToken: func(token string) error {
-		var value any = token
-		if token == "" {
-			value = nil
-		}
-		return s.store.SetSettings(map[string]any{"github_token": value})
-	}, Report: s.logs.Report, Changed: s.pulls.RefreshSoon, StateDir: s.store.Directory})
 	s.owner = webui.NewOwner(s.store.Token)
-	s.settings, err = settings.New(settings.Options{Store: s.store, Version: o.Version, MCPConfig: o.MCPConfig, Report: s.logs.Report, Core: s.providers.Call, Editable: uiEditable, Agents: func() (any, error) { return s.bridge.Agents() }, SetAgent: func(id string, enabled bool) (any, error) { return s.bridge.SetAgent(id, enabled) }, PullPreferences: func() (any, error) { return s.pulls.Preferences() }, RestorePulls: func(value any) error {
-		raw, e := json.Marshal(value)
-		if e != nil {
-			return e
-		}
-		var preferences pulls.Preferences
-		if e = json.Unmarshal(raw, &preferences); e != nil {
-			return e
-		}
-		return s.pulls.Restore(preferences)
-	}, GitHub: func(ctx context.Context) (any, error) { return s.auth.Settings(ctx), nil }, GitHubAction: func(ctx context.Context, action string) (any, error) {
-		switch action {
-		case "start":
-			return s.auth.Start(s.ctx), nil
-		case "cancel":
-			return s.auth.Cancel(), nil
-		case "sign-out":
-			return map[string]bool{"accepted": true}, s.auth.SignOut()
-		}
-		return nil, httpx.Fail(400, "Invalid GitHub login action")
-	}})
+	s.settings, err = settings.New(settings.Options{Store: s.store, Version: o.Version, MCPConfig: o.MCPConfig, Report: s.logs.Report, Core: s.providers.Call, Editable: uiEditable, Agents: func() (any, error) { return s.bridge.Agents() }, SetAgent: func(id string, enabled bool) (any, error) { return s.bridge.SetAgent(id, enabled) }})
 	if err != nil {
 		return nil, err
 	}
@@ -162,9 +129,6 @@ func New(parent context.Context, o Options) (server *Server, err error) {
 				}
 			}
 		}
-	}
-	if err = s.pulls.Start(ctx); err != nil {
-		return nil, err
 	}
 	s.http = &http.Server{Handler: http.HandlerFunc(s.ServeHTTP), ConnContext: s.owner.ConnContext, ConnState: s.owner.ConnState, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 * 1024}
 	s.wg.Add(1)
@@ -225,12 +189,6 @@ func (s *Server) Close() error {
 		if s.settings != nil {
 			s.settings.Close()
 		}
-		if s.auth != nil {
-			attempt(s.auth.Close())
-		}
-		if s.pulls != nil {
-			attempt(s.pulls.Close())
-		}
 		s.wg.Wait()
 		if s.providers != nil {
 			attempt(s.providers.Close())
@@ -281,7 +239,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.owner.Wrap(http.HandlerFunc(s.route)).ServeHTTP(w, r)
 }
 func (s *Server) modules() []map[string]string {
-	return []map[string]string{{"name": "sessions", "status": "ready"}, {"name": "providers", "status": "ready"}, {"name": "pulls", "status": "ready"}, {"name": "agents", "status": "ready"}}
+	return []map[string]string{{"name": "sessions", "status": "ready"}, {"name": "providers", "status": "ready"}, {"name": "agents", "status": "ready"}}
 }
 
 // Direct local UI access does not require an owner-link capsule. Control APIs
@@ -310,8 +268,7 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.HasPrefix(path, "/ui/api/") {
 		if r.Method == "POST" {
-			lanChoice := !localPeer(r) && (path == "/ui/api/repos" || path == "/ui/api/pulls/refresh")
-			if (!editable && !lanChoice) || r.Header.Get("x-nootify-ui") != "1" {
+			if !editable || r.Header.Get("x-nootify-ui") != "1" {
 				httpx.WriteError(w, httpx.Fail(403, "Service owner authorization is required for local settings"))
 				return
 			}
@@ -368,10 +325,6 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 			s.settings.Handler().ServeHTTP(w, r)
 			return
 		}
-		if path == "/ui/api/pulls" || path == "/ui/api/pulls/refresh" || path == "/ui/api/repos" {
-			s.pulls.UIHandler().ServeHTTP(w, r)
-			return
-		}
 		if path == "/ui/api/agents" {
 			var result any
 			var err error
@@ -401,13 +354,6 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if path == "/ui/api/snapshot" && r.Method == "GET" {
-			snapshot := s.pulls.Snapshot()
-			followed := 0
-			for _, repository := range snapshot.Repositories {
-				if repository.Followed {
-					followed++
-				}
-			}
 			access := map[string]any{"owner_authenticated": webui.Authenticated(r) && localPeer(r)}
 			lan, tailscale := networkURLs(interfaceAddresses(), s.options.Port)
 			if lan != "" {
@@ -419,7 +365,7 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 			if localPeer(r) {
 				access["owner_ui_command"] = quote(s.options.Executable) + " ui-url --state-dir " + quote(s.store.Directory) + " --port " + strconv.Itoa(s.options.Port)
 			}
-			httpx.JSON(w, 200, map[string]any{"time": time.Now().UTC().Format(time.RFC3339Nano), "modules": s.modules(), "sessions": s.bridge.List(), "logs": s.logs.Recent(), "pulls": map[string]any{"internal": len(snapshot.Internal), "upstream": len(snapshot.Upstream), "running": snapshot.Refresh.Running, "followed": followed, "lastSuccessAt": snapshot.Refresh.LastSuccessAt, "error": snapshot.Refresh.Error, "signedOut": snapshot.Refresh.SignedOut}, "access": access})
+			httpx.JSON(w, 200, map[string]any{"time": time.Now().UTC().Format(time.RFC3339Nano), "modules": s.modules(), "sessions": s.bridge.List(), "logs": s.logs.Recent(), "access": access})
 			return
 		}
 		httpx.WriteError(w, httpx.Fail(404, "No such UI endpoint"))
@@ -443,10 +389,6 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 	}
 	if path == "/v1/services" && r.Method == "GET" {
 		httpx.JSON(w, 200, s.modules())
-		return
-	}
-	if path == "/v1/pulls" || path == "/v1/pulls/refresh" || path == "/v1/repos" || strings.HasPrefix(path, "/v1/repos/") {
-		s.pulls.UIHandler().ServeHTTP(w, r)
 		return
 	}
 	if strings.HasPrefix(path, "/v1/sessions") || strings.HasPrefix(path, "/v1/backends/") || strings.HasPrefix(path, "/v1/agents") {
@@ -550,7 +492,7 @@ func (s *Server) enroll() error {
 			existing[stringValue(session["adapter"])+":"+stringValue(session["session_id"])] = true
 		}
 	}
-	sources := pulls.DefaultSources(s.options.Home)
+	sources := discovery.DefaultSources(s.options.Home)
 	if !enabled["claude"] {
 		sources.ClaudeDir = ""
 		sources.DesktopRoots = nil
@@ -562,11 +504,11 @@ func (s *Server) enroll() error {
 		sources.OpenCodeData = ""
 	}
 	include := false
-	discovery, err := pulls.DiscoverSources(s.ctx, pulls.DiscoveryOptions{Home: s.options.Home, Sources: &sources, IncludeTranscripts: &include})
+	discovered, err := discovery.DiscoverSources(s.ctx, discovery.DiscoveryOptions{Home: s.options.Home, Sources: &sources, IncludeTranscripts: &include})
 	if err != nil {
 		return err
 	}
-	candidates := pulls.EligibleThreadSessions(discovery.Sessions)
+	candidates := discovery.EligibleThreadSessions(discovered.Sessions)
 	for _, candidate := range candidates {
 		if s.ctx.Err() != nil {
 			return s.ctx.Err()
