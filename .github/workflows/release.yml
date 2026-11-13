@@ -98,17 +98,23 @@ jobs:
     permissions:
       contents: write
     env:
-      RELEASE_NOTES: >-
-        Removes GitHub pull-request lists, repository subscriptions, GitHub sign-in
-        and background PR refresh so Nootify focuses on agent-session notifications.
-        Notification-session discovery and synchronization remain available;
-        existing settings and conversation state are retained. Legacy backup PR
-        sections are ignored while supported settings still import normally.
-        Includes the existing automatic Magpie CDN updates and offline fallback.
-        Apple Silicon macOS 13.5+ DMG and
-        Windows x64 per-user NSIS installer. The macOS app is ad-hoc signed and not
-        notarized; allow it under System Settings > Privacy & Security on first
-        launch. The Windows installer is not Authenticode signed.
+      RELEASE_NOTES: |
+        Adds automatic IPv4 access through the operating system's Tailscale client.
+        The local sidebar shows separate LAN and Tailscale addresses, with complete
+        addresses wrapping when needed. Connecting Tailscale after Nootify starts
+        needs no service restart.
+
+        Both devices need access to the same tailnet, with the configured TCP port
+        (9417 by default) permitted by Tailscale grants/ACLs and the host firewall.
+        Use the numeric Tailscale address shown in the sidebar. No embedded VPN
+        login, Tailscale Serve, Funnel, or router port forwarding is required.
+        Remote settings remain read-only, and control APIs still require a token.
+
+        Existing identity, settings, conversation state, and automatic Magpie
+        asset updates are retained. Apple Silicon macOS 13.5+ DMG and Windows x64
+        per-user NSIS installer. The macOS app is ad-hoc signed and not notarized;
+        allow it under System Settings > Privacy & Security on first launch.
+        The Windows installer is not Authenticode signed.
     steps:
       - uses: actions/checkout@v7
         with:

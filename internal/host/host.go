@@ -218,7 +218,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	remote := !localPeer(r)
 	host := strings.ToLower(r.Host)
 	if !lanPeer(r) || !s.allowedHost(r) {
-		httpx.WriteError(w, httpx.Fail(403, "Only this computer and its LAN addresses are accepted"))
+		httpx.WriteError(w, httpx.Fail(403, "Only this computer and its LAN or Tailscale addresses are accepted"))
 		return
 	}
 	pageNavigation := r.Method == "GET" && r.URL.Path == "/" && r.Header.Get("sec-fetch-dest") == "document"
@@ -355,8 +355,12 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 		}
 		if path == "/ui/api/snapshot" && r.Method == "GET" {
 			access := map[string]any{"owner_authenticated": webui.Authenticated(r) && localPeer(r)}
-			if address := s.lanURL(); address != "" {
-				access["lan_url"] = address
+			lan, tailscale := networkURLs(interfaceAddresses(), s.options.Port)
+			if lan != "" {
+				access["lan_url"] = lan
+			}
+			if tailscale != "" {
+				access["tailscale_url"] = tailscale
 			}
 			if localPeer(r) {
 				access["owner_ui_command"] = quote(s.options.Executable) + " ui-url --state-dir " + quote(s.store.Directory) + " --port " + strconv.Itoa(s.options.Port)

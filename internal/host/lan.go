@@ -24,8 +24,11 @@ func listenLAN(port int) (net.Listener, error) {
 	return net.Listen("tcp4", net.JoinHostPort("0.0.0.0", strconv.Itoa(port)))
 }
 
-// LAN authority is derived from the accepted socket and this computer's own
-// interfaces, never forwarding headers, DNS answers, or an embedded VPN device.
+// The OS Tailscale client assigns IPv4 addresses from this shared address range.
+var tailscaleIPv4 = netip.MustParsePrefix("100.64.0.0/10")
+
+// LAN/Tailscale authority is derived from the accepted socket and this computer's
+// own interfaces, never forwarding headers, DNS answers, or an embedded VPN device.
 func peerAddress(r *http.Request) (netip.Addr, bool) {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -37,7 +40,16 @@ func peerAddress(r *http.Request) (netip.Addr, bool) {
 func localPeer(r *http.Request) bool { ip, ok := peerAddress(r); return ok && ip.IsLoopback() }
 func lanPeer(r *http.Request) bool {
 	ip, ok := peerAddress(r)
-	return ok && (ip.IsLoopback() || ip.IsPrivate())
+	if !ok {
+		return false
+	}
+	if ip.IsLoopback() || ip.IsPrivate() {
+		return true
+	}
+	// CGNAT is not private LAN space. Accept it only on a connection addressed
+	// to this computer's Tailscale IP, as reported by the actual listening socket.
+	local, ok := r.Context().Value(http.LocalAddrContextKey).(*net.TCPAddr)
+	return ok && local != nil && tailscaleIPv4.Contains(ip) && tailscaleIPv4.Contains(local.AddrPort().Addr().Unmap())
 }
 func (s *Server) allowedHost(r *http.Request) bool {
 	host, port, err := net.SplitHostPort(r.Host)
@@ -56,7 +68,7 @@ func (s *Server) allowedHost(r *http.Request) bool {
 		if ip.IsLoopback() {
 			return localPeer(r)
 		}
-		if !ip.IsPrivate() {
+		if !ip.IsPrivate() && !tailscaleIPv4.Contains(ip) {
 			return false
 		}
 		for _, own := range interfaceAddresses() {
@@ -79,22 +91,29 @@ func interfaceAddresses() []netip.Addr {
 		prefix, err := netip.ParsePrefix(address.String())
 		if err == nil {
 			ip := prefix.Addr().Unmap()
-			if ip.IsPrivate() {
+			if ip.IsPrivate() || tailscaleIPv4.Contains(ip) {
 				result = append(result, ip)
 			}
 		}
 	}
 	return result
 }
-func (s *Server) lanURL() string {
-	addresses := interfaceAddresses()
+func networkURLs(addresses []netip.Addr, port int) (lan, tailscale string) {
+	var lanIP, tailscaleIP netip.Addr
 	for _, ip := range addresses {
-		if ip.Is4() {
-			return "http://" + net.JoinHostPort(ip.String(), strconv.Itoa(s.options.Port)) + "/"
+		ip = ip.Unmap()
+		if ip.IsPrivate() && (!lanIP.IsValid() || (ip.Is4() && !lanIP.Is4())) {
+			lanIP = ip
+		}
+		if tailscaleIPv4.Contains(ip) && !tailscaleIP.IsValid() {
+			tailscaleIP = ip
 		}
 	}
-	for _, ip := range addresses {
-		return "http://" + net.JoinHostPort(ip.String(), strconv.Itoa(s.options.Port)) + "/"
+	if lanIP.IsValid() {
+		lan = "http://" + net.JoinHostPort(lanIP.String(), strconv.Itoa(port)) + "/"
 	}
-	return ""
+	if tailscaleIP.IsValid() {
+		tailscale = "http://" + net.JoinHostPort(tailscaleIP.String(), strconv.Itoa(port)) + "/"
+	}
+	return lan, tailscale
 }

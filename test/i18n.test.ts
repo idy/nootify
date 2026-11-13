@@ -80,15 +80,18 @@ test('provider navigation and agent summaries replace the legacy global Feishu e
   assert.deepEqual([...document.querySelectorAll('#provider-type-options button strong')].map(item => item.textContent), ['飞书 Bot', '飞书个人 App', '远程 Nootify gRPC']);
   assert.equal(translate('en', '远程 Nootify gRPC'), 'Remote Nootify gRPC');
   assert.equal(translate('en', '搜索接入类型'), 'Search channel types');
-  assert.doesNotMatch(page, /slack|telegram|tailscale|tailnet/i);
-  assert.doesNotMatch(JSON.stringify(english), /slack|telegram|tailscale|tailnet|default notification channel/i);
+  assert.doesNotMatch(page, /slack|telegram/i);
+  assert.equal(document.querySelector('[data-view="settings-tailscale"]'), null);
+  assert.doesNotMatch(JSON.stringify(english), /slack|telegram|default notification channel/i);
   assert.ok(document.getElementById('lan-line'));
   assert.ok(document.getElementById('lan-url'));
+  assert.ok(document.getElementById('tailscale-line'));
+  assert.ok(document.getElementById('tailscale-url'));
   assert.equal(translate('en', '通过局域网访问时只能查看；请在运行 Nootify 的电脑上修改设置。'), 'Service settings are read-only over LAN. Edit them on the computer running Nootify.');
   assert.equal(translate('en', '飞书通知'), 'Feishu notifications');
   assert.equal(translate('zh-CN', '飞书通知'), '飞书通知');
   const script = await readFile(new URL('../../src/ui-app.ts', import.meta.url), 'utf8');
-  assert.doesNotMatch(script, /\/ui\/api\/settings\/(?:channel|slack|telegram)|chat-transport|tailscale|tailnet/i);
+  assert.doesNotMatch(script, /\/ui\/api\/settings\/(?:channel|slack|telegram|tailscale)|chat-transport/i);
 });
 
 test('saved preferences override browser defaults; native preferences override browser storage', async t => {

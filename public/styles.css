@@ -93,6 +93,8 @@ svg { flex: none; }
 .status-line { display: flex; align-items: center; gap: 8px; height: 18px; min-width: 0; line-height: 18px; }
 .status-line .value { margin-left: auto; overflow: hidden; color: var(--faint); text-overflow: ellipsis; white-space: nowrap; }
 .status-line .value.selectable { user-select: all; cursor: text; }
+.network-address { height: auto; min-height: 18px; flex-wrap: wrap; row-gap: 0; }
+.network-address .value { flex-shrink: 0; max-width: 100%; }
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); }
 .dot.ok { background: var(--green); }
 .dot.warn { background: var(--amber); }
