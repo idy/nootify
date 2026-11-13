@@ -29,11 +29,11 @@ test('every English translation preserves all source interpolation parameters', 
 
 test('interpolation preserves user content without interpreting HTML, placeholders or replacement patterns', () => {
   const value = '<img src=x onerror=alert(1)> $& {p1} 中文 👋';
-  assert.equal(translate('en', '关注 {p0}', { p0: value }), `Follow ${value}`);
-  assert.equal(translate('zh-CN', '关注 {p0}', { p0: value }), `关注 ${value}`);
-  assert.equal(translate('en', '{p0} 个 PR', { p0: 0 }), 'PRs: 0');
-  assert.equal(translate('en', '关注 {p0}'), 'Follow {p0}');
-  assert.equal(translate('en', '关注 {p0}', Object.create({ p0: 'inherited' }) as Record<string, unknown>), 'Follow {p0}');
+  assert.equal(translate('en', '启用 {p0}', { p0: value }), `Enable ${value}`);
+  assert.equal(translate('zh-CN', '启用 {p0}', { p0: value }), `启用 ${value}`);
+  assert.equal(translate('en', '{p0} 条待确认', { p0: 0 }), '0 pending');
+  assert.equal(translate('en', '启用 {p0}'), 'Enable {p0}');
+  assert.equal(translate('en', '启用 {p0}', Object.create({ p0: 'inherited' }) as Record<string, unknown>), 'Enable {p0}');
 });
 
 test('all marked static UI messages and dynamic translation keys have a catalog entry', async () => {
@@ -55,7 +55,7 @@ test('provider navigation and agent summaries replace the legacy global Feishu e
   const page = await readFile(new URL('../../public/index.html', import.meta.url), 'utf8');
   const { document } = parseHTML(page);
   assert.deepEqual([...document.querySelectorAll('#settings-subnav [data-view]')].map(link => link.getAttribute('data-view')), [
-    'settings-general', 'settings-github', 'settings-remote', 'settings-backup', 'settings-about',
+    'settings-general', 'settings-remote', 'settings-backup', 'settings-about',
   ]);
   assert.equal(document.querySelectorAll('[data-panel="settings-lark"]').length, 1);
   assert.equal(document.querySelector('#notification-channel, #channel-save, [id^="slack-"], [id^="telegram-"]'), null);
@@ -69,8 +69,8 @@ test('provider navigation and agent summaries replace the legacy global Feishu e
   assert.doesNotMatch(JSON.stringify(english), /\bproviders?\b/i);
   assert.equal(document.querySelector('#settings-subnav [href="#/settings/lark"]'), null);
   assert.ok(document.querySelector('[data-panel="settings-remote"]'));
-  assert.equal(document.querySelectorAll('.nav-label')[1].textContent, 'Repos');
-  assert.equal(document.querySelector('[data-view="settings-github"]')!.textContent, 'GitHub');
+  assert.equal(document.querySelectorAll('.nav-label').length, 1);
+  assert.equal(document.querySelector('[data-view="settings-github"], [id="pulls-view"], [id="repos-view"]'), null);
   assert.doesNotMatch(page, /每台电脑独立轮询/);
   assert.ok(document.querySelector('#channel-state'));
   assert.equal(document.querySelector('#agents-view select'), null);

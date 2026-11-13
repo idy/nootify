@@ -22,7 +22,6 @@ const (
 	ModuleStatus
 	Sessions
 	Lark
-	Pulls
 	Agents
 	Ready
 	Disabled
@@ -101,7 +100,6 @@ var catalog = [][2]string{
 	ModuleStatus:        {"{name}: {status}", "{name}：{status}"},
 	Sessions:            {"Sessions", "会话"},
 	Lark:                {"Feishu", "飞书"},
-	Pulls:               {"PR", "PR"},
 	Agents:              {"Agents", "Agents"},
 	Ready:               {"Ready", "就绪"},
 	Disabled:            {"Disabled", "未启用"},

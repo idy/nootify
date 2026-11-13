@@ -13,12 +13,6 @@
       <a class="nav-item mds-nav-item" href="#/providers" data-view="providers"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2.5" width="4" height="4" rx="1"/><rect x="10" y="9.5" width="4" height="4" rx="1"/><path d="M6 4.5h4a2 2 0 0 1 2 2v3M4 6.5v3a2 2 0 0 0 2 2h4"/></svg><span data-i18n="通道">通道</span><span class="nav-count" id="providers-count"></span></a>
       <a class="nav-item mds-nav-item" href="#/agents" data-view="agents"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1.5"/><path d="M6.5 1.5V4M9.5 1.5V4M6.5 12v2.5M9.5 12v2.5M1.5 6.5H4M1.5 9.5H4M12 6.5h2.5M12 9.5h2.5"/></svg><span>Agents</span><span class="nav-count" id="agents-count"></span></a>
     </div>
-    <div class="nav-group">
-      <p class="nav-label mds-nav-group">Repos</p>
-      <a class="nav-item mds-nav-item" href="#/pulls/internal" data-view="pulls-internal"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="4.5" cy="3.5" r="1.5"/><circle cx="4.5" cy="12.5" r="1.5"/><circle cx="11.5" cy="12.5" r="1.5"/><path d="M4.5 5v6M11.5 11V6.5a2 2 0 0 0-2-2H7m0 0 1.5-1.5M7 4.5 8.5 6"/></svg><span data-i18n="我们仓库的 PR">我们仓库的 PR</span><span class="nav-count" id="internal-count"></span></a>
-      <a class="nav-item mds-nav-item" href="#/pulls/upstream" data-view="pulls-upstream"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 13.5V4M4.5 7.5 8 4l3.5 3.5"/><path d="M3 2.5h10"/></svg><span data-i18n="提交上游的 PR">提交上游的 PR</span><span class="nav-count" id="upstream-count"></span></a>
-      <a class="nav-item mds-nav-item" href="#/repos" data-view="repos"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 2h8v9.5h-8A1.5 1.5 0 0 0 3 13V3.5A1.5 1.5 0 0 1 4.5 2z"/><path d="M3 13a1.5 1.5 0 0 0 1.5 1.5h8v-3"/></svg><span data-i18n="PR 订阅">PR 订阅</span><span class="nav-count" id="repos-count"></span></a>
-    </div>
   </nav>
   <nav class="nav settings-nav mds-nav" aria-label="设置" data-i18n-aria-label="设置">
     <div class="nav-group">
@@ -27,7 +21,6 @@
   </nav>
   <nav class="subnav mds-subnav" id="settings-subnav" aria-label="设置页面" data-i18n-aria-label="设置页面" hidden>
     <a class="nav-item mds-nav-item" href="#/settings/general" data-view="settings-general"><span data-i18n="通用">通用</span></a>
-    <a class="nav-item mds-nav-item" href="#/settings/github" data-view="settings-github"><span>GitHub</span></a>
     <a class="nav-item mds-nav-item" href="#/settings/remote" data-view="settings-remote"><span data-i18n="远程接入">远程接入</span></a>
     <a class="nav-item mds-nav-item" href="#/settings/backup" data-view="settings-backup"><span data-i18n="导入导出">导入导出</span></a>
     <a class="nav-item mds-nav-item" href="#/settings/about" data-view="settings-about"><span data-i18n="关于">关于</span><span class="update-dot" title="有新版本" data-i18n-title="有新版本" hidden></span></a>
@@ -47,13 +40,6 @@
         <button type="button" id="pause" class="text-button mds-button mds-button--subtle" aria-pressed="false" aria-label="暂停" title="暂停" data-i18n-aria-label="暂停" data-i18n-title="暂停"><svg class="page-action-icon" viewBox="0 0 16 16" aria-hidden="true"><path id="pause-icon" d="M5.5 3v10M10.5 3v10"/></svg><span id="pause-label" class="action-label" data-i18n="暂停">暂停</span></button>
         <button type="button" id="export" class="text-button mds-button mds-button--subtle" title="导出当前筛选结果" aria-label="导出" data-i18n-title="导出当前筛选结果" data-i18n-aria-label="导出"><svg class="page-action-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 10V2M5 5l3-3 3 3M3 9v4h10V9"/></svg><span class="action-label" data-i18n="导出">导出</span></button>
       </div>
-      <div id="pull-actions" class="titlebar-page-actions" hidden>
-        <div class="titlebar-search"><button type="button" class="icon-button search-toggle mds-icon-button" aria-controls="pull-search" aria-expanded="false" aria-label="搜索 PR" title="搜索 PR" data-i18n-aria-label="搜索 PR" data-i18n-title="搜索 PR"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/></svg></button><label class="search"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/></svg><input id="pull-search" type="search" placeholder="搜索标题、仓库、作者" data-i18n-placeholder="搜索标题、仓库、作者" autocomplete="off" aria-label="搜索 PR" data-i18n-aria-label="搜索 PR"></label></div>
-        <button type="button" id="pull-sort" class="text-button mds-button mds-button--subtle" title="切换排序方向" data-i18n-title="切换排序方向"><svg class="page-action-icon" viewBox="0 0 16 16" aria-hidden="true"><path id="pull-sort-icon" d="M8 13V3m-4 4 4-4 4 4"/></svg><span id="pull-sort-label" class="action-label"></span></button>
-      </div>
-      <div id="repo-actions" class="titlebar-page-actions" hidden>
-        <div class="titlebar-search"><button type="button" class="icon-button search-toggle mds-icon-button" aria-controls="repo-search" aria-expanded="false" aria-label="搜索 PR 订阅" title="搜索 PR 订阅" data-i18n-aria-label="搜索 PR 订阅" data-i18n-title="搜索 PR 订阅"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/></svg></button><label class="search"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/></svg><input id="repo-search" type="search" placeholder="搜索仓库、会话、PR" data-i18n-placeholder="搜索仓库、会话、PR" autocomplete="off" aria-label="搜索 PR 订阅" data-i18n-aria-label="搜索 PR 订阅"></label></div>
-      </div>
       <span id="updated" class="updated"></span>
       <div id="titlebar-update" class="titlebar-update" hidden>
         <button type="button" id="update-action" class="text-button update-action mds-button mds-button--subtle"><svg viewBox="0 0 16 16" aria-hidden="true"><path id="update-action-icon" d="M8 13V3M4 7l4-4 4 4"/></svg><span id="update-action-label" role="status" aria-live="polite" aria-atomic="true" data-i18n="检查更新">检查更新</span></button>
@@ -62,7 +48,6 @@
     </div>
   </header>
   <div id="error" class="banner" role="alert" hidden></div>
-  <div id="github-signin" class="banner note" role="status" hidden><span data-i18n="还没有登录 GitHub，PR 数据不会更新。">还没有登录 GitHub，PR 数据不会更新。</span><a class="inline-link" href="#/settings/github" data-i18n="去登录">去登录</a></div>
   <section id="logs-view" class="view" aria-label="运行日志" data-i18n-aria-label="运行日志">
     <p class="hint" data-i18n="按消息方向和用途查看最近 1,000 条事件，最新在前。发送成功不代表已读，只有收到会话回执才确认接收。">按消息方向和用途查看最近 1,000 条事件，最新在前。发送成功不代表已读，只有收到会话回执才确认接收。</p>
     <div class="list-filters" id="outcome-tabs" role="group" aria-label="按事件用途筛选" data-i18n-aria-label="按事件用途筛选"></div>
@@ -71,16 +56,6 @@
   <section id="sessions-view" class="view" aria-label="路由会话" hidden data-i18n-aria-label="路由会话">
     <p class="hint" data-i18n="收到消息后，Nootify 按通道的会话绑定查找对应的 agent 会话。这里保留最近 1,000 个路由会话及最后一次查找结果，重启后仍可查看。">收到消息后，Nootify 按通道的会话绑定查找对应的 agent 会话。这里保留最近 1,000 个路由会话及最后一次查找结果，重启后仍可查看。</p>
     <div class="group mds-group"><div class="rows" id="sessions-body" role="list"></div><div id="no-sessions" class="empty" hidden><strong data-i18n="还没有会话路由记录">还没有会话路由记录</strong><span data-i18n="通道收到绑定会话的消息后，这里会显示查找结果。">通道收到绑定会话的消息后，这里会显示查找结果。</span></div></div>
-  </section>
-  <section id="pulls-view" class="view" aria-label="PR" hidden>
-    <div id="pull-banner" class="banner" role="status" hidden></div>
-    <div class="list-summary"><div><div class="group-title" id="pull-title"></div><div class="group-sub"><span id="pull-sub"></span><a id="pull-hidden" class="inline-link" href="#/repos" hidden></a></div></div><div class="group-side" id="pull-side"></div></div>
-    <div class="list-filters" id="pull-tabs" role="group" aria-label="按状态筛选" data-i18n-aria-label="按状态筛选"></div>
-    <div class="group mds-group">
-      <div class="rows" id="pull-rows" role="list" aria-labelledby="pull-title"></div>
-      <div id="pull-empty" class="empty" hidden><strong id="pull-empty-title"></strong><span id="pull-empty-detail"></span></div>
-    </div>
-    <details class="warnings" id="pull-warnings" hidden><summary></summary><ul></ul></details>
   </section>
   <section id="providers-view" class="view" aria-label="通道" data-i18n-aria-label="通道" hidden>
     <p class="hint" data-i18n="连接飞书或远程 Nootify，收发会话消息。">连接飞书或远程 Nootify，收发会话消息。</p>
@@ -162,18 +137,6 @@
       <div class="rows" id="agent-rows" role="list" aria-labelledby="channel-title"></div>
     </div>
   </section>
-  <section id="repos-view" class="view" aria-label="PR 订阅" data-i18n-aria-label="PR 订阅" hidden>
-    <p class="hint" data-i18n="点击仓库查看来源会话，勾选或取消关注。Open PR 包含草稿。">点击仓库查看来源会话，勾选或取消关注。Open PR 包含草稿。</p>
-    <div id="repo-banner" class="banner" role="alert" hidden></div>
-    <div class="list-filters" id="repo-tabs" role="group" aria-label="按关注状态筛选" data-i18n-aria-label="按关注状态筛选"></div>
-    <div class="group mds-group">
-      <table class="repo-table" id="repo-table" aria-label="PR 订阅" data-i18n-aria-label="PR 订阅">
-        <thead><tr><th scope="col" class="repo-follow-cell" data-i18n="关注">关注</th><th scope="col" class="repo-name-cell" data-i18n="仓库">仓库</th><th scope="col" class="repo-agents-cell" data-i18n="来源">来源</th><th scope="col" class="repo-scope-cell" data-i18n="订阅范围">订阅范围</th><th scope="col" class="repo-sessions-cell" data-i18n="会话">会话</th><th scope="col" class="repo-linked-cell" data-i18n="关联 PR">关联 PR</th><th scope="col" class="repo-open-cell">Open PR</th><th scope="col" class="repo-active-cell" data-i18n="最近活跃">最近活跃</th></tr></thead>
-        <tbody id="repo-rows"></tbody>
-      </table>
-      <div id="repo-empty" class="empty" hidden><strong id="repo-empty-title"></strong><span id="repo-empty-detail"></span></div>
-    </div>
-  </section>
   <section id="settings-view" class="view" aria-label="设置" data-i18n-aria-label="设置" hidden>
     <div id="settings-banner" class="banner" role="alert" hidden></div>
     <div data-panel="settings-general" hidden>
@@ -189,13 +152,6 @@
         </div>
       </div>
       <p class="hint" data-i18n="语言偏好保存在当前设备，不影响其他设备。">语言偏好保存在当前设备，不影响其他设备。</p>
-    </div>
-    <div data-panel="settings-github" hidden>
-      <div class="group mds-group">
-        <div class="setting"><div class="setting-main"><div class="setting-title" data-i18n="GitHub 账号">GitHub 账号</div><div class="setting-sub" id="github-status"></div></div><span id="github-state"></span><div class="setting-actions"><button type="button" id="github-login" class="text-button primary mds-button mds-button--primary" hidden data-i18n="登录">登录</button><button type="button" id="github-logout" class="text-button mds-button mds-button--subtle" hidden data-i18n="退出登录">退出登录</button></div></div>
-        <div class="setting" id="github-flow" hidden><div class="setting-main"><div class="setting-title" id="github-flow-title"></div><div class="setting-sub" id="github-flow-sub"></div></div><span id="github-code" class="device-code mono mds-mono"></span><div class="setting-actions"><button type="button" id="github-cancel" class="text-button mds-button mds-button--subtle" data-i18n="取消">取消</button><button type="button" id="github-copy" class="text-button mds-button mds-button--subtle" data-i18n="复制">复制</button><a id="github-open" class="text-button primary mds-button mds-button--primary" href="https://github.com/login/device" target="_blank" rel="noopener noreferrer" data-i18n="打开 GitHub">打开 GitHub</a></div></div>
-      </div>
-      <p class="hint" data-i18n="在浏览器里输入验证码并授权后，这里会自动更新。令牌只保存在 Nootify 的状态目录（权限 0600），和终端里的 gh 互不影响，也不需要安装 gh。GitHub 没有私有仓库的只读授权，所以会申请 repo 和 read:org；Nootify 只发送只读查询。">在浏览器里输入验证码并授权后，这里会自动更新。令牌只保存在 Nootify 的状态目录（权限 0600），和终端里的 gh 互不影响，也不需要安装 gh。GitHub 没有私有仓库的只读授权，所以会申请 repo 和 read:org；Nootify 只发送只读查询。</p>
     </div>
     <div data-panel="settings-remote" hidden>
       <p class="hint" data-i18n="允许其他 Nootify 连接此节点。未匹配到本机会话的消息会独立发送给每个下游节点，各自确认接收。">允许其他 Nootify 连接此节点。未匹配到本机会话的消息会独立发送给每个下游节点，各自确认接收。</p>
@@ -269,7 +225,7 @@
         <div class="setting"><div class="setting-main"><div class="setting-title" data-i18n="导入配置">导入配置</div><div class="setting-sub" data-i18n="选择导出的文件，确认内容后再写入">选择导出的文件，确认内容后再写入</div></div><div class="setting-actions"><input id="import-file" type="file" accept=".json,application/json" aria-label="选择配置文件" data-i18n-aria-label="选择配置文件" hidden><button type="button" id="import-choose" class="text-button primary mds-button mds-button--primary" data-i18n="选择文件…">选择文件…</button></div></div>
         <div class="setting" id="import-preview" hidden><div class="setting-main"><div class="setting-title" id="import-name"></div><div class="setting-sub" id="import-date"></div><ul id="import-lines" class="setting-list"></ul></div><div class="setting-actions"><button type="button" id="import-cancel" class="text-button mds-button mds-button--subtle" data-i18n="取消">取消</button><button type="button" id="import-apply" class="text-button primary mds-button mds-button--primary" data-i18n="写入这些设置">写入这些设置</button></div></div>
       </div>
-      <p class="hint" data-i18n="配置文件包含飞书凭据与接收人、PR 配置与关注选择、Codex 和 OpenCode 连接、已启用的 Agents。其中有明文密钥，文件权限是 0600，不要提交到仓库或转发。导入只覆盖文件里有的设置；Agents 只会启用，不会关闭。GitHub 登录不在文件里，换机器后重新登录。">配置文件包含飞书凭据与接收人、PR 配置与关注选择、Codex 和 OpenCode 连接、已启用的 Agents。其中有明文密钥，文件权限是 0600，不要提交到仓库或转发。导入只覆盖文件里有的设置；Agents 只会启用，不会关闭。GitHub 登录不在文件里，换机器后重新登录。</p>
+      <p class="hint" data-i18n="配置文件包含飞书凭据与接收人、Codex 和 OpenCode 连接、已启用的 Agents。其中有明文密钥，文件权限是 0600，不要提交到仓库或转发。导入只覆盖文件里有的设置；Agents 只会启用，不会关闭。">配置文件包含飞书凭据与接收人、Codex 和 OpenCode 连接、已启用的 Agents。其中有明文密钥，文件权限是 0600，不要提交到仓库或转发。导入只覆盖文件里有的设置；Agents 只会启用，不会关闭。</p>
     </div>
     <div data-panel="settings-about" hidden>
       <div class="group mds-group">

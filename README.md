@@ -2,7 +2,7 @@
 
 Follow your coding agents from Feishu and send replies back to
 the matching conversation on your computer. Nootify is a Windows and macOS tray
-app that also keeps your GitHub pull requests in view. Connect a Feishu bot
+app. Connect a Feishu bot
 directly or use another Nootify node as your notification provider.
 
 [Website](https://nootify.idy.dev/) · [Download](https://github.com/idy/nootify/releases/latest) · [Setup guide](docs/guide.md#agents-and-notification-channels) · [Discord](https://discord.gg/JMJZ4mDcc4)
@@ -21,8 +21,6 @@ directly or use another Nootify node as your notification provider.
   receipt reaction in Feishu.
 - Supports Trae and WorkBuddy through an inbox they check at work milestones;
   it cannot wake an idle or closed conversation in those clients.
-- Shows pull requests from your projects and contributions, including review,
-  CI, and merge-conflict status.
 - Keeps routing state and credentials in a local background service.
 
 ## Install
@@ -108,7 +106,7 @@ npm run test:integration
 ```
 
 The Go backend directly calls the notification core. It owns HTTP authentication, SQLite state, agent input adapters,
-session discovery, PR tracking, settings, CLI commands, and service management.
+session discovery, settings, CLI commands, and service management.
 There are no Node or notification-core child processes. The MyGo
 window owns its trusted asset/authorization handler in process; it never launches
 a separate UI service. Closing the window hides it, and the independently managed
@@ -124,9 +122,9 @@ For an isolated synthetic browser preview of the application UI:
 npm run preview:ui
 ```
 
-The fixture provides synthetic channels, sessions, logs, repositories, and
+The fixture provides synthetic channels, sessions, logs, agents, and
 contacts. Preview edits are temporary; personal-app QR authorization is simulated
-and never grants a real Feishu app. Real OAuth, provider connections, and filesystem
+and never grants a real Feishu app. Real provider connections and filesystem
 actions are unavailable. Use the local URL printed by the preview command.
 The fixture is separate from the installed Go service; preview results do not
 verify native asset embedding, authenticated transport, or desktop behavior.
@@ -161,8 +159,9 @@ See [desktop builds](docs/guide.md#build-the-desktop-app).
 | `internal/host/`, `internal/app/` | Unified Go HTTP service and CLI entry point |
 | `internal/providers/`, `native/core/` | Direct notification dispatch, Feishu WebSocket, remote gRPC, durable delivery state |
 | `internal/bridge/` | Agent transports, targeted lookup, prompt instructions, cooperative inboxes |
+| `internal/discovery/` | Local conversation discovery and notification-session enrollment |
 | `internal/storage/`, `internal/events/` | Compatible SQLite persistence and bounded private logs |
-| `internal/pulls/`, `internal/settings/` | PR discovery/tracking, native OAuth/setup flows, configuration and contacts |
+| `internal/settings/` | Per-channel registration/setup flows, configuration and contacts |
 | `internal/webui/` | Trusted UI assets, owner proof and encrypted framing in Go |
 | `internal/service/` | Owned LaunchAgent/Scheduled Task management and legacy installation migration |
 | `src/` | Browser UI TypeScript and browser-only API declarations |

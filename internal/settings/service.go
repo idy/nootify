@@ -27,10 +27,6 @@ type Options struct {
 	Core               func(context.Context, string, any) (any, error)
 	Agents             func() (any, error)
 	SetAgent           func(string, bool) (any, error)
-	PullPreferences    func() (any, error)
-	RestorePulls       func(any) error
-	GitHub             func(context.Context) (any, error)
-	GitHubAction       func(context.Context, string) (any, error)
 	// Env nil uses the process environment. An empty map isolates tests from host credentials.
 	Env                         map[string]string
 	HTTPClient                  *http.Client

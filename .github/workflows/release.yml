@@ -99,13 +99,13 @@ jobs:
       contents: write
     env:
       RELEASE_NOTES: >-
-        Automatically downloads the latest stable Magpie Design System from jsDelivr
-        at startup and every six hours. Complete CSS, font and icon releases are
-        size/SHA256-validated and cached locally; offline or failed updates retain
-        the last usable cache or bundled fallback. New styles apply on the next
-        page load. Bundles Magpie v0.4.4 with Outfit and Source Sans 3 fonts and its
-        updated compact type scale. Existing identity, settings and conversation
-        state are retained. Apple Silicon macOS 13.5+ DMG and
+        Removes GitHub pull-request lists, repository subscriptions, GitHub sign-in
+        and background PR refresh so Nootify focuses on agent-session notifications.
+        Notification-session discovery and synchronization remain available;
+        existing settings and conversation state are retained. Legacy backup PR
+        sections are ignored while supported settings still import normally.
+        Includes the existing automatic Magpie CDN updates and offline fallback.
+        Apple Silicon macOS 13.5+ DMG and
         Windows x64 per-user NSIS installer. The macOS app is ad-hoc signed and not
         notarized; allow it under System Settings > Privacy & Security on first
         launch. The Windows installer is not Authenticode signed.

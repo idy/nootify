@@ -8,11 +8,11 @@ web
 
 ## Users
 
-The owner of a Windows or macOS computer follows local coding-agent conversations, receives their progress in Feishu, and sends replies back to the addressed conversation. They also track pull requests associated with those conversations and repositories.
+The owner of a Windows or macOS computer follows local coding-agent conversations, receives their progress in Feishu, and sends replies back to the addressed conversation.
 
 ## Product Purpose
 
-Nootify connects existing local agent sessions to notification providers and keeps their related GitHub pull requests in view. Notification-session creation does not create, unarchive, or take over a native agent conversation. Nootify routes input to existing clients rather than calling a model API itself.
+Nootify connects existing local agent sessions to notification providers. Notification-session creation does not create, unarchive, or take over a native agent conversation. Nootify routes input to existing clients rather than calling a model API itself.
 
 ## Positioning
 
@@ -20,7 +20,7 @@ An agent session is the business identity. Platform groups and topics are privat
 
 ## Operating Context
 
-The application ships as one Go executable with background-service, CLI, and Go/MyGo desktop modes. The Go backend directly owns the HTTP API, agent transports, session discovery, repository tracking, settings, notification core, and direct LAN HTTP access. TypeScript is limited to the browser UI, which is compiled and embedded during the build; the installed application does not use a Node runtime or notification sidecars.
+The application ships as one Go executable with background-service, CLI, and Go/MyGo desktop modes. The Go backend directly owns the HTTP API, agent transports, session discovery, settings, notification core, and direct LAN HTTP access. TypeScript is limited to the browser UI, which is compiled and embedded during the build; the installed application does not use a Node runtime or notification sidecars.
 
 The desktop uses the system WebView on Windows and macOS. The browser UI shares its design language across those platforms, while the window, tray, menus, keyboard shortcuts, and updater use native platform behavior. Closing the window hides it; quitting the desktop leaves the independently managed Go background job running.
 
@@ -36,17 +36,15 @@ Providers implement idempotent session creation, metadata access, deletion, rich
 
 Local adapters address existing Claude, Codex, and OpenCode sessions through their supported input transports. Trae and WorkBuddy use explicitly polled inboxes; those inboxes cannot wake an idle or closed conversation. A transport write is not proof that an agent processed a message, and receipt of a message does not approve a permission request.
 
-PR subscriptions come from structured session associations, repository anchors, explicit PR links, and saved follow choices. Message text and an account-wide repository inventory are not subscription evidence. Failed refreshes retain the previous snapshot and expose their outcome.
-
 ### Local authority
 
 Provider mutations, settings, agent-prompt edits, secret reveal, and contact directories require local access from an actual loopback peer. Direct local browser pages support editing without an owner authorization link, and reloading does not lock them. Host, Origin, Fetch Metadata, local socket-peer, and UI request-header checks remain enforced; local processes are trusted.
 
-The HTTP service listens on all IPv4 interfaces (`0.0.0.0:9417` by default), accepts loopback and private LAN peers, and checks the Host against its own interface addresses or system hostname and service port. LAN browser access is read-only except repository follow choices and PR refresh; bearer-authenticated `/v1/` APIs allow private LAN callers, with remote identity management restricted to loopback. Forwarded headers cannot grant local authority. Desktop/CLI gateway API traffic uses authenticated encryption; direct LAN HTTP is plaintext. Nootify does not manage a VPN device or alter the operating system's Tailscale installation.
+The HTTP service listens on all IPv4 interfaces (`0.0.0.0:9417` by default), accepts loopback and private LAN peers, and checks the Host against its own interface addresses or system hostname and service port. LAN browser access is read-only; bearer-authenticated `/v1/` APIs allow private LAN callers, with remote identity management restricted to loopback. Forwarded headers cannot grant local authority. Desktop/CLI gateway API traffic uses authenticated encryption; direct LAN HTTP is plaintext. Nootify does not manage a VPN device or alter the operating system's Tailscale installation.
 
 ### Application workflows
 
-Every page uses a content column capped at 960px and centered within the area to the right of the sidebar, including page titles, actions, logs, routing sessions, and settings. The user-facing name is Channels in English and 通道 in Chinese; internal provider identifiers and API routes keep their existing names. The message-bridge sidebar includes Channels alongside Logs, Routed sessions, and Agents. Repository navigation is grouped under Repos. Remote access settings configure the listener and show nodes connected to this Nootify.
+Every page uses a content column capped at 960px and centered within the area to the right of the sidebar, including page titles, actions, logs, routing sessions, and settings. The user-facing name is Channels in English and 通道 in Chinese; internal provider identifiers and API routes keep their existing names. The message-bridge sidebar includes Channels alongside Logs, Routed sessions, and Agents. Remote access settings configure the listener and show nodes connected to this Nootify.
 
 All list Add actions belong at the upper left immediately above their list, using a text button rather than the titlebar. Channels uses one compact grouped list with single-line rows; an empty list retains centered explanatory text. Name/default badge, type, connection state, switch, and text actions share one line, with local horizontal scrolling on narrow screens. Already-default actions are hidden and Delete remains visually secondary. Connection IDs and addresses stay in the editor. Agents also use single-line rows by default. Clicking the row expands paths, status explanations, instruction content, and update actions; its separate checkbox only controls enablement. Expansion survives data refresh, and agent rows have no hover background highlight.
 
@@ -72,7 +70,7 @@ Web dropdowns use the existing authored controller with Magpie controls, keyboar
 
 The implemented Go runtime lives under `internal/` and `native/core/`; the native shell and tray live under `desktop/`. Browser UI source is in `src/`, with HTML/CSS and embedded assets in `public/`. The penguin mark is `desktop/brand.svg`.
 
-Durable validation includes Go tests under `internal/host/`, `internal/bridge/`, `internal/providers/`, `internal/pulls/`, `internal/settings/`, `internal/webui/`, and `native/core/`; browser regressions are under `test/`. `desktop/smoke.go` exercises the actual native tray, language changes, window lifecycle, and update bridge. `integration/headless.test.mjs` exercises real Go CLI/HTTP/gRPC processes with a synthetic upstream bot.
+Durable validation includes Go tests under `internal/host/`, `internal/bridge/`, `internal/providers/`, `internal/discovery/`, `internal/settings/`, `internal/webui/`, and `native/core/`; browser regressions are under `test/`. `desktop/smoke.go` exercises the actual native tray, language changes, window lifecycle, and update bridge. `integration/headless.test.mjs` exercises real Go CLI/HTTP/gRPC processes with a synthetic upstream bot.
 
 `npm run preview:ui` is an isolated synthetic fixture for browser interaction and visual checks. It does not certify native asset embedding, authenticated transport, or desktop integration. Use clearly identified synthetic contacts for general previews. Label read-only live profile checks separately and limit them to the profile needed for verification. Aggregate live diagnostics report counts and timings rather than bulk contact identities or credentials. The recipient component's contract remains `.impeccable/surfaces/feishu-recipient.md`.
 

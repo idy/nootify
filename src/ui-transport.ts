@@ -56,8 +56,7 @@ export class UiTransport {
     if (!this.codec) {
       const method = init.method ?? 'GET';
       const local = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
-      const repositoryAction = method === 'POST' && !local && ['/ui/api/repos', '/ui/api/pulls/refresh'].includes(url.pathname);
-      if (method !== 'GET' && !(method === 'POST' && local) && !repositoryAction) throw new Error('Local access is required');
+      if (method !== 'GET' && !(method === 'POST' && local)) throw new Error('Local access is required');
       const headers = new Headers(init.headers);
       if (method === 'POST') headers.set('x-nootify-ui', '1');
       return this.network(url, { ...init, headers, credentials: 'omit', redirect: 'error' });
