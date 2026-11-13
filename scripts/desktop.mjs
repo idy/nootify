@@ -10,6 +10,7 @@ import { parseArgs, promisify } from 'node:util';
 import { buildTarget } from './build-targets.mjs';
 import { runNpm, verifyExecutable, verifyWindowsX64 } from './bundle-utils.mjs';
 import { stageServiceBundle } from './stage-service.mjs';
+import { stageMacLegacyUpgrade } from './macos-legacy-upgrade.mjs';
 import { withNsisCompiler } from './nsis.mjs';
 
 const run = promisify(execFile);
@@ -94,7 +95,10 @@ export async function copyPayload(target, paths, base = root) {
   await mkdir(binDir, { recursive: true });
   await mkdir(resourceDir, { recursive: true });
   await cp(paths.resources, join(resourceDir, 'licenses'), { recursive: true, dereference: false });
-  if (target.platform === 'darwin') await copyFile(join(base, 'desktop', 'icons', 'icon.icns'), join(resourceDir, 'icon.icns'));
+  if (target.platform === 'darwin') {
+    await copyFile(join(base, 'desktop', 'icons', 'icon.icns'), join(resourceDir, 'icon.icns'));
+    await stageMacLegacyUpgrade(paths.app, target.goarch);
+  }
 }
 
 export async function compileDesktop(target, paths, version, appID) {
@@ -157,7 +161,9 @@ export async function createMacDmg(source, output, { execute = run, wait = delay
 async function packageMac(paths, version, appID, bundles) {
   await writeFile(join(paths.app, 'Contents', 'Info.plist'), macInfoPlist(version, appID));
   await writeFile(join(paths.app, 'Contents', 'PkgInfo'), 'APPL????');
-  await run('/usr/bin/codesign', ['--force', '--sign', '-', '--options', 'runtime', '--timestamp=none', join(paths.app, 'Contents', 'MacOS', 'Nootify')], { cwd: root });
+  for (const name of ['node', 'nootify-core', 'nootify-tsnet', 'Nootify']) {
+    await run('/usr/bin/codesign', ['--force', '--sign', '-', '--options', 'runtime', '--timestamp=none', join(paths.app, 'Contents', 'MacOS', name)], { cwd: root });
+  }
   await run('/usr/bin/codesign', ['--force', '--sign', '-', '--options', 'runtime', '--timestamp=none', paths.app], { cwd: root });
   await run('/usr/bin/codesign', ['--verify', '--deep', '--strict', paths.app], { cwd: root });
   // The updater archive keeps the existing Nootify.app top-level member.

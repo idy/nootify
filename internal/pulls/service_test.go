@@ -51,8 +51,19 @@ func eventually(t *testing.T, p func() bool) {
 }
 func settled(t *testing.T, s *Service) PullSnapshot {
 	t.Helper()
-	eventually(t, func() bool { return !s.Snapshot().Refresh.Running })
-	return s.Snapshot()
+	// Discovery permits a Git subprocess to run for ten seconds. A five-second
+	// test deadline can expire first on a busy runner, even for healthy refreshes.
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		snapshot := s.Snapshot()
+		if !snapshot.Refresh.Running {
+			return snapshot
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("refresh did not settle: %+v", snapshot.Refresh)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 func newTestService(t *testing.T, opts Options) *Service {
 	t.Helper()

@@ -155,6 +155,91 @@ func TestLegacyLaunchdMigrationDrainsBeforeRewriteAndPreservesConfiguration(t *t
 		}
 	}
 }
+func TestLegacyUpdaterHandoffPreservesRegistrationForRollback(t *testing.T) {
+	for _, startFails := range []bool{false, true} {
+		t.Run(strconv.FormatBool(startFails), func(t *testing.T) {
+			options, _, r, path := launchdFixture(t, true)
+			options.PreserveLegacyLaunchd = true
+			original, _ := os.ReadFile(path)
+			loaded := false // The old updater stopped its service before the exchange.
+			r.run = func(_ context.Context, c Command) Output {
+				switch c.Path {
+				case "/usr/bin/plutil":
+					if slices.Contains(c.Args, "xml1") {
+						return Output{}
+					}
+					data, err := os.ReadFile(path)
+					return Output{Stdout: string(data), Err: err}
+				case "/bin/launchctl":
+					switch c.Args[0] {
+					case "print":
+						if loaded {
+							return Output{} // A loaded job can have no process yet.
+						}
+						return Output{Err: testExit(113), Stderr: `Could not find service "` + Label + `" in domain for user gui: 501`}
+					case "bootstrap":
+						loaded = true
+						return Output{}
+					case "kickstart":
+						if startFails && options.PreserveLegacyLaunchd {
+							return Output{Err: testExit(5), Stderr: "synthetic partial start"}
+						}
+						return Output{}
+					case "bootout":
+						loaded = false
+						return Output{}
+					}
+				}
+				t.Fatalf("unexpected command %s %v", c.Path, c.Args)
+				return Output{}
+			}
+			_, err := manageLaunchd(context.Background(), "start", options, r)
+			if (err != nil) != startFails {
+				t.Fatal(err)
+			}
+			if _, err := manageLaunchd(context.Background(), "stop", options, r); err != nil {
+				t.Fatal("cannot quiesce replacement for old supervisor rollback", err)
+			}
+			after, _ := os.ReadFile(path)
+			if loaded || string(after) != string(original) {
+				t.Fatal("legacy registration changed before GUI commit or rollback")
+			}
+			if _, err := os.Stat(path + ".node-backup"); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("legacy handoff unexpectedly migrated the registration", err)
+			}
+			// Once the old transaction is over, an ordinary Go service start may
+			// migrate normally. Its exact original registration is still recoverable.
+			options.PreserveLegacyLaunchd = false
+			if _, err := manageLaunchd(context.Background(), "start", options, r); err != nil {
+				t.Fatal("ordinary post-handoff start failed", err)
+			}
+			after, _ = os.ReadFile(path)
+			if _, legacy, err := ownedLaunchd(after, options); err != nil || legacy {
+				t.Fatal("ordinary start did not migrate to Go", err)
+			}
+		})
+	}
+}
+
+func TestLegacyBridgeStillRefusesForeignLaunchdRegistration(t *testing.T) {
+	options, registration, r, path := launchdFixture(t, true)
+	options.PreserveLegacyLaunchd = true
+	registration["ProgramArguments"].([]string)[0] = "/foreign/Nootify.app/Contents/MacOS/node"
+	data, _ := json.Marshal(registration)
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	r.run = func(_ context.Context, c Command) Output {
+		if c.Path != "/usr/bin/plutil" {
+			t.Fatal("legacy bridge controlled a foreign service", c)
+		}
+		return Output{Stdout: string(data)}
+	}
+	if _, err := manageLaunchd(context.Background(), "start", options, r); err == nil {
+		t.Fatal("legacy compatibility bypassed ownership validation")
+	}
+}
+
 func TestStopPublishesDrainReceiptOnlyAfterOwnedBootout(t *testing.T) {
 	options, registration, r, path := launchdFixture(t, false)
 	data, _ := json.Marshal(registration)
