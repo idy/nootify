@@ -110,12 +110,6 @@ jobs:
         login, Tailscale Serve, Funnel, or router port forwarding is required.
         Remote settings remain read-only, and control APIs still require a token.
 
-        Removes GitHub pull-request lists, repository subscriptions, GitHub sign-in
-        and background PR refresh so Nootify focuses on agent-session notifications.
-        Notification-session discovery and synchronization remain available.
-        Legacy backup PR sections are ignored while supported settings still
-        import normally.
-
         Existing identity, settings, conversation state, and automatic Magpie
         asset updates are retained. Apple Silicon macOS 13.5+ DMG and Windows x64
         per-user NSIS installer. The macOS app is ad-hoc signed and not notarized;
