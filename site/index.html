@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <meta name="theme-color" content="#f7f9fc">
+  <meta name="theme-color" content="#0b5cad" data-idy-theme-color-light="#0b5cad" data-idy-theme-color-dark="#0b3d73">
   <title>Nootify — your coding session, one reply away</title>
   <meta name="description" content="Follow your coding sessions in Feishu and send replies back to Claude Code, Codex, and OpenCode on Windows or macOS. Nootify also keeps your GitHub pull requests in view.">
   <meta property="og:title" content="Nootify — your coding session, one reply away">
@@ -13,15 +13,13 @@
   <meta property="og:url" content="https://nootify.idy.dev/">
   <link rel="canonical" href="https://nootify.idy.dev/">
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
-  <script src="shared/idy.js"></script>
+  <script src="shared/sdk/idy-site.min.js"></script>
+  <link rel="stylesheet" href="shared/sdk/idy-site.css">
   <link rel="stylesheet" href="styles.css">
-  <link rel="stylesheet" href="shared/idy.css">
-  <link rel="stylesheet" href="shared/header.css">
   <script src="translations.js" defer></script>
   <script src="script.js" defer></script>
-  <script src="shared/header.js" defer></script>
 </head>
-<body>
+<body class="idy-site">
   <a class="skip-link" href="#main" data-i18n="skipContent">Skip to content</a>
   <header class="idy-header compact-header">
     <div class="idy-header-inner">
@@ -56,8 +54,8 @@
   <main id="main">
     <section class="hero wrap" aria-labelledby="hero-title">
       <div class="hero-copy">
-        <div class="product-name"><span class="app-icon"><img src="brand.svg" width="40" height="40" alt=""></span><span>Nootify</span></div>
         <h1 id="hero-title" data-i18n-html="heroTitle">Your coding session.<br>One reply away.</h1>
+        <div class="product-name"><span class="app-icon"><img src="brand.svg" width="40" height="40" alt=""></span><span>Nootify</span></div>
         <p class="hero-description" data-i18n="heroDescription">Follow Claude Code, Codex, and OpenCode from Feishu. Get progress in a conversation’s own group, then send your reply back to the existing session on your computer.</p>
         <div class="hero-actions">
           <a class="button primary" data-download href="https://github.com/idy/nootify/releases">Browse releases</a>

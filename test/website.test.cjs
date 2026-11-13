@@ -53,8 +53,9 @@ async function render(fetcher, platform = "MacIntel") {
     AbortController, setTimeout, clearTimeout, fetch: fetcher,
   };
   context.window = context;
+  context.document.defaultView = context;
   vm.createContext(context);
-  for (const file of ["shared/idy.js", "translations.js"]) vm.runInContext(readFileSync(join(site, file), "utf8"), context);
+  for (const file of ["shared/sdk/idy-site.min.js", "translations.js"]) vm.runInContext(readFileSync(join(site, file), "utf8"), context);
   await vm.runInContext(readFileSync(join(site, "script.js"), "utf8"), context);
   return { context, fields, node: name => fields[`[data-${name}]`][0], language(value) { events.storage({ key: "idy-language", newValue: value }); } };
 }
