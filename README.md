@@ -171,6 +171,21 @@ See [desktop builds](docs/guide.md#build-the-desktop-app).
 | `site/` | Public website |
 | `test/` | Browser/UI regression tests |
 
+## Website development
+
+The static public website lives in `site/`, separate from the application UI in
+`public/`. It requires no build step. `index.html` loads the complete vendored
+idy.dev SDK from `site/shared/sdk/`; refresh that whole distribution, including
+assets and licenses, rather than editing bundled files individually. The public
+site follows the Component Datasheet system: self-hosted Archivo, a blue masthead,
+white/deep navy sheets, 2px corners, fine rules and no shadows. Local `styles.css`
+retains the conversation example and page layout through `--idy-*` tokens.
+
+Run only the website regression suite with `node --test test/website.test.cjs`.
+Check both languages and themes, narrow screens, and release failure states when
+changing the page. Website language/theme preferences and release downloads
+remain separate from the local application.
+
 ## Documentation
 
 - [Setup and notification channels](docs/guide.md#agents-and-notification-channels)
