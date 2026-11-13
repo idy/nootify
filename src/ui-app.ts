@@ -617,7 +617,7 @@ async function providerRegistrationAction(action: 'start' | 'cancel' | 'recover'
   if (!editor || !personalEditor() || state.providers?.editable !== true || state.providerRegistrationBusy) return false;
   if (action === 'start' && (state.providerRegistrationPending || state.providerRegistration?.error === 'save_unconfirmed')) return false;
   if (action === 'start' && !field('provider-name').value.trim()) {
-    state.providerEditorError = () => t('请填写必填字段。'); renderProviderEditor(); field('provider-name').focus(); return false;
+    state.providerEditorError = () => t('请填写必填字段。'); renderProviderEditor(); showFieldError('provider-name', 'provider-editor-error'); return false;
   }
   const id = state.providerRegistration?.registration_id;
   if (action === 'cancel' && !id) return true;

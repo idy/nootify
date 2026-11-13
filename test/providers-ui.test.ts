@@ -218,6 +218,10 @@ test('provider and remote-access UI performs real mutations, preserves secrets a
 
   await t.test('invalid channel fields use the shared error state and retain their existing hint', () => {
     button('provider-add').click(); button('provider-choose-remote').click();
+    assert.equal(element('provider-editor').hasAttribute('novalidate'), true, 'Required fields reach the authored submit handler');
+    submit('provider-editor');
+    assert.equal(document.activeElement, field('provider-name'));
+    assert.equal(field('provider-name').getAttribute('aria-invalid'), 'true');
     change('provider-name', 'Validation preview'); change('provider-address', 'relay.example:9418');
     const before = providerWrites.length;
     submit('provider-editor');
@@ -234,6 +238,12 @@ test('provider and remote-access UI performs real mutations, preserves secrets a
     button('provider-cancel').click();
     button('provider-add').click(); button('provider-choose-remote').click();
     assert.equal(field('provider-address').hasAttribute('aria-invalid'), false, 'A new draft clears prior field errors');
+    button('provider-cancel').click();
+    const beforeRegistration = registrationWrites.length;
+    button('provider-add').click(); button('provider-choose-personal-app').click(); submit('provider-editor');
+    assert.equal(registrationWrites.length, beforeRegistration, 'An empty name must not start personal authorization');
+    assert.equal(field('provider-name').getAttribute('aria-invalid'), 'true');
+    assert.equal(document.activeElement, field('provider-name'));
     button('provider-cancel').click();
   });
 
@@ -331,7 +341,12 @@ test('provider and remote-access UI performs real mutations, preserves secrets a
     assert.equal(rows[0].querySelector('b'), null); assert.match(rows[0].textContent!, /2 pending.*Last acknowledgement/);
     assert.match(rows[1].textContent!, /Disconnected/);
     assert.match(rows[1].textContent!, /7 pending.*No acknowledgement yet/);
+    assert.equal(element('remote-form').hasAttribute('novalidate'), true, 'Required listener fields reach authored validation');
     const beforeValidation = remoteWrites.length;
+    change('remote-listen', ''); submit('remote-form');
+    assert.equal(remoteWrites.length, beforeValidation);
+    assert.equal(field('remote-listen').getAttribute('aria-invalid'), 'true');
+    assert.equal(document.activeElement, field('remote-listen'));
     change('remote-listen', 'missing-port'); submit('remote-form');
     assert.equal(remoteWrites.length, beforeValidation);
     assert.equal(field('remote-listen').getAttribute('aria-invalid'), 'true');

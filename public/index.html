@@ -85,7 +85,7 @@
         <p id="provider-type-empty" class="mds-hint" role="status" hidden data-i18n="没有匹配的接入类型">没有匹配的接入类型</p>
         <div class="mds-dialog-actions"><button type="button" id="provider-chooser-cancel" class="mds-button" data-i18n="取消">取消</button></div>
       </div>
-      <form id="provider-editor" class="channel-form" aria-labelledby="provider-editor-title" hidden>
+      <form id="provider-editor" novalidate class="channel-form" aria-labelledby="provider-editor-title" hidden>
         <div class="channel-form-content">
           <fieldset id="provider-fields" class="channel-fields" disabled>
             <div class="channel-type-summary"><span data-i18n="接入类型">接入类型</span><span id="provider-type-name"></span></div>
@@ -160,7 +160,7 @@
       <div id="remote-banner" class="banner" role="alert" hidden></div>
       <div id="remote-readonly" class="banner note" role="status" hidden data-i18n="只能查看连接状态；请在运行 Nootify 的电脑上修改接入和密钥。">只能查看连接状态；请在运行 Nootify 的电脑上修改接入和密钥。</div>
       <div class="list-summary"><div><h2 id="remote-title" class="group-title" data-i18n="远程接入">远程接入</h2><div id="remote-node" class="group-sub mono mds-mono"></div></div><div class="group-side"><span id="remote-state" role="status"></span><button type="button" id="remote-retry" class="text-button mds-button mds-button--subtle" data-i18n="重试" hidden>重试</button></div></div>
-      <form id="remote-form" class="group mds-group" aria-labelledby="remote-title">
+      <form id="remote-form" novalidate class="group mds-group" aria-labelledby="remote-title">
         <fieldset id="remote-fields" class="settings-fields" disabled>
           <div class="setting setting-with-switch"><div class="setting-main"><label class="setting-title" for="remote-enabled" data-i18n="允许下游连接">允许下游连接</label></div><label class="mds-switch"><input id="remote-enabled" class="switch" type="checkbox" role="switch"><span class="mds-switch-track" aria-hidden="true"></span></label></div>
           <label class="setting setting-field-row"><span class="setting-main"><span class="setting-title" data-i18n="监听地址">监听地址</span></span><input id="remote-listen" class="setting-field mono mds-input mds-mono" type="text" placeholder="127.0.0.1:9418" required autocomplete="off" spellcheck="false"></label>
