@@ -67,6 +67,7 @@ test('Logs separates event purpose from delivery outcome and keeps its controls 
   const agentWrites: { agent: string; enabled: boolean }[] = [];
   let reads = 0; let agentReads = 0;
   let lanURL: string | undefined = 'http://192.168.1.20:9417/';
+  let tailscaleURL: string | undefined;
   let releaseAgentReads!: () => void;
   const agentsReady = new Promise<void>(resolve => { releaseAgentReads = resolve; });
   let agentsUnavailable = false; let agentsEmpty = false;
@@ -74,7 +75,7 @@ test('Logs separates event purpose from delivery outcome and keeps its controls 
     const path = new URL(String(input), 'http://127.0.0.1:9417').pathname;
     if (path === '/ui/api/snapshot') {
       reads++;
-      return Response.json({ time: '2026-11-08T10:31:00.000Z', modules: [], logs, access: { lan_url: lanURL },
+      return Response.json({ time: '2026-11-08T10:31:00.000Z', modules: [], logs, access: { lan_url: lanURL, tailscale_url: tailscaleURL },
         sessions: [{ session_id: 'session-1', session_name: 'SQLite recovery', adapter: 'codex', host_id: 'fixture-host' }] });
     }
     if (path === '/ui/api/agents') {
@@ -123,6 +124,30 @@ test('Logs separates event purpose from delivery outcome and keeps its controls 
     assert.equal(element('lan-line').hidden, true);
     location.hostname = '127.0.0.1'; await refresh();
     assert.equal(element('lan-line').hidden, false);
+  });
+
+  await t.test('Tailscale appears independently on connect and clears on disconnect or remote access', async () => {
+    const refresh = async () => {
+      const before = reads; element('refresh').click();
+      await until(() => reads > before, 'Tailscale snapshot did not refresh');
+      await settleUiFixture();
+    };
+    assert.equal(element('tailscale-line').hidden, true);
+    tailscaleURL = 'http://100.101.102.103:9417/'; await refresh();
+    assert.equal(element('tailscale-line').hidden, false);
+    assert.equal(element('tailscale-url').textContent, '100.101.102.103:9417');
+    assert.equal(element('tailscale-url').title, 'Address for other devices on your Tailscale network: http://100.101.102.103:9417/');
+    lanURL = undefined; await refresh();
+    assert.equal(element('lan-line').hidden, true);
+    assert.equal(element('tailscale-line').hidden, false, 'Tailscale works without a private LAN address');
+    location.hostname = '100.101.102.103'; await refresh();
+    assert.equal(element('tailscale-line').hidden, true);
+    location.hostname = '127.0.0.1'; await refresh();
+    assert.equal(element('tailscale-line').hidden, false);
+    tailscaleURL = undefined; lanURL = 'http://192.168.1.20:9417/'; await refresh();
+    assert.equal(element('tailscale-line').hidden, true);
+    assert.equal(element('tailscale-url').textContent, '');
+    assert.equal(element('tailscale-url').title, '');
   });
 
   await t.test('the removed Tailscale settings route falls back to Logs without loading a settings page', async () => {

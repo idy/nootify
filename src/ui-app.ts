@@ -11,7 +11,7 @@ const fetch = ownerTransport.fetch;
 
 interface Snapshot {
   time: string; modules: ModuleStatus[]; sessions: PublicSession[]; logs: LogEntry[];
-  access?: { lan_url?: string; owner_authenticated?: boolean; owner_ui_command?: string };
+  access?: { lan_url?: string; tailscale_url?: string; owner_authenticated?: boolean; owner_ui_command?: string };
 }
 type View = 'logs' | 'sessions' | 'agents' | 'providers' | 'settings-general' | 'settings-lark' | 'settings-remote' | 'settings-backup' | 'settings-about';
 interface AgentsPage { agents: AgentPrompt[]; editable: boolean }
@@ -1493,6 +1493,10 @@ function renderChrome(): void {
   $('lan-line').hidden = !local || !lan;
   $('lan-url').textContent = lan ? lan.replace(/^https?:\/\//, '').replace(/\/$/, '') : '';
   $('lan-url').title = lan ? t('局域网内其他设备的访问地址：{p0}', { p0: lan }) : '';
+  const tailscale = state.snapshot.access?.tailscale_url;
+  $('tailscale-line').hidden = !local || !tailscale;
+  $('tailscale-url').textContent = tailscale ? tailscale.replace(/^https?:\/\//, '').replace(/\/$/, '') : '';
+  $('tailscale-url').title = tailscale ? t('Tailscale 网络内其他设备的访问地址：{p0}', { p0: tailscale }) : '';
 }
 function renderAll(): void { renderChrome(); renderLogs(); renderSessions(); renderProviders(); renderAgents(); renderSettings(); }
 async function loadSnapshot(): Promise<void> {

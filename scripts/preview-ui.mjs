@@ -303,7 +303,7 @@ export function createPreviewServer(fixture = createPreviewFixture()) {
         const { body: sessions } = await fixture.modules[0].handle({ method: 'GET', path: '/v1/sessions' });
         return json({ time: new Date().toISOString(), sessions, logs: fixture.logs.recent(),
           modules: fixture.modules.map(module => ({ name: module.name, status: module.status() })), channel: channel(),
-          access: { owner_authenticated: false } });
+          access: { owner_authenticated: false, lan_url: 'http://192.168.1.20:9417/', tailscale_url: 'http://100.101.102.103:9417/' } });
       }
       if (path === '/ui/api/providers') return json(editable(await (read ? providers.page() : providers.action(body))));
       if (path === '/ui/api/providers/registration' && !read) return json(await providers.registration(body));
