@@ -585,6 +585,7 @@ export const english = {
   '后台刷新中': 'Refreshing',
   '更新于 {p0}': 'Updated at {p0}',
   '局域网内其他设备的访问地址：{p0}': 'Address for other devices on your LAN: {p0}',
+  'Tailscale 网络内其他设备的访问地址：{p0}': 'Address for other devices on your Tailscale network: {p0}',
   '实时更新': 'Live',
   '无法连接本机服务：{p0}。正在自动重试。': 'Cannot connect to the local service: {p0}. Retrying automatically.',
   '连接中断': 'Disconnected',

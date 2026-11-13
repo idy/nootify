@@ -12,7 +12,7 @@ const fetch = ownerTransport.fetch;
 interface PullSummary { internal: number; upstream: number; followed: number; running: boolean; lastSuccessAt?: string; error?: string; signedOut?: boolean }
 interface Snapshot {
   time: string; modules: ModuleStatus[]; sessions: PublicSession[]; logs: LogEntry[];
-  pulls?: PullSummary; access?: { lan_url?: string; owner_authenticated?: boolean; owner_ui_command?: string };
+  pulls?: PullSummary; access?: { lan_url?: string; tailscale_url?: string; owner_authenticated?: boolean; owner_ui_command?: string };
 }
 type View = 'logs' | 'sessions' | 'agents' | 'providers' | 'pulls-internal' | 'pulls-upstream' | 'repos' | 'settings-general' | 'settings-github' | 'settings-lark' | 'settings-remote' | 'settings-backup' | 'settings-about';
 interface AgentsPage { agents: AgentPrompt[]; editable: boolean }
@@ -1746,6 +1746,10 @@ function renderChrome(): void {
   $('lan-line').hidden = !local || !lan;
   $('lan-url').textContent = lan ? lan.replace(/^https?:\/\//, '').replace(/\/$/, '') : '';
   $('lan-url').title = lan ? t('局域网内其他设备的访问地址：{p0}', { p0: lan }) : '';
+  const tailscale = state.snapshot.access?.tailscale_url;
+  $('tailscale-line').hidden = !local || !tailscale;
+  $('tailscale-url').textContent = tailscale ? tailscale.replace(/^https?:\/\//, '').replace(/\/$/, '') : '';
+  $('tailscale-url').title = tailscale ? t('Tailscale 网络内其他设备的访问地址：{p0}', { p0: tailscale }) : '';
 }
 function renderAll(): void { renderChrome(); renderLogs(); renderSessions(); renderProviders(); renderAgents(); renderPulls(); renderRepos(); renderSettings(); }
 async function loadSnapshot(): Promise<void> {

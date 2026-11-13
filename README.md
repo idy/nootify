@@ -53,8 +53,12 @@ Windows installers are not code-signed.
 3. Start a new agent conversation. It receives instructions to open its
    notification session and post progress; reply there to continue the conversation.
 
-For browser access from another device, use the sidebar LAN link, normally
-`http://<LAN-IPv4>:9417/`; see [LAN access](docs/guide.md#lan-access).
+For browser access from another device, use the sidebar LAN address, normally
+`http://<LAN-IPv4>:9417/`. If the operating system's Tailscale client is connected,
+Nootify also accepts its IPv4 address and shows a separate Tailscale address,
+`http://<Tailscale-IPv4>:9417/`, automatically. Both devices need Tailscale access
+to the same tailnet; no Nootify VPN login or Tailscale Serve setup is needed.
+See [LAN and Tailscale access](docs/guide.md#lan-access).
 
 To serve other Nootify nodes, configure the listener under **Settings → Remote
 access** (`远程接入`). Personal apps can be reconnected, reauthorized for the same App ID, and checked
