@@ -67,6 +67,11 @@ jobs:
           NOOTIFY_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run desktop:build -- --target ${{ matrix.target }} --ci
 
+      - name: Verify macOS archive signatures and legacy updater compatibility
+        if: runner.os == 'macOS'
+        shell: bash
+        run: NOOTIFY_TEST_MAC_UPDATE_ARCHIVE="$GITHUB_WORKSPACE/build/desktop/${{ matrix.target }}/macos/Nootify.app.tar.gz" go test ./desktop/internal/updater -run '^TestMacPackagedUpdateCompatibility$' -count=1 -v
+
       - name: Collect signed release assets
         run: node scripts/release-assets.mjs collect --target ${{ matrix.target }} --bundles build/desktop/${{ matrix.target }} --output .cache/release-assets
 
@@ -94,19 +99,15 @@ jobs:
       contents: write
     env:
       RELEASE_NOTES: >-
-        This patch adopts Magpie UI with compact channel and agent lists and standard dialogs.
-        Feishu Bot and personal App setup are separate; personal-channel authorization can
-        recover after reload, check permissions, and reconnect without changing defaults.
-        Windows delivery state writes tolerate transient file contention.
-        The MyGo desktop, background service and CLI now share one Go executable;
-        TypeScript is used only for the browser UI. Direct LAN access replaces
-        embedded Tailscale. Existing identity, settings and conversation state are retained.
-        Upgrading from Node-era 0.2.1 requires manually replacing the application;
-        its old updater cannot complete this transition. Later Go-to-Go updates use
-        the signed manifest. Apple Silicon macOS 13.5+ DMG and Windows x64 per-user
-        NSIS installer. The macOS app is ad-hoc signed and not notarized; allow it
-        under System Settings > Privacy & Security on first launch. The Windows
-        installer is not Authenticode signed.
+        Fixes macOS updates from Node-era 0.2.1 failing with
+        "app bundle is missing regular file Contents/MacOS/node".
+        Lightweight compatibility launchers satisfy the old updater's bundle checks
+        and forward its service commands to the unified Go executable without
+        restoring Node.js or retired helper runtimes. Existing identity, settings
+        and conversation state are retained. Apple Silicon macOS 13.5+ DMG and
+        Windows x64 per-user NSIS installer. The macOS app is ad-hoc signed and not
+        notarized; allow it under System Settings > Privacy & Security on first
+        launch. The Windows installer is not Authenticode signed.
     steps:
       - uses: actions/checkout@v7
         with:

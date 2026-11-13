@@ -55,6 +55,7 @@ func Run(parent context.Context, args []string, version string, stdout, stderr i
 	pin := flags.Bool("pin", false, "")
 	managed := flags.Bool("ui-managed", false, "")
 	serviceManaged := flags.Bool("service-managed", false, "")
+	preserveLegacyLaunchd := flags.Bool("preserve-legacy-launchd", false, "")
 	help := flags.Bool("help", false, "")
 	flags.BoolVar(help, "h", false, "")
 	channel := flags.String("channel", "", "")
@@ -92,7 +93,7 @@ func Run(parent context.Context, args []string, version string, stdout, stderr i
 	if directory == "" {
 		directory = storage.DefaultDir()
 	}
-	options := service.Options{StateDir: directory, Port: *port, MCPConfig: value("mcp-config"), Executable: executable, Drain: json.RawMessage(value("service-drain"))}
+	options := service.Options{StateDir: directory, Port: *port, MCPConfig: value("mcp-config"), Executable: executable, Drain: json.RawMessage(value("service-drain")), PreserveLegacyLaunchd: *preserveLegacyLaunchd}
 	if command == "serve" {
 		ctx, cancel := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
 		defer cancel()

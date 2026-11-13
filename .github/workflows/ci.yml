@@ -151,6 +151,11 @@ jobs:
       - name: Build desktop bundle without updater signing
         run: npm run desktop:build -- --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --no-sign --ci
 
+      - name: Verify macOS archive signatures and legacy updater compatibility
+        if: runner.os == 'macOS'
+        shell: bash
+        run: NOOTIFY_TEST_MAC_UPDATE_ARCHIVE="$GITHUB_WORKSPACE/build/desktop/${{ matrix.target }}/macos/Nootify.app.tar.gz" go test ./desktop/internal/updater -run '^TestMacPackagedUpdateCompatibility$' -count=1 -v
+
       - name: Smoke test the native MyGo app with an isolated identity
         timeout-minutes: 2
         shell: bash

@@ -24,6 +24,9 @@ type Options struct {
 	MCPConfig  string
 	Executable string
 	Drain      json.RawMessage
+	// PreserveLegacyLaunchd keeps the exact Node-era registration recoverable
+	// while its old updater supervises an uncommitted replacement GUI.
+	PreserveLegacyLaunchd bool
 }
 type Result struct {
 	Installed  bool   `json:"installed"`

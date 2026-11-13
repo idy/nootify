@@ -349,7 +349,7 @@ func manageLaunchd(ctx context.Context, action string, options Options, r launch
 			if err = assertPortFree(options.Port); err != nil {
 				return Result{}, err
 			}
-			if legacy {
+			if legacy && !options.PreserveLegacyLaunchd {
 				if err = migrateLaunchd(ctx, plist, options, registration, r); err != nil {
 					return Result{}, err
 				}

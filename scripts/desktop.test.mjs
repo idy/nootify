@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, cp, lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -67,7 +67,7 @@ test('package version overrides build native metadata without a second version a
   assert.match(plist, /NSAllowsLocalNetworking/);
 });
 
-test('staged payload contains one executable and its licenses', async t => {
+test('staged payload contains the Go executable, licenses and macOS upgrade bridge', async t => {
   const base = await temporary(t);
   await put(join(base, 'desktop/icons/icon.icns'), 'icon');
   for (const target of [mac, windows]) {
@@ -77,8 +77,46 @@ test('staged payload contains one executable and its licenses', async t => {
     await copyPayload(target, paths, base);
     const binaries = target === mac ? join(paths.app, 'Contents/MacOS') : paths.payload;
     const resources = target === mac ? join(paths.app, 'Contents/Resources') : paths.payload;
-    assert.deepEqual((await readdir(binaries)).filter(file => file !== 'licenses').sort(), [`Nootify${target.extension}`]);
+    const expected = target === mac ? ['Nootify', 'node', 'nootify-core', 'nootify-tsnet'] : ['Nootify.exe'];
+    assert.deepEqual((await readdir(binaries)).filter(file => file !== 'licenses').sort(), expected);
     assert.equal(await readFile(join(resources, 'licenses/third-party-notices.txt'), 'utf8'), 'notices');
+    if (target !== mac) continue;
+    // Frozen v0.2.1 archive.go / service.Current contract: symlinks and empty
+    // placeholders fail before the old updater can exchange the app bundle.
+    for (const name of ['MacOS/node', 'MacOS/nootify-core', 'MacOS/nootify-tsnet', 'Resources/service/dist/src/cli.js', 'Resources/service/dist/src/server.js']) {
+      const info = await lstat(join(paths.app, 'Contents', name));
+      assert.ok(info.isFile() && info.size > 0, `legacy updater requires regular file ${name}`);
+      if (name.startsWith('MacOS/') && process.platform !== 'win32') assert.ok(info.mode & 0o111);
+    }
+  }
+});
+
+test('macOS legacy launcher forwards old CLI and daemon argv without a Node runtime', { skip: process.platform !== 'darwin' }, async t => {
+  const base = await temporary(t);
+  const paths = desktopPaths(mac, base);
+  await put(join(base, 'desktop/icons/icon.icns'), 'icon');
+  await put(join(paths.resources, 'third-party-notices.txt'), 'notices');
+  await put(paths.executable, '#!/bin/sh\nprintf "<%s>\\n" "$@"\n');
+  await chmod(paths.executable, 0o755);
+  await copyPayload(mac, paths, base);
+  const contents = join(paths.app, 'Contents');
+  const launcher = join(contents, 'MacOS/node');
+  const cli = join(contents, 'Resources/service/dist/src/cli.js');
+  const server = join(contents, 'Resources/service/dist/src/server.js');
+  const options = { env: { ...process.env, NODE_OPTIONS: '--require=/missing/injected.js', NODE_PATH: '/missing/modules' } };
+  for (const action of ['service-start', 'service-restart', 'service-stop', 'service-status', 'thread-open']) {
+    const args = [action, '--state-dir', join(base, 'private state'), '--port', '19417'];
+    const { stdout } = await run(launcher, [cli, ...args], options);
+    const expected = action.startsWith('service-') ? [action, '--preserve-legacy-launchd', ...args.slice(1)] : args;
+    assert.equal(stdout, expected.map(value => `<${value}>\n`).join(''));
+  }
+  const { stdout } = await run(launcher, [server, '--state-dir', join(base, 'private state')], options);
+  assert.equal(stdout, `<serve>\n<--state-dir>\n<${join(base, 'private state')}>\n`);
+  for (const args of [[], [cli], [join(base, 'foreign.js'), 'service-start']]) {
+    await assert.rejects(run(launcher, args, options), error => error.code === 64);
+  }
+  for (const name of ['nootify-core', 'nootify-tsnet']) {
+    await assert.rejects(run(join(contents, 'MacOS', name), [], options), error => error.code === 64);
   }
 });
 
