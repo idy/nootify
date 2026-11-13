@@ -4,6 +4,8 @@
   --on-accent: var(--idy-ink);
   --soft: var(--idy-spec-fill, var(--idy-hover));
   --message-line: var(--idy-line);
+  /* brand.svg has a fixed light fill in both appearances. */
+  --mark-bg: #121b26;
 }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
@@ -22,7 +24,7 @@ h3 { font-size: 19px; line-height: 1.45; }
 .hero { display: grid; grid-template-columns: 1.1fr 1fr; align-items: center; gap: 70px; padding-block: 76px 86px; }
 .hero-copy { min-width: 0; }
 .product-name { display: flex; align-items: center; gap: 13px; margin-bottom: 25px; font-size: 18px; font-weight: 700; }
-.app-icon { display: grid; place-items: center; width: 54px; height: 54px; border-radius: 2px; background: var(--idy-ink); }
+.app-icon { display: grid; place-items: center; width: 54px; height: 54px; border-radius: 2px; background: var(--mark-bg); }
 .app-icon img { display: block; }
 h1 { font-size: clamp(38px, 4.2vw, 60px); line-height: 1.09; letter-spacing: -.01em; }
 .hero-description { max-width: 49ch; margin-top: 25px; color: var(--idy-muted); font-size: 17px; line-height: 1.8; }
@@ -34,7 +36,7 @@ h1 { font-size: clamp(38px, 4.2vw, 60px); line-height: 1.09; letter-spacing: -.0
 .platform-note { margin: 19px 0 0; color: var(--idy-muted); font-size: 12px; }
 .conversation { margin: 0; min-width: 0; border: 1px solid var(--idy-line); border-radius: 2px; background: var(--idy-surface); overflow: hidden; }
 .conversation-heading { display: flex; align-items: center; gap: 12px; padding: 22px 24px; border-bottom: 1px solid var(--idy-line); }
-.chat-icon { flex: 0 0 38px; height: 38px; display: grid; place-items: center; background: var(--idy-ink); border-radius: 2px; }
+.chat-icon { flex: 0 0 38px; height: 38px; display: grid; place-items: center; background: var(--mark-bg); border-radius: 2px; }
 .conversation-heading h2 { font-size: 16px; letter-spacing: 0; }
 .conversation-heading p { margin: 2px 0 0; font-size: 11px; color: var(--idy-muted); }
 .client-name { margin-left: auto; color: var(--idy-muted); font-size: 10px; white-space: nowrap; }
@@ -141,7 +143,7 @@ h1 { font-size: clamp(38px, 4.2vw, 60px); line-height: 1.09; letter-spacing: -.0
 
 .idy-site .hero { gap: 40px; }
 .idy-site .product-name { margin: 16px 0 0; font-size: 16px; font-stretch: 75%; }
-.idy-site :is(.app-icon, .chat-icon) { background: var(--idy-ink); }
+.idy-site :is(.app-icon, .chat-icon) { background: var(--mark-bg); }
 .idy-site :is(.conversation, .download-section) { border: 1px solid var(--idy-line); border-top: 2px solid var(--idy-ink); }
 .idy-site .conversation-heading { padding: 14px 20px; background: var(--idy-spec-fill, var(--idy-hover)); }
 .idy-site .conversation-heading h2 { font-size: 16px; line-height: 24px; }
