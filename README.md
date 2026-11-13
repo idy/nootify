@@ -131,11 +131,22 @@ actions are unavailable. Use the local URL printed by the preview command.
 The fixture is separate from the installed Go service; preview results do not
 verify native asset embedding, authenticated transport, or desktop behavior.
 
-The frontend uses [Magpie Design System v0.4.1](https://github.com/idy/magpie-design-system/tree/v0.4.1),
-vendored in `public/vendor/magpie/` with its fonts, icons, and licenses. Resources
-are served locally for offline use and strict CSP. `public/styles.css` owns
-Nootify's route layouts and domain-specific list/dialog composition; shared
-controls use the upstream `mds-*` classes. See [shared UI controls](docs/ui-components.md).
+The frontend bundles [Magpie Design System v0.4.4](https://github.com/idy/magpie-design-system/tree/v0.4.4)
+in `public/vendor/magpie/` with its fonts, icons, licenses, and a size/SHA256
+manifest. The service checks the CDN in the background at startup and every six
+hours, stores complete validated releases in `STATE_DIR/ui-assets/magpie`, and
+uses a cached release only when newer than the bundle. Stylesheets use versioned
+same-origin URLs; a newly downloaded stylesheet applies on the next page load.
+Offline use retains a usable cache or the bundled fallback and strict CSP.
+`public/styles.css` owns Nootify's route layouts and domain-specific list/dialog
+composition; shared controls use upstream `mds-*` classes, while JavaScript
+helpers remain owned by the app. See [shared UI controls](docs/ui-components.md).
+
+To refresh the checked-in baseline explicitly, run `npm run vendor:magpie`.
+The command resolves stable latest through jsDelivr, downloads the pinned CSS,
+fonts, icons, and root license, and validates every size and SHA256 before
+replacing the bundle. Normal builds package checked-in files without CDN access.
+See [bundle provenance and update procedure](public/vendor/magpie/README.md).
 
 The Go core owns provider connections, notification-session mappings, and durable
 delivery/replay state. Production Feishu ingestion uses WebSocket events, with

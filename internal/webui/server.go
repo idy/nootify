@@ -295,6 +295,16 @@ func Assets(assets fs.FS) http.Handler {
 			http.NotFound(w, r)
 			return
 		}
+		if resolver, ok := assets.(interface{ resolveAsset(string) string }); ok {
+			if resolved := resolver.resolveAsset(name); resolved != name {
+				w.Header().Set("cache-control", "no-store")
+				w.Header().Set("referrer-policy", "no-referrer")
+				w.Header().Set("x-content-type-options", "nosniff")
+				w.Header().Set("content-security-policy", contentPolicy)
+				http.Redirect(w, r, "/ui/"+resolved, http.StatusTemporaryRedirect)
+				return
+			}
+		}
 		data, err := fs.ReadFile(assets, name)
 		if err != nil {
 			http.NotFound(w, r)

@@ -9,13 +9,13 @@ related_targets: ["public/styles.css","src/ui-app.ts"]
 
 Mode: Operate. Scope: all application routes in `public/index.html`, shared controls in `public/styles.css`, and dynamically rendered content in `src/ui-app.ts`.
 
-The user explicitly chose `idy/magpie-design-system` for this redesign. Preserve product behavior, the penguin identity, navigation groups, local-only configuration, Chinese/English, and automatic system appearance. Users operate Nootify alongside coding tools on their own computers in changing ambient light; follow their system theme. Build directly in code using Magpie v0.4.1, served locally with its fonts and licenses.
+The user explicitly chose `idy/magpie-design-system` for this redesign. Preserve product behavior, the penguin identity, navigation groups, local-only configuration, Chinese/English, and automatic system appearance. Users operate Nootify alongside coding tools on their own computers in changing ambient light; follow their system theme. Build directly in code using the bundled Magpie v0.4.4 baseline, served locally with its fonts and licenses. The service checks stable latest from jsDelivr at startup and every six hours, validates complete releases under `STATE_DIR/ui-assets/magpie`, and prefers a cache only when newer than the bundle. Versioned same-origin stylesheets keep CSS imports and referenced fonts and icon masks on one release; updated stylesheets apply on the next page load, with a usable cache or bundled fallback offline. JavaScript helpers remain app-owned, and baseline syncing is explicit maintenance rather than part of normal builds.
 
 ## Direction contract
 
 THESIS: Make every route part of the same Magpie application, with working information and actions immediately available. Keep the established tasks and centered 960px working column.
 
-OWN-WORLD: Magpie's neutral canvas, sidebar and surfaces; blue primary actions; semantic status colors; Montserrat navigation/actions, Monda section headings, Lato body; 34px controls and 12px groups. Use actual upstream classes and tokens rather than copying their appearance.
+OWN-WORLD: Magpie's neutral canvas, sidebar and surfaces; blue primary actions; semantic status colors; Outfit display/actions and Source Sans 3 headings, body, and interface text, with system CJK fallbacks; 34px controls and 12px groups. Use actual upstream classes and tokens rather than copying their appearance.
 
 STORY: Scan connection state, inspect logs or routing, manage providers and clients, then make explicit, reversible configuration changes. Status remains readable in words as well as color.
 

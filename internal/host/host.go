@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -34,28 +35,29 @@ type Options struct {
 	RefreshPrompts                                 bool
 }
 type Server struct {
-	options   Options
-	ctx       context.Context
-	cancel    context.CancelFunc
-	listener  net.Listener
-	http      *http.Server
-	owner     *webui.Owner
-	store     *storage.Store
-	logs      *events.Log
-	bridge    *bridge.Service
-	providers *providers.Service
-	pulls     *pulls.Service
-	auth      *pulls.Auth
-	settings  *settings.Service
-	done      chan struct{}
-	once      sync.Once
-	wg        sync.WaitGroup
-	closeErr  error
-	serveMu   sync.Mutex
-	serveErr  error
-	admitMu   sync.Mutex
-	handlers  sync.WaitGroup
-	stopping  bool
+	options     Options
+	ctx         context.Context
+	cancel      context.CancelFunc
+	listener    net.Listener
+	http        *http.Server
+	owner       *webui.Owner
+	store       *storage.Store
+	logs        *events.Log
+	bridge      *bridge.Service
+	providers   *providers.Service
+	pulls       *pulls.Service
+	auth        *pulls.Auth
+	settings    *settings.Service
+	done        chan struct{}
+	once        sync.Once
+	wg          sync.WaitGroup
+	closeErr    error
+	serveMu     sync.Mutex
+	serveErr    error
+	admitMu     sync.Mutex
+	handlers    sync.WaitGroup
+	stopping    bool
+	closeAssets func()
 }
 
 func New(parent context.Context, o Options) (server *Server, err error) {
@@ -90,6 +92,7 @@ func New(parent context.Context, o Options) (server *Server, err error) {
 	if err != nil {
 		return nil, err
 	}
+	s.options.Assets, s.closeAssets = webui.NewMagpieAssets(ctx, o.Assets, filepath.Join(s.store.Directory, "ui-assets", "magpie"))
 	s.logs, err = events.Open(s.store.Directory, o.Output)
 	if err != nil {
 		return nil, err
@@ -216,6 +219,9 @@ func (s *Server) Close() error {
 			attempt(s.listener.Close())
 		}
 		s.handlers.Wait()
+		if s.closeAssets != nil {
+			s.closeAssets()
+		}
 		if s.settings != nil {
 			s.settings.Close()
 		}

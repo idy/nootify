@@ -15,26 +15,28 @@
 
 /* Theme-independent scales. */
 :root {
-  --mds-font: Lato, "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
-  --mds-font-display: Montserrat, "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
-  --mds-font-action: Montserrat, "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
-  --mds-font-heading: Monda, "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+  --mds-font: "Source Sans 3", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+  --mds-font-display: Outfit, "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+  --mds-font-action: Outfit, "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+  --mds-font-heading: "Source Sans 3", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
   --mds-mono: "SF Mono", "SFMono-Regular", "Cascadia Mono", Consolas, "Liberation Mono", monospace;
 
   /* Type: body copy, section headings, supporting notes, captions and code. */
-  --mds-text-body: 0.875rem;
-  --mds-text-heading: 1rem;
-  --mds-text-title: 1.25rem;
-  --mds-text-note: 0.8125rem;
-  --mds-text-caption: 0.75rem;
-  --mds-text-code: 0.8125rem;
+  --mds-text-body: 0.8125rem;
+  --mds-text-heading: 0.9375rem;
+  --mds-text-title: 1.125rem;
+  --mds-text-note: 0.75rem;
+  --mds-text-caption: 0.6875rem;
+  --mds-text-code: 0.75rem;
 
   /* Layout. */
   --mds-gutter: 24px;
   --mds-gap: 20px;
   --mds-section-gap: 20px;
   --mds-control-height: 34px;
+  --mds-compact-control-height: 20px;
   --mds-titlebar-height: 48px;
+  --mds-titlebar-visual-gap: 8px;
   --mds-sidebar-width: 200px;
 
   /* Radii: inline code, controls, segmented/notice/toast, groups and cards, dialogs. */

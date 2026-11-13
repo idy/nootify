@@ -17,7 +17,7 @@ html {
 body { margin: 0; font-size: var(--mds-text-body); }
 [data-theme] { color: var(--mds-ink); }
 h1, h2, h3, p, pre { margin: 0; }
-h1 { font: 600 var(--mds-text-title)/1.4 var(--mds-font-display); text-wrap: balance; }
+h1 { font: 300 var(--mds-text-title)/1.4 var(--mds-font-display); text-wrap: balance; }
 h2, h3, h4, h5, h6 { font-family: var(--mds-font-heading); font-weight: 400; line-height: 1.5; text-wrap: balance; }
 p { text-wrap: pretty; }
 a { color: inherit; }

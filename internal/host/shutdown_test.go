@@ -18,8 +18,12 @@ type blockedAssets struct {
 }
 
 func (f *blockedAssets) Open(name string) (fs.File, error) {
-	f.once.Do(func() { close(f.entered) })
-	<-f.release
+	// Block the admitted page request, while allowing startup asset metadata
+	// probes to report absent files without waiting for that request to begin.
+	if name == "index.html" {
+		f.once.Do(func() { close(f.entered) })
+		<-f.release
+	}
 	return f.files.Open(name)
 }
 func TestShutdownJoinsAdmittedHandlerBeforeClosingState(t *testing.T) {

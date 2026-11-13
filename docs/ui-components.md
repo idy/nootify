@@ -1,8 +1,16 @@
 # Shared application controls
 
-Nootify uses [Magpie Design System v0.4.1](https://github.com/idy/magpie-design-system/tree/v0.4.1). The unmodified CSS, font, and icon assets live in `public/vendor/magpie/`; its README records the exact release, commit, license notices, and update procedure. The root Go module embeds browser assets through `public/assets.go`, and `internal/webui/` owns trusted asset serving for the Go host and desktop gateway. Magpie assets use `/ui/vendor/magpie/`; preserve the upstream relative CSS, font, and icon paths when building and serving the embedded tree.
+Nootify bundles [Magpie Design System v0.4.4](https://github.com/idy/magpie-design-system/tree/v0.4.4). The unmodified CSS, font, and icon assets live in `public/vendor/magpie/`; its [README](../public/vendor/magpie/README.md) records the exact release, commit, license notices, and update procedure. The root Go module embeds browser assets through `public/assets.go`, and `internal/webui/` owns trusted asset serving for the Go host and desktop gateway. The stable Magpie stylesheet URL resolves to a versioned same-origin path such as `/ui/vendor/magpie/@v0.4.4/css/magpie.css`; preserve upstream relative CSS, font, and icon paths.
 
-`public/styles.css` imports the upstream stylesheet. Magpie owns palette, typography, focus, standard control skins, automatic system appearance, and reduced motion. Nootify owns its 224px navigation column, centered 960px working column, native window-control clearance, live lists, recipient picker, provider editor, and narrow-screen composition. Keep application overrides outside the vendor directory. No runtime CDN or extra framework is required.
+`public/styles.css` imports the upstream stylesheet. Magpie owns palette, typography, focus, standard control skins, automatic system appearance, and reduced motion. Nootify owns its 224px navigation column, centered 960px working column, native window-control clearance, live lists, recipient picker, provider editor, and narrow-screen composition. Keep application overrides outside the vendor directory. JavaScript helpers, including dropdown behavior and dialog lifecycle, remain owned by the app.
+
+## Resources and updates
+
+At startup and every six hours, the service checks stable latest through `https://data.jsdelivr.com/v1/package/resolve/gh/idy/magpie-design-system@latest`. It pins the resolved `vVERSION`, reads `https://data.jsdelivr.com/v1/package/gh/idy/magpie-design-system@vVERSION/flat`, and downloads resources from `https://cdn.jsdelivr.net/gh/idy/magpie-design-system@vVERSION/PATH`. Only the complete CSS, font, icon, and license set is cached at `STATE_DIR/ui-assets/magpie`; every file's byte size and SHA256 base64 must match the manifest before activation. Cached releases are preferred only when newer than the bundled baseline. A usable validated cache or the bundle remains available offline or after a failed update.
+
+The browser loads assets from the local origin, keeping the existing CSP. Versioned stylesheets keep CSS imports and referenced fonts and icon masks on one release; a downloaded stylesheet takes effect on the next page load. HTML SVG references use stable paths and resolve to the active release when requested. This automatic background check adds no user setting and does not fetch upstream JavaScript helpers.
+
+`npm run vendor:magpie` explicitly refreshes the checked-in baseline using the same endpoints and validation. The local `public/vendor/magpie/manifest.json` has a `version` such as `v0.4.4` and `files` entries containing relative `name` (no leading slash), SHA256 base64 `hash`, and byte `size`. Builds and desktop packaging use the checked-in bundle without networking; review provenance and design documentation when maintaining that baseline.
 
 ## Component mapping
 
@@ -27,7 +35,7 @@ Filter buttons remain toggle buttons with `aria-pressed`, since they filter one 
 `src/dropdown.ts` exports `Dropdown`, a select-only combobox. Nootify retains this controller so keyboard commits, focus restoration, and dismissal behavior remain compatible. It consumes Magpie's visual primitives rather than creating a second dropdown appearance.
 
 - The trigger is a button with `setting-field dropdown-button mds-input`, an accessible label, and a `[data-dropdown-label]` child. Its string `value` holds the committed selection.
-- The popup uses `dropdown-menu mds-select-menu` and `role="listbox"`. Options have `dropdown-option mds-select-option`, `role="option"`, unique `data-value`, and `[data-option-label]` children. The upstream CSS mask draws the selected check; the retained legacy SVG is hidden.
+- The popup uses `dropdown-menu mds-select-menu` and `role="listbox"`. Options have `dropdown-option mds-select-option`, `role="option"`, unique `data-value`, and `[data-option-label]` children. The upstream CSS mask draws the selected check at regular text weight; the retained legacy SVG is hidden.
 - The controller links trigger and popup through ARIA and portals the popup to `document.body` to escape clipping groups.
 
 ```ts

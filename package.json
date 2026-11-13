@@ -1,11 +1,12 @@
 {
   "name": "nootify",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "private": true,
   "type": "module",
   "description": "Routes Feishu replies to local coding-agent sessions and tracks pull requests, with a Windows and macOS tray app",
   "scripts": {
     "build": "node scripts/build-ui.mjs",
+    "vendor:magpie": "node scripts/sync-magpie.mjs",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && tsc -p tsconfig.test.json && node scripts/test.mjs && go test ./internal/... ./desktop/...",
     "test:integration": "npm run build && node scripts/integration.mjs",

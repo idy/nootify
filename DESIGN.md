@@ -47,31 +47,31 @@ colors:
   dark-selected: "#ffffff14"
 typography:
   title:
-    fontFamily: "Montserrat, \"PingFang SC\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", system-ui, sans-serif"
-    fontSize: "1.25rem"
-    fontWeight: 600
+    fontFamily: "Outfit, \"PingFang SC\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", system-ui, sans-serif"
+    fontSize: "1.125rem"
+    fontWeight: 300
     lineHeight: 1.4
   heading:
-    fontFamily: "Monda, \"PingFang SC\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", system-ui, sans-serif"
-    fontSize: "1rem"
+    fontFamily: "\"Source Sans 3\", \"PingFang SC\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", system-ui, sans-serif"
+    fontSize: "0.9375rem"
     fontWeight: 400
     lineHeight: 1.5
   body:
-    fontFamily: "Lato, \"PingFang SC\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", system-ui, sans-serif"
-    fontSize: "0.875rem"
+    fontFamily: "\"Source Sans 3\", \"PingFang SC\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", system-ui, sans-serif"
+    fontSize: "0.8125rem"
     fontWeight: 400
     lineHeight: 1.5
   action:
-    fontFamily: "Montserrat, \"PingFang SC\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", system-ui, sans-serif"
-    fontSize: "0.8125rem"
-    fontWeight: 500
+    fontFamily: "Outfit, \"PingFang SC\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", system-ui, sans-serif"
+    fontSize: "0.75rem"
+    fontWeight: 300
     lineHeight: 1.5
   caption:
-    fontFamily: "Lato, \"PingFang SC\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", system-ui, sans-serif"
-    fontSize: "0.75rem"
+    fontFamily: "\"Source Sans 3\", \"PingFang SC\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", system-ui, sans-serif"
+    fontSize: "0.6875rem"
   code:
     fontFamily: "\"SF Mono\", \"SFMono-Regular\", \"Cascadia Mono\", Consolas, \"Liberation Mono\", monospace"
-    fontSize: "0.8125rem"
+    fontSize: "0.75rem"
 rounded:
   xs: "4px"
   sm: "8px"
@@ -135,17 +135,19 @@ components:
 
 **Creative North Star: "Magpie application, local settings"**
 
-Nootify uses the user-selected Magpie Design System v0.4.1 for its complete application. Quiet neutral surfaces, blue actions, compact controls, and the penguin identity support everyday operation alongside coding tools. Chinese and English share the same hierarchy and follow system light/dark appearance.
+Nootify bundles the user-selected Magpie Design System v0.4.4 for its complete application. Quiet neutral surfaces, blue actions, compact controls, and the penguin identity support everyday operation alongside coding tools. Chinese and English share the same hierarchy and follow system light/dark appearance.
 
 The unmodified upstream CSS, fonts, and icons in `public/vendor/magpie/` own the palette, type roles, standard component skins, focus treatments, and reduced motion. `public/styles.css` imports that system and owns Nootify's domain composition: navigation dimensions, live lists, grouped channels, recipient selection, and responsive dialogs. The frontmatter records the reused shipped tokens; upstream remains the implementation source of truth. Application adjustments stay outside the vendor directory.
+
+The service checks stable latest from jsDelivr in the background at startup and every six hours. Complete size/SHA256-validated releases are cached under `STATE_DIR/ui-assets/magpie` and preferred only when newer than the bundled baseline. Versioned same-origin stylesheets keep CSS imports and referenced fonts and icon masks on one release; a newly downloaded stylesheet applies on the next page load. Offline operation retains a usable cache or the bundled fallback. JavaScript helpers remain app-owned. Maintainers refresh the checked-in baseline with `npm run vendor:magpie`; normal builds package the bundle without CDN access.
 
 **Key Characteristics:**
 
 - Neutral groups with fine row separators.
-- Distinct title, heading, action, and reading fonts.
+- Outfit display/actions and Source Sans 3 reading roles.
 - Stable live lists and explicit dialog confirmation.
 
-Provenance: approved whole-application replacement, recorded from `public/index.html`, `public/styles.css`, the component diff in `src/ui-app.ts`, and Magpie v0.4.1 (commit `284dd0341351fb4bbeaf55ce1a6658397c7d5941`). The direction contract remains in `.impeccable/surfaces/public-index-html.md`; integration and controller mapping remain in `docs/ui-components.md`.
+Provenance: approved whole-application replacement, recorded from `public/index.html`, `public/styles.css`, the component diff in `src/ui-app.ts`, and the unmodified Magpie v0.4.4 bundle (commit `fc0e8f1c43521b22b72d3be4223ea924189c1adb`). `public/vendor/magpie/manifest.json` records the bundled version, relative paths, SHA256 base64 hashes, and byte sizes. The direction contract remains in `.impeccable/surfaces/public-index-html.md`; integration and controller mapping remain in `docs/ui-components.md`.
 
 ## Colors
 
@@ -163,9 +165,9 @@ Repository tags retain a separate eight-color identity set with tinted backgroun
 
 ## Typography
 
-Locally bundled Montserrat supplies dialog titles, brand, navigation, breadcrumbs, and actions. All breadcrumb segments share the upstream body size (14px); the current page differs only by ink color and weight (600 versus 400), never by a larger title size. Monda supplies section headings. Channel names use bold Lato body text (14px/1.5), with type and labeled status alongside in aligned columns (13px/1.5). Lato supplies body text, fields, row names, notes, and captions. Each uses Magpie's system Chinese fallbacks. Monospace identifiers retain tabular figures and disabled ligatures.
+Locally bundled Outfit supplies upstream large titles and actions at light weight (300). Source Sans 3 supplies section headings and reading/interface text at regular weight (400), including upstream navigation. Nootify's brand and breadcrumb compositions retain their display/action role aliases. All breadcrumb segments share the upstream body size (13px); the current page differs by ink color rather than a larger title size. Channel names use semibold Source Sans 3 body text (13px/1.5), with type and labeled status alongside in aligned columns (12px/1.5). Body text, fields, row names, notes, and captions use Source Sans 3. Each uses Magpie's system Chinese fallbacks. Monospace identifiers retain tabular figures and disabled ligatures.
 
-The compact ramp is title (20px), heading (16px), body/navigation (14px), notes/actions/code (13px), and caption (12px), at the default root size. Titles are semibold, Monda headings regular, and action labels medium. Nootify row names use (14px/20px) medium; subtitles use (12px/17px), preventing mixed CJK/Latin line-box jumps. Metadata tags remain (11px). Recipient dialog titles reduce to (16px) below the local mobile breakpoint; channel dialog titles retain the upstream title size. Supporting hints are bounded at (75ch). There is no separate hero display scale.
+The upstream compact ramp is title (18px), heading (15px), body/navigation (13px), notes/actions/code (12px), and caption (11px), at the default root size. Nootify's existing row names use the body token with (20px) line height and medium weight; subtitles use the caption token with (17px) line height, preventing mixed CJK/Latin line-box jumps. Metadata tags remain (11px). The recipient title composition retains its semibold weight and (16px) mobile override; standard channel dialog titles follow upstream Outfit and light weight. Supporting hints are bounded at (75ch). There is no separate hero display scale.
 
 **The Names First Rule.** Lead contact rows with human names; keep IDs and disambiguation subordinate and preserve already formatted aliases.
 
@@ -198,7 +200,7 @@ Upstream controls have small curved corners, groups use the large radius, and di
 - **Native tray menu:** use the platform's menu material, typography, hover, disabled states, and keyboard shortcuts. Keep Open Nootify, one application status, Software Updates, Settings, and Quit Nootify; an available update may expose its direct install action. Settings retains `CmdOrCtrl+,` and Quit retains `CmdOrCtrl+Q`. Keep background-service/module/start/restart/install controls out of the everyday menu. Status changes update existing items without rebuilding the menu. Do not imitate this native surface with browser HTML/CSS.
 - **Buttons:** upstream primary blue, raised secondary, and transparent subtle variants; standard minimum height (34px). Primary hover changes to accent-hover; subtle hover uses its neutral overlay. Disabled buttons use opacity (.45). Channel delete confirmation uses the upstream primary button; other destructive confirmations retain semantic danger color. Channel Delete stays neutral at rest and gains error color on hover. Native labels and action state remain application responsibilities.
 - **Fields and switches:** upstream bordered fields provide hover, accent focus, invalid, and disabled states. Switches retain a native checkbox plus an adjacent visual track (34px by 20px); checked state fills blue and moves the knob. Secret controls and validation remain local compositions.
-- **Dropdowns:** the existing select-only combobox controller uses upstream field/menu/option skins. Options fill the popup width, align text to the start, and wrap long labels. Selection is bold with the upstream check mask; keyboard-active options use the selected surface. The body-portaled popup is viewport-bounded and may flip upward. Arrows, Home/End, and typeahead preview; Enter/Space commits; Escape cancels. Tab, outside interaction, route changes, resizing, and ancestor scrolling dismiss without committing. Focus stays on the trigger.
+- **Dropdowns:** the existing select-only combobox controller uses upstream field/menu/option skins. Options fill the popup width, align text to the start, and wrap long labels. Selection retains regular text weight with the upstream check mask; keyboard-active options use the selected surface. The body-portaled popup is viewport-bounded and may flip upward. Arrows, Home/End, and typeahead preview; Enter/Space commits; Escape cancels. Tab, outside interaction, route changes, resizing, and ancestor scrolling dismiss without committing. Focus stays on the trigger.
 - **Navigation and filters:** neutral selected navigation with a thin inset border; nested settings use an indented rule. Filters use `aria-pressed`, neutral selection, a border, and semibold text; they are list toggles, not tab panels.
 - **Groups and channels:** the user-facing term is Channel / 通道; internal provider identifiers remain implementation details. Channels join compact rows inside one upstream group. Each row keeps its name/Default badge, type, labeled status, enable switch, and text actions on one line at all widths; narrow screens scroll the list horizontally. Long names truncate with their full value in a tooltip. Connection errors remain available on the status label and in the editor. The already-default action is hidden. Add is a text button above the list at its upper left; Add and Edit open the same standard Magpie channel dialog. App IDs and addresses appear only in the editor. The empty state remains inside the group, and a short routing note below explains that new sessions use the default while existing sessions retain their channel.
 - **Channel chooser:** The searchable chooser presents three rows with SVG identity icons, a name and supporting explanation: Feishu Bot for manual credentials, Feishu personal app for QR registration, and Remote Nootify. Existing channels retain their actual connection-type label; personal editors hide manual credential fields.

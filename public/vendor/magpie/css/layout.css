@@ -33,13 +33,34 @@
 [data-window-chrome="macos"] .mds-brand { padding-left: 88px; } /* Clear the traffic lights. */
 .mds-brand-mark { display: grid; place-items: center; }
 .mds-brand-mark svg { display: block; width: 22px; height: 22px; }
-.mds-brand-name { min-width: 0; overflow: hidden; font-family: var(--mds-font-display); font-size: 0.9375rem; font-weight: 650; letter-spacing: -0.013em; text-overflow: ellipsis; white-space: nowrap; }
+.mds-brand-name { min-width: 0; overflow: hidden; font-family: var(--mds-font); font-size: var(--mds-text-body); font-weight: 400; letter-spacing: -0.013em; text-overflow: ellipsis; white-space: nowrap; }
 /* Fixed-height native chrome centres its text; window controls fill the row. */
 .mds-titlebar-content { display: flex; align-items: center; gap: 16px; min-width: 0; padding-inline: var(--mds-gutter); border-bottom: 1px solid var(--mds-line); }
 .mds-titlebar-actions { display: flex; align-items: center; gap: 10px; min-width: 0; margin-left: auto; }
+/* Balance visible content at 8px. Dense titlebars trim horizontal hit padding
+   instead of overlapping adjacent actions; coarse-pointer height stays 44px. */
+.mds-titlebar-actions.mds-titlebar-actions--balanced { gap: var(--mds-titlebar-visual-gap); padding-inline-end: 0; }
+.mds-titlebar-actions--balanced > * { --mds-action-inset-start: 0px; --mds-action-inset-end: 0px; margin-inline-start: calc(0px - var(--mds-action-inset-start)); margin-inline-end: calc(0px - var(--mds-action-inset-end)); }
+/* End padding = shared gap + 9.625px caret ink + 4.1875px end inset - 1px border. */
+.mds-titlebar-actions--balanced .mds-select--text { padding-inline-end: calc(var(--mds-titlebar-visual-gap) + 12.8125px); background-position: right 1px center; }
+.mds-titlebar-actions--balanced > :is(.mds-action-slot--select, .mds-select-control--text, .mds-select--text) { --mds-action-inset-start: 3px; --mds-action-inset-end: 4.1875px; min-width: 0; }
+/* Text caret: 1px border + 1px placement + 40/256 of its 14px Phosphor viewport. */
+.mds-titlebar-actions--balanced > :is(.mds-switch, .mds-action-slot--switch) { --mds-action-inset-start: 2px; --mds-action-inset-end: 2px; }
+.mds-titlebar-actions--balanced > .mds-switch,
+.mds-titlebar-actions--balanced > .mds-action-slot--switch > .mds-switch { width: 38px; align-items: center; justify-content: center; }
+.mds-titlebar-actions--balanced > .mds-action-slot--switch { flex: 0 0 auto; }
+.mds-titlebar-actions--balanced > .mds-pill--responsive { --mds-action-inset-start: 1px; --mds-action-inset-end: 1px; }
+.mds-titlebar-actions--balanced > .mds-pill--icon { --mds-action-inset-start: 2px; --mds-action-inset-end: 2px; width: 32px; min-width: 32px; }
+.mds-titlebar-actions--balanced > .mds-icon-button--compact { --mds-action-inset-start: 4px; --mds-action-inset-end: 4px; width: 24px; min-width: 24px; }
+.mds-titlebar-actions--balanced > .mds-icon-button--compact::before { width: 24px; }
+/* Phosphor Reload has 2px/1px optical insets inside its 16px viewport. */
+.mds-titlebar-actions--balanced > .mds-icon-button--compact:has(use[href$="#reload"]) { --mds-action-inset-start: 6px; --mds-action-inset-end: 5px; }
+@media (max-width: 640px) {
+  .mds-titlebar-actions--balanced > .mds-pill--responsive { --mds-action-inset-start: 2px; --mds-action-inset-end: 2px; width: 32px; min-width: 32px; }
+}
 .mds-crumbs { display: flex; align-items: baseline; gap: 8px; min-width: 0; font-size: var(--mds-text-body); white-space: nowrap; }
 .mds-crumbs > * { color: var(--mds-muted); font-size: inherit; font-weight: 400; }
-.mds-crumbs > [aria-current] { overflow: hidden; color: var(--mds-ink); font-weight: 600; text-overflow: ellipsis; }
+.mds-crumbs > [aria-current] { overflow: hidden; color: var(--mds-ink); font-weight: 400; text-overflow: ellipsis; }
 .mds-crumb-sep { color: var(--mds-faint); }
 
 .mds-window-controls { display: flex; flex: 0 0 auto; align-self: stretch; }
@@ -66,7 +87,7 @@
 }
 .mds-nav-item .mds-icon { color: var(--mds-muted); }
 .mds-nav-item:hover:not(:disabled) { background: var(--mds-hover); }
-.mds-nav-item[aria-current] { background: var(--mds-selected); color: var(--mds-ink-strong); font-weight: 600; }
+.mds-nav-item[aria-current] { background: var(--mds-selected); color: var(--mds-ink-strong); font-weight: 400; }
 .mds-nav-item[aria-current] .mds-icon { color: var(--mds-ink-strong); }
 .mds-nav-item:disabled { cursor: not-allowed; opacity: .45; }
 .mds-sidebar-footer { display: grid; gap: 12px; margin-top: auto; padding: 16px 10px 0; border-top: 1px solid var(--mds-line); color: var(--mds-muted); font-size: var(--mds-text-caption); }
@@ -100,14 +121,14 @@
 .mds-actionbar-buttons { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; margin-inline-start: auto; }
 
 /* ---- Typography and nested navigation ------------------------------- */
-.mds-titlebar, .mds-titlebar .mds-status { font-family: var(--mds-font-action); }
+.mds-titlebar, .mds-titlebar .mds-status { font-family: var(--mds-font); }
 .mds-shell { font-family: var(--mds-font); }
-.mds-nav-item { font-family: var(--mds-font-action); font-weight: 500; }
+.mds-nav-item { font-family: var(--mds-font); font-weight: 400; }
 .mds-nav-group { font-family: var(--mds-font-heading); font-weight: 400; }
 
 /* A parent keeps its own active surface; only its selected leaf is current. */
 .mds-nav-branch { display: grid; gap: 10px; }
-.mds-nav-parent { border: 1px solid transparent; font-family: var(--mds-font-action); font-weight: 500; }
+.mds-nav-parent { border: 1px solid transparent; font-family: var(--mds-font); font-weight: 400; }
 .mds-nav-parent[data-active] { border-color: var(--mds-line); background: var(--mds-surface); color: var(--mds-ink); box-shadow: 0 1px 2px var(--mds-toast-shadow); }
 .mds-nav-parent[data-active] .mds-icon { color: var(--mds-ink); }
 .mds-nav-parent[data-active]:hover:not(:disabled) { background: var(--mds-surface); }

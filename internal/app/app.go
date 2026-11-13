@@ -147,7 +147,7 @@ func Run(parent context.Context, args []string, version string, stdout, stderr i
 	if command == "ui-url" {
 		ctx, cancel := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
 		defer cancel()
-		gateway, err := webui.NewGateway(ctx, webui.Options{BaseURL: base, Token: token, Route: value("ui-route"), Assets: assets.FS})
+		gateway, err := webui.NewGateway(ctx, webui.Options{BaseURL: base, Token: token, Route: value("ui-route"), Assets: assets.FS, StateDir: directory})
 		if err != nil {
 			return true, err
 		}
