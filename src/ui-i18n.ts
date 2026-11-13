@@ -523,6 +523,8 @@ export const english = {
   '继续': 'Resume',
   '暂停': 'Pause',
   '主导航': 'Main navigation',
+  '打开导航': 'Open navigation',
+  '关闭导航': 'Close navigation',
   'Nootify 运行日志': 'Nootify logs',
   '有新版本': 'Update available',
   '设置页面': 'Settings pages',

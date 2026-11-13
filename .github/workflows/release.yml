@@ -99,22 +99,24 @@ jobs:
       contents: write
     env:
       RELEASE_NOTES: |
-        Adds automatic IPv4 access through the operating system's Tailscale client.
-        The local sidebar shows separate LAN and Tailscale addresses, with complete
-        addresses wrapping when needed. Connecting Tailscale after Nootify starts
-        needs no service restart.
+        Refines the application UI against Magpie Design System v0.4.4, with
+        consistent typography, control sizes, corner radii, and dialog actions.
+        Log search now lives above the list filters. Selected filters use text
+        color only, with tighter list spacing and no visible horizontal scrollbar.
+        The titlebar update pill and refresh action use compact controls.
 
-        Both devices need access to the same tailnet, with the configured TCP port
-        (9417 by default) permitted by Tailscale grants/ACLs and the host firewall.
-        Use the numeric Tailscale address shown in the sidebar. No embedded VPN
-        login, Tailscale Serve, Funnel, or router port forwarding is required.
-        Remote settings remain read-only, and control APIs still require a token.
+        Narrow browser windows now use a left-side navigation drawer instead of
+        horizontal navigation. It includes settings and connection status, closes
+        after page selection, supports Escape and backdrop dismissal, and restores
+        keyboard focus. Wide browsers and native windows retain the fixed sidebar.
+        Channel and remote-listener validation now marks the invalid field and
+        links its error; QR authorization failures show the correct error color.
 
-        Existing identity, settings, conversation state, and automatic Magpie
-        asset updates are retained. Apple Silicon macOS 13.5+ DMG and Windows x64
-        per-user NSIS installer. The macOS app is ad-hoc signed and not notarized;
-        allow it under System Settings > Privacy & Security on first launch.
-        The Windows installer is not Authenticode signed.
+        Existing identity, settings, conversation state, LAN/Tailscale access, and
+        automatic Magpie asset updates are retained. Apple Silicon macOS 13.5+ DMG
+        and Windows x64 per-user NSIS installer. The macOS app is ad-hoc signed and
+        not notarized; allow it under System Settings > Privacy & Security on first
+        launch. The Windows installer is not Authenticode signed.
     steps:
       - uses: actions/checkout@v7
         with:

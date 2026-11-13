@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Synthetic browser preview. Build first (`npm run build`), then launch this file
- * through preview_start. Only 127.0.0.1:9427 is used; an occupied port is an error.
+ * through preview_start. Binds loopback on PORT (default 9427); occupied ports fail.
  * Open the printed ordinary local URL to edit without an authorization link.
  * The fixture serves the same browser modules embedded by the native Go host.
  * All fixture mutations disappear on restart. No storage, agent discovery,
@@ -19,7 +19,9 @@ class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
 
-export const PREVIEW_ORIGIN = 'http://127.0.0.1:9427';
+const previewPort = Number(process.env.PORT || 9427);
+if (!Number.isInteger(previewPort) || previewPort < 1 || previewPort > 65535) throw new Error('Invalid preview PORT');
+export const PREVIEW_ORIGIN = `http://127.0.0.1:${previewPort}`;
 const copy = value => structuredClone(value);
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
 const required = (value, field) => {
@@ -261,7 +263,7 @@ export function createPreviewServer(fixture = createPreviewFixture()) {
     };
     try {
       const origin = `http://${request.headers.host}`;
-      if (![PREVIEW_ORIGIN, 'http://localhost:9427'].includes(origin) || request.headers.origin && request.headers.origin !== origin
+      if (![PREVIEW_ORIGIN, `http://localhost:${previewPort}`].includes(origin) || request.headers.origin && request.headers.origin !== origin
         || request.headers['sec-fetch-site'] && !['none', 'same-origin'].includes(request.headers['sec-fetch-site'])) {
         throw new HttpError(403, 'Preview requests must use the local origin');
       }
@@ -340,7 +342,7 @@ export async function main() {
   try {
     await new Promise((resolveListen, reject) => {
       server.once('error', reject);
-      server.listen(9427, '127.0.0.1', () => { server.off('error', reject); resolveListen(); });
+      server.listen(previewPort, '127.0.0.1', () => { server.off('error', reject); resolveListen(); });
     });
     server.on('error', error => { console.error(`Nootify Preview failed: ${error.message}`); close(); process.exitCode = 1; });
     console.log('Nootify Preview/demo ready. Synthetic data only; edits reset on restart.');
