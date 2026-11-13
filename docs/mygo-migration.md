@@ -27,7 +27,7 @@ The release manifest remains `latest.json` with `version`, `notes`, `pub_date`, 
 
 ## Direct LAN access
 
-The Go HTTP service listens on all IPv4 interfaces at `0.0.0.0:9417` by default and exposes `access.lan_url` for the sidebar link. It accepts actual loopback/private LAN peers and validates Host against its own interface IPs or system hostname and service port, retaining origin/fetch-site checks. LAN UI access is read-only except repository follow choices and PR refresh. Local settings, mutations, secret reveal, and directory reads require an actual loopback peer. Bearer-authenticated `/v1/` APIs permit private LAN callers; `/v1/remote/` identity management stays loopback-only.
+The Go HTTP service listens on all IPv4 interfaces at `0.0.0.0:9417` by default and exposes `access.lan_url` for the sidebar link. It accepts actual loopback/private LAN peers and validates Host against its own interface IPs or system hostname and service port, retaining origin/fetch-site checks. LAN UI access is read-only. Local settings, mutations, secret reveal, and directory reads require an actual loopback peer. Bearer-authenticated `/v1/` APIs permit private LAN callers; `/v1/remote/` identity management stays loopback-only.
 
 Remote Nootify connects directly over authenticated gRPC. Plaintext endpoints require numeric loopback or private LAN IPs and reject public peers; public endpoints require TLS. Direct LAN HTTP and plaintext gRPC are not encrypted by the desktop gateway. There is no embedded VPN client or tunnel layer. Retired embedded Tailscale identity files remain unused and untouched, and the operating system's Tailscale installation is unchanged. See [LAN access](guide.md#lan-access).
 

@@ -72,7 +72,7 @@ func (s *shell) relocalize() {
 	s.renderUpdate()
 }
 func moduleLabel(l language.Locale, name, status string) string {
-	names := map[string]language.Text{"sessions": language.Sessions, "lark": language.Lark, "pulls": language.Pulls, "agents": language.Agents}
+	names := map[string]language.Text{"sessions": language.Sessions, "lark": language.Lark, "agents": language.Agents}
 	states := map[string]language.Text{"ready": language.Ready, "disabled": language.Disabled, "connecting": language.Connecting, "reconnecting": language.Reconnecting, "failed": language.Failed, "stopped": language.Stopped, "refreshing": language.Refreshing, "signed_out": language.SignedOut, "stale": language.Stale, "error": language.Error, "idle": language.Idle}
 	if key, ok := names[name]; ok {
 		name = l.Text(key)

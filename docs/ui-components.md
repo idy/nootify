@@ -23,12 +23,12 @@ The browser loads assets from the local origin, keeping the existing CSP. Versio
 | Actions | `mds-button`, `mds-button--primary`, `mds-button--subtle`, `mds-icon-button` | Action state and translated accessible names; a local danger modifier uses semantic tokens |
 | Text fields | `mds-input`, `mds-mono` | Labels, validation, secret handling, responsive width |
 | Switches | `mds-switch` with a checkbox and adjacent `mds-switch-track` | The native checkbox retains its ID, label, checked/disabled state and change handler |
-| Checkboxes | `mds-check` around the native input | Repository follow and agent injection state |
+| Checkboxes | `mds-check` around the native input | Agent injection state |
 | Language popup | `mds-select-menu`, `mds-select-option`, `mds-input` | Existing `Dropdown` controller and its dismissal semantics |
 | Channel chooser/editor/delete dialogs | Unmodified `mds-dialog`, `mds-dialog-actions`, Magpie controls | Vertical form composition, native modal lifecycle/scrolling, async save and focus restoration; no local width, padding or footer-skin overrides |
 | Recipient picker | `mds-dialog` with the application’s bounded-list composition | Independently scrolling contacts and reachable selection footer |
 
-Filter buttons remain toggle buttons with `aria-pressed`, since they filter one list rather than switch tab panels. Repository identity tags, delivery types and contact rows are domain compositions using Magpie tokens. The penguin stays Nootify's brand mark.
+Filter buttons remain toggle buttons with `aria-pressed`, since they filter one list rather than switch tab panels. Delivery types and contact rows are domain compositions using Magpie tokens. The penguin stays Nootify's brand mark.
 
 ## Dropdown
 
@@ -64,7 +64,7 @@ A personal scan records the channel name and enabled state before starting. The 
 
 ## Verification
 
-`npm run preview:ui` is an isolated synthetic browser fixture for channel dialogs, remote settings, repository choices, agent toggles, language switching, and contact selection. Use the local URL printed by the command. Personal authorization uses an explicitly synthetic QR flow; real OAuth, provider connections, and filesystem actions are unavailable. Preview results do not prove that the Go host serves every embedded asset or that native transport and desktop integration work.
+`npm run preview:ui` is an isolated synthetic browser fixture for channel dialogs, remote settings, agent toggles, language switching, and contact selection. Use the local URL printed by the command. Personal authorization uses an explicitly synthetic QR flow; real provider connections and filesystem actions are unavailable. Preview results do not prove that the Go host serves every embedded asset or that native transport and desktop integration work.
 
 The production Go host allows direct loopback editing without an authorization link and preserves that access after a page reload, subject to actual peer, Host/origin/fetch-site, and UI-header checks. LAN settings remain read-only. The encrypted desktop/CLI gateway is separate from direct browser access.
 

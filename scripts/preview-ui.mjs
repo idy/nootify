@@ -7,7 +7,7 @@
  * All fixture mutations disappear on restart. No storage, agent discovery,
  * provider core, OS services, or credential resolvers are constructed here.
  * Personal channel authorization is simulated (completes after fifteen status reads).
- * OAuth sign-in, legacy registration, backup/import, and folder actions fail explicitly.
+ * Legacy registration, backup/import, and folder actions fail explicitly.
  */
 import QRCode from 'qrcode';
 import { createServer } from 'node:http';
@@ -54,7 +54,6 @@ export function createPreviewFixture() {
     ['thread_message', 'providers', 1, 'Preview: Running the reconnect regression checks.', 8],
     ['delivery_failed', 'providers', 2, 'Preview: The demo conversation is offline; delivery was not attempted.', 12],
     ['reconnecting', 'providers', null, 'Preview: Studio relay is reconnecting. This is a simulated connection state.', 15],
-    ['refresh_completed', 'pulls', null, 'Preview: Refreshed 4 synthetic pull requests across 3 demo repositories.', 18],
     ['ignored', 'providers', 1, 'Preview: Duplicate demo reply ignored.', 21],
     ['thread_created', 'providers', 0, 'Preview: Created a synthetic notification destination for this conversation.', 24],
     ['ready', 'host', null, 'Preview/demo mode: all data is synthetic and changes stay in memory.', 30],
@@ -205,50 +204,6 @@ export function createPreviewFixture() {
     },
   };
 
-  const reference = index => ({ id: sessions[index].session_id, name: sessions[index].session_name,
-    agent: ['claude', 'codex', 'opencode'][index], adapter: sessions[index].adapter });
-  const makePull = (number, title, repository, index, reviewDecision, ciState, isDraft = false) => ({
-    number, title: `Preview · ${title}`, repository, author: 'preview-alex', isDraft,
-    url: `${PREVIEW_ORIGIN}/#/pulls/${repository.startsWith('preview-team/') ? 'internal' : 'upstream'}`,
-    headBranch: `preview/change-${number}`, updatedAt: ago(number), reviewDecision, mergeable: 'MERGEABLE',
-    ci: { state: ciState, passed: ciState === 'SUCCESS' ? 8 : 6, failed: ciState === 'FAILURE' ? 1 : 0,
-      pending: ciState === 'PENDING' ? 2 : 0, total: ciState === 'FAILURE' ? 7 : 8 },
-    sessions: [reference(index)], subscription: 'session-branch',
-  });
-  const internal = [
-    makePull(42, 'Simplify provider configuration', 'preview-team/nootify', 0, 'APPROVED', 'SUCCESS'),
-    makePull(39, 'Keep queued replies through reconnects', 'preview-team/nootify', 1, 'CHANGES_REQUESTED', 'FAILURE'),
-    makePull(18, 'Add a concise setup guide', 'preview-team/handbook', 2, 'REVIEW_REQUIRED', 'PENDING', true),
-  ];
-  const upstream = [makePull(107, 'Improve connection shutdown', 'preview-community/transport', 1, 'REVIEW_REQUIRED', 'SUCCESS')];
-  const repositories = ['preview-team/nootify', 'preview-team/handbook', 'preview-community/transport'].map((repository, index) => ({
-    repository, followed: index !== 1, ...(index === 1 ? { choice: 'mute' } : {}), agents: [reference(index).agent], sessions: 1,
-    sources: [{ ...reference(index), directory: `/preview/demo/${repository}`, branch: `preview/change-${index + 1}`,
-      archived: false, lastActive: ago(index + 1), fromRepository: true, pulls: [] }], allPulls: true, linkedPulls: 1, authored: 1,
-    lastActive: ago(index + 1), pulls: { internal: internal.filter(pull => pull.repository === repository).length,
-      upstream: upstream.filter(pull => pull.repository === repository).length },
-  }));
-  let refreshedAt = ago(18);
-  const pulls = {
-    snapshot() {
-      const followed = new Set(repositories.filter(repo => repo.followed).map(repo => repo.repository));
-      const visibleInternal = internal.filter(pull => followed.has(pull.repository));
-      const visibleUpstream = upstream.filter(pull => followed.has(pull.repository));
-      return copy({ internal: visibleInternal, upstream: visibleUpstream,
-        hidden: { internal: internal.length - visibleInternal.length, upstream: upstream.length - visibleUpstream.length }, repositories,
-        refresh: { running: false, lastSuccessAt: refreshedAt, finishedAt: refreshedAt }, warnings: [] });
-    },
-    refresh() { refreshedAt = new Date().toISOString(); report('pulls', 'Refreshed synthetic pull requests without contacting GitHub.'); },
-    async setChoice(repository, follow) {
-      if (follow !== null && typeof follow !== 'boolean') throw new HttpError(400, 'Preview: follow must be boolean or null');
-      const row = repositories.find(item => item.repository === repository);
-      if (!row) throw new HttpError(404, 'Preview: repository was not found');
-      row.followed = follow ?? true;
-      if (follow === null) delete row.choice; else row.choice = follow ? 'follow' : 'mute';
-      return copy(row);
-    },
-  };
-
   const recipientRows = [
     { open_id: 'ou_previewalex', name: 'Preview · Alex Chen', en_name: 'Alex Chen' },
     { open_id: 'ou_previewmorgan', name: 'Preview · Morgan Lin', en_name: 'Morgan Lin' },
@@ -261,7 +216,6 @@ export function createPreviewFixture() {
     async page() { return { version: '0.2.0-preview', exports_dir: '/preview/demo/exports (in-memory only)', lark: {
       status: feishu()?.enabled ? 'ready' : 'disabled', configured: Boolean(feishu()), connection_type: 'bot', source: 'settings',
       app_id: feishu()?.app_id, saved: Boolean(feishu()), recipient: feishu()?.recipient_open_id, groups: sessions.length } }; },
-    async github() { return { account: { signedIn: true, login: 'preview-demo', source: 'nootify' }, login: { status: 'idle' } }; },
     async larkRegistration() { return { status: 'idle' }; },
     async larkSetup() { return { app_id: feishu()?.app_id ?? appId, status: 'ready', missing: [], mention_only: false }; },
     async larkRecipients(onProgress, signal) {
@@ -279,13 +233,12 @@ export function createPreviewFixture() {
       report('providers', 'Updated the demo recipient in memory.');
     },
     async larkSecret() { return { app_id: feishu()?.app_id, app_secret: secrets.get(feishu()?.id) ?? '' }; },
-    startGitHubLogin: unavailable('GitHub sign-in'), cancelGitHubLogin: unavailable('GitHub sign-in'), signOutGitHub: unavailable('GitHub sign-out'),
     saveLark: unavailable('legacy Feishu setup; use the Providers demo editor'), clearLark: unavailable('legacy Feishu removal; use the Providers demo editor'),
     startLarkRegistration: unavailable('Feishu registration'), cancelLarkRegistration: unavailable('Feishu registration'),
     exportConfig: unavailable('configuration export'), previewImport: unavailable('configuration import'), importConfig: unavailable('configuration import'),
     reveal: unavailable('opening system folders'),
   };
-  const modules = ['sessions', 'providers', 'pulls', 'agents'].map(name => ({
+  const modules = ['sessions', 'providers', 'agents'].map(name => ({
     name, status: () => 'ready',
     async handle(request) {
       if (name === 'sessions' && request.method === 'GET' && request.path === '/v1/sessions') return { body: copy(sessions) };
@@ -293,11 +246,11 @@ export function createPreviewFixture() {
       return undefined;
     },
   }));
-  return { modules, logs, options: { providers, agents, pulls, settings, channel } };
+  return { modules, logs, options: { providers, agents, settings, channel } };
 }
 
 export function createPreviewServer(fixture = createPreviewFixture()) {
-  const { providers, agents, pulls, settings, channel } = fixture.options;
+  const { providers, agents, settings, channel } = fixture.options;
   const publicDirectory = fileURLToPath(new URL('../public/', import.meta.url));
   const mime = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.woff2': 'font/woff2', '.ttf': 'font/ttf' };
   const editable = value => ({ ...value, editable: true });
@@ -346,10 +299,8 @@ export function createPreviewServer(fixture = createPreviewFixture()) {
       const read = request.method === 'GET';
       if (path === '/ui/api/snapshot' && read) {
         const { body: sessions } = await fixture.modules[0].handle({ method: 'GET', path: '/v1/sessions' });
-        const snapshot = pulls.snapshot();
         return json({ time: new Date().toISOString(), sessions, logs: fixture.logs.recent(),
           modules: fixture.modules.map(module => ({ name: module.name, status: module.status() })), channel: channel(),
-          pulls: { internal: snapshot.internal.length, upstream: snapshot.upstream.length, followed: snapshot.repositories.filter(repo => repo.followed).length, ...snapshot.refresh },
           access: { owner_authenticated: false } });
       }
       if (path === '/ui/api/providers') return json(editable(await (read ? providers.page() : providers.action(body))));
@@ -361,14 +312,7 @@ export function createPreviewServer(fixture = createPreviewFixture()) {
         if (!read) await agents.set(body.agent, body.enabled);
         return json(editable({ agents: await agents.list() }));
       }
-      if (path === '/ui/api/pulls' && read) return json(editable(pulls.snapshot()));
-      if (path === '/ui/api/pulls/refresh' && !read) { pulls.refresh(); return json(editable(pulls.snapshot())); }
-      if (path === '/ui/api/repos') {
-        if (!read) await pulls.setChoice(body.repository, body.follow);
-        return json(editable({ repositories: pulls.snapshot().repositories }));
-      }
       if (path === '/ui/api/settings' && read) return json(editable(await settings.page()));
-      if (path === '/ui/api/settings/github' && read) return json(editable(await settings.github()));
       if (path === '/ui/api/settings/lark/registration' && !read && body.action === 'status') return json(await settings.larkRegistration());
       if (path === '/ui/api/settings/lark/permissions' && !read) return json(await settings.larkSetup());
       if (path === '/ui/api/settings/lark/secret' && !read) return json(await settings.larkSecret());
@@ -401,7 +345,7 @@ export async function main() {
     server.on('error', error => { console.error(`Nootify Preview failed: ${error.message}`); close(); process.exitCode = 1; });
     console.log('Nootify Preview/demo ready. Synthetic data only; edits reset on restart.');
     console.log(`Preview URL: ${PREVIEW_ORIGIN}/#/providers`);
-    console.log('Routes: #/providers, #/logs, #/sessions, #/agents, #/repos, #/pulls/internal, #/pulls/upstream, #/settings/remote, #/settings/lark');
+    console.log('Routes: #/providers, #/logs, #/sessions, #/agents, #/settings/remote, #/settings/lark');
     process.once('SIGINT', close);
     process.once('SIGTERM', close);
     return server;

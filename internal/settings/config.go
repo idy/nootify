@@ -6,12 +6,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"math"
 	"net"
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -22,24 +20,12 @@ import (
 )
 
 var agentIDs = []string{"claude", "codex", "opencode", "trae", "workbuddy"}
-var repositoryPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+$`)
-
-func repositoryName(s string) bool {
-	if !repositoryPattern.MatchString(s) || strings.HasSuffix(strings.ToLower(s), ".git") {
-		return false
-	}
-	_, name, _ := strings.Cut(s, "/")
-	return name != "." && name != ".."
-}
-
-var loginPattern = regexp.MustCompile(`(?i)^[a-z\d][a-z\d-]*(?:\[bot\])?$`)
 
 type configFile struct {
 	Format     string         `json:"format"`
 	Version    int            `json:"version"`
 	ExportedAt string         `json:"exported_at"`
 	Lark       map[string]any `json:"lark,omitempty"`
-	Pulls      map[string]any `json:"pulls,omitempty"`
 	Backends   map[string]any `json:"backends,omitempty"`
 	Agents     []string       `json:"agents,omitempty"`
 	Providers  map[string]any `json:"providers,omitempty"`
@@ -48,8 +34,6 @@ type ImportSummary struct {
 	ExportedAt    string   `json:"exported_at,omitempty"`
 	AppID         string   `json:"app_id,omitempty"`
 	Recipient     string   `json:"recipient,omitempty"`
-	PullsConfig   bool     `json:"pulls_config"`
-	Follow        *int     `json:"follow,omitempty"`
 	Backends      []string `json:"backends"`
 	Agents        []string `json:"agents"`
 	Warnings      []string `json:"warnings"`
@@ -58,11 +42,6 @@ type ImportSummary struct {
 
 func summarize(f configFile) ImportSummary {
 	r := ImportSummary{ExportedAt: f.ExportedAt, AppID: text(f.Lark["app_id"]), Recipient: text(f.Lark["recipient_open_id"]), Backends: []string{}, Agents: append([]string{}, f.Agents...), Warnings: []string{}}
-	_, r.PullsConfig = f.Pulls["config"]
-	if v, ok := f.Pulls["follow"]; ok {
-		n := len(array(v))
-		r.Follow = &n
-	}
 	for _, id := range []string{"codex", "opencode"} {
 		if f.Backends[id] != nil {
 			r.Backends = append(r.Backends, id)
@@ -109,37 +88,7 @@ func parseConfig(v any) (configFile, error) {
 			}
 		}
 	}
-	if v, ok := m["pulls"]; ok {
-		p := object(v)
-		if p == nil {
-			return f, problem(400, "Invalid pulls section")
-		}
-		f.Pulls = map[string]any{}
-		if config, ok := p["config"]; ok {
-			if e = validatePullConfig(config); e != nil {
-				return f, e
-			}
-			f.Pulls["config"] = config
-		}
-		if follow, ok := p["follow"]; ok {
-			list, ok := follow.([]any)
-			if !ok {
-				return f, problem(400, "Invalid repository follow choices")
-			}
-			clean := []any{}
-			for _, v := range list {
-				x := object(v)
-				if !repositoryName(text(x["repository"])) {
-					return f, problem(400, "Invalid repository follow choices")
-				}
-				if _, ok := x["follow"].(bool); !ok {
-					return f, problem(400, "Invalid repository follow choices")
-				}
-				clean = append(clean, map[string]any{"repository": x["repository"], "follow": x["follow"]})
-			}
-			f.Pulls["follow"] = clean
-		}
-	}
+	// Removed feature sections in older exports are ignored, like other unknown fields.
 	if v, ok := m["backends"]; ok {
 		b := object(v)
 		if b == nil {
@@ -221,48 +170,6 @@ func validateBackend(v any, id string) (map[string]any, error) {
 		}
 	}
 	return out, nil
-}
-func validatePullConfig(v any) error {
-	m := object(v)
-	if m == nil {
-		return problem(400, "Pulls configuration must be a JSON object.")
-	}
-	for _, spec := range []struct {
-		name  string
-		max   int
-		valid func(string) bool
-	}{{"authors", 100, loginPattern.MatchString}, {"ownedOwners", 100, loginPattern.MatchString}, {"upstreamOwners", 100, loginPattern.MatchString}, {"excludeRepositories", 1000, repositoryName}, {"scanRoots", 100, func(s string) bool {
-		return filepath.IsAbs(s) || strings.HasPrefix(s, "~/") || strings.HasPrefix(s, `~\`)
-	}}} {
-		v, ok := m[spec.name]
-		if !ok || v == nil {
-			continue
-		}
-		a, ok := v.([]any)
-		if !ok || len(a) > spec.max {
-			return problem(400, "Invalid pulls "+spec.name)
-		}
-		for _, v := range a {
-			if !spec.valid(text(v)) {
-				return problem(400, "Invalid pulls "+spec.name)
-			}
-		}
-	}
-	for _, spec := range []struct {
-		name string
-		min  float64
-	}{{"maxScanDepth", 0}, {"maxSearchPages", 1}, {"maxForkPages", 1}, {"maxUpstreamPages", 1}} {
-		if v, ok := m[spec.name]; ok && v != nil {
-			n, ok := v.(float64)
-			if !ok || math.Trunc(n) != n || n < spec.min {
-				return problem(400, "Invalid pulls "+spec.name)
-			}
-		}
-	}
-	if v, ok := m["followDefault"]; ok && v != nil && v != "involved" && v != "all" {
-		return problem(400, "followDefault must be involved or all")
-	}
-	return nil
 }
 func validateAddress(raw string, zero bool) bool {
 	host, p, e := net.SplitHostPort(raw)
@@ -403,16 +310,6 @@ func (s *Service) configFile(ctx context.Context) (configFile, error) {
 			f.Backends[id] = b
 		}
 	}
-	if s.options.PullPreferences != nil {
-		v, e := s.options.PullPreferences()
-		if e != nil {
-			return f, e
-		}
-		f.Pulls, e = jsonObject(v)
-		if e != nil {
-			return f, e
-		}
-	}
 	if s.options.Agents != nil {
 		v, e := s.options.Agents()
 		if e != nil {
@@ -536,9 +433,6 @@ func (s *Service) ImportConfig(ctx context.Context, v any) (ImportSummary, error
 	if s.options.Core == nil && (f.Providers != nil || len(f.Lark) > 0) {
 		return summary, problem(400, "Provider configuration is not supported by this service")
 	}
-	if f.Pulls != nil && s.options.RestorePulls == nil {
-		return summary, problem(400, "Pull preferences are not supported by this service")
-	}
 	if f.Providers != nil && s.environmentOverride() {
 		env, _, e := resolveCredentials(s.env, "", "", "")
 		if e != nil {
@@ -599,11 +493,6 @@ func (s *Service) ImportConfig(ctx context.Context, v any) (ImportSummary, error
 			return nil
 		})
 		if e != nil {
-			return summary, e
-		}
-	}
-	if f.Pulls != nil {
-		if e = s.options.RestorePulls(f.Pulls); e != nil {
 			return summary, e
 		}
 	}

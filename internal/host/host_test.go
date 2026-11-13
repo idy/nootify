@@ -134,7 +134,7 @@ func TestBrowserEncryptionAgainstUnifiedService(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.Close()
-	for _, path := range []string{"/ui/api/snapshot", "/ui/api/providers", "/ui/api/settings", "/ui/api/agents", "/ui/api/pulls"} {
+	for _, path := range []string{"/ui/api/snapshot", "/ui/api/providers", "/ui/api/settings", "/ui/api/agents"} {
 		response, err := client.Fetch(context.Background(), webui.Operation{Method: "GET", Path: path})
 		if err != nil {
 			t.Fatalf("%s: %v", path, err)
@@ -146,6 +146,47 @@ func TestBrowserEncryptionAgainstUnifiedService(t *testing.T) {
 		}
 	}
 }
+func TestPullTrackingEndpointsAreRemoved(t *testing.T) {
+	s := newFixture(t)
+	for _, endpoint := range []struct{ method, path string }{
+		{"GET", "/ui/api/pulls"},
+		{"POST", "/ui/api/pulls/refresh"},
+		{"GET", "/ui/api/repos"},
+		{"POST", "/ui/api/repos"},
+		{"GET", "/ui/api/settings/github"},
+		{"POST", "/ui/api/settings/github/login"},
+		{"GET", "/v1/pulls"},
+		{"POST", "/v1/pulls/refresh"},
+		{"GET", "/v1/repos"},
+		{"PUT", "/v1/repos/owner/repo"},
+	} {
+		status, body := call(t, s, endpoint.method, endpoint.path, map[string]any{"action": "start"}, true)
+		if status != 404 {
+			t.Fatalf("removed endpoint %s %s: %d %+v", endpoint.method, endpoint.path, status, body)
+		}
+	}
+	status, snapshot := call(t, s, "GET", "/ui/api/snapshot", nil, false)
+	if status != 200 || snapshot["sessions"] == nil || snapshot["logs"] == nil || snapshot["access"] == nil {
+		t.Fatal("notification snapshot is incomplete", status, snapshot)
+	}
+	if _, exists := snapshot["pulls"]; exists {
+		t.Fatal("snapshot still exposes pull tracking", snapshot)
+	}
+	status, health := call(t, s, "GET", "/health", nil, false)
+	if status != 200 {
+		t.Fatal(status)
+	}
+	for _, modules := range []any{snapshot["modules"], health["modules"]} {
+		var names []string
+		for _, module := range modules.([]any) {
+			names = append(names, module.(map[string]any)["name"].(string))
+		}
+		if strings.Join(names, ",") != "sessions,providers,agents" {
+			t.Fatal("unexpected active modules", names)
+		}
+	}
+}
+
 func TestOccupiedPortDoesNotTouchState(t *testing.T) {
 	isolate(t)
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")

@@ -70,10 +70,6 @@
       {
         "name": "breadcrumb-viewport",
         "value": "980px"
-      },
-      {
-        "name": "repository-reflow",
-        "value": "1100px"
       }
     ]
   },
