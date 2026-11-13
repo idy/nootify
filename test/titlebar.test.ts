@@ -22,7 +22,7 @@ test('native titlebar leaves page controls interactive and drags only non-intera
     target.dispatchEvent(event);
     return event.defaultPrevented;
   };
-  for (const selector of ['#logs-actions .search', '#logs-actions .search svg', '#search', '#pause', '#pause-icon', '#export', '#export svg', '.search-toggle', '.search-toggle svg', '#refresh', '.brand']) {
+  for (const selector of ['#logs-view .logs-search', '#logs-view .logs-search svg', '#search', '#pause', '#pause-icon', '#export', '#export svg', '#refresh', '.brand']) {
     assert.equal(down(selector), false, selector);
     assert.equal(down(selector, 2), false, `${selector} double-click`);
     assert.equal(location.href, origin, `${selector} must not move the window`);

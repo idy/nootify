@@ -178,7 +178,7 @@ function renderTabs(id: string, tabs: [string, string, number][], selected: stri
   const container = $(id);
   const focusedValue = container.contains(document.activeElement) ? (document.activeElement as HTMLElement).dataset.value : undefined;
   container.replaceChildren(...tabs.map(([value, label, count]) => {
-    const button = node('button'); button.type = 'button'; button.dataset.value = value;
+    const button = node('button', undefined, 'mds-button mds-button--subtle'); button.type = 'button'; button.dataset.value = value;
     button.setAttribute('aria-pressed', String(value === selected));
     button.append(node('span', label), node('span', number(count), 'count'));
     button.addEventListener('click', () => select(value));
@@ -423,12 +423,14 @@ function renderProviders(): void {
     enabledLabel.title = t('启用 {p0}', { p0: provider.name });
     enabledLabel.append(toggle); row.append(enabledLabel);
     const edit = node('button', t('编辑'), 'mds-link-button'); edit.type = 'button'; edit.disabled = !editable || busy; edit.dataset.key = `provider-edit-${provider.id}`;
+    edit.setAttribute('aria-haspopup', 'dialog'); edit.setAttribute('aria-controls', 'provider-dialog');
     edit.setAttribute('aria-label', t('编辑 {p0}', { p0: provider.name })); edit.addEventListener('click', () => openProviderEditor(provider)); actions.append(edit);
     const makeDefault = node('button', t('设为默认'), 'mds-link-button'); makeDefault.type = 'button'; makeDefault.disabled = !editable || busy || !provider.enabled || provider.id === page?.default_provider_id;
     makeDefault.hidden = provider.id === page?.default_provider_id;
     makeDefault.dataset.key = `provider-default-${provider.id}`; makeDefault.setAttribute('aria-label', t('将 {p0} 设为默认', { p0: provider.name }));
     makeDefault.addEventListener('click', () => { void mutateProvider({ action: 'default', id: provider.id }); }); actions.append(makeDefault);
     const remove = node('button', t('删除'), 'mds-link-button channel-delete'); remove.type = 'button'; remove.disabled = !editable || busy; remove.dataset.key = `provider-delete-${provider.id}`;
+    remove.setAttribute('aria-haspopup', 'dialog'); remove.setAttribute('aria-controls', 'provider-delete-dialog');
     remove.setAttribute('aria-label', t('删除 {p0}', { p0: provider.name })); remove.addEventListener('click', () => openProviderDelete(provider, remove)); actions.append(remove);
     row.append(actions); item.append(row); return item;
   }));
@@ -439,6 +441,7 @@ function openProviderEditor(provider?: ProviderSummary, type?: ProviderChoice): 
   state.providerRegistration = undefined; state.providerRegistrationPending = false; state.providerSetup = undefined; state.providerCloseRequested = undefined;
   state.providerEditor = { id: provider?.id, step: provider || type ? 'configure' : 'choose', type: provider?.type ?? (type === 'remote' ? 'remote' : 'feishu'), connectionType: provider?.connection_type ?? (type === 'personal-app' ? 'personal-app' : 'bot'), secretSet: provider?.secret_set === true, tokenSet: provider?.token_set === true };
   state.providerEditorError = ''; state.providersError = '';
+  clearFormErrors('provider-editor');
   field('provider-type-search').value = '';
   field('provider-name').value = provider?.name ?? '';
   field('provider-enabled').checked = provider?.enabled ?? true;
@@ -552,7 +555,8 @@ function renderProviderAuthorization(): void {
     : flow?.status === 'complete' ? flow.error ? t('通道已保存，仍需确认状态。') : t('授权完成，通道已保存。') : flow?.status === 'connecting' ? t('正在验证并保存应用…') : t('正在准备个人 App 认证…'));
   setText('provider-registration-detail', failed ? errors[expired ? 'expired_token' : flow?.error ?? ''] ?? t('暂时无法获取应用配置，请检查网络后重试。')
     : flow?.status === 'complete' && flow.error ? t('请检查通道连接状态；不要重复创建通道。') : editor?.id && flow?.status !== 'complete' ? t('请选择同一个个人 App；如需更换应用，请添加新通道。') : t('扫码完成后仅保存此通道，不会替换其他通道。'));
-  $('provider-registration-detail').classList.toggle('tone-error', !!failed);
+  if (failed) $('provider-registration-detail').dataset.tone = 'error';
+  else delete $('provider-registration-detail').dataset.tone;
   setText('provider-registration-expiry', waiting && flow.expires_at ? t('二维码在 {p0} 前有效，确认后自动连接。', { p0: clock(flow.expires_at) }) : '');
   $('provider-registration-retry').hidden = !failed || flow?.error === 'save_unconfirmed';
   $<HTMLButtonElement>('provider-registration-retry').disabled = state.providers?.editable !== true || state.providerRegistrationBusy;
@@ -691,6 +695,7 @@ async function mutateProvider(body: ProviderAction, target: 'page' | 'editor' | 
 async function saveProvider(): Promise<void> {
   const editor = state.providerEditor;
   if (!editor || editor.step !== 'configure' || state.providers?.editable !== true || state.providersBusy || state.providerRegistrationBusy || providerRegistrationActive()) return;
+  clearFormErrors('provider-editor');
   if (personalEditor() && !editor.id) { await providerRegistrationAction('start'); return; }
   const type = editor.type;
   const provider: ProviderConfig = { ...(editor.id ? { id: editor.id } : {}), name: field('provider-name').value.trim(), type, enabled: field('provider-enabled').checked };
@@ -709,7 +714,7 @@ async function saveProvider(): Promise<void> {
   }
   if (invalid) {
     state.providerEditorError = invalid === 'provider-address' ? () => t('请填写有效的主机和端口，例如 host:9418。') : () => t('请填写必填字段。');
-    renderProviderEditor(); field(invalid).focus(); return;
+    renderProviderEditor(); showFieldError(invalid, 'provider-editor-error'); return;
   }
   await mutateProvider({ action: 'save', provider }, 'editor');
 }
@@ -746,6 +751,7 @@ function hideRemoteToken(): void {
   state.remoteSecretRevealed = false; field('remote-token').type = 'password';
 }
 function fillRemote(): void {
+  clearFormErrors('remote-form');
   const page = state.remote; if (!page) return;
   hideRemoteToken();
   field('remote-enabled').checked = page.enabled; field('remote-listen').value = page.listen;
@@ -805,12 +811,13 @@ function renderRemote(): void {
 }
 async function saveRemote(): Promise<void> {
   if (state.remote?.editable !== true || state.remoteBusy || state.remoteSecretLoading) return;
+  clearFormErrors('remote-form');
   const listen = field('remote-listen').value.trim(); const tls = field('remote-tls').checked;
   const cert = field('remote-cert').value.trim(); const key = field('remote-key').value.trim();
   if (!addressValid(listen) || (tls && !state.remote.tls && (!cert || !key))) {
     state.remoteReadError = false;
     state.remoteError = !addressValid(listen) ? () => t('请填写有效的主机和端口，例如 host:9418。') : () => t('请填写 TLS 证书和私钥路径。');
-    renderRemote(); field(!addressValid(listen) ? 'remote-listen' : !cert ? 'remote-cert' : 'remote-key').focus(); return;
+    renderRemote(); showFieldError(!addressValid(listen) ? 'remote-listen' : !cert ? 'remote-cert' : 'remote-key', 'remote-banner'); return;
   }
   const token = state.remoteSecretRevealed ? '' : field('remote-token').value;
   const body = { enabled: field('remote-enabled').checked, listen, ...(token ? { token } : {}),
@@ -927,6 +934,27 @@ function renderAgents(): void {
 function setText(id: string, text: string): void { if ($(id).textContent !== text) $(id).textContent = text; }
 function setTone(id: string, tone: Tone): void { setText(id, tone.label); $(id).className = `tone-${tone.tone}`; }
 const field = (id: string): HTMLInputElement => $<HTMLInputElement>(id);
+function clearFieldError(input: HTMLInputElement): void {
+  const errorId = input.dataset.validationError;
+  if (!errorId) return;
+  input.removeAttribute('aria-invalid');
+  const descriptions = (input.getAttribute('aria-describedby') ?? '').split(/\s+/).filter(id => id && id !== errorId);
+  if (descriptions.length) input.setAttribute('aria-describedby', descriptions.join(' '));
+  else input.removeAttribute('aria-describedby');
+  delete input.dataset.validationError;
+}
+function clearFormErrors(id: string): void {
+  for (const input of $(id).querySelectorAll<HTMLInputElement>('input[data-validation-error]')) clearFieldError(input);
+}
+function showFieldError(id: string, errorId: string): void {
+  const input = field(id);
+  clearFieldError(input);
+  input.setAttribute('aria-invalid', 'true');
+  input.dataset.validationError = errorId;
+  input.setAttribute('aria-describedby', [input.getAttribute('aria-describedby'), errorId].filter(Boolean).join(' '));
+  input.focus();
+}
+
 async function post<T>(path: string, body?: unknown): Promise<T> {
   const response = await fetch(path, { method: 'POST', headers: { 'x-nootify-ui': '1', 'content-type': 'application/json' },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -1369,6 +1397,7 @@ function renderUpdate(): void {
   $('titlebar-update').classList.toggle('has-error', !!failed);
   const button = $<HTMLButtonElement>('update-action');
   button.classList.toggle('busy', working);
+  if (failed) button.dataset.tone = 'error'; else delete button.dataset.tone;
   if (update) {
     const action = updateAction(update);
     const hint = action === 'install' ? t('安装 {p0}，完成后自动重启', { p0: updateTag(update) }) : action === 'details' ? t('查看更新详情') : t('检查软件更新');
@@ -1389,42 +1418,40 @@ function renderUpdate(): void {
 }
 
 // ---- Chrome, loading and events ----
-function closeTitlebarSearches(): void {
-  for (const group of document.querySelectorAll<HTMLElement>('.titlebar-search')) {
-    group.removeAttribute('data-open');
-    group.querySelector('.search-toggle')!.setAttribute('aria-expanded', 'false');
-  }
+function usesNavigationDrawer(): boolean {
+  return !document.documentElement.hasAttribute('data-nootify-desktop') && matchMedia('(max-width: 760px)').matches;
 }
-function focusTitlebarSearch(id: string): void {
-  const input = field(id);
-  const group = input.closest<HTMLElement>('.titlebar-search')!;
-  const toggle = group.querySelector<HTMLButtonElement>('.search-toggle')!;
-  closeTitlebarSearches();
-  if (getComputedStyle(toggle).display !== 'none') {
-    group.setAttribute('data-open', '');
-    toggle.setAttribute('aria-expanded', 'true');
-  }
-  input.focus();
+function closeNavigationDrawer(restoreFocus = true): void {
+  const drawer = $<HTMLDialogElement>('navigation-drawer');
+  if (!drawer.open) return;
+  drawer.close();
+  $('navigation-toggle').setAttribute('aria-expanded', 'false');
+  if (restoreFocus && usesNavigationDrawer()) $('navigation-toggle').focus();
 }
-function renderSearchToggles(): void {
-  for (const group of document.querySelectorAll<HTMLElement>('.titlebar-search')) {
-    const input = group.querySelector<HTMLInputElement>('input')!;
-    const toggle = group.querySelector<HTMLButtonElement>('.search-toggle')!;
-    const query = input.value.trim();
-    const label = input.getAttribute('aria-label')!;
-    group.classList.toggle('has-query', !!query);
-    toggle.title = query ? `${label}: ${query}` : label;
-    toggle.setAttribute('aria-label', toggle.title);
+function syncNavigationLayout(): void {
+  const sidebar = $('primary-sidebar');
+  const drawer = $<HTMLDialogElement>('navigation-drawer');
+  const narrow = usesNavigationDrawer();
+  const wasOpen = drawer.open;
+  if (narrow) {
+    const hadSidebarFocus = sidebar.contains(document.activeElement);
+    if (sidebar.parentElement !== drawer) drawer.append(sidebar);
+    if (hadSidebarFocus && !drawer.open) $('navigation-toggle').focus();
+  } else {
+    closeNavigationDrawer(false);
+    const content = document.querySelector<HTMLElement>('.content')!;
+    if (sidebar.parentElement === drawer) content.before(sidebar);
+    if (wasOpen) sidebar.querySelector<HTMLElement>('[aria-current="page"]')?.focus();
   }
+  $('settings-subnav').hidden = !narrow && !isSettingsView(state.view);
 }
-function revealActiveNavigation(): void {
-  if (document.documentElement.hasAttribute('data-nootify-desktop') || !matchMedia('(max-width: 760px)').matches) return;
-  const active = document.querySelector<HTMLElement>('.sidebar .nav-item[aria-current="page"]');
-  const navigation = active?.closest<HTMLElement>('nav');
-  if (!active || !navigation) return;
-  const item = active.getBoundingClientRect();
-  const track = navigation.getBoundingClientRect();
-  navigation.scrollLeft += item.left - track.left - (navigation.clientWidth - item.width) / 2;
+function openNavigationDrawer(): void {
+  syncNavigationLayout();
+  if (!usesNavigationDrawer()) return;
+  const drawer = $<HTMLDialogElement>('navigation-drawer');
+  if (!drawer.open) drawer.showModal();
+  $('navigation-toggle').setAttribute('aria-expanded', 'true');
+  ($('primary-sidebar').querySelector<HTMLElement>('[aria-current="page"]') ?? $('navigation-close')).focus();
 }
 function renderPauseButton(): void {
   const label = state.paused ? t('继续') : t('暂停');
@@ -1438,7 +1465,6 @@ function renderChrome(): void {
   const meta = views[state.view];
   $('logs-actions').hidden = state.view !== 'logs';
   renderPauseButton();
-  renderSearchToggles();
   $('connection').textContent = state.connected ? t('实时更新') : state.connectionError ? t('连接中断') : t('正在连接');
   if (state.connectionError) $('error').textContent = t('无法连接本机服务：{p0}。正在自动重试。', { p0: state.connectionError });
   $('crumb-group').textContent = meta.group; $('crumb-page').textContent = meta.title;
@@ -1448,7 +1474,7 @@ function renderChrome(): void {
   }
   for (const section of ['logs-view', 'sessions-view', 'agents-view', 'providers-view', 'settings-view']) $(section).hidden = section !== meta.section;
   for (const panel of document.querySelectorAll<HTMLElement>('[data-panel]')) panel.hidden = panel.dataset.panel !== state.view;
-  $('settings-subnav').hidden = !isSettingsView(state.view);
+  $('settings-subnav').hidden = !usesNavigationDrawer() && !isSettingsView(state.view);
   $('settings-link').toggleAttribute('data-open', isSettingsView(state.view));
   $('refresh').title = t('立即刷新'); $('refresh').setAttribute('aria-label', t('立即刷新'));
   $('updated').textContent = state.snapshot.time ? t('更新于 {p0}', { p0: clock(state.snapshot.time) }) : '';
@@ -1525,6 +1551,10 @@ $('provider-type-options').addEventListener('keydown', event => {
   } else if (event.key === 'Home' || event.key === 'End') { event.preventDefault(); options[event.key === 'Home' ? 0 : options.length - 1]?.focus(); }
 });
 $('provider-editor').addEventListener('submit', event => { event.preventDefault(); void saveProvider(); });
+for (const id of ['provider-editor', 'remote-form']) $(id).addEventListener('input', event => {
+  const input = event.target as HTMLInputElement | null;
+  if (input?.tagName === 'INPUT') clearFieldError(input);
+});
 $('provider-dialog').addEventListener('cancel', event => { event.preventDefault(); closeProviderEditor(); });
 $('provider-dialog').addEventListener('keydown', event => {
   if (event.key === 'Escape') { event.preventDefault(); closeProviderEditor(); }
@@ -1544,10 +1574,10 @@ $('remote-retry').addEventListener('click', () => { state.remoteError = ''; stat
 $('remote-token-toggle').addEventListener('click', () => { void toggleRemoteToken(); });
 
 window.addEventListener('hashchange', () => {
+  if ($<HTMLDialogElement>('navigation-drawer').open) { closeNavigationDrawer(false); $('crumb-page').focus({ preventScroll: true }); }
   if (viewFromHash() !== 'providers' && (providerRegistrationActive() || state.providerRegistrationBusy)) {
     location.hash = views.providers.hash; closeProviderEditor(); return;
   }
-  closeTitlebarSearches();
   state.view = viewFromHash();
   if (state.view !== 'settings-remote') hideRemoteToken();
   if (state.view !== 'providers') { closeProviderEditor(false); if (state.providerDelete) closeProviderDelete(false); }
@@ -1555,7 +1585,6 @@ window.addEventListener('hashchange', () => {
   if (state.view !== 'settings-lark') { showLarkSecret(false); if (state.recipientPicker) closeRecipientPicker(); }
   state.settingsNote = undefined;
   renderAll();
-  requestAnimationFrame(revealActiveNavigation);
   if (state.view === 'agents') void loadAgents();
   loadSettingsView();
   $(views[state.view].section).scrollTop = 0;
@@ -1750,32 +1779,21 @@ $('import-apply').addEventListener('click', () => {
     return () => t('配置已导入{p0}', { p0: result.warnings.length ? t('；{p0}', { p0: result.warnings.join(t('；')) }) : '' });
   });
 });
-$('refresh').addEventListener('click', () => { void refreshNow(); });
-for (const group of document.querySelectorAll<HTMLElement>('.titlebar-search')) {
-  const toggle = group.querySelector<HTMLButtonElement>('.search-toggle')!;
-  const input = group.querySelector<HTMLInputElement>('input')!;
-  toggle.addEventListener('click', () => {
-    if (group.hasAttribute('data-open')) closeTitlebarSearches();
-    else focusTitlebarSearch(input.id);
-  });
-  input.addEventListener('input', renderSearchToggles);
-  group.addEventListener('keydown', event => {
-    if (event.key !== 'Escape' || !group.hasAttribute('data-open')) return;
-    event.preventDefault();
-    closeTitlebarSearches();
-    toggle.focus();
-  });
-  group.addEventListener('focusout', event => {
-    // Safari blurs the input without focusing a clicked button; let that click toggle the current state.
-    // Outside pointer interactions are dismissed by the document's pointerdown handler.
-    if (!event.relatedTarget || group.contains(event.relatedTarget as Node)) return;
-    group.removeAttribute('data-open');
-    toggle.setAttribute('aria-expanded', 'false');
-  });
-}
-document.addEventListener('pointerdown', event => {
-  if (event.target instanceof Element && !event.target.closest('.titlebar-search')) closeTitlebarSearches();
+$('navigation-toggle').addEventListener('click', openNavigationDrawer);
+$('navigation-close').addEventListener('click', () => closeNavigationDrawer());
+$('navigation-drawer').addEventListener('cancel', event => { event.preventDefault(); closeNavigationDrawer(); });
+$('navigation-drawer').addEventListener('close', () => $('navigation-toggle').setAttribute('aria-expanded', 'false'));
+$('navigation-drawer').addEventListener('click', event => {
+  if (event.target !== event.currentTarget) return;
+  const bounds = $('navigation-drawer').getBoundingClientRect();
+  if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) closeNavigationDrawer();
 });
+$('primary-sidebar').addEventListener('click', event => {
+  if (!(event.target instanceof Element) || !event.target.closest('a[href]') || !$<HTMLDialogElement>('navigation-drawer').open) return;
+  closeNavigationDrawer(false);
+  $('crumb-page').focus({ preventScroll: true });
+});
+$('refresh').addEventListener('click', () => { void refreshNow(); });
 $('search').addEventListener('input', () => renderLogs(true));
 $('pause').addEventListener('click', () => {
   state.paused = !state.paused;
@@ -1789,12 +1807,13 @@ $('export').addEventListener('click', () => {
   URL.revokeObjectURL(url);
 });
 document.addEventListener('keydown', event => {
+  if ($<HTMLDialogElement>('navigation-drawer').open) return;
   if (state.recipientPicker && event.key === '/' && !['INPUT', 'TEXTAREA'].includes((event.target as HTMLElement).tagName)) { event.preventDefault(); field('recipient-search').focus(); return; }
   if (event.key !== '/' || ['INPUT', 'TEXTAREA', 'SELECT'].includes((event.target as HTMLElement).tagName)) return;
   event.preventDefault();
-  if (state.view === 'logs') focusTitlebarSearch('search');
+  if (state.view === 'logs') field('search').focus();
   else {
-    window.addEventListener('hashchange', () => focusTitlebarSearch('search'), { once: true });
+    window.addEventListener('hashchange', () => field('search').focus(), { once: true });
     location.hash = views.logs.hash;
   }
 });
@@ -1809,7 +1828,6 @@ function renderLanguage(): void {
   languageDropdown.value = languagePreference();
   renderAll();
   renderLogs(true); // Paused logs still need their labels refreshed.
-  requestAnimationFrame(revealActiveNavigation);
 }
 $('language').addEventListener('change', () => {
   const value = languageDropdown.value;
@@ -1833,8 +1851,8 @@ window.addEventListener('storage', event => {
 });
 
 renderLanguage();
-requestAnimationFrame(revealActiveNavigation);
-window.addEventListener('resize', revealActiveNavigation);
+syncNavigationLayout();
+window.addEventListener('resize', syncNavigationLayout);
 void loadSnapshot();
 void loadAgents();
 if (state.view === 'providers' || state.view === 'agents') void loadProviders();

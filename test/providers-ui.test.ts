@@ -216,6 +216,27 @@ test('provider and remote-access UI performs real mutations, preserves secrets a
     assert.equal(document.activeElement?.getAttribute('data-key'), 'provider-edit-provider-1');
   });
 
+  await t.test('invalid channel fields use the shared error state and retain their existing hint', () => {
+    button('provider-add').click(); button('provider-choose-remote').click();
+    change('provider-name', 'Validation preview'); change('provider-address', 'relay.example:9418');
+    const before = providerWrites.length;
+    submit('provider-editor');
+    assert.equal(providerWrites.length, before);
+    assert.equal(document.activeElement, field('provider-token'));
+    assert.equal(field('provider-token').getAttribute('aria-invalid'), 'true');
+    assert.equal(field('provider-token').getAttribute('aria-describedby'), 'provider-token-hint provider-editor-error');
+    change('provider-token', 'synthetic-validation-token');
+    assert.equal(field('provider-token').hasAttribute('aria-invalid'), false);
+    assert.equal(field('provider-token').getAttribute('aria-describedby'), 'provider-token-hint');
+    change('provider-address', 'missing-port'); submit('provider-editor');
+    assert.equal(field('provider-address').getAttribute('aria-invalid'), 'true');
+    assert.equal(document.activeElement, field('provider-address'));
+    button('provider-cancel').click();
+    button('provider-add').click(); button('provider-choose-remote').click();
+    assert.equal(field('provider-address').hasAttribute('aria-invalid'), false, 'A new draft clears prior field errors');
+    button('provider-cancel').click();
+  });
+
   await t.test('remote providers save TLS options, change the default and preserve tokens when toggled', async () => {
     button('provider-add').click(); button('provider-choose-remote').click();
     assert.equal(element('provider-feishu-fields').hidden, true);
@@ -310,6 +331,15 @@ test('provider and remote-access UI performs real mutations, preserves secrets a
     assert.equal(rows[0].querySelector('b'), null); assert.match(rows[0].textContent!, /2 pending.*Last acknowledgement/);
     assert.match(rows[1].textContent!, /Disconnected/);
     assert.match(rows[1].textContent!, /7 pending.*No acknowledgement yet/);
+    const beforeValidation = remoteWrites.length;
+    change('remote-listen', 'missing-port'); submit('remote-form');
+    assert.equal(remoteWrites.length, beforeValidation);
+    assert.equal(field('remote-listen').getAttribute('aria-invalid'), 'true');
+    assert.equal(field('remote-listen').getAttribute('aria-describedby'), 'remote-banner');
+    assert.equal(document.activeElement, field('remote-listen'));
+    change('remote-listen', '127.0.0.1:9418');
+    assert.equal(field('remote-listen').hasAttribute('aria-invalid'), false);
+    assert.equal(field('remote-listen').hasAttribute('aria-describedby'), false);
     field('remote-enabled').checked = true; field('remote-enabled').dispatchEvent(new window.Event('input', { bubbles: true }));
     change('remote-listen', '0.0.0.0:9418'); field('remote-tls').checked = true; field('remote-tls').dispatchEvent(new window.Event('change', { bubbles: true }));
     change('remote-cert', '/synthetic/server.pem'); change('remote-key', '/synthetic/server-key.pem'); submit('remote-form');

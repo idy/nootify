@@ -16,19 +16,19 @@ The browser loads assets from the local origin, keeping the existing CSP. Versio
 
 | Application element | Magpie component | Application responsibility |
 | --- | --- | --- |
-| Shell and navigation | `mds-shell`, `mds-sidebar`, `mds-nav`, `mds-nav-item`, `mds-subnav` | Hash routing, live counts, native chrome, horizontal navigation on small screens |
+| Shell and navigation | `mds-shell`, `mds-sidebar`, `mds-nav`, `mds-nav-item`, `mds-subnav` | Hash routing, live counts, native chrome, modal sidebar drawer on narrow browser screens |
 | List/settings groups | `mds-group` | Data rows, disclosures, sorting, filters, responsive tables |
 | Channel list | `mds-group` with application rows | Single-line identity/type/status/switch/actions, locally scrolling on narrow screens; text Add above the list |
 | Agent list | Native checkbox and disclosure button | Single-line collapsed state; details and update/instruction content expand independently from enablement |
 | Actions | `mds-button`, `mds-button--primary`, `mds-button--subtle`, `mds-icon-button` | Action state and translated accessible names; a local danger modifier uses semantic tokens |
-| Text fields | `mds-input`, `mds-mono` | Labels, validation, secret handling, responsive width |
+| Text fields and search | `mds-input`, `mds-mono` | Labels, inset search icons, validation, secret handling, responsive width |
 | Switches | `mds-switch` with a checkbox and adjacent `mds-switch-track` | The native checkbox retains its ID, label, checked/disabled state and change handler |
 | Checkboxes | `mds-check` around the native input | Agent injection state |
 | Language popup | `mds-select-menu`, `mds-select-option`, `mds-input` | Existing `Dropdown` controller and its dismissal semantics |
 | Channel chooser/editor/delete dialogs | Unmodified `mds-dialog`, `mds-dialog-actions`, Magpie controls | Vertical form composition, native modal lifecycle/scrolling, async save and focus restoration; no local width, padding or footer-skin overrides |
 | Recipient picker | `mds-dialog` with the application’s bounded-list composition | Independently scrolling contacts and reachable selection footer |
 
-Filter buttons remain toggle buttons with `aria-pressed`, since they filter one list rather than switch tab panels. Delivery types and contact rows are domain compositions using Magpie tokens. The penguin stays Nootify's brand mark.
+Filter buttons compose `mds-button mds-button--subtle` and remain toggle buttons with `aria-pressed`, since they filter one list rather than switch tab panels. Their labels use regular Source Sans 3, matching Magpie’s reading controls; selection changes only the label and count to accent ink without changing weight. Backgrounds and borders stay transparent, including on hover; keyboard focus remains visible. Chooser names use `mds-card-title`; all dialog titles use the upstream title role. Settings descriptions use the note role, while compact metadata uses caption. The titlebar update action uses `mds-pill mds-pill--responsive` and `data-tone="error"` for failure. Its face is 20px high and follows its content width, with 32px fine-pointer and 44px coarse-pointer targets; the adjacent refresh button uses `mds-icon-button--compact`. Application corners reference the upstream radius scale, including extra-small metadata tags and medium contact rows. Delivery types and contact rows are domain compositions using Magpie tokens. The penguin stays Nootify's brand mark. Channel and listener validation sets `aria-invalid` and associates the field with its error without replacing existing hint IDs; editing clears the field error. Search fields and recipient actions retain the upstream focus, disabled, and coarse-pointer rules rather than local size overrides. Log search sits in the working content above purpose filters, capped at 400px and filling narrower widths; it stays visible on mobile. The `/` shortcut focuses this input, navigating to Logs when needed. There is no titlebar search toggle or popover.
 
 ## Dropdown
 
@@ -64,7 +64,7 @@ A personal scan records the channel name and enabled state before starting. The 
 
 ## Verification
 
-`npm run preview:ui` is an isolated synthetic browser fixture for channel dialogs, remote settings, agent toggles, language switching, and contact selection. Use the local URL printed by the command. Personal authorization uses an explicitly synthetic QR flow; real provider connections and filesystem actions are unavailable. Preview results do not prove that the Go host serves every embedded asset or that native transport and desktop integration work.
+`npm run preview:ui` is an isolated synthetic browser fixture for channel dialogs, remote settings, agent toggles, language switching, and contact selection. Use the local URL printed by the command. The fixture binds loopback on `PORT` (default `9427`), allowing isolated worktree previews without stopping another running instance. Personal authorization uses an explicitly synthetic QR flow; real provider connections and filesystem actions are unavailable. Preview results do not prove that the Go host serves every embedded asset or that native transport and desktop integration work.
 
 The production Go host allows direct loopback editing without an authorization link and preserves that access after a page reload, subject to actual peer, Host/origin/fetch-site, and UI-header checks. LAN settings remain read-only. The encrypted desktop/CLI gateway is separate from direct browser access.
 
