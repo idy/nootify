@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -18,21 +19,23 @@ import (
 type Options struct {
 	BaseURL, Token, Route string
 	Assets                fs.FS
+	StateDir              string
 }
 type Gateway struct {
-	URL        string
-	origin     string
-	options    Options
-	server     *http.Server
-	listener   net.Listener
-	front      *Sessions
-	capability Capability
-	ctx        context.Context
-	cancel     context.CancelFunc
-	done       chan struct{}
-	once       sync.Once
-	connMu     sync.Mutex
-	upstream   *Client
+	URL         string
+	origin      string
+	options     Options
+	server      *http.Server
+	listener    net.Listener
+	front       *Sessions
+	capability  Capability
+	ctx         context.Context
+	cancel      context.CancelFunc
+	done        chan struct{}
+	once        sync.Once
+	connMu      sync.Mutex
+	upstream    *Client
+	closeAssets func()
 }
 
 func NewGateway(parent context.Context, options Options) (*Gateway, error) {
@@ -67,7 +70,11 @@ func NewGateway(parent context.Context, options Options) (*Gateway, error) {
 	g.capability = capability
 	fragment := url.Values{"nootify-ui": {capability.ID + "." + capability.Key}, "route": {route}}
 	g.URL = g.origin + "/#" + fragment.Encode()
-	assets := Assets(options.Assets)
+	localAssets := options.Assets
+	if options.StateDir != "" {
+		localAssets, g.closeAssets = NewMagpieAssets(ctx, localAssets, filepath.Join(options.StateDir, "ui-assets", "magpie"))
+	}
+	assets := Assets(localAssets)
 	proxy := http.HandlerFunc(g.proxy)
 	g.server = &http.Server{ReadHeaderTimeout: 5 * time.Second, MaxHeaderBytes: 32 * 1024, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Host != listener.Addr().String() {
@@ -244,6 +251,9 @@ func (g *Gateway) Close() error {
 		g.connMu.Unlock()
 		if upstream != nil {
 			_ = upstream.Close()
+		}
+		if g.closeAssets != nil {
+			g.closeAssets()
 		}
 		close(g.done)
 	})

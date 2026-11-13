@@ -57,7 +57,7 @@ func (m *Manager) OpenUI(ctx context.Context, currentRoute string) (*OwnedUI, er
 	if !tokenPattern.MatchString(token) {
 		return nil, errors.New("invalid private service authorization")
 	}
-	gateway, err := webui.NewGateway(ctx, webui.Options{BaseURL: "http://" + m.address + "/", Token: token, Route: route, Assets: public.FS})
+	gateway, err := webui.NewGateway(ctx, webui.Options{BaseURL: "http://" + m.address + "/", Token: token, Route: route, Assets: public.FS, StateDir: m.StateDir})
 	if err != nil {
 		return nil, err
 	}

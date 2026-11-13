@@ -1,0 +1,105 @@
+{
+  "version": "v0.4.4",
+  "files": [
+    {
+      "name": "LICENSE",
+      "hash": "DdCGOeqKEgftZNX84oC3FlvIQgiqreG8RbBb6f5aQc0=",
+      "size": 1060
+    },
+    {
+      "name": "css/Magpie-MIT.txt",
+      "hash": "edLIREcV1LxFPsT4oKryBRpMHuWsCPW9LlhIrvh8dXI=",
+      "size": 1063
+    },
+    {
+      "name": "css/base.css",
+      "hash": "6XwYDzdfO0dU85KSHwkobKhTSWlUMLmyqWy86MXNpFo=",
+      "size": 2109
+    },
+    {
+      "name": "css/components.css",
+      "hash": "WZZJX8EgINfJZfGozoNKtDRF+gAQqGYH+nUb8BIKle4=",
+      "size": 27046
+    },
+    {
+      "name": "css/fonts.css",
+      "hash": "09eA/3o7EbJQE6Xtdg5swmCn00YUAt9ixsnMllL7oD0=",
+      "size": 423
+    },
+    {
+      "name": "css/layout.css",
+      "hash": "+ps2RL1R+3vAS3fdhAm4+A3XSNLAEW4QP7H0RMpIoEo=",
+      "size": 11803
+    },
+    {
+      "name": "css/magpie.css",
+      "hash": "UHaxG0hXU4+n63ETKU1rsFwUAdUdzgqhjCAket7Hz4c=",
+      "size": 168
+    },
+    {
+      "name": "css/tokens.css",
+      "hash": "/uUlOlNzB6dMT8q3UWks2KwNnFWyi+GQoeSvvEd58ps=",
+      "size": 7485
+    },
+    {
+      "name": "fonts/Outfit-OFL.txt",
+      "hash": "4qa7slibhbrBaQ7I8iCyKpw6+b/aVt9jkferSRx6A58=",
+      "size": 4388
+    },
+    {
+      "name": "fonts/README.md",
+      "hash": "nXIFoTbnJPz0wZvgnVRmTXXitYE/B+y7fZKe76g4SdQ=",
+      "size": 1858
+    },
+    {
+      "name": "fonts/Source-Sans-3-OFL.txt",
+      "hash": "f6wvbGvEcUTiw16PQRR7PIyJVJDUS0YmalMS/pM2TS4=",
+      "size": 4485
+    },
+    {
+      "name": "fonts/outfit-latin.woff2",
+      "hash": "ZCBE9+gOgV9vfYnVoPV7UeX5mSpivB3QP39EQXZSn3E=",
+      "size": 14068
+    },
+    {
+      "name": "fonts/source-sans-3-latin.woff2",
+      "hash": "WHQ1yp2QcyuMHOSVgiLGrTreK4dVABiOHTGO+8th9MU=",
+      "size": 28804
+    },
+    {
+      "name": "icons/LICENSE",
+      "hash": "3b5gguw8+XnbR+WvVJ0oScXWGCs+AF75HOHbuesSLxE=",
+      "size": 1092
+    },
+    {
+      "name": "icons/README.md",
+      "hash": "2rO7fNjmk7v+2az1WrF6Yfawo5VxweEDFQlEAtFD1vw=",
+      "size": 1823
+    },
+    {
+      "name": "icons/caret-down.svg",
+      "hash": "eDeNuSvi6GF7h1akoJGWgXpQ+zo+jpcYUcewbSOA07o=",
+      "size": 234
+    },
+    {
+      "name": "icons/check.svg",
+      "hash": "/gkLP+wFi5FwmrDDWWHl78u/aXEohgzHlCQqT6af/pc=",
+      "size": 240
+    },
+    {
+      "name": "icons/icons.svg",
+      "hash": "14Do6iC8T5gHEccBT705V+9uC9Zj1VTg4nz4nEjwg38=",
+      "size": 8742
+    },
+    {
+      "name": "icons/manifest.json",
+      "hash": "SlEGuej/HMaNeAFj+QSF2OHbmnxlX2nl0emfxeU966Y=",
+      "size": 868
+    },
+    {
+      "name": "icons/spinner.svg",
+      "hash": "MOWhr5gHYAFHqEe8shxuRVhHVbKsy77KExuUi6Je2RA=",
+      "size": 331
+    }
+  ]
+}

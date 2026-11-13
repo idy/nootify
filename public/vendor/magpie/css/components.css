@@ -8,9 +8,9 @@
 /* ---- Typography roles ------------------------------------------------ */
 /* These explicit families also work when a host page omits base.css. */
 :where(.mds-card, .mds-group, .mds-section-heading, .mds-note, .mds-notice, .mds-status, .mds-check, .mds-loading, .mds-toast, .mds-dialog, .mds-code) { font-family: var(--mds-font); }
-.mds-title { font: 600 var(--mds-text-title)/1.4 var(--mds-font-display); text-wrap: balance; }
+.mds-title { font: 300 var(--mds-text-title)/1.4 var(--mds-font-display); text-wrap: balance; }
 .mds-heading { font: 400 var(--mds-text-heading)/1.5 var(--mds-font-heading); text-wrap: balance; }
-.mds-button, .mds-link-button, .mds-icon-button, .mds-pill { font-family: var(--mds-font-action); font-weight: 500; }
+.mds-button, .mds-link-button, .mds-icon-button, .mds-pill { font-family: var(--mds-font-action); font-weight: 300; }
 .mds-input:not(.mds-mono), .mds-select:not(.mds-mono), .mds-textarea:not(.mds-mono) { font-family: var(--mds-font); }
 
 /* ---- Utilities ------------------------------------------------------- */
@@ -34,7 +34,7 @@
   min-height: var(--mds-control-height); padding: 6px 12px;
   border: 1px solid var(--mds-line-strong); border-radius: var(--mds-radius-sm);
   background: var(--mds-raised); color: var(--mds-ink);
-  font-size: var(--mds-text-note); font-weight: 500; line-height: 1.5; white-space: nowrap;
+  font-size: var(--mds-text-note); font-weight: 300; line-height: 1.5; white-space: nowrap;
   transition: background-color var(--mds-duration-fast), border-color var(--mds-duration-fast), color var(--mds-duration-fast);
 }
 .mds-button:hover:not(:disabled) { background: var(--mds-button-hover); }
@@ -52,10 +52,18 @@
 .mds-link-button:hover:not(:disabled) { color: var(--mds-ink-strong); }
 
 .mds-icon-button {
-  display: grid; place-items: center; width: 32px; height: 32px; padding: 0;
+  display: grid; place-items: center; flex: 0 0 auto; width: 32px; height: 32px; padding: 0;
   border: 0; border-radius: var(--mds-radius-sm); background: transparent; color: var(--mds-muted);
 }
 .mds-icon-button:hover:not(:disabled) { background: var(--mds-icon-hover); color: var(--mds-ink); }
+/* Compact toolbar chrome matches the 20px switch track. The native button
+   keeps its larger transparent hit area, including the coarse-pointer target. */
+.mds-icon-button--compact { position: relative; isolation: isolate; }
+.mds-icon-button--compact::before { content: ""; position: absolute; z-index: -1; box-sizing: border-box; width: 28px; height: var(--mds-compact-control-height); left: 50%; top: 50%; transform: translate(-50%, -50%); border-radius: var(--mds-radius-pill); pointer-events: none; }
+.mds-icon-button--compact:hover:not(:disabled) { background: transparent; }
+.mds-icon-button--compact:hover:not(:disabled)::before { background: var(--mds-icon-hover); }
+.mds-icon-button--compact:focus-visible { outline: none; }
+.mds-icon-button--compact:focus-visible::before { outline: 2px solid var(--mds-accent-ink); outline-offset: 2px; }
 
 .mds-button:disabled, .mds-link-button:disabled, .mds-icon-button:disabled { cursor: not-allowed; opacity: .45; }
 
@@ -90,6 +98,13 @@
 }
 .mds-select-trigger:focus:not(:focus-visible) { outline: none; }
 .mds-select-trigger[aria-expanded="true"] { border-color: var(--mds-accent-ink); }
+/* Unboxed values in titlebars, toolbars and metadata rows. Keep the normal
+   caret, invalid state and keyboard focus ring in both native/enhanced modes. */
+.mds-select-control--text { display: inline-flex; width: auto; min-width: 0; max-width: 100%; }
+.mds-select.mds-select--text { width: auto; min-width: 0; max-width: 100%; padding-inline-start: 2px; border-color: transparent; background-color: transparent; color: var(--mds-ink-secondary); font-size: var(--mds-text-note); }
+.mds-select--text:not([aria-invalid="true"]):is(:hover, :focus, [aria-expanded="true"]) { border-color: transparent; }
+.mds-select--text:hover:not(:disabled) { text-decoration: underline; text-underline-offset: 3px; }
+.mds-select.mds-select--text[aria-invalid="true"] { border-color: var(--mds-error); }
 .mds-select-menu {
   position: fixed; inset: auto; z-index: 20; margin: 0; padding: 4px;
   box-sizing: border-box; max-height: 280px; overflow-y: auto; overscroll-behavior: contain;
@@ -110,7 +125,7 @@
   mask: url("../icons/check.svg") center / contain no-repeat;
   opacity: 0; transform: translateY(-50%);
 }
-.mds-select-option[aria-selected="true"] { font-weight: 700; }
+.mds-select-option[aria-selected="true"] { font-weight: 400; }
 .mds-select-option[aria-selected="true"]::before { opacity: 1; }
 .mds-select-option[data-active] { background: var(--mds-selected); color: var(--mds-ink-strong); }
 .mds-select-option[aria-disabled="true"] { opacity: .45; cursor: not-allowed; }
@@ -128,14 +143,23 @@
 .mds-check input:focus-visible { outline: 2px solid var(--mds-accent-ink); outline-offset: 3px; }
 
 /* Switch: <label class="mds-switch"><input type="checkbox" role="switch"><span class="mds-switch-track"></span></label> */
-.mds-switch { position: relative; display: inline-flex; flex: 0 0 auto; width: 34px; height: 20px; cursor: pointer; }
+.mds-switch { position: relative; display: inline-flex; flex: 0 0 auto; width: 34px; height: var(--mds-compact-control-height); cursor: pointer; }
 .mds-switch input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: inherit; }
-.mds-switch-track { position: relative; width: 34px; height: 20px; border-radius: var(--mds-radius-pill); background: var(--mds-switch-off); transition: background-color var(--mds-duration); }
+.mds-switch-track { position: relative; width: 34px; height: var(--mds-compact-control-height); border-radius: var(--mds-radius-pill); background: var(--mds-switch-off); transition: background-color var(--mds-duration); }
 .mds-switch-track::after { content: ""; position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%; background: var(--mds-switch-knob); box-shadow: 0 1px 2px #0006; transition: transform var(--mds-duration) var(--mds-ease); }
-.mds-switch input:checked + .mds-switch-track { background: var(--mds-accent); }
-.mds-switch input:checked + .mds-switch-track::after { transform: translateX(14px); }
-.mds-switch input:focus-visible + .mds-switch-track { outline: 2px solid var(--mds-accent-ink); outline-offset: 3px; }
-.mds-switch input:disabled + .mds-switch-track { opacity: .5; cursor: not-allowed; }
+/* A controlled button can use the same anatomy; its application owns the
+   async action and aria-checked state rather than changing a checkbox value. */
+button.mds-switch { padding: 0; border: 0; background: transparent; }
+.mds-switch input:checked + .mds-switch-track,
+button.mds-switch[aria-checked="true"] > .mds-switch-track { background: var(--mds-accent); }
+.mds-switch input:checked + .mds-switch-track::after,
+button.mds-switch[aria-checked="true"] > .mds-switch-track::after { transform: translateX(14px); }
+.mds-switch input:focus-visible + .mds-switch-track,
+button.mds-switch:focus-visible > .mds-switch-track { outline: 2px solid var(--mds-accent-ink); outline-offset: 3px; }
+button.mds-switch:focus-visible { outline: none; }
+.mds-switch input:disabled + .mds-switch-track,
+button.mds-switch:disabled > .mds-switch-track { opacity: .5; cursor: not-allowed; }
+button.mds-switch:disabled { cursor: not-allowed; }
 
 /* ---- Segmented tabs -------------------------------------------------- */
 /* <div class="mds-tabs" role="tablist"><button role="tab" aria-selected="true">…</button>…</div> */
@@ -144,10 +168,10 @@
   display: flex; align-items: center; justify-content: center; gap: 8px;
   min-height: 32px; padding: 6px 12px; border: 0; border-radius: var(--mds-radius-sm);
   background: transparent; color: var(--mds-muted);
-  font-family: var(--mds-font-action); font-size: var(--mds-text-note); font-weight: 500; line-height: 1.4; white-space: nowrap;
+  font-family: var(--mds-font); font-size: var(--mds-text-note); font-weight: 400; line-height: 1.4; white-space: nowrap;
 }
 .mds-tabs > [role="tab"]:hover:not(:disabled) { color: var(--mds-ink); }
-.mds-tabs > [role="tab"][aria-selected="true"] { background: var(--mds-selected); color: var(--mds-ink-strong); font-weight: 600; }
+.mds-tabs > [role="tab"][aria-selected="true"] { background: var(--mds-selected); color: var(--mds-ink-strong); font-weight: 400; }
 .mds-tabs > [role="tab"]:disabled { cursor: not-allowed; opacity: .45; }
 .mds-tabs .mds-icon { width: 14px; height: 14px; }
 .mds-tabs--fill { display: flex; width: 100%; }
@@ -180,6 +204,18 @@
   .mds-row-label { padding-top: 0; }
   .mds-row--toggle { grid-template-columns: minmax(0, 1fr) auto; }
 }
+
+/* Preferences give descriptions the flexible column and keep short controls
+   aligned at the right. Long editors can opt into a full-width row. */
+.mds-row--preference { grid-template-columns: minmax(0, 1fr) minmax(160px, 220px); align-items: center; min-height: 64px; }
+.mds-row--preference .mds-row-label { padding-top: 0; }
+.mds-row--preference .mds-row-label p { margin-top: 2px; }
+@container mds-group (max-width: 400px) {
+  .mds-row--preference { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  .mds-row--preference.mds-row--toggle { grid-template-columns: minmax(0, 1fr) auto; }
+}
+.mds-row.mds-row--stacked { grid-template-columns: minmax(0, 1fr); gap: 8px; align-items: start; }
+.mds-row--stacked .mds-row-label { padding-top: 0; }
 
 .mds-card { min-width: 0; padding: 16px; border: 1px solid var(--mds-line); border-radius: var(--mds-radius-lg); background: var(--mds-surface); }
 .mds-card-title { display: block; font-family: var(--mds-font-heading); font-size: var(--mds-text-body); font-weight: 400; }
@@ -214,13 +250,31 @@
   min-height: 28px; padding: 3px 10px 3px 8px;
   border: 1px solid var(--mds-pill-line); border-radius: var(--mds-radius-pill);
   background: var(--mds-pill-bg); color: var(--mds-pill-ink);
-  font-size: var(--mds-text-caption); font-weight: 500; font-variant-numeric: tabular-nums; white-space: nowrap;
+  font-size: var(--mds-text-caption); font-weight: 300; font-variant-numeric: tabular-nums; white-space: nowrap;
 }
 .mds-pill:hover:not(:disabled) { background: var(--mds-pill-hover); }
 .mds-pill:disabled { cursor: default; }
 .mds-pill[data-tone="error"] { --mds-pill-ink: var(--mds-error); --mds-pill-line: var(--mds-error-line); --mds-pill-bg: var(--mds-error-bg); --mds-pill-hover: var(--mds-error-hover); }
 .mds-pill .mds-icon { width: 13px; height: 13px; }
 .mds-pill[aria-busy="true"] .mds-icon { animation: mds-spin 1s linear infinite; }
+/* A slim 20px face aligns with the switch track inside a larger hit target.
+   Label text stays in the accessibility tree, including live status changes. */
+.mds-pill--icon, .mds-pill--responsive { position: relative; isolation: isolate; border-color: transparent; background: transparent; }
+.mds-pill--icon::before, .mds-pill--responsive::before { content: ""; position: absolute; z-index: -1; box-sizing: border-box; height: var(--mds-compact-control-height); inset-inline: 0; top: 50%; transform: translateY(-50%); border: 1px solid var(--mds-pill-line); border-radius: var(--mds-radius-pill); background: var(--mds-pill-bg); pointer-events: none; }
+.mds-pill--icon:hover:not(:disabled), .mds-pill--responsive:hover:not(:disabled) { background: transparent; }
+.mds-pill--icon:hover:not(:disabled)::before, .mds-pill--responsive:hover:not(:disabled)::before { background: var(--mds-pill-hover); }
+.mds-pill--icon:focus-visible, .mds-pill--responsive:focus-visible { outline: none; }
+.mds-pill--icon:focus-visible::before, .mds-pill--responsive:focus-visible::before { outline: 2px solid var(--mds-accent-ink); outline-offset: 2px; }
+.mds-pill--icon::before { width: 28px; left: 50%; right: auto; transform: translate(-50%, -50%); }
+.mds-pill--icon { width: 32px; height: 32px; min-width: 32px; min-height: 32px; padding: 0; border-radius: var(--mds-radius-sm); }
+.mds-pill--icon .mds-icon { width: 16px; height: 16px; }
+.mds-pill--icon .mds-pill-label { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+@media (max-width: 640px) {
+  .mds-pill--responsive::before { width: 28px; left: 50%; right: auto; transform: translate(-50%, -50%); }
+  .mds-pill--responsive { width: 32px; height: 32px; min-width: 32px; min-height: 32px; padding: 0; border-radius: var(--mds-radius-sm); }
+  .mds-pill--responsive .mds-icon { width: 16px; height: 16px; }
+  .mds-pill--responsive .mds-pill-label { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+}
 
 .mds-spinner {
   display: inline-block; flex: 0 0 auto; width: 15px; height: 15px;
@@ -250,7 +304,7 @@
   box-shadow: 0 20px 60px var(--mds-dialog-shadow);
 }
 .mds-dialog--wide { width: min(920px, 90vw); max-height: 85vh; }
-.mds-dialog h2 { font-family: var(--mds-font-display); font-size: var(--mds-text-title); font-weight: 600; line-height: 1.4; text-wrap: balance; }
+.mds-dialog h2 { font-family: var(--mds-font-display); font-size: var(--mds-text-title); font-weight: 300; line-height: 1.4; text-wrap: balance; }
 .mds-dialog p { margin-top: 8px; color: var(--mds-muted); font-size: var(--mds-text-body); line-height: 1.6; }
 .mds-dialog-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 20px; }
 /* ::backdrop does not inherit custom properties in Chromium 120 (WebView2), so values stay literal. */
@@ -282,8 +336,12 @@
 @media (pointer: coarse) {
   .mds-button, .mds-link-button, .mds-icon-button, .mds-tabs > [role="tab"] { min-height: 44px; }
   .mds-icon-button { min-width: 44px; }
-  .mds-pill { min-height: 40px; }
+  .mds-pill { min-height: 44px; }
+  .mds-pill--icon { width: 44px; height: 44px; min-width: 44px; }
   .mds-check { min-height: 44px; }
   .mds-input, .mds-select, .mds-textarea { min-height: 44px; font-size: 16px; }
   .mds-switch { width: 44px; height: 44px; align-items: center; justify-content: center; }
+}
+@media (max-width: 640px) and (pointer: coarse) {
+  .mds-pill--responsive { width: 44px; height: 44px; min-width: 44px; min-height: 44px; }
 }
